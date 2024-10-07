@@ -12,6 +12,14 @@ pub struct Config {
 pub struct ServerConfig {
     pub bind_address: String,
     pub port: u16,
+    pub tls: Option<ServerTlsConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ServerTlsConfig {
+    pub server_certificate_bundle: String,
+    pub server_private_key: String,
+    pub client_ca_bundle: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
