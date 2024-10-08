@@ -222,12 +222,15 @@ async fn main() -> io::Result<()> {
     }
 }
 
-async fn serve_tls(
+async fn serve_tls<T>(
     listener: TcpListener,
     tls_acceptor: TlsAcceptor,
     timeouts: Vec<Duration>,
-    registry: Arc<Registry<DiskStorageEngine>>, // TODO: generic-ize this
-) -> io::Result<()> {
+    registry: Arc<Registry<T>>,
+) -> io::Result<()>
+where
+    T: StorageEngine + Send + Sync + 'static,
+{
     loop {
         let registry = registry.clone();
         let timeouts = timeouts.clone();
@@ -250,11 +253,14 @@ async fn serve_tls(
     }
 }
 
-async fn serve_insecure(
+async fn serve_insecure<T>(
     listener: TcpListener,
     timeouts: Vec<Duration>,
-    registry: Arc<Registry<DiskStorageEngine>>, // TODO: generic-ize this
-) -> io::Result<()> {
+    registry: Arc<Registry<T>>,
+) -> io::Result<()>
+where
+    T: StorageEngine + Send + Sync + 'static,
+{
     loop {
         let registry = registry.clone();
         let timeouts = timeouts.clone();
@@ -269,12 +275,10 @@ async fn serve_insecure(
     }
 }
 
-fn serve_request<T>(
-    registry: Arc<Registry<DiskStorageEngine>>,
-    timeouts: Vec<Duration>,
-    io: TokioIo<T>,
-) where
-    T: Unpin + AsyncWrite + AsyncRead + Send + 'static,
+fn serve_request<T, S>(registry: Arc<Registry<T>>, timeouts: Vec<Duration>, io: TokioIo<S>)
+where
+    T: StorageEngine + Send + Sync + 'static,
+    S: Unpin + AsyncWrite + AsyncRead + Send + 'static,
 {
     tokio::task::spawn(async move {
         let registry = registry.clone();
@@ -284,7 +288,7 @@ fn serve_request<T>(
             service_fn(move |req| {
                 let registry = registry.clone();
                 async move {
-                    match router::<DiskStorageEngine>(req, registry).await {
+                    match router::<T>(req, registry).await {
                         Ok(res) => Ok::<Response<RegistryResponseBody>, Infallible>(res),
                         Err(e) => Ok(e.to_response()),
                     }
