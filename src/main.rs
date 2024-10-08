@@ -346,7 +346,7 @@ where
     if ROUTE_API_VERSION_REGEX.is_match(&path) {
         if method == Method::GET {
             info!("API version check: {}", path);
-            return handle_api_version::<T>().await;
+            return handle_api_version().await;
         }
     } else if let Some(parameters) = parse_regex::<NewUploadParameters>(&path, &ROUTE_UPLOADS_REGEX)
     {
@@ -425,10 +425,7 @@ where
     Err(RegistryError::NotFound)
 }
 
-async fn handle_api_version<T>() -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+async fn handle_api_version() -> Result<Response<RegistryResponseBody>, RegistryError> {
     let res = Response::builder()
         .status(StatusCode::OK)
         .header("Docker-Distribution-API-Version", "registry/2.0")
