@@ -38,7 +38,9 @@ mod tls;
 
 use crate::config::Config;
 use crate::error::RegistryError;
-use crate::http_helpers::{paginated_response, parse_query_parameters, parse_range_header};
+use crate::http_helpers::{
+    paginated_response, parse_authorization_header, parse_query_parameters, parse_range_header,
+};
 use crate::io_helpers::parse_regex;
 use crate::oci::{Digest, Reference, ReferrerList};
 use crate::registry::{BlobData, NewUpload};
@@ -327,6 +329,19 @@ where
 {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+
+    let auth_credentials = req
+        .headers()
+        .get("Authorization")
+        .map(parse_authorization_header)
+        .flatten();
+
+    debug!("Authorization: {:?}", auth_credentials);
+
+    if auth_credentials.is_none() {
+        // TODO: Handle per/repo access
+        return Err(RegistryError::Unauthorized);
+    }
 
     if ROUTE_API_VERSION_REGEX.is_match(&path) {
         if method == Method::GET {

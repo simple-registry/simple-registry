@@ -1,14 +1,52 @@
 use crate::error::RegistryError;
 use crate::RegistryResponseBody;
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use hyper::header::HeaderValue;
 use hyper::{Response, StatusCode};
 use lazy_static::lazy_static;
-use log::warn;
+use log::{debug, warn};
 use regex::Regex;
 use serde::de::DeserializeOwned;
 
 lazy_static! {
     static ref RANGE_RE: Regex = Regex::new(r"^(?:bytes=)?(?P<start>\d+)-(?P<end>\d+)$").unwrap();
+}
+
+pub fn parse_authorization_header(header: &HeaderValue) -> Option<(String, String)> {
+    let Ok(header_str) = header.to_str() else {
+        debug!("Error parsing Authorization header as string");
+        return None;
+    };
+
+    let parts: Vec<&str> = header_str.split_whitespace().collect();
+    if parts.len() != 2 {
+        debug!("Invalid Authorization header format: {}", header_str);
+        return None;
+    }
+
+    if parts[0] != "Basic" {
+        debug!("Invalid Authorization header type: {}", parts[0]);
+        return None;
+    }
+
+    let Ok(auth_details) = BASE64_STANDARD.decode(parts[1]) else {
+        debug!("Error decoding Authorization header");
+        return None;
+    };
+
+    let Ok(auth_str) = String::from_utf8(auth_details) else {
+        debug!("Error parsing Authorization header as UTF8 string");
+        return None;
+    };
+
+    let parts: Vec<&str> = auth_str.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        warn!("Invalid Authorization header format: {}", auth_str);
+        return None;
+    }
+
+    Some((parts[0].to_string(), parts[1].to_string()))
 }
 
 pub fn parse_range_header(range_header: &HeaderValue) -> Result<(u64, u64), RegistryError> {

@@ -11,7 +11,7 @@ pub enum RegistryError {
     NotFound,
     //NameUnknown,
     BlobUnknown,
-    //Unauthorized,
+    Unauthorized,
     //Denied,
     //TooManyRequests,
     DigestInvalid,
@@ -42,6 +42,9 @@ impl RegistryError {
                 "BLOB_UNKNOWN",
                 "Blob unknown to registry",
             ),
+            RegistryError::Unauthorized => {
+                (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized")
+            }
             RegistryError::DigestInvalid => (
                 StatusCode::BAD_REQUEST,
                 "DIGEST_INVALID",
@@ -80,10 +83,16 @@ impl RegistryError {
         let body = body.to_string();
         let body = bytes::Bytes::from(body);
 
-        Response::builder()
+        let mut res = Response::builder()
             .status(status)
-            .header("Content-Type", "application/json")
-            .body(RegistryResponseBody::Fixed(Full::new(body)))
+            .header("Content-Type", "application/json");
+
+        if self == &RegistryError::Unauthorized {
+            let basic_realm = format!("Basic realm=\"{}\", charset=\"UTF-8\"", "Docker Registry");
+            res = res.header("WWW-Authenticate", basic_realm)
+        }
+
+        res.body(RegistryResponseBody::Fixed(Full::new(body)))
             .unwrap() // XXX: This should be handled better
     }
 }
@@ -93,9 +102,9 @@ impl Display for RegistryError {
         let message = match self {
             RegistryError::InternalServerError => "Internal server error",
             RegistryError::NotFound => "Resource not found",
-            /*RegistryError::NameUnknown => "Repository name not known to registry",
+            /*RegistryError::NameUnknown => "Repository name not known to registry",*/
             RegistryError::Unauthorized => "Unauthorized",
-            RegistryError::Denied => "Denied",
+            /*RegistryError::Denied => "Denied",
             RegistryError::TooManyRequests => "Too many requests",
             RegistryError::ManifestUnknown => "Manifest unknown",
             RegistryError::ManifestUnverified => "Manifest unverified",*/
