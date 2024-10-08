@@ -333,8 +333,7 @@ where
     let auth_credentials = req
         .headers()
         .get("Authorization")
-        .map(parse_authorization_header)
-        .flatten();
+        .and_then(parse_authorization_header);
 
     debug!("Authorization: {:?}", auth_credentials);
 
