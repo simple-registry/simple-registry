@@ -26,12 +26,14 @@ use tokio::pin;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 mod config;
 mod error;
 mod http_helpers;
 mod io_helpers;
 mod oci;
+mod policy;
 mod registry;
 mod storage;
 mod tls;
@@ -43,6 +45,7 @@ use crate::http_helpers::{
 };
 use crate::io_helpers::parse_regex;
 use crate::oci::{Digest, Reference, ReferrerList};
+use crate::policy::{ClientAction, ClientIdentity};
 use crate::registry::{BlobData, NewUpload};
 use crate::storage::{DiskStorageEngine, StorageEngine};
 use crate::tls::{build_root_store, load_certificate_bundle, load_private_key};
@@ -58,7 +61,7 @@ lazy_static! {
     static ref ROUTE_MANIFEST_REGEX: Regex =
         Regex::new(r"^/v2/(?P<name>.+)/manifests/(?P<reference>.+)$").unwrap();
     static ref ROUTE_REFERRERS_REGEX: Regex =
-        Regex::new(r"^/v2/(?P<name>.+)/referrers/(?P<reference>.+)$").unwrap();
+        Regex::new(r"^/v2/(?P<name>.+)/referrers/(?P<digest>.+)$").unwrap();
     static ref ROUTE_LIST_TAGS_REGEX: Regex = Regex::new(r"^/v2/(?P<name>.+)/tags/list$").unwrap();
     static ref ROUTE_CATALOG_REGEX: Regex = Regex::new(r"^/v2/_catalog$").unwrap();
 }
@@ -83,7 +86,7 @@ pub struct ManifestParameters {
 #[derive(Deserialize)]
 pub struct ReferrerParameters {
     pub name: String,
-    pub reference: Digest,
+    pub digest: Digest,
 }
 
 #[derive(Deserialize)]
@@ -201,8 +204,15 @@ async fn main() -> io::Result<()> {
     }
 
     info!("Initializing registry");
+    // TODO: new() or from_config()
     let registry = Arc::new(Registry {
         storage: DiskStorageEngine::new(config.storage.root_dir.clone()),
+        credentials: config.build_credentials(),
+        namespaces: config.build_namespace_list(),
+        namespace_default_allow: config.build_namespace_default_allow_list(),
+        namespace_policies: config
+            .build_namespace_policies()
+            .expect("Failed to build policy rules"),
     });
 
     info!("Starting registry server on {}", binding_addr);
@@ -240,15 +250,26 @@ where
 
         if let Ok(tls) = tls_acceptor.accept(tcp).await {
             let (_, session) = tls.get_ref();
-            let client_cert = session.peer_certificates();
+            let client_identity = session
+                .peer_certificates()
+                .and_then(|certs| certs.first())
+                .and_then(|cert| {
+                    // parse cert with x509-parser and isolate the O and OU fields from the certificate
+                    match X509Certificate::from_der(cert.as_ref()).ok() {
+                        Some((_, cert)) => ClientIdentity::from_cert(&cert).ok(),
+                        None => None,
+                    }
+                });
 
-            debug!("Client certificate: {:?}", client_cert);
-            // TODO: certificate validation / authorization
+            debug!(
+                "Client Identity from peer certificate: {:?}",
+                client_identity
+            );
 
             debug!("Accepted connection from {:?}", remote_address);
             let io = TokioIo::new(tls);
 
-            serve_request(registry, timeouts, io);
+            serve_request(registry, timeouts, io, client_identity.unwrap_or_default());
         }
     }
 }
@@ -271,24 +292,31 @@ where
         debug!("Accepted connection from {:?}", remote_address);
         let io = TokioIo::new(tcp);
 
-        serve_request(registry, timeouts, io);
+        serve_request(registry, timeouts, io, ClientIdentity::new());
     }
 }
 
-fn serve_request<T, S>(registry: Arc<Registry<T>>, timeouts: Vec<Duration>, io: TokioIo<S>)
-where
+fn serve_request<T, S>(
+    registry: Arc<Registry<T>>,
+    timeouts: Vec<Duration>,
+    io: TokioIo<S>,
+    client_identity: ClientIdentity,
+) where
     T: StorageEngine + Send + Sync + 'static,
     S: Unpin + AsyncWrite + AsyncRead + Send + 'static,
 {
     tokio::task::spawn(async move {
         let registry = registry.clone();
+        let client_identity = client_identity.clone();
 
         let conn = http1::Builder::new().serve_connection(
             io,
             service_fn(move |req| {
                 let registry = registry.clone();
+                let client_identity = client_identity.clone();
+
                 async move {
-                    match router::<T>(req, registry).await {
+                    match router::<T>(req, registry, client_identity).await {
                         Ok(res) => Ok::<Response<RegistryResponseBody>, Infallible>(res),
                         Err(e) => Ok(e.to_response()),
                     }
@@ -327,6 +355,7 @@ where
 async fn router<T>(
     req: Request<Incoming>,
     registry: Arc<Registry<T>>,
+    mut client_identity: ClientIdentity,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync + 'static,
@@ -334,93 +363,92 @@ where
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
-    let auth_credentials = req
+    let basic_auth_credentials = req
         .headers()
         .get("Authorization")
         .and_then(parse_authorization_header);
 
-    debug!("Authorization: {:?}", auth_credentials);
+    debug!("Authorization: {:?}", basic_auth_credentials);
 
-    if auth_credentials.is_none() {
-        // TODO: Handle per/repo access
-        return Err(RegistryError::Unauthorized);
+    if let Some((username, password)) = basic_auth_credentials {
+        client_identity.set_credentials(username, password);
     }
 
     if ROUTE_API_VERSION_REGEX.is_match(&path) {
         if method == Method::GET {
             info!("API version check: {}", path);
-            return handle_api_version().await;
+            return handle_get_api_version(registry, client_identity).await;
         }
     } else if let Some(parameters) = parse_regex::<NewUploadParameters>(&path, &ROUTE_UPLOADS_REGEX)
     {
         if method == Method::POST {
             info!("Start upload: {}", path);
-            return handle_start_upload(req, registry, parameters).await;
+            return handle_start_upload(req, registry, client_identity, parameters).await;
         }
     } else if let Some(parameters) = parse_regex::<UploadParameters>(&path, &ROUTE_UPLOAD_REGEX) {
         if method == Method::GET {
             info!("Get upload progress: {}", path);
-            return handle_get_upload_progress(registry, parameters).await;
+            return handle_get_upload_progress(registry, client_identity, parameters).await;
         }
         if method == Method::PATCH {
             info!("Patch upload: {}", path);
-            return handle_patch_upload(req, registry, parameters).await;
+            return handle_patch_upload(req, registry, client_identity, parameters).await;
         }
         if method == Method::PUT {
             info!("Put upload: {}", path);
-            return handle_put_upload(req, registry, parameters).await;
+            return handle_put_upload(req, registry, client_identity, parameters).await;
         }
         if method == Method::DELETE {
             info!("Delete upload: {}", path);
-            return handle_delete_upload(registry, parameters).await;
+            return handle_delete_upload(registry, client_identity, parameters).await;
         }
     } else if let Some(parameters) = parse_regex::<BlobParameters>(&path, &ROUTE_BLOB_REGEX) {
         if method == Method::GET {
             info!("Get blob: {}", path);
-            return handle_get_blob(req, registry, parameters).await;
+            return handle_get_blob(req, registry, client_identity, parameters).await;
         }
         if method == Method::HEAD {
             info!("Head blob: {}", path);
-            return handle_head_blob(registry, parameters).await;
+            return handle_head_blob(registry, client_identity, parameters).await;
         }
         if method == Method::DELETE {
             info!("Delete blob: {}", path);
-            return handle_delete_blob(registry, parameters).await;
+            return handle_delete_blob(registry, client_identity, parameters).await;
         }
     } else if let Some(parameters) = parse_regex::<ManifestParameters>(&path, &ROUTE_MANIFEST_REGEX)
     {
         if method == Method::GET {
             info!("Get manifest: {}", path);
-            return handle_get_manifest(registry, parameters).await;
+            return handle_get_manifest(registry, client_identity, parameters).await;
         }
         if method == Method::HEAD {
             info!("Head manifest: {}", path);
-            return handle_head_manifest(registry, parameters).await;
+            return handle_head_manifest(registry, client_identity, parameters).await;
         }
         if method == Method::PUT {
             info!("Put manifest: {}", path);
-            return handle_put_manifest(req, registry, parameters).await;
+            return handle_put_manifest(req, registry, client_identity, parameters).await;
         }
         if method == Method::DELETE {
             info!("Delete manifest: {}", path);
-            return handle_delete_manifest(registry, parameters).await;
+            return handle_delete_manifest(registry, client_identity, parameters).await;
         }
     } else if let Some(parameters) =
         parse_regex::<ReferrerParameters>(&path, &ROUTE_REFERRERS_REGEX)
     {
         if method == Method::GET {
             info!("Get referrers: {}", path);
-            return handle_get_referrers(registry, parameters).await;
+            return handle_get_referrers(registry, client_identity, parameters).await;
         }
     } else if ROUTE_CATALOG_REGEX.is_match(&path) {
         if method == Method::GET {
             info!("List catalog: {}", path);
-            return handle_list_catalog(req, registry).await;
+            return handle_list_catalog(req, registry, client_identity).await;
         }
     } else if let Some(parameters) = parse_regex::<TagsParameters>(&path, &ROUTE_LIST_TAGS_REGEX) {
         if method == Method::GET {
             info!("List tags: {}", path);
-            return handle_list_tags(req, registry, parameters).await;
+            return handle_list_tags(req, registry, client_identity, parameters).await;
         }
     }
 
@@ -428,7 +456,15 @@ where
     Err(RegistryError::NotFound)
 }
 
-async fn handle_api_version() -> Result<Response<RegistryResponseBody>, RegistryError> {
+async fn handle_get_api_version<T>(
+    registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
+) -> Result<Response<RegistryResponseBody>, RegistryError>
+where
+    T: StorageEngine,
+{
+    client_identity.can_do(&registry, ClientAction::GetApiVersion)?;
+
     let res = Response::builder()
         .status(StatusCode::OK)
         .header("Docker-Distribution-API-Version", "registry/2.0")
@@ -439,11 +475,17 @@ async fn handle_api_version() -> Result<Response<RegistryResponseBody>, Registry
 
 async fn handle_get_manifest<T>(
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: ManifestParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(
+        &registry,
+        ClientAction::GetManifest(parameters.name.clone(), parameters.reference.clone()),
+    )?;
+
     let manifest = registry
         .get_manifest(&parameters.name, parameters.reference.into())
         .await?;
@@ -459,11 +501,17 @@ where
 
 async fn handle_head_manifest<T>(
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: ManifestParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(
+        &registry,
+        ClientAction::GetManifest(parameters.name.clone(), parameters.reference.clone()),
+    )?;
+
     let manifest = registry
         .head_manifest(&parameters.name, parameters.reference.into())
         .await?;
@@ -481,11 +529,17 @@ where
 async fn handle_get_blob<T>(
     req: Request<Incoming>,
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: BlobParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(
+        &registry,
+        ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()),
+    )?;
+
     let range_header = req.headers().get("range");
     let range = range_header.map(parse_range_header).transpose()?;
 
@@ -524,11 +578,17 @@ where
 
 async fn handle_head_blob<T>(
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: BlobParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(
+        &registry,
+        ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()),
+    )?;
+
     let blob = registry
         .head_blob(&parameters.name, parameters.digest)
         .await?;
@@ -544,11 +604,14 @@ where
 async fn handle_start_upload<T>(
     request: Request<Incoming>,
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: NewUploadParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
+
     #[derive(Deserialize, Default)]
     struct UploadQuery {
         digest: Option<String>,
@@ -580,11 +643,14 @@ where
 async fn handle_patch_upload<T>(
     request: Request<Incoming>,
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: UploadParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
+
     let range = request
         .headers()
         .get("content-range")
@@ -614,11 +680,14 @@ where
 async fn handle_put_upload<T>(
     request: Request<Incoming>,
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: UploadParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
+
     #[derive(Deserialize, Default)]
     struct CompleteUploadQuery {
         digest: String,
@@ -645,11 +714,14 @@ where
 
 async fn handle_delete_upload<T>(
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: UploadParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
+
     registry
         .delete_upload(&parameters.name, parameters.uuid)
         .await?;
@@ -663,11 +735,14 @@ where
 
 async fn handle_get_upload_progress<T>(
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: UploadParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
+
     let location = format!("/v2/{}/blobs/uploads/{}", parameters.name, parameters.uuid);
 
     let range_max = registry
@@ -687,11 +762,17 @@ where
 
 async fn handle_delete_blob<T>(
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: BlobParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(
+        &registry,
+        ClientAction::DeleteBlob(parameters.name.clone(), parameters.digest.clone()),
+    )?;
+
     registry
         .delete_blob(&parameters.name, parameters.digest)
         .await?;
@@ -706,11 +787,17 @@ where
 async fn handle_put_manifest<T>(
     request: Request<Incoming>,
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: ManifestParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(
+        &registry,
+        ClientAction::PutManifest(parameters.name.clone(), parameters.reference.clone()),
+    )?;
+
     let content_type = request
         .headers()
         .get("Content-Type")
@@ -756,11 +843,17 @@ where
 
 async fn handle_delete_manifest<T>(
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: ManifestParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(
+        &registry,
+        ClientAction::DeleteManifest(parameters.name.clone(), parameters.reference.clone()),
+    )?;
+
     registry
         .delete_manifest(&parameters.name, parameters.reference)
         .await?;
@@ -774,13 +867,20 @@ where
 
 async fn handle_get_referrers<T>(
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: ReferrerParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(
+        &registry,
+        ClientAction::GetReferrers(parameters.name.clone(), parameters.digest.clone()),
+    )?;
+
+    // TODO: support filtering!
     let manifests = registry
-        .get_referrers(&parameters.name, parameters.reference)
+        .get_referrers(&parameters.name, parameters.digest)
         .await?;
 
     let referrer_list = ReferrerList {
@@ -801,10 +901,13 @@ where
 async fn handle_list_catalog<T>(
     request: Request<Incoming>,
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(&registry, ClientAction::ListCatalog)?;
+
     #[derive(Debug, Deserialize, Default)]
     struct CatalogQuery {
         n: Option<u32>,
@@ -829,11 +932,14 @@ where
 async fn handle_list_tags<T>(
     request: Request<Incoming>,
     registry: Arc<Registry<T>>,
+    client_identity: ClientIdentity,
     parameters: TagsParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
+    client_identity.can_do(&registry, ClientAction::ListTags(parameters.name.clone()))?;
+
     #[derive(Deserialize, Debug, Default)]
     struct TagsQuery {
         n: Option<u32>,

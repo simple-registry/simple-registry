@@ -12,5 +12,5 @@ openssl req -new -x509 -days 365 -nodes -out client-ca-bundle.pem -keyout client
   -subj "/C=US/ST=CA/L=San Francisco/O=My Company/CN=example.com"
 
 openssl req -new -nodes -out client-certificate.csr -keyout client-private-key.pem \
-  -subj "/C=US/ST=CA/L=San Francisco/O=My Company/CN=example.com"
+  -subj "/C=US/ST=CA/L=San Francisco/O=admins/CN=philippe"
 openssl x509 -req -in client-certificate.csr -days 365 -CA client-ca-bundle.pem -CAkey client-ca-private-key.pem -CAcreateserial -out client-certificate.pem

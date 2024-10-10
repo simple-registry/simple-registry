@@ -11,7 +11,7 @@ lazy_static! {
     static ref TAG_REGEX: Regex = Regex::new(r"^\w[\w.-]{0,127}$").unwrap();
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Reference {
     Tag(String),
     Digest(Digest),

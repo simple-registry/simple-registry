@@ -3,6 +3,7 @@ use http_body_util::Full;
 use hyper::{Response, StatusCode};
 use log::error;
 use sha2::digest::crypto_common::hazmat;
+use std::cmp::PartialEq;
 use std::fmt::Display;
 
 #[derive(Debug, PartialEq)]
@@ -11,7 +12,7 @@ pub enum RegistryError {
     NotFound,
     //NameUnknown,
     BlobUnknown,
-    Unauthorized,
+    Unauthorized(String),
     //Denied,
     //TooManyRequests,
     DigestInvalid,
@@ -42,8 +43,8 @@ impl RegistryError {
                 "BLOB_UNKNOWN",
                 "Blob unknown to registry",
             ),
-            RegistryError::Unauthorized => {
-                (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized")
+            RegistryError::Unauthorized(s) => {
+                (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", s.as_str())
             }
             RegistryError::DigestInvalid => (
                 StatusCode::BAD_REQUEST,
@@ -83,17 +84,24 @@ impl RegistryError {
         let body = body.to_string();
         let body = bytes::Bytes::from(body);
 
-        let mut res = Response::builder()
-            .status(status)
-            .header("Content-Type", "application/json");
+        match self {
+            RegistryError::Unauthorized(_) => {
+                let basic_realm =
+                    format!("Basic realm=\"{}\", charset=\"UTF-8\"", "Docker Registry");
 
-        if self == &RegistryError::Unauthorized {
-            let basic_realm = format!("Basic realm=\"{}\", charset=\"UTF-8\"", "Docker Registry");
-            res = res.header("WWW-Authenticate", basic_realm)
+                Response::builder()
+                    .status(status)
+                    .header("Content-Type", "application/json")
+                    .header("WWW-Authenticate", basic_realm)
+                    .body(RegistryResponseBody::Fixed(Full::new(body)))
+                    .unwrap()
+            }
+            _ => Response::builder()
+                .status(status)
+                .header("Content-Type", "application/json")
+                .body(RegistryResponseBody::Fixed(Full::new(body)))
+                .unwrap(),
         }
-
-        res.body(RegistryResponseBody::Fixed(Full::new(body)))
-            .unwrap() // XXX: This should be handled better
     }
 }
 
@@ -103,7 +111,7 @@ impl Display for RegistryError {
             RegistryError::InternalServerError => "Internal server error",
             RegistryError::NotFound => "Resource not found",
             /*RegistryError::NameUnknown => "Repository name not known to registry",*/
-            RegistryError::Unauthorized => "Unauthorized",
+            RegistryError::Unauthorized(s) => s,
             /*RegistryError::Denied => "Denied",
             RegistryError::TooManyRequests => "Too many requests",
             RegistryError::ManifestUnknown => "Manifest unknown",
