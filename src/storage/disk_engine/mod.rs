@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use log::{debug, error, warn};
-use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use std::collections::HashSet;
 use std::io::{ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use sha2::digest::crypto_common::hazmat::SerializableState;
 use tokio::fs::{self, File};
 use tokio::io::AsyncSeekExt;
 use uuid::Uuid;
@@ -19,6 +19,30 @@ use crate::storage::tree_manager::TreeManager;
 use crate::storage::{paginate, StorageEngine, UploadSummary};
 
 mod upload_writer;
+
+pub async fn save_hash_state(tree_manager: &TreeManager, sha256: &Sha256, name: &str, uuid: &Uuid, algorithm: &str, offset: u64) -> Result<(), RegistryError> {
+    let path = tree_manager.upload_hash_context_path(name, uuid, algorithm, offset);
+
+    let state = sha256.serialize();
+    let state = state.as_slice().to_vec();
+
+    fs::write(&path, state).await?;
+    Ok(())
+}
+
+pub async fn load_hash_state(tree_manager: &TreeManager, name: &str, uuid: &Uuid, algorithm: &str, offset: u64) -> Result<Sha256, RegistryError> {
+    let path = tree_manager.upload_hash_context_path(name, uuid, algorithm, offset);
+    let state = fs::read(&path).await?;
+
+    let state = state
+        .as_slice()
+        .try_into()
+        .map_err(|_| RegistryError::InternalServerError)?;
+    let state = Sha256::deserialize(state)?;
+    let hasher = Sha256::from(state);
+
+    Ok(hasher)
+}
 
 pub struct DiskStorageEngine {
     pub tree: Arc<TreeManager>,
@@ -269,15 +293,8 @@ impl StorageEngine for DiskStorageEngine {
             .upload_hash_context_container_path(name, &uuid, "sha256");
         fs::create_dir_all(&container_dir).await?;
 
-        // TODO: cleanup
         let hasher = Sha256::new();
-        let hasher_state = hasher.clone();
-        let hasher_state = hasher_state.serialize();
-        let hasher_state = hasher_state.as_slice().to_vec();
-
-        self.tree
-            .save_hashstate(name, &uuid, "sha256", 0, &hasher_state)
-            .await?;
+        save_hash_state(&self.tree, &hasher, name, &uuid, "sha256", 0).await?;
 
         Ok(uuid.to_string())
     }
@@ -302,31 +319,11 @@ impl StorageEngine for DiskStorageEngine {
             .await?
             .ok_or(RegistryError::BlobUnknown)?;
 
-        let offsets = self.tree.list_hashstates(name, &uuid, "sha256").await?;
+        let hasher = load_hash_state(&self.tree, name, &uuid, "sha256", size).await?;
+        let hash = hasher.finalize();
 
-        // TODO: cleanup the syntax
-        if let Some(&last_offset) = offsets.last() {
-            if last_offset == size {
-                let state_bytes = self
-                    .tree
-                    .load_hashstate(name, &uuid, "sha256", last_offset)
-                    .await?;
-                let state_array = state_bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| RegistryError::InternalServerError)?;
-                let hasher_state = Sha256::deserialize(state_array)?;
-                let hasher = Sha256::from(hasher_state);
-                let hash = hasher.finalize();
-                let digest = hex::encode(hash);
-                let digest = Digest::Sha256(digest);
-                Ok(UploadSummary { digest, size })
-            } else {
-                Err(RegistryError::InternalServerError)
-            }
-        } else {
-            Err(RegistryError::InternalServerError)
-        }
+        let digest = Digest::Sha256(hex::encode(hash));
+        Ok(UploadSummary { digest, size })
     }
 
     async fn complete_upload(
@@ -343,24 +340,7 @@ impl StorageEngine for DiskStorageEngine {
         let digest = match digest {
             Some(digest) => digest,
             None => {
-                let offsets = self.tree.list_hashstates(name, &uuid, "sha256").await?;
-                let Some(&last_offset) = offsets.last() else {
-                    return Err(RegistryError::InternalServerError);
-                };
-                if last_offset != size {
-                    return Err(RegistryError::InternalServerError);
-                }
-
-                let state_bytes = self
-                    .tree
-                    .load_hashstate(name, &uuid, "sha256", last_offset)
-                    .await?;
-                let state_array = state_bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| RegistryError::InternalServerError)?;
-                let hasher_state = Sha256::deserialize(state_array)?;
-                let hasher = Sha256::from(hasher_state);
+                let hasher = load_hash_state(&self.tree, name, &uuid, "sha256", size).await?;
                 let hash = hasher.finalize();
                 let digest = hex::encode(hash);
                 Digest::Sha256(digest)

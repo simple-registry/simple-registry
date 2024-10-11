@@ -1,15 +1,15 @@
 use futures_util::ready;
 use log::error;
-use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest, Sha256};
 use std::io::{ErrorKind, SeekFrom};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite};
+use tokio::io::{AsyncSeekExt, AsyncWrite};
 use uuid::Uuid;
 
 use crate::error::RegistryError;
+use crate::storage::disk_engine::{load_hash_state, save_hash_state};
 use crate::storage::tree_manager::TreeManager;
 
 pub struct DiskUploadWriter {
@@ -26,7 +26,7 @@ impl DiskUploadWriter {
         tree_manager: Arc<TreeManager>,
         name: &str,
         uuid: Uuid,
-        start_offset: u64,
+        offset: u64,
     ) -> Result<Self, RegistryError> {
         let file_path = tree_manager.upload_path(name, &uuid);
         let mut file = fs::OpenOptions::new()
@@ -45,61 +45,9 @@ impl DiskUploadWriter {
                 }
             })?;
 
-        file.seek(SeekFrom::Start(start_offset)).await?;
+        file.seek(SeekFrom::Start(offset)).await?;
 
-        let mut offset = 0;
-        let mut hasher = Sha256::new();
-
-        let offsets = tree_manager
-            .list_hashstates(name, &uuid, "sha256")
-            .await
-            .unwrap_or_default();
-
-        if let Some(&last_offset) = offsets.iter().filter(|&&o| o <= start_offset).last() {
-            let state = tree_manager
-                .load_hashstate(name, &uuid, "sha256", last_offset)
-                .await?;
-            let state = state
-                .as_slice()
-                .try_into()
-                .map_err(|_| RegistryError::InternalServerError)?;
-            let state = Sha256::deserialize(&state)?;
-            offset = last_offset;
-            hasher = Sha256::from(state)
-        };
-
-        // NOTE: this may be unnecessary since out-of-order uploads are not supported in the OCI spec.
-        if start_offset > offset {
-            let mut read_file = File::open(&file_path).await.map_err(|e| {
-                error!("Error opening upload file for reading {}: {}", file_path, e);
-                if e.kind() == ErrorKind::NotFound {
-                    RegistryError::NotFound
-                } else {
-                    RegistryError::InternalServerError
-                }
-            })?;
-
-            read_file.seek(SeekFrom::Start(offset)).await?;
-
-            let mut buffer = [0u8; 8192];
-            let mut bytes_to_read = start_offset - offset;
-
-            while bytes_to_read > 0 {
-                let n = read_file.read(&mut buffer).await?;
-                if n == 0 {
-                    break;
-                }
-                let n = n as u64;
-                let to_update = std::cmp::min(n, bytes_to_read) as usize;
-                hasher.update(&buffer[..to_update]);
-                offset += to_update as u64;
-                bytes_to_read -= to_update as u64;
-            }
-
-            if offset != start_offset {
-                return Err(RegistryError::InternalServerError);
-            }
-        }
+        let hasher = load_hash_state(&tree_manager, name, &uuid, "sha256", offset).await?;
 
         Ok(Self {
             file,
@@ -112,21 +60,15 @@ impl DiskUploadWriter {
     }
 
     fn save_hashstate_sync(&self) -> Result<(), RegistryError> {
-        let hasher_state = self.hasher.clone();
         let storage = self.tree_manager.clone();
         let name = self.name.clone();
         let uuid = self.uuid;
         let offset = self.offset;
 
-        let hasher_state = hasher_state.serialize();
-        let hasher_state = hasher_state.as_slice().to_vec();
-
         tokio::task::block_in_place(|| {
             let rt = tokio::runtime::Handle::current();
             rt.block_on(async move {
-                storage
-                    .save_hashstate(&name, &uuid, "sha256", offset, &hasher_state)
-                    .await
+                save_hash_state(&storage, &self.hasher, &name, &uuid, "sha256", offset).await
             })
         })
     }

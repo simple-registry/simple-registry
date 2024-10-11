@@ -1,9 +1,6 @@
-use crate::error::RegistryError;
-use crate::oci::Digest;
-use log::error;
-use std::io::ErrorKind;
-use tokio::fs;
 use uuid::Uuid;
+
+use crate::oci::Digest;
 use crate::registry::LinkReference;
 
 pub struct TreeManager {
@@ -210,61 +207,5 @@ impl TreeManager {
                 self.manifest_referrer_link_container_dir(name, subject, referrer)
             }
         }
-    }
-
-    // TODO: move to more appropriate place / refactor
-    pub async fn save_hashstate(
-        &self,
-        name: &str,
-        uuid: &Uuid,
-        algorithm: &str,
-        offset: u64,
-        state: &[u8],
-    ) -> Result<(), RegistryError> {
-        let path = self.upload_hash_context_path(name, uuid, algorithm, offset);
-        fs::write(&path, state).await?;
-
-        Ok(())
-    }
-
-    pub async fn load_hashstate(
-        &self,
-        name: &str,
-        uuid: &Uuid,
-        algorithm: &str,
-        offset: u64,
-    ) -> Result<Vec<u8>, RegistryError> {
-        let path = self.upload_hash_context_path(name, uuid, algorithm, offset);
-        Ok(fs::read(&path).await?)
-    }
-
-    pub async fn list_hashstates(
-        &self,
-        name: &str,
-        uuid: &Uuid,
-        algorithm: &str,
-    ) -> Result<Vec<u64>, RegistryError> {
-        let path = self.upload_hash_context_container_path(name, uuid, algorithm);
-        let mut offsets = Vec::new();
-
-        let mut read_dir = match fs::read_dir(&path).await {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(offsets),
-            Err(e) => {
-                error!("Error reading directory {}: {}", path, e);
-                return Err(RegistryError::InternalServerError);
-            }
-        };
-
-        while let Some(entry) = read_dir.next_entry().await? {
-            if let Ok(offset_str) = entry.file_name().into_string() {
-                if let Ok(offset) = offset_str.parse::<u64>() {
-                    offsets.push(offset);
-                }
-            }
-        }
-
-        offsets.sort();
-        Ok(offsets)
     }
 }
