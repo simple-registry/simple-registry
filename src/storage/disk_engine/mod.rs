@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use log::{debug, error, warn};
+use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use std::collections::HashSet;
 use std::io::{ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use sha2::digest::crypto_common::hazmat::SerializableState;
 use tokio::fs::{self, File};
 use tokio::io::AsyncSeekExt;
 use uuid::Uuid;
@@ -20,7 +20,14 @@ use crate::storage::{paginate, StorageEngine, UploadSummary};
 
 mod upload_writer;
 
-pub async fn save_hash_state(tree_manager: &TreeManager, sha256: &Sha256, name: &str, uuid: &Uuid, algorithm: &str, offset: u64) -> Result<(), RegistryError> {
+pub async fn save_hash_state(
+    tree_manager: &TreeManager,
+    sha256: &Sha256,
+    name: &str,
+    uuid: &Uuid,
+    algorithm: &str,
+    offset: u64,
+) -> Result<(), RegistryError> {
     let path = tree_manager.upload_hash_context_path(name, uuid, algorithm, offset);
 
     let state = sha256.serialize();
@@ -30,7 +37,13 @@ pub async fn save_hash_state(tree_manager: &TreeManager, sha256: &Sha256, name: 
     Ok(())
 }
 
-pub async fn load_hash_state(tree_manager: &TreeManager, name: &str, uuid: &Uuid, algorithm: &str, offset: u64) -> Result<Sha256, RegistryError> {
+pub async fn load_hash_state(
+    tree_manager: &TreeManager,
+    name: &str,
+    uuid: &Uuid,
+    algorithm: &str,
+    offset: u64,
+) -> Result<Sha256, RegistryError> {
     let path = tree_manager.upload_hash_context_path(name, uuid, algorithm, offset);
     let state = fs::read(&path).await?;
 
@@ -255,7 +268,7 @@ impl StorageEngine for DiskStorageEngine {
         let path = self.tree.manifest_referrers_dir(name, digest);
         let all_manifest = self.collect_directory_entries(&path).await?;
         let mut referrers = Vec::new();
-        // FIXME: instead of having the digest in the filename, we could have it in file content!
+        // TODO: instead of having the digest in the filename, we could have it in file content!
         for manifest_digest in all_manifest {
             let manifest_digest = Digest::from_str(&manifest_digest)?;
             let blob_path = self.tree.blob_path(&manifest_digest);
@@ -287,7 +300,6 @@ impl StorageEngine for DiskStorageEngine {
         let date_path = self.tree.upload_start_date_path(name, &uuid);
         fs::write(date_path, Utc::now().to_rfc3339()).await?;
 
-        // TODO: rework to have a one-liner
         let container_dir = self
             .tree
             .upload_hash_context_container_path(name, &uuid, "sha256");
@@ -361,7 +373,6 @@ impl StorageEngine for DiskStorageEngine {
     }
 
     async fn delete_upload(&self, name: &str, uuid: Uuid) -> Result<(), RegistryError> {
-        // TODO: implement a mechanism to ensure data integrity (operation-queue, scrub?)
         let path = self.tree.upload_container_path(name, &uuid);
         let _ = fs::remove_dir_all(&path).await;
         self.delete_empty_parent_dirs(&path).await
@@ -397,7 +408,6 @@ impl StorageEngine for DiskStorageEngine {
     }
 
     async fn delete_blob(&self, digest: &Digest) -> Result<(), RegistryError> {
-        // TODO: implement a mechanism to ensure data integrity (operation-queue, scrub?)
         let path = self.tree.blob_container_dir(digest);
         fs::remove_dir_all(&path).await?;
         self.delete_empty_parent_dirs(&path).await
@@ -434,7 +444,6 @@ impl StorageEngine for DiskStorageEngine {
         debug!("Creating link container dir at path: {}", path);
         fs::create_dir_all(&path).await?;
 
-        // TODO: implement a mechanism to ensure data integrity (operation-queue, scrub?)
         let link_path = self.tree.get_link_path(reference, namespace);
         debug!("Creating link at path: {}", link_path);
         fs::write(&link_path, digest.to_string()).await?;
@@ -454,7 +463,6 @@ impl StorageEngine for DiskStorageEngine {
         );
         let digest = self.read_link(name, reference).await?;
 
-        // TODO: implement a mechanism to ensure data integrity (operation-queue, scrub?)
         let path = self.tree.get_link_container_path(reference, name);
         debug!("Deleting link at path: {}", path);
         let _ = fs::remove_dir_all(&path).await;

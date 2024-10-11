@@ -11,7 +11,7 @@ use crate::storage::StorageEngine;
 pub struct ManifestData {
     pub media_type: String,
     pub digest: Digest,
-    pub content: Vec<u8>, // FIXME: This should be an async Reader instead
+    pub content: Vec<u8>, // TODO: This should be an async Reader instead
 }
 
 pub struct ManifestSummary {
@@ -84,7 +84,6 @@ where
         })
     }
 
-    // TODO: this function is a mess, refactor it!
     pub async fn put_manifest(
         &self,
         namespace: &str,
@@ -159,11 +158,9 @@ where
             let digest = Digest::from_str(&subject_descriptor.digest)?;
             let link_reference = LinkReference::Referrer(digest.clone(), manifest_digest.clone());
 
-            debug!("[BEFORE] link_reference: {:?}", link_reference);
             self.storage
                 .create_link(namespace, &link_reference, &digest)
                 .await?;
-            debug!("[AFTER] link_reference: {:?}", link_reference);
 
             subject = Some(digest);
         } else {
@@ -213,7 +210,7 @@ where
         for layer in manifest.layers {
             let digest = Digest::from_str(&layer.digest)?;
             let link_reference = LinkReference::Layer(digest.clone());
-            let _ = self.storage.delete_link(namespace, &link_reference).await; // FIXME: should NOT be ignored
+            let _ = self.storage.delete_link(namespace, &link_reference).await; // TODO: should NOT be ignored
         }
 
         debug!("Deleting links for config");

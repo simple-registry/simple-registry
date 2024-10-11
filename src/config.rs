@@ -1,10 +1,10 @@
 use cel_interpreter::Program;
+use lazy_static::lazy_static;
 use log::{debug, error};
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use lazy_static::lazy_static;
-use regex::Regex;
 use tokio::fs;
 
 use crate::error::RegistryError;
@@ -30,7 +30,21 @@ pub struct Config {
 pub struct ServerConfig {
     pub bind_address: String,
     pub port: u16,
+    #[serde(default = "ServerConfig::default_query_timeout")]
+    pub query_timeout: u64,
+    #[serde(default = "ServerConfig::default_query_timeout_grace_period")]
+    pub query_timeout_grace_period: u64,
     pub tls: Option<ServerTlsConfig>,
+}
+
+impl ServerConfig {
+    fn default_query_timeout() -> u64 {
+        3600
+    }
+
+    fn default_query_timeout_grace_period() -> u64 {
+        60
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -214,11 +214,10 @@ async fn main() -> io::Result<()> {
 
     info!("Listening on: {}", binding_addr);
 
-    // Use a 5 second timeout for incoming connections to the server.
-    // If a request is in progress when the 5 second timeout elapses,
-    // use a 2 second timeout for processing the final request and graceful shutdown.
-    // TODO: Make these configurable
-    let timeouts = vec![Duration::from_secs(5), Duration::from_secs(2)];
+    let timeouts = vec![
+        Duration::from_secs(config.server.query_timeout),
+        Duration::from_secs(config.server.query_timeout_grace_period),
+    ];
 
     match tls_acceptor {
         Some(tls_acceptor) => serve_tls(listener, tls_acceptor, timeouts, registry).await,

@@ -25,6 +25,8 @@ Goals
 
 - `bind_address` (string) :The address to bind the server to
 - `port` (uint16): The port to bind the server to
+- `query_timeout` (uint64): The timeout for queries in seconds
+- `query_timeout_grace_period` (uint64): The grace period for queries in seconds
 
 #### Optional TLS (`server.tls`)
 
