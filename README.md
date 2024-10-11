@@ -40,8 +40,6 @@ Multiple storage backends are supported, but only the filesystem backend is curr
 
 #### Filesystem Storage (`storage.fs`)
 
-- TODO: move "storage" to "storage.fs"
-
 - `root_dir` (string): The root directory for the storage.
 
 ### Identity (`identity.<identity-id>`)

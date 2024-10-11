@@ -38,7 +38,7 @@ mod registry;
 mod storage;
 mod tls;
 
-use crate::config::Config;
+use crate::config::{Config, StorageBackendConfig};
 use crate::error::RegistryError;
 use crate::http_helpers::{
     paginated_response, parse_authorization_header, parse_query_parameters, parse_range_header,
@@ -204,16 +204,10 @@ async fn main() -> io::Result<()> {
     }
 
     info!("Initializing registry");
-    // TODO: new() or from_config()
-    let registry = Arc::new(Registry {
-        storage: DiskStorageEngine::new(config.storage.root_dir.clone()),
-        credentials: config.build_credentials(),
-        namespaces: config.build_namespace_list(),
-        namespace_default_allow: config.build_namespace_default_allow_list(),
-        namespace_policies: config
-            .build_namespace_policies()
-            .expect("Failed to build policy rules"),
-    });
+    let backend = match &config.storage.backend {
+        StorageBackendConfig::FS(fs_config) => DiskStorageEngine::new(fs_config.root_dir.clone()),
+    };
+    let registry = Arc::new(Registry::from_config(config, backend));
 
     info!("Starting registry server on {}", binding_addr);
     let listener = TcpListener::bind(binding_addr).await?;

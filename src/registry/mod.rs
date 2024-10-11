@@ -37,6 +37,18 @@ impl<T> Registry<T>
 where
     T: StorageEngine,
 {
+    pub fn from_config(config: &Config, storage: T) -> Self {
+        Self {
+            storage,
+            credentials: config.build_credentials(),
+            namespaces: config.build_namespace_list(),
+            namespace_default_allow: config.build_namespace_default_allow_list(),
+            namespace_policies: config
+                .build_namespace_policies()
+                .expect("Failed to build policy rules"),
+        }
+    }
+
     pub fn validate_namespace(&self, namespace: &str) -> Result<(), RegistryError> {
         if REPOSITORY_NAME_RE.is_match(namespace) {
             Ok(())
@@ -63,10 +75,12 @@ where
             RegistryError::Unauthorized("Unable to verify credentials".to_string())
         })?;
 
-        Argon2::default().verify_password(password.as_bytes(), &identity_password).map_err(|e| {
-            error!("Unable to verify password: {}", e);
-            RegistryError::Unauthorized("Invalid credentials".to_string())
-        })?;
+        Argon2::default()
+            .verify_password(password.as_bytes(), &identity_password)
+            .map_err(|e| {
+                error!("Unable to verify password: {}", e);
+                RegistryError::Unauthorized("Invalid credentials".to_string())
+            })?;
 
         Ok(Some(identity_id.clone()))
     }

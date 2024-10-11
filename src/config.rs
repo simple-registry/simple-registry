@@ -33,6 +33,17 @@ pub struct ServerTlsConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct StorageConfig {
+    pub backend: StorageBackendConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub enum StorageBackendConfig {
+    #[serde(rename = "fs")]
+    FS(StorageFSConfig),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct StorageFSConfig {
     pub root_dir: String,
 }
 
