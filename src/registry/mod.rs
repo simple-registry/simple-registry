@@ -18,7 +18,7 @@ use crate::error::RegistryError;
 use crate::storage::StorageEngine;
 
 lazy_static! {
-    static ref REPOSITORY_NAME_RE: Regex =
+    static ref NAMESPACE_RE: Regex =
         Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap();
 }
 
@@ -50,7 +50,7 @@ where
     }
 
     pub fn validate_namespace(&self, namespace: &str) -> Result<(), RegistryError> {
-        if REPOSITORY_NAME_RE.is_match(namespace) {
+        if NAMESPACE_RE.is_match(namespace) {
             Ok(())
         } else {
             Err(RegistryError::NameInvalid)

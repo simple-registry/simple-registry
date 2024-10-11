@@ -56,8 +56,6 @@ impl ClientIdentity {
         registry: &Registry<T>,
         action: ClientAction,
     ) -> Result<(), RegistryError> {
-        // TODO: check repository exists!
-
         let identity_id = registry.validate_credentials(&self.credentials)?;
 
         let Some(namespace) = action.get_namespace() else {

@@ -3,9 +3,18 @@ use log::{debug, error};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use lazy_static::lazy_static;
+use regex::Regex;
 use tokio::fs;
 
 use crate::error::RegistryError;
+
+lazy_static! {
+    // This regex is used to validate repository names.
+    // We choose to have the same constraints as namespaces initial part.
+    static ref REPOSITORY_RE: Regex =
+        Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$").unwrap();
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
@@ -83,7 +92,10 @@ impl Config {
     pub fn build_repositories_list(&self) -> HashSet<String> {
         let mut namespace_set = HashSet::new();
         for repo in self.repository.iter() {
-            // TODO: validate namespace name!
+            if !REPOSITORY_RE.is_match(&repo.namespace) {
+                error!("Invalid repository name: {}", repo.namespace);
+                continue;
+            }
             namespace_set.insert(repo.namespace.clone());
         }
         namespace_set
