@@ -101,8 +101,11 @@ The following `request.action` actions are supported:
 - [x] Auth Policies
     - [x] Login/Password
     - [x] mTLS
+- [ ] Code quality
+    - [ ] Re-check official error codes / endpoints matches
+    - [ ] Error handling, abusive .unwrap(), etc. 
+    - [ ] Missing features & important TODOs
 - [ ] Scrub tooling
-- [ ] Re-check official error codes / endpoints matches
 - [ ] Renovate
 - [ ] CI
     - [ ] Formatting
