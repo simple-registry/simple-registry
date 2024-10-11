@@ -80,7 +80,7 @@ impl Config {
         credentials_map
     }
 
-    pub fn build_namespace_list(&self) -> HashSet<String> {
+    pub fn build_repositories_list(&self) -> HashSet<String> {
         let mut namespace_set = HashSet::new();
         for repo in self.repository.iter() {
             // TODO: validate namespace name!
@@ -89,7 +89,7 @@ impl Config {
         namespace_set
     }
 
-    pub fn build_namespace_default_allow_list(&self) -> HashMap<String, bool> {
+    pub fn build_repository_default_allow_list(&self) -> HashMap<String, bool> {
         let mut policy_default_allow_map = HashMap::new();
         for repo in self.repository.iter() {
             policy_default_allow_map.insert(repo.namespace.clone(), repo.policy_default_allow);
@@ -97,7 +97,9 @@ impl Config {
         policy_default_allow_map
     }
 
-    pub fn build_namespace_policies(&self) -> Result<HashMap<String, Vec<Program>>, RegistryError> {
+    pub fn build_repository_policies(
+        &self,
+    ) -> Result<HashMap<String, Vec<Program>>, RegistryError> {
         let mut policy_rules_map = HashMap::new();
         for repo in &self.repository {
             let mut policies = Vec::new();

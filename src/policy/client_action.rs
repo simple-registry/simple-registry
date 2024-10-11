@@ -1,5 +1,4 @@
 use crate::oci::{Digest, Reference};
-use crate::registry::extract_namespace;
 
 #[derive(Clone, Debug)]
 pub enum ClientAction {
@@ -40,7 +39,7 @@ impl ClientAction {
             | ClientAction::GetManifest(name, _)
             | ClientAction::DeleteManifest(name, _)
             | ClientAction::GetReferrers(name, _)
-            | ClientAction::ListTags(name) => Some(extract_namespace(name.to_string())),
+            | ClientAction::ListTags(name) => Some(name.clone()),
             _ => None,
         }
     }

@@ -6,7 +6,7 @@ mod upload;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use cel_interpreter::Program;
 use lazy_static::lazy_static;
-use log::error;
+use log::{debug, error};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 
@@ -28,9 +28,9 @@ where
 {
     pub storage: T,
     pub credentials: HashMap<String, (String, String)>,
-    pub namespaces: HashSet<String>,
-    pub namespace_default_allow: HashMap<String, bool>,
-    pub namespace_policies: HashMap<String, Vec<Program>>,
+    pub repositories: HashSet<String>,
+    pub repository_default_allow: HashMap<String, bool>,
+    pub repository_policies: HashMap<String, Vec<Program>>,
 }
 
 impl<T> Registry<T>
@@ -41,10 +41,10 @@ where
         Self {
             storage,
             credentials: config.build_credentials(),
-            namespaces: config.build_namespace_list(),
-            namespace_default_allow: config.build_namespace_default_allow_list(),
-            namespace_policies: config
-                .build_namespace_policies()
+            repositories: config.build_repositories_list(),
+            repository_default_allow: config.build_repository_default_allow_list(),
+            repository_policies: config
+                .build_repository_policies()
                 .expect("Failed to build policy rules"),
         }
     }
@@ -85,26 +85,26 @@ where
         Ok(Some(identity_id.clone()))
     }
 
-    pub fn is_namespace_policy_default_allow(&self, namespace: &str) -> bool {
+    pub fn get_repository(&self, namespace: &str) -> Option<String> {
+        debug!("Looking for repository matching namespace: {}", namespace);
+        let repository = self
+            .repositories
+            .iter()
+            .find(|&n| namespace.starts_with(n))
+            .cloned();
+
+        debug!("Found repository: {:?}", repository);
+        repository
+    }
+
+    pub fn is_repository_policy_default_allow(&self, namespace: &str) -> bool {
         *self
-            .namespace_default_allow
+            .repository_default_allow
             .get(namespace)
             .unwrap_or(&false)
     }
 
-    pub fn get_namespace_policies(&self, namespace: &str) -> Option<&Vec<Program>> {
-        self.namespace_policies.get(namespace)
+    pub fn get_repository_policies(&self, namespace: &str) -> Option<&Vec<Program>> {
+        self.repository_policies.get(namespace)
     }
-}
-
-pub fn extract_namespace(name: String) -> String {
-    // TODO: match self.namespace entries instead!
-
-    let mut namespace_parts = Vec::new();
-    for namespace in name.split('/') {
-        namespace_parts.push(namespace);
-    }
-
-    namespace_parts.pop();
-    namespace_parts.join("/")
 }

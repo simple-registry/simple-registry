@@ -64,33 +64,49 @@ impl ClientIdentity {
             return Ok(());
         };
 
-        let default_allow = registry.is_namespace_policy_default_allow(&namespace);
-        let policies = registry.get_namespace_policies(&namespace);
+        let repository = registry
+            .get_repository(&namespace)
+            .ok_or_else(|| RegistryError::Unauthorized("Repository not found".to_string()))?;
+
+        let default_allow = registry.is_repository_policy_default_allow(&repository);
+        debug!(
+            "Default allow: {:?} for namespace: {:?} and repository: {:?}",
+            default_allow, namespace, repository
+        );
+
+        let policies = registry.get_repository_policies(&repository);
 
         if let Some(policies) = policies {
             self.check_policies(action, identity_id, policies, default_allow)
         } else {
-            error!("Applying default policy to repository '{:?}' and action '{:?}'", repository, action);
+            error!(
+                "Applying default policy to repository '{:?}' and action '{:?}'",
+                repository, action
+            );
             self.apply_default_policy(action, identity_id, default_allow)
         }
     }
 
-    fn apply_default_policy(&self, action: ClientAction, identity_id: Option<String>, default_allow: bool) -> Result<(), RegistryError> {
+    fn apply_default_policy(
+        &self,
+        action: ClientAction,
+        identity_id: Option<String>,
+        default_allow: bool,
+    ) -> Result<(), RegistryError> {
         if default_allow {
             Ok(())
         } else {
-            error!("Default policy denied access: {:?} from {:?}", action, identity_id);
+            error!(
+                "Default policy denied access: {:?} from {:?}",
+                action, identity_id
+            );
             Err(RegistryError::Unauthorized(
                 "Access denied (by policy)".to_string(),
             ))
         }
     }
 
-    fn build_policy_context(
-        &self,
-        identity_id: &Option<String>,
-        action: &ClientAction,
-    ) -> Context {
+    fn build_policy_context(&self, identity_id: &Option<String>, action: &ClientAction) -> Context {
         let request = CELRequest::from(action.clone());
         debug!("Policy context (request) : {:?}", request);
 
