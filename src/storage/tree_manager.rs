@@ -1,9 +1,10 @@
 use crate::error::RegistryError;
-use crate::oci::{Digest, LinkReference};
+use crate::oci::Digest;
 use log::error;
 use std::io::ErrorKind;
 use tokio::fs;
 use uuid::Uuid;
+use crate::registry::LinkReference;
 
 pub struct TreeManager {
     pub root_dir: String,

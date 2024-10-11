@@ -6,8 +6,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite};
 use uuid::Uuid;
 
 use crate::error::RegistryError;
-use crate::oci::{Descriptor, Digest, LinkReference};
-
+use crate::oci::{Descriptor, Digest};
+use crate::registry::LinkReference;
 pub use crate::storage::disk_engine::DiskStorageEngine;
 
 pub struct UploadSummary {

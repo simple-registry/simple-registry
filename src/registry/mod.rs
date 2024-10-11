@@ -2,6 +2,7 @@ mod blob;
 mod content_discovery;
 mod manifest;
 mod upload;
+mod link_reference;
 
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use cel_interpreter::Program;
@@ -12,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 pub use blob::BlobData;
 pub use upload::NewUpload;
+pub use link_reference::LinkReference;
 
 use crate::config::Config;
 use crate::error::RegistryError;

@@ -12,7 +12,8 @@ use tokio::io::AsyncSeekExt;
 use uuid::Uuid;
 
 use crate::error::RegistryError;
-use crate::oci::{Descriptor, Digest, LinkReference, Manifest};
+use crate::oci::{Descriptor, Digest, Manifest};
+use crate::registry::LinkReference;
 use crate::storage::disk_engine::upload_writer::DiskUploadWriter;
 use crate::storage::tree_manager::TreeManager;
 use crate::storage::{paginate, StorageEngine, UploadSummary};

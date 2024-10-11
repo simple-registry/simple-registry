@@ -2,11 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 mod digest;
-mod link_reference;
 mod reference;
 
 pub use digest::Digest;
-pub use link_reference::LinkReference;
 pub use reference::Reference;
 
 #[derive(Debug, Deserialize)]

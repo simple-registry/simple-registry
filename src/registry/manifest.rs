@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::error::RegistryError;
 use crate::io_helpers::parse_reader;
-use crate::oci::{Digest, LinkReference, Manifest, Reference};
-use crate::registry::Registry;
+use crate::oci::{Digest, Manifest, Reference};
+use crate::registry::{LinkReference, Registry};
 use crate::storage::StorageEngine;
 
 pub struct ManifestData {
