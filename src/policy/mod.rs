@@ -68,50 +68,64 @@ impl ClientIdentity {
         let policies = registry.get_namespace_policies(&namespace);
 
         if let Some(policies) = policies {
-            let request = CELRequest::from(action.clone());
-            debug!("Policy context (request) : {:?}", request);
-
-            let username = self
-                .credentials
-                .as_ref()
-                .map(|(username, _)| username.clone());
-            let certificate = CELIdentityCertificate::new(
-                self.cert_organizations.clone(),
-                self.cert_common_name.clone(),
-            );
-            let identity = CELIdentity::new(identity_id, username, certificate);
-            debug!("Policy context (identity) : {:?}", identity);
-
-            let mut context = Context::default();
-            context.add_variable("request", &request).unwrap();
-            context.add_variable("identity", &identity).unwrap();
-            return self.check_policies(context, policies, default_allow);
+            self.check_policies(action, identity_id, policies, default_allow)
+        } else {
+            error!("Applying default policy to repository '{:?}' and action '{:?}'", repository, action);
+            self.apply_default_policy(action, identity_id, default_allow)
         }
-
-        self.apply_default_policy(default_allow)
     }
 
-    fn apply_default_policy(&self, default_allow: bool) -> Result<(), RegistryError> {
+    fn apply_default_policy(&self, action: ClientAction, identity_id: Option<String>, default_allow: bool) -> Result<(), RegistryError> {
         if default_allow {
             Ok(())
         } else {
+            error!("Default policy denied access: {:?} from {:?}", action, identity_id);
             Err(RegistryError::Unauthorized(
                 "Access denied (by policy)".to_string(),
             ))
         }
     }
 
+    fn build_policy_context(
+        &self,
+        identity_id: &Option<String>,
+        action: &ClientAction,
+    ) -> Context {
+        let request = CELRequest::from(action.clone());
+        debug!("Policy context (request) : {:?}", request);
+
+        let username = self
+            .credentials
+            .as_ref()
+            .map(|(username, _)| username.clone());
+        let certificate = CELIdentityCertificate::new(
+            self.cert_organizations.clone(),
+            self.cert_common_name.clone(),
+        );
+        let identity = CELIdentity::new(identity_id.clone(), username, certificate);
+        debug!("Policy context (identity) : {:?}", identity);
+
+        let mut context = Context::default();
+        context.add_variable("request", &request).unwrap();
+        context.add_variable("identity", &identity).unwrap();
+        context
+    }
+
     fn check_policies(
         &self,
-        context: Context,
+        action: ClientAction,
+        identity_id: Option<String>,
         policies: &[Program],
         default_allow: bool,
     ) -> Result<(), RegistryError> {
+        let context = self.build_policy_context(&identity_id, &action);
+
         for policy in policies {
             let evaluation_result = policy.execute(&context).map_err(|e| {
                 error!("Policy execution failed: {}", e);
                 RegistryError::Unauthorized("Policy execution failed".to_string())
             })?;
+            debug!("CEL program content {:?}", policy);
             debug!("CEL program evaluates to {:?}", evaluation_result);
 
             match evaluation_result {
@@ -120,7 +134,7 @@ impl ClientIdentity {
                     return Ok(());
                 }
                 Value::Bool(false) if default_allow => {
-                    debug!("Policy matched, denying access");
+                    error!("Policy matched, denying access");
                     return Err(RegistryError::Unauthorized(
                         "Access denied (by policy)".to_string(),
                     ));
@@ -136,6 +150,6 @@ impl ClientIdentity {
         }
 
         debug!("No policy matched, applying default policy");
-        self.apply_default_policy(default_allow)
+        self.apply_default_policy(action, identity_id, default_allow)
     }
 }
