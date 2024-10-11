@@ -3,6 +3,7 @@ use chrono::Utc;
 use log::{debug, error, warn};
 use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest as ShaDigestTrait, Sha256};
+use std::collections::HashSet;
 use std::io::{ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use crate::error::RegistryError;
 use crate::oci::{Descriptor, Digest, LinkReference, Manifest};
 use crate::storage::disk_engine::upload_writer::DiskUploadWriter;
 use crate::storage::tree_manager::TreeManager;
-use crate::storage::{StorageEngine, UploadSummary};
+use crate::storage::{paginate, StorageEngine, UploadSummary};
 
 mod upload_writer;
 
@@ -40,7 +41,38 @@ impl DiskStorageEngine {
         }
     }
 
-    // TODO: cleanup
+    async fn collect_repositories(&self, base_path: &Path, repositories: &mut HashSet<String>) {
+        let mut path_stack: Vec<PathBuf> = vec![base_path.to_path_buf()];
+
+        while let Some(current_path) = path_stack.pop() {
+            if let Ok(mut entries) = fs::read_dir(&current_path).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let path = entry.path();
+
+                    if path.is_dir() {
+                        debug!("checking path: {}", path.display());
+                        // check entries starting with a "_": it means it's a repository
+                        // add entries not starting with a "_" as paths to explore
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.starts_with('_') {
+                                if let Some(name) =
+                                    path.parent().and_then(|p| p.strip_prefix(base_path).ok())
+                                {
+                                    if let Some(name) = name.to_str() {
+                                        debug!("Found repository: {}", name);
+                                        repositories.insert(name.to_string());
+                                    }
+                                }
+                            } else {
+                                debug!("Exploring path: {}", path.display());
+                                path_stack.push(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     pub async fn collect_directory_entries(
         &self,
@@ -65,37 +97,16 @@ impl DiskStorageEngine {
         Ok(entries)
     }
 
-    pub fn paginate(
-        &self,
-        items: &[String],
-        n: u32,
-        last: String,
-    ) -> (Vec<String>, Option<String>) {
-        let start = if last.is_empty() {
-            0
-        } else {
-            items.iter().position(|x| x == &last).map_or(0, |i| i + 1)
-        };
-
-        let end = usize::min(start + n as usize, items.len());
-        let next = if end < items.len() {
-            Some(items[end - 1].clone())
-        } else {
-            None
-        };
-
-        (items[start..end].to_vec(), next)
-    }
-
     pub async fn delete_empty_parent_dirs(
         &self,
         path: impl AsRef<Path>,
     ) -> Result<(), RegistryError> {
         let path = PathBuf::from(path.as_ref());
+        let root_dir = Path::new(&self.tree.root_dir);
 
         let mut parent = path.parent();
         while let Some(parent_path) = parent {
-            if parent_path == Path::new(&self.tree.root_dir) {
+            if parent_path == root_dir {
                 break;
             }
 
@@ -114,8 +125,6 @@ impl DiskStorageEngine {
 
         Ok(())
     }
-
-    // TODO: /cleanup
 
     pub async fn blob_rc_update<O>(
         &self,
@@ -189,12 +198,15 @@ impl StorageEngine for DiskStorageEngine {
         n: u32,
         last: String,
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
-        let repository_dir = self.tree.repository_dir();
-        // FIXME: detect repositories with "/" in the name! or adopt a declarative approach to define valid repositories
+        let base_path = self.tree.repository_dir();
+        let base_path = Path::new(&base_path);
+        let mut repositories = HashSet::new();
+        self.collect_repositories(base_path, &mut repositories)
+            .await;
 
-        let mut all_repos = self.collect_directory_entries(&repository_dir).await?;
-        all_repos.sort();
-        Ok(self.paginate(&all_repos, n, last))
+        let mut repositories: Vec<String> = repositories.into_iter().collect();
+        repositories.sort();
+        Ok(paginate(&repositories, n, last))
     }
 
     async fn list_tags(
@@ -205,9 +217,9 @@ impl StorageEngine for DiskStorageEngine {
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         let path = self.tree.manifest_tags_dir(name);
         debug!("Listing tags in path: {}", path);
-        let mut all_tags = self.collect_directory_entries(&path).await?;
-        all_tags.sort();
-        Ok(self.paginate(&all_tags, n, last))
+        let mut tags = self.collect_directory_entries(&path).await?;
+        tags.sort();
+        Ok(paginate(&tags, n, last))
     }
 
     async fn list_referrers(

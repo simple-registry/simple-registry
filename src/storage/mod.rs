@@ -92,3 +92,20 @@ pub trait StorageEngine {
         reference: &LinkReference,
     ) -> Result<(), RegistryError>;
 }
+
+pub fn paginate(items: &[String], n: u32, last: String) -> (Vec<String>, Option<String>) {
+    let start = if last.is_empty() {
+        0
+    } else {
+        items.iter().position(|x| x == &last).map_or(0, |i| i + 1)
+    };
+
+    let end = usize::min(start + n as usize, items.len());
+    let next = if end < items.len() {
+        Some(items[end - 1].clone())
+    } else {
+        None
+    };
+
+    (items[start..end].to_vec(), next)
+}
