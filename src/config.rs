@@ -33,6 +33,7 @@ pub struct ServerTlsConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct StorageConfig {
+    #[serde(flatten)]
     pub backend: StorageBackendConfig,
 }
 
