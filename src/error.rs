@@ -1,7 +1,7 @@
 use crate::RegistryResponseBody;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
-use log::error;
+use log::debug;
 use sha2::digest::crypto_common::hazmat;
 use std::cmp::PartialEq;
 use std::fmt::Display;
@@ -131,10 +131,10 @@ impl Display for RegistryError {
 impl From<std::io::Error> for RegistryError {
     fn from(error: std::io::Error) -> Self {
         if error.kind() == std::io::ErrorKind::NotFound {
-            error!("Error: {:?}", error);
+            debug!("Error: {:?}", error);
             RegistryError::NotFound
         } else {
-            error!("Error: {:?}", error);
+            debug!("Error: {:?}", error);
             RegistryError::InternalServerError
         }
     }
