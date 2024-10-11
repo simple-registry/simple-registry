@@ -3,14 +3,17 @@ mod content_discovery;
 mod manifest;
 mod upload;
 
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use cel_interpreter::Program;
 use lazy_static::lazy_static;
+use log::error;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 
 pub use blob::BlobData;
 pub use upload::NewUpload;
 
+use crate::config::Config;
 use crate::error::RegistryError;
 use crate::storage::StorageEngine;
 
@@ -55,12 +58,15 @@ where
             .get(username)
             .ok_or_else(|| RegistryError::Unauthorized("Invalid credentials".to_string()))?;
 
-        if !identity_password.eq(password) {
-            // TODO: use a hash algorithm instead of plain text password :-/
-            return Err(RegistryError::Unauthorized(
-                "Invalid credentials".to_string(),
-            ));
-        }
+        let identity_password = PasswordHash::new(identity_password).map_err(|e| {
+            error!("Unable to hash password: {}", e);
+            RegistryError::Unauthorized("Unable to verify credentials".to_string())
+        })?;
+
+        Argon2::default().verify_password(password.as_bytes(), &identity_password).map_err(|e| {
+            error!("Unable to verify password: {}", e);
+            RegistryError::Unauthorized("Invalid credentials".to_string())
+        })?;
 
         Ok(Some(identity_id.clone()))
     }

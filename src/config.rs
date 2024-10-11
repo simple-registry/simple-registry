@@ -39,7 +39,7 @@ pub struct StorageConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct IdentityConfig {
     pub username: String,
-    pub password: String, // TODO: hash!
+    pub password: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

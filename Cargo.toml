@@ -9,6 +9,7 @@ opt-level = 3
 lto = "fat"
 
 [dependencies]
+argon2 = "0.5.3"
 async-trait = "0.1.83"
 base64 = "0.22.1"
 bytes = "1.7.2"

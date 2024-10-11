@@ -14,7 +14,7 @@ Goals
 
 ## Ecosystem
 
-### Kubernetes Operator (TODO)
+### Kubernetes Operator
 
 - TODO: Reloadable configuration
 - TODO: Operator (separate project)
@@ -46,11 +46,9 @@ Multiple storage backends are supported, but only the filesystem backend is curr
 
 ### Identity (`identity.<identity-id>`)
 
-- TODO: hash passwords
-
 - `<identity-id>` (string): The identity ID can be any string. It is used to reference the identity in the repository configuration.
 - `username` (string): The username for the identity.
-- `password` (string): The hashed password for the identity.
+- `password` (string): The argon2 hashed password for the identity.
 
 ### Repository (`repository`)
 
