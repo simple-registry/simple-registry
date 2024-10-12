@@ -105,6 +105,7 @@ The following `request.action` actions are supported:
     - [ ] Re-check official error codes / endpoints matches
     - [ ] Error handling, abusive .unwrap(), etc. 
     - [ ] Missing features & important TODOs
+    - [ ] Concurrent operations (e.g. on disk)
 - [ ] Scrub tooling
 - [ ] Renovate
 - [ ] CI

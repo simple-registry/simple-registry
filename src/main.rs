@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
-use bytes::Bytes;
-use futures_util::{Stream, StreamExt};
-use http_body_util::{BodyExt, Empty, Full, StreamBody};
-use hyper::body::{Body, Frame, Incoming};
+use arc_swap::ArcSwap;
+use http_body_util::BodyExt;
+use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -11,20 +10,14 @@ use lazy_static::lazy_static;
 use log::{debug, error, info, warn};
 use regex::Regex;
 use registry::Registry;
-use rustls::server::WebPkiClientVerifier;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::pin;
 use tokio_rustls::TlsAcceptor;
-use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
@@ -40,7 +33,7 @@ mod tls;
 
 use self::http::request::{parse_authorization_header, parse_query_parameters, parse_range_header};
 use self::http::response::paginated_response;
-use crate::config::{Config, ServerTlsConfig, StorageBackendConfig};
+use crate::config::{Config, StorageBackendConfig};
 use crate::error::RegistryError;
 use crate::http::response::RegistryResponseBody;
 use crate::io_helpers::parse_regex;
@@ -48,7 +41,6 @@ use crate::oci::{Digest, Reference, ReferrerList};
 use crate::policy::{ClientAction, ClientIdentity};
 use crate::registry::{BlobData, NewUpload};
 use crate::storage::{DiskStorageEngine, StorageEngine};
-use crate::tls::{build_root_store, load_certificate_bundle, load_private_key};
 
 lazy_static! {
     static ref ROUTE_API_VERSION_REGEX: Regex = Regex::new(r"^/v2/?$").unwrap();
@@ -64,7 +56,10 @@ lazy_static! {
         Regex::new(r"^/v2/(?P<name>.+)/referrers/(?P<digest>.+)$").unwrap();
     static ref ROUTE_LIST_TAGS_REGEX: Regex = Regex::new(r"^/v2/(?P<name>.+)/tags/list$").unwrap();
     static ref ROUTE_CATALOG_REGEX: Regex = Regex::new(r"^/v2/_catalog$").unwrap();
+    static ref CONFIG: ArcSwap<Config> = ArcSwap::new(Arc::new(Config::default()));
 }
+
+const CONFIG_PATH: &str = "config.toml";
 
 #[derive(Deserialize)]
 pub struct NewUploadParameters {
@@ -100,184 +95,79 @@ pub struct BlobParameters {
     pub digest: Digest,
 }
 
-type BytesFrameStream = Pin<Box<dyn Stream<Item = Result<Frame<Bytes>, io::Error>> + Send>>;
+pub fn reload_config(config: &ArcSwap<Config>) -> Result<(), io::Error> {
+    let new_config = Config::load(CONFIG_PATH).map_err(|err| {
+        error!("Failed to load configuration: {}", err);
+        io::Error::new(io::ErrorKind::InvalidInput, err)
+    })?;
 
-pub enum RegistryResponseBody {
-    Empty(Empty<Bytes>),
-    Fixed(Full<Bytes>),
-    Streaming(StreamBody<BytesFrameStream>),
-}
-
-impl RegistryResponseBody {
-    pub fn empty() -> Self {
-        RegistryResponseBody::Empty(Empty::new())
-    }
-
-    pub fn fixed(data: Vec<u8>) -> Self {
-        let data = Bytes::from(data);
-        RegistryResponseBody::Fixed(Full::new(data))
-    }
-
-    pub fn streaming<R>(reader: R) -> Self
-    where
-        R: AsyncRead + Send + 'static,
-    {
-        let stream = ReaderStream::new(reader).map(|result| result.map(Frame::data));
-        RegistryResponseBody::Streaming(StreamBody::new(Box::pin(stream)))
-    }
-}
-
-impl Body for RegistryResponseBody {
-    type Data = Bytes;
-    type Error = io::Error;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        match self.get_mut() {
-            RegistryResponseBody::Empty(body) => Pin::new(body)
-                .poll_frame(cx)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
-            RegistryResponseBody::Fixed(body) => Pin::new(body)
-                .poll_frame(cx)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
-            RegistryResponseBody::Streaming(body) => Pin::new(body).poll_frame(cx),
-        }
-    }
+    config.store(Arc::new(new_config));
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     env_logger::init();
 
-    let config = match Config::load("config.toml").await {
-        Ok(config) => Box::leak(Box::new(config)),
-        Err(e) => {
-            error!("Failed to load configuration: {}", e);
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Invalid configuration",
-            ));
-        }
-    };
-
-    let address = config.server.bind_address.parse::<IpAddr>().map_err(|e| {
-        error!("Failed to parse bind address: {}", e);
-        io::Error::new(io::ErrorKind::InvalidInput, "Invalid bind address")
-    })?;
-
-    let binding_addr = SocketAddr::new(address, config.server.port);
-
-    let tls_acceptor;
-    if let Some(tls) = &config.server.tls {
-        info!("Detected TLS configuration");
-        let server_certs = load_certificate_bundle(&tls.server_certificate_bundle)?;
-        let server_key = load_private_key(&tls.server_private_key)?;
-
-        let config = match &tls.client_ca_bundle {
-            Some(client_ca_bundle) => {
-                let client_cert = load_certificate_bundle(client_ca_bundle)?;
-                let client_cert_store = build_root_store(client_cert)?;
-
-                let client_cert_verifier =
-                    WebPkiClientVerifier::builder(Arc::new(client_cert_store))
-                        .allow_unauthenticated()
-                        .build()
-                        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-
-                rustls::ServerConfig::builder()
-                    .with_client_cert_verifier(client_cert_verifier)
-                    .with_single_cert(server_certs, server_key)
-                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?
-            }
-            None => rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(server_certs, server_key)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?,
-        };
-
-        tls_acceptor = Some(TlsAcceptor::from(Arc::new(config)));
-    } else {
-        info!("No TLS configuration detected (will serve over insecure HTTP)");
-        tls_acceptor = None;
-    }
+    reload_config(&CONFIG)?;
+    let config = CONFIG.load();
 
     info!("Initializing registry");
     let backend = match &config.storage.backend {
         StorageBackendConfig::FS(fs_config) => DiskStorageEngine::new(fs_config.root_dir.clone()),
     };
-    let registry = Arc::new(Registry::from_config(config, backend));
+    let registry = Arc::new(Registry::from_config(&config, backend.clone()));
+    drop(config);
 
-    info!("Starting registry server on {}", binding_addr);
-    let listener = TcpListener::bind(binding_addr).await?;
-
-    info!("Listening on: {}", binding_addr);
-
-    let timeouts = vec![
-        Duration::from_secs(config.server.query_timeout),
-        Duration::from_secs(config.server.query_timeout_grace_period),
-    ];
-
-    match tls_acceptor {
-        Some(tls_acceptor) => serve_tls(listener, tls_acceptor, timeouts, registry).await,
-        None => serve_insecure(listener, timeouts, registry).await,
+    match CONFIG.load().build_tls_acceptor()? {
+        Some(tls_acceptor) => serve_tls(tls_acceptor, registry).await,
+        None => serve_insecure(registry).await,
     }
 }
 
-async fn serve_tls<T>(
-    listener: TcpListener,
-    tls_acceptor: TlsAcceptor,
-    timeouts: Vec<Duration>,
-    registry: Arc<Registry<T>>,
-) -> io::Result<()>
+async fn serve_tls<T>(tls_acceptor: TlsAcceptor, registry: Arc<Registry<T>>) -> io::Result<()>
 where
     T: StorageEngine + Send + Sync + 'static,
 {
+    let binding_addr = CONFIG.load().get_binding_address()?;
+    let listener = TcpListener::bind(binding_addr).await?;
+    info!("Listening on {} over TLS", binding_addr);
+
     loop {
         let registry = registry.clone();
-        let timeouts = timeouts.clone();
 
-        debug!("Waiting for incoming connection");
         let (tcp, remote_address) = listener.accept().await?;
 
         if let Ok(tls) = tls_acceptor.accept(tcp).await {
             let (_, session) = tls.get_ref();
-            let client_identity = session
+            let identity = session
                 .peer_certificates()
                 .and_then(|certs| certs.first())
-                .and_then(|cert| {
-                    // parse cert with x509-parser and isolate the O and OU fields from the certificate
-                    match X509Certificate::from_der(cert.as_ref()).ok() {
-                        Some((_, cert)) => ClientIdentity::from_cert(&cert).ok(),
-                        None => None,
-                    }
+                .and_then(|cert| match X509Certificate::from_der(cert.as_ref()).ok() {
+                    Some((_, cert)) => ClientIdentity::from_cert(&cert).ok(),
+                    None => None,
                 });
 
-            debug!(
-                "Client Identity from peer certificate: {:?}",
-                client_identity
-            );
+            debug!("Client Identity from certificate: {:?}", identity);
 
             debug!("Accepted connection from {:?}", remote_address);
             let io = TokioIo::new(tls);
 
-            serve_request(registry, timeouts, io, client_identity.unwrap_or_default());
+            serve_request(registry, io, identity.unwrap_or_default());
         }
     }
 }
 
-async fn serve_insecure<T>(
-    listener: TcpListener,
-    timeouts: Vec<Duration>,
-    registry: Arc<Registry<T>>,
-) -> io::Result<()>
+async fn serve_insecure<T>(registry: Arc<Registry<T>>) -> io::Result<()>
 where
     T: StorageEngine + Send + Sync + 'static,
 {
+    let binding_addr = CONFIG.load().get_binding_address()?;
+    let listener = TcpListener::bind(binding_addr).await?;
+    info!("Listening on {} (non-TLS)", binding_addr);
+
     loop {
         let registry = registry.clone();
-        let timeouts = timeouts.clone();
 
         debug!("Waiting for incoming connection");
         let (tcp, remote_address) = listener.accept().await?;
@@ -285,31 +175,27 @@ where
         debug!("Accepted connection from {:?}", remote_address);
         let io = TokioIo::new(tcp);
 
-        serve_request(registry, timeouts, io, ClientIdentity::new());
+        serve_request(registry, io, ClientIdentity::new());
     }
 }
 
-fn serve_request<T, S>(
-    registry: Arc<Registry<T>>,
-    timeouts: Vec<Duration>,
-    io: TokioIo<S>,
-    client_identity: ClientIdentity,
-) where
+fn serve_request<T, S>(registry: Arc<Registry<T>>, io: TokioIo<S>, identity: ClientIdentity)
+where
     T: StorageEngine + Send + Sync + 'static,
     S: Unpin + AsyncWrite + AsyncRead + Send + 'static,
 {
     tokio::task::spawn(async move {
         let registry = registry.clone();
-        let client_identity = client_identity.clone();
+        let identity = identity.clone();
 
         let conn = http1::Builder::new().serve_connection(
             io,
             service_fn(move |req| {
                 let registry = registry.clone();
-                let client_identity = client_identity.clone();
+                let identity = identity.clone();
 
                 async move {
-                    match router::<T>(req, registry, client_identity).await {
+                    match router::<T>(req, registry, identity).await {
                         Ok(res) => Ok::<Response<RegistryResponseBody>, Infallible>(res),
                         Err(e) => Ok(e.to_response()),
                     }
@@ -318,10 +204,7 @@ fn serve_request<T, S>(
         );
         pin!(conn);
 
-        // Iterate the timeouts.  Use tokio::select! to wait on the
-        // result of polling the connection itself,
-        // and also on tokio::time::sleep for the current timeout duration.
-        for (iter, sleep_duration) in timeouts.iter().enumerate() {
+        for (iter, sleep_duration) in CONFIG.load().get_timeouts().iter().enumerate() {
             debug!("iter = {} sleep_duration = {:?}", iter, sleep_duration);
             tokio::select! {
                 res = conn.as_mut() => {
@@ -348,7 +231,7 @@ fn serve_request<T, S>(
 async fn router<T>(
     req: Request<Incoming>,
     registry: Arc<Registry<T>>,
-    mut client_identity: ClientIdentity,
+    mut identity: ClientIdentity,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync + 'static,
@@ -364,84 +247,84 @@ where
     debug!("Authorization: {:?}", basic_auth_credentials);
 
     if let Some((username, password)) = basic_auth_credentials {
-        client_identity.set_credentials(username, password);
+        identity.set_credentials(username, password);
     }
 
     if ROUTE_API_VERSION_REGEX.is_match(&path) {
         if method == Method::GET {
             info!("API version check: {}", path);
-            return handle_get_api_version(registry, client_identity).await;
+            return handle_get_api_version(registry, identity).await;
         }
     } else if let Some(parameters) = parse_regex::<NewUploadParameters>(&path, &ROUTE_UPLOADS_REGEX)
     {
         if method == Method::POST {
             info!("Start upload: {}", path);
-            return handle_start_upload(req, registry, client_identity, parameters).await;
+            return handle_start_upload(req, registry, identity, parameters).await;
         }
     } else if let Some(parameters) = parse_regex::<UploadParameters>(&path, &ROUTE_UPLOAD_REGEX) {
         if method == Method::GET {
             info!("Get upload progress: {}", path);
-            return handle_get_upload_progress(registry, client_identity, parameters).await;
+            return handle_get_upload_progress(registry, identity, parameters).await;
         }
         if method == Method::PATCH {
             info!("Patch upload: {}", path);
-            return handle_patch_upload(req, registry, client_identity, parameters).await;
+            return handle_patch_upload(req, registry, identity, parameters).await;
         }
         if method == Method::PUT {
             info!("Put upload: {}", path);
-            return handle_put_upload(req, registry, client_identity, parameters).await;
+            return handle_put_upload(req, registry, identity, parameters).await;
         }
         if method == Method::DELETE {
             info!("Delete upload: {}", path);
-            return handle_delete_upload(registry, client_identity, parameters).await;
+            return handle_delete_upload(registry, identity, parameters).await;
         }
     } else if let Some(parameters) = parse_regex::<BlobParameters>(&path, &ROUTE_BLOB_REGEX) {
         if method == Method::GET {
             info!("Get blob: {}", path);
-            return handle_get_blob(req, registry, client_identity, parameters).await;
+            return handle_get_blob(req, registry, identity, parameters).await;
         }
         if method == Method::HEAD {
             info!("Head blob: {}", path);
-            return handle_head_blob(registry, client_identity, parameters).await;
+            return handle_head_blob(registry, identity, parameters).await;
         }
         if method == Method::DELETE {
             info!("Delete blob: {}", path);
-            return handle_delete_blob(registry, client_identity, parameters).await;
+            return handle_delete_blob(registry, identity, parameters).await;
         }
     } else if let Some(parameters) = parse_regex::<ManifestParameters>(&path, &ROUTE_MANIFEST_REGEX)
     {
         if method == Method::GET {
             info!("Get manifest: {}", path);
-            return handle_get_manifest(registry, client_identity, parameters).await;
+            return handle_get_manifest(registry, identity, parameters).await;
         }
         if method == Method::HEAD {
             info!("Head manifest: {}", path);
-            return handle_head_manifest(registry, client_identity, parameters).await;
+            return handle_head_manifest(registry, identity, parameters).await;
         }
         if method == Method::PUT {
             info!("Put manifest: {}", path);
-            return handle_put_manifest(req, registry, client_identity, parameters).await;
+            return handle_put_manifest(req, registry, identity, parameters).await;
         }
         if method == Method::DELETE {
             info!("Delete manifest: {}", path);
-            return handle_delete_manifest(registry, client_identity, parameters).await;
+            return handle_delete_manifest(registry, identity, parameters).await;
         }
     } else if let Some(parameters) =
         parse_regex::<ReferrerParameters>(&path, &ROUTE_REFERRERS_REGEX)
     {
         if method == Method::GET {
             info!("Get referrers: {}", path);
-            return handle_get_referrers(registry, client_identity, parameters).await;
+            return handle_get_referrers(registry, identity, parameters).await;
         }
     } else if ROUTE_CATALOG_REGEX.is_match(&path) {
         if method == Method::GET {
             info!("List catalog: {}", path);
-            return handle_list_catalog(req, registry, client_identity).await;
+            return handle_list_catalog(req, registry, identity).await;
         }
     } else if let Some(parameters) = parse_regex::<TagsParameters>(&path, &ROUTE_LIST_TAGS_REGEX) {
         if method == Method::GET {
             info!("List tags: {}", path);
-            return handle_list_tags(req, registry, client_identity, parameters).await;
+            return handle_list_tags(req, registry, identity, parameters).await;
         }
     }
 
@@ -451,12 +334,12 @@ where
 
 async fn handle_get_api_version<T>(
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine,
 {
-    client_identity.can_do(&registry, ClientAction::GetApiVersion)?;
+    identity.can_do(&registry, ClientAction::GetApiVersion)?;
 
     let res = Response::builder()
         .status(StatusCode::OK)
@@ -468,13 +351,13 @@ where
 
 async fn handle_get_manifest<T>(
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: ManifestParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(
+    identity.can_do(
         &registry,
         ClientAction::GetManifest(parameters.name.clone(), parameters.reference.clone()),
     )?;
@@ -494,13 +377,13 @@ where
 
 async fn handle_head_manifest<T>(
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: ManifestParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(
+    identity.can_do(
         &registry,
         ClientAction::GetManifest(parameters.name.clone(), parameters.reference.clone()),
     )?;
@@ -522,13 +405,13 @@ where
 async fn handle_get_blob<T>(
     req: Request<Incoming>,
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: BlobParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(
+    identity.can_do(
         &registry,
         ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()),
     )?;
@@ -571,13 +454,13 @@ where
 
 async fn handle_head_blob<T>(
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: BlobParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(
+    identity.can_do(
         &registry,
         ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()),
     )?;
@@ -597,13 +480,13 @@ where
 async fn handle_start_upload<T>(
     request: Request<Incoming>,
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: NewUploadParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
+    identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
 
     #[derive(Deserialize, Default)]
     struct UploadQuery {
@@ -636,13 +519,13 @@ where
 async fn handle_patch_upload<T>(
     request: Request<Incoming>,
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: UploadParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
+    identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
 
     let range = request
         .headers()
@@ -673,13 +556,13 @@ where
 async fn handle_put_upload<T>(
     request: Request<Incoming>,
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: UploadParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
+    identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
 
     #[derive(Deserialize, Default)]
     struct CompleteUploadQuery {
@@ -707,13 +590,13 @@ where
 
 async fn handle_delete_upload<T>(
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: UploadParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
+    identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
 
     registry
         .delete_upload(&parameters.name, parameters.uuid)
@@ -728,13 +611,13 @@ where
 
 async fn handle_get_upload_progress<T>(
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: UploadParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
+    identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
 
     let location = format!("/v2/{}/blobs/uploads/{}", parameters.name, parameters.uuid);
 
@@ -755,13 +638,13 @@ where
 
 async fn handle_delete_blob<T>(
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: BlobParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(
+    identity.can_do(
         &registry,
         ClientAction::DeleteBlob(parameters.name.clone(), parameters.digest.clone()),
     )?;
@@ -780,13 +663,13 @@ where
 async fn handle_put_manifest<T>(
     request: Request<Incoming>,
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: ManifestParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(
+    identity.can_do(
         &registry,
         ClientAction::PutManifest(parameters.name.clone(), parameters.reference.clone()),
     )?;
@@ -836,13 +719,13 @@ where
 
 async fn handle_delete_manifest<T>(
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: ManifestParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(
+    identity.can_do(
         &registry,
         ClientAction::DeleteManifest(parameters.name.clone(), parameters.reference.clone()),
     )?;
@@ -860,13 +743,13 @@ where
 
 async fn handle_get_referrers<T>(
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: ReferrerParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(
+    identity.can_do(
         &registry,
         ClientAction::GetReferrers(parameters.name.clone(), parameters.digest.clone()),
     )?;
@@ -894,12 +777,12 @@ where
 async fn handle_list_catalog<T>(
     request: Request<Incoming>,
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(&registry, ClientAction::ListCatalog)?;
+    identity.can_do(&registry, ClientAction::ListCatalog)?;
 
     #[derive(Debug, Deserialize, Default)]
     struct CatalogQuery {
@@ -925,13 +808,13 @@ where
 async fn handle_list_tags<T>(
     request: Request<Incoming>,
     registry: Arc<Registry<T>>,
-    client_identity: ClientIdentity,
+    identity: ClientIdentity,
     parameters: TagsParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError>
 where
     T: StorageEngine + Send + Sync,
 {
-    client_identity.can_do(&registry, ClientAction::ListTags(parameters.name.clone()))?;
+    identity.can_do(&registry, ClientAction::ListTags(parameters.name.clone()))?;
 
     #[derive(Deserialize, Debug, Default)]
     struct TagsQuery {

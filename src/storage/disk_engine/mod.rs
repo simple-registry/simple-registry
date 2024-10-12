@@ -57,6 +57,7 @@ pub async fn load_hash_state(
     Ok(hasher)
 }
 
+#[derive(Clone)]
 pub struct DiskStorageEngine {
     pub tree: Arc<TreeManager>,
 }
