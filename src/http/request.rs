@@ -1,9 +1,7 @@
 use crate::error::RegistryError;
-use crate::RegistryResponseBody;
-use base64::prelude::BASE64_STANDARD;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use hyper::header::HeaderValue;
-use hyper::{Response, StatusCode};
 use lazy_static::lazy_static;
 use log::{debug, warn};
 use regex::Regex;
@@ -96,23 +94,4 @@ pub fn parse_query_parameters<T: DeserializeOwned + Default>(
         warn!("Failed to parse query parameters: {}", e);
         RegistryError::Unsupported
     })
-}
-
-pub fn paginated_response(
-    body: String,
-    link: Option<String>,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let res = match link {
-        Some(link) => Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
-            .header("Link", format!("<{}>; rel=\"next\"", link))
-            .body(RegistryResponseBody::fixed(body.into_bytes()))?,
-        None => Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
-            .body(RegistryResponseBody::fixed(body.into_bytes()))?,
-    };
-
-    Ok(res)
 }

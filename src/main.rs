@@ -30,7 +30,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 
 mod config;
 mod error;
-mod http_helpers;
+mod http;
 mod io_helpers;
 mod oci;
 mod policy;
@@ -38,11 +38,11 @@ mod registry;
 mod storage;
 mod tls;
 
-use crate::config::{Config, StorageBackendConfig};
+use self::http::request::{parse_authorization_header, parse_query_parameters, parse_range_header};
+use self::http::response::paginated_response;
+use crate::config::{Config, ServerTlsConfig, StorageBackendConfig};
 use crate::error::RegistryError;
-use crate::http_helpers::{
-    paginated_response, parse_authorization_header, parse_query_parameters, parse_range_header,
-};
+use crate::http::response::RegistryResponseBody;
 use crate::io_helpers::parse_regex;
 use crate::oci::{Digest, Reference, ReferrerList};
 use crate::policy::{ClientAction, ClientIdentity};
