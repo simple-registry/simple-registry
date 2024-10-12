@@ -8,7 +8,6 @@ mod client_action;
 
 use crate::error::RegistryError;
 use crate::registry::Registry;
-use crate::storage::StorageEngine;
 pub use client_action::ClientAction;
 
 #[derive(Clone, Debug, Default)]
@@ -51,11 +50,7 @@ impl ClientIdentity {
         self.credentials = Some((username, password));
     }
 
-    pub fn can_do<T: StorageEngine>(
-        &self,
-        registry: &Registry<T>,
-        action: ClientAction,
-    ) -> Result<(), RegistryError> {
+    pub fn can_do(&self, registry: &Registry, action: ClientAction) -> Result<(), RegistryError> {
         let identity_id = registry.validate_credentials(&self.credentials)?;
 
         let Some(namespace) = action.get_namespace() else {

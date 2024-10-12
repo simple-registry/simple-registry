@@ -33,14 +33,13 @@ mod tls;
 
 use self::http::request::{parse_authorization_header, parse_query_parameters, parse_range_header};
 use self::http::response::paginated_response;
-use crate::config::{Config, StorageBackendConfig};
+use crate::config::Config;
 use crate::error::RegistryError;
 use crate::http::response::RegistryResponseBody;
 use crate::io_helpers::parse_regex;
 use crate::oci::{Digest, Reference, ReferrerList};
 use crate::policy::{ClientAction, ClientIdentity};
 use crate::registry::{BlobData, NewUpload};
-use crate::storage::{DiskStorageEngine, StorageEngine};
 
 lazy_static! {
     static ref ROUTE_API_VERSION_REGEX: Regex = Regex::new(r"^/v2/?$").unwrap();
@@ -110,14 +109,12 @@ async fn main() -> io::Result<()> {
     env_logger::init();
 
     reload_config(&CONFIG)?;
-    let config = CONFIG.load();
 
     info!("Initializing registry");
-    let backend = match &config.storage.backend {
-        StorageBackendConfig::FS(fs_config) => DiskStorageEngine::new(fs_config.root_dir.clone()),
+    let registry = {
+        let config = CONFIG.load();
+        Arc::new(Registry::from_config(&config))
     };
-    let registry = Arc::new(Registry::from_config(&config, backend.clone()));
-    drop(config);
 
     match CONFIG.load().build_tls_acceptor()? {
         Some(tls_acceptor) => serve_tls(tls_acceptor, registry).await,
@@ -125,10 +122,7 @@ async fn main() -> io::Result<()> {
     }
 }
 
-async fn serve_tls<T>(tls_acceptor: TlsAcceptor, registry: Arc<Registry<T>>) -> io::Result<()>
-where
-    T: StorageEngine + Send + Sync + 'static,
-{
+async fn serve_tls(tls_acceptor: TlsAcceptor, registry: Arc<Registry>) -> io::Result<()> {
     let binding_addr = CONFIG.load().get_binding_address()?;
     let listener = TcpListener::bind(binding_addr).await?;
     info!("Listening on {} over TLS", binding_addr);
@@ -158,10 +152,7 @@ where
     }
 }
 
-async fn serve_insecure<T>(registry: Arc<Registry<T>>) -> io::Result<()>
-where
-    T: StorageEngine + Send + Sync + 'static,
-{
+async fn serve_insecure(registry: Arc<Registry>) -> io::Result<()> {
     let binding_addr = CONFIG.load().get_binding_address()?;
     let listener = TcpListener::bind(binding_addr).await?;
     info!("Listening on {} (non-TLS)", binding_addr);
@@ -179,9 +170,8 @@ where
     }
 }
 
-fn serve_request<T, S>(registry: Arc<Registry<T>>, io: TokioIo<S>, identity: ClientIdentity)
+fn serve_request<S>(registry: Arc<Registry>, io: TokioIo<S>, identity: ClientIdentity)
 where
-    T: StorageEngine + Send + Sync + 'static,
     S: Unpin + AsyncWrite + AsyncRead + Send + 'static,
 {
     tokio::task::spawn(async move {
@@ -195,7 +185,7 @@ where
                 let identity = identity.clone();
 
                 async move {
-                    match router::<T>(req, registry, identity).await {
+                    match router(req, registry, identity).await {
                         Ok(res) => Ok::<Response<RegistryResponseBody>, Infallible>(res),
                         Err(e) => Ok(e.to_response()),
                     }
@@ -228,14 +218,11 @@ where
     });
 }
 
-async fn router<T>(
+async fn router(
     req: Request<Incoming>,
-    registry: Arc<Registry<T>>,
+    registry: Arc<Registry>,
     mut identity: ClientIdentity,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync + 'static,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
@@ -332,13 +319,10 @@ where
     Err(RegistryError::NotFound)
 }
 
-async fn handle_get_api_version<T>(
-    registry: Arc<Registry<T>>,
+async fn handle_get_api_version(
+    registry: Arc<Registry>,
     identity: ClientIdentity,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(&registry, ClientAction::GetApiVersion)?;
 
     let res = Response::builder()
@@ -349,14 +333,11 @@ where
     Ok(res)
 }
 
-async fn handle_get_manifest<T>(
-    registry: Arc<Registry<T>>,
+async fn handle_get_manifest(
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: ManifestParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(
         &registry,
         ClientAction::GetManifest(parameters.name.clone(), parameters.reference.clone()),
@@ -375,14 +356,11 @@ where
     Ok(res)
 }
 
-async fn handle_head_manifest<T>(
-    registry: Arc<Registry<T>>,
+async fn handle_head_manifest(
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: ManifestParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(
         &registry,
         ClientAction::GetManifest(parameters.name.clone(), parameters.reference.clone()),
@@ -402,15 +380,12 @@ where
     Ok(res)
 }
 
-async fn handle_get_blob<T>(
+async fn handle_get_blob(
     req: Request<Incoming>,
-    registry: Arc<Registry<T>>,
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: BlobParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(
         &registry,
         ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()),
@@ -452,14 +427,11 @@ where
     Ok(res)
 }
 
-async fn handle_head_blob<T>(
-    registry: Arc<Registry<T>>,
+async fn handle_head_blob(
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: BlobParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(
         &registry,
         ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()),
@@ -477,15 +449,12 @@ where
     Ok(res)
 }
 
-async fn handle_start_upload<T>(
+async fn handle_start_upload(
     request: Request<Incoming>,
-    registry: Arc<Registry<T>>,
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: NewUploadParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
 
     #[derive(Deserialize, Default)]
@@ -516,15 +485,12 @@ where
     Ok(res)
 }
 
-async fn handle_patch_upload<T>(
+async fn handle_patch_upload(
     request: Request<Incoming>,
-    registry: Arc<Registry<T>>,
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: UploadParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
 
     let range = request
@@ -553,15 +519,12 @@ where
     Ok(res)
 }
 
-async fn handle_put_upload<T>(
+async fn handle_put_upload(
     request: Request<Incoming>,
-    registry: Arc<Registry<T>>,
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: UploadParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
 
     #[derive(Deserialize, Default)]
@@ -588,14 +551,11 @@ where
     Ok(res)
 }
 
-async fn handle_delete_upload<T>(
-    registry: Arc<Registry<T>>,
+async fn handle_delete_upload(
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: UploadParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
 
     registry
@@ -609,14 +569,11 @@ where
     Ok(res)
 }
 
-async fn handle_get_upload_progress<T>(
-    registry: Arc<Registry<T>>,
+async fn handle_get_upload_progress(
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: UploadParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(&registry, ClientAction::PutBlob(parameters.name.clone()))?;
 
     let location = format!("/v2/{}/blobs/uploads/{}", parameters.name, parameters.uuid);
@@ -636,14 +593,11 @@ where
     Ok(res)
 }
 
-async fn handle_delete_blob<T>(
-    registry: Arc<Registry<T>>,
+async fn handle_delete_blob(
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: BlobParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(
         &registry,
         ClientAction::DeleteBlob(parameters.name.clone(), parameters.digest.clone()),
@@ -660,15 +614,12 @@ where
     Ok(res)
 }
 
-async fn handle_put_manifest<T>(
+async fn handle_put_manifest(
     request: Request<Incoming>,
-    registry: Arc<Registry<T>>,
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: ManifestParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(
         &registry,
         ClientAction::PutManifest(parameters.name.clone(), parameters.reference.clone()),
@@ -717,14 +668,11 @@ where
     Ok(res)
 }
 
-async fn handle_delete_manifest<T>(
-    registry: Arc<Registry<T>>,
+async fn handle_delete_manifest(
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: ManifestParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(
         &registry,
         ClientAction::DeleteManifest(parameters.name.clone(), parameters.reference.clone()),
@@ -741,14 +689,11 @@ where
     Ok(res)
 }
 
-async fn handle_get_referrers<T>(
-    registry: Arc<Registry<T>>,
+async fn handle_get_referrers(
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: ReferrerParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(
         &registry,
         ClientAction::GetReferrers(parameters.name.clone(), parameters.digest.clone()),
@@ -774,14 +719,11 @@ where
     Ok(res)
 }
 
-async fn handle_list_catalog<T>(
+async fn handle_list_catalog(
     request: Request<Incoming>,
-    registry: Arc<Registry<T>>,
+    registry: Arc<Registry>,
     identity: ClientIdentity,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(&registry, ClientAction::ListCatalog)?;
 
     #[derive(Debug, Deserialize, Default)]
@@ -805,15 +747,12 @@ where
     paginated_response(catalog, link)
 }
 
-async fn handle_list_tags<T>(
+async fn handle_list_tags(
     request: Request<Incoming>,
-    registry: Arc<Registry<T>>,
+    registry: Arc<Registry>,
     identity: ClientIdentity,
     parameters: TagsParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError>
-where
-    T: StorageEngine + Send + Sync,
-{
+) -> Result<Response<RegistryResponseBody>, RegistryError> {
     identity.can_do(&registry, ClientAction::ListTags(parameters.name.clone()))?;
 
     #[derive(Deserialize, Debug, Default)]

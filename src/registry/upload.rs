@@ -9,17 +9,13 @@ use uuid::Uuid;
 use crate::error::RegistryError;
 use crate::oci::Digest;
 use crate::registry::Registry;
-use crate::storage::StorageEngine;
 
 pub enum NewUpload {
     ExistingBlob(Digest),
     Session(String, Uuid),
 }
 
-impl<T> Registry<T>
-where
-    T: StorageEngine,
-{
+impl Registry {
     pub async fn start_upload(
         &self,
         namespace: &str,

@@ -14,6 +14,8 @@ use std::time::Duration;
 use std::{fs, io};
 use tokio_rustls::TlsAcceptor;
 
+use crate::storage::{DiskStorageEngine, StorageEngine};
+
 lazy_static! {
     // This regex is used to validate repository names.
     // We choose to have the same constraints as namespaces initial part.
@@ -97,7 +99,7 @@ pub struct RepositoryConfig {
 }
 
 impl Config {
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, std::io::Error> {
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, io::Error> {
         let config_str = fs::read_to_string(path)?;
         let config: Self = toml::from_str(&config_str).map_err(|err| {
             let err = format!("Failed to parse configuration: {}", err);
@@ -106,7 +108,7 @@ impl Config {
         Ok(config)
     }
 
-    pub fn get_binding_address(&self) -> Result<SocketAddr, std::io::Error> {
+    pub fn get_binding_address(&self) -> Result<SocketAddr, io::Error> {
         let address = self.server.bind_address.parse::<IpAddr>().map_err(|e| {
             error!("Failed to parse bind address: {}", e);
             io::Error::new(io::ErrorKind::InvalidInput, "Invalid bind address")
@@ -155,6 +157,14 @@ impl Config {
         };
 
         Ok(Some(TlsAcceptor::from(Arc::new(tls_config))))
+    }
+
+    pub fn build_storage_engine(&self) -> Box<dyn StorageEngine> {
+        match &self.storage.backend {
+            StorageBackendConfig::FS(fs_config) => {
+                Box::new(DiskStorageEngine::new(fs_config.root_dir.clone()))
+            }
+        }
     }
 
     pub fn build_credentials(&self) -> HashMap<String, (String, String)> {

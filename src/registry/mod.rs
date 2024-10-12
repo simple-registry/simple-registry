@@ -24,24 +24,18 @@ lazy_static! {
         Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap();
 }
 
-pub struct Registry<T>
-where
-    T: StorageEngine,
-{
-    pub storage: T,
+pub struct Registry {
+    pub storage: Box<dyn StorageEngine>,
     pub credentials: HashMap<String, (String, String)>,
     pub repositories: HashSet<String>,
     pub repository_default_allow: HashMap<String, bool>,
     pub repository_policies: HashMap<String, Vec<Program>>,
 }
 
-impl<T> Registry<T>
-where
-    T: StorageEngine,
-{
-    pub fn from_config(config: &Config, storage: T) -> Self {
+impl Registry {
+    pub fn from_config(config: &Config) -> Self {
         Self {
-            storage,
+            storage: config.build_storage_engine(),
             credentials: config.build_credentials(),
             repositories: config.build_repositories_list(),
             repository_default_allow: config.build_repository_default_allow_list(),

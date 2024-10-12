@@ -4,7 +4,7 @@ use tokio::io::{AsyncRead, AsyncSeek};
 use crate::error::RegistryError;
 use crate::oci::Digest;
 use crate::registry::Registry;
-use crate::storage::StorageEngine;
+use crate::storage::StorageEngineReader;
 
 pub enum BlobData<R>
 where
@@ -20,10 +20,7 @@ pub struct BlobSummary {
     pub size: u64,
 }
 
-impl<T> Registry<T>
-where
-    T: StorageEngine,
-{
+impl Registry {
     pub async fn head_blob(
         &self,
         namespace: &str,
@@ -41,7 +38,7 @@ where
         namespace: &str,
         digest: &Digest,
         range: Option<(u64, u64)>,
-    ) -> Result<BlobData<T::Reader>, RegistryError> {
+    ) -> Result<BlobData<impl StorageEngineReader>, RegistryError> {
         self.validate_namespace(namespace)?;
 
         let total_length = self.storage.get_blob_size(digest).await?;

@@ -1,12 +1,8 @@
 use crate::error::RegistryError;
 use crate::oci::{Descriptor, Digest};
 use crate::registry::Registry;
-use crate::storage::StorageEngine;
 
-impl<T> Registry<T>
-where
-    T: StorageEngine,
-{
+impl Registry {
     pub async fn get_referrers(
         &self,
         namespace: &str,

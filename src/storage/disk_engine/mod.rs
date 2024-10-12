@@ -16,7 +16,9 @@ use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::LinkReference;
 use crate::storage::disk_engine::upload_writer::DiskUploadWriter;
 use crate::storage::tree_manager::TreeManager;
-use crate::storage::{paginate, StorageEngine, UploadSummary};
+use crate::storage::{
+    paginate, StorageEngine, StorageEngineReader, StorageEngineWriter, UploadSummary,
+};
 
 mod upload_writer;
 
@@ -229,9 +231,6 @@ impl DiskStorageEngine {
 
 #[async_trait]
 impl StorageEngine for DiskStorageEngine {
-    type Reader = File;
-    type Writer = DiskUploadWriter;
-
     async fn read_catalog(
         &self,
         n: u32,
@@ -317,8 +316,10 @@ impl StorageEngine for DiskStorageEngine {
         name: &str,
         uuid: Uuid,
         start_offset: Option<u64>,
-    ) -> Result<Self::Writer, RegistryError> {
-        DiskUploadWriter::new(self.tree.clone(), name, uuid, start_offset.unwrap_or(0)).await
+    ) -> Result<Box<dyn StorageEngineWriter>, RegistryError> {
+        Ok(Box::new(
+            DiskUploadWriter::new(self.tree.clone(), name, uuid, start_offset.unwrap_or(0)).await?,
+        ))
     }
 
     async fn read_upload_summary(
@@ -390,7 +391,7 @@ impl StorageEngine for DiskStorageEngine {
         &self,
         digest: &Digest,
         start_offset: Option<u64>,
-    ) -> Result<Self::Reader, RegistryError> {
+    ) -> Result<Box<dyn StorageEngineReader>, RegistryError> {
         let path = self.tree.blob_path(digest);
         let mut file = match File::open(&path).await {
             Ok(file) => file,
@@ -405,7 +406,7 @@ impl StorageEngine for DiskStorageEngine {
             file.seek(SeekFrom::Start(offset)).await?;
         }
 
-        Ok(file)
+        Ok(Box::new(file))
     }
 
     async fn delete_blob(&self, digest: &Digest) -> Result<(), RegistryError> {

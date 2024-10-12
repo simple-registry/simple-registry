@@ -6,7 +6,6 @@ use crate::error::RegistryError;
 use crate::io_helpers::parse_reader;
 use crate::oci::{Digest, Manifest, Reference};
 use crate::registry::{LinkReference, Registry};
-use crate::storage::StorageEngine;
 
 pub struct ManifestData {
     pub media_type: String,
@@ -25,10 +24,7 @@ pub struct NewManifest {
     pub subject: Option<Digest>,
 }
 
-impl<T> Registry<T>
-where
-    T: StorageEngine,
-{
+impl Registry {
     pub async fn head_manifest(
         &self,
         namespace: &str,

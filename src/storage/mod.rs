@@ -2,24 +2,27 @@ mod disk_engine;
 mod tree_manager;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use uuid::Uuid;
 
 use crate::error::RegistryError;
 use crate::oci::{Descriptor, Digest};
 use crate::registry::LinkReference;
-pub use crate::storage::disk_engine::DiskStorageEngine;
+pub use disk_engine::DiskStorageEngine;
 
 pub struct UploadSummary {
     pub digest: Digest,
     pub size: u64,
 }
 
-#[async_trait]
-pub trait StorageEngine {
-    type Reader: AsyncSeek + AsyncRead + AsyncReadExt + Unpin + Send + 'static;
-    type Writer: AsyncWrite + Unpin + Send;
+pub trait StorageEngineReader: AsyncSeek + AsyncRead + Unpin + Send {}
+impl<T> StorageEngineReader for T where T: AsyncSeek + AsyncRead + Unpin + Send {}
 
+pub trait StorageEngineWriter: AsyncWrite + Unpin + Send {}
+impl<T> StorageEngineWriter for T where T: AsyncWrite + Unpin + Send {}
+
+#[async_trait]
+pub trait StorageEngine: Send + Sync {
     async fn read_catalog(
         &self,
         n: u32,
@@ -46,7 +49,7 @@ pub trait StorageEngine {
         namespace: &str,
         uuid: Uuid,
         start_offset: Option<u64>,
-    ) -> Result<Self::Writer, RegistryError>;
+    ) -> Result<Box<dyn StorageEngineWriter>, RegistryError>;
 
     async fn read_upload_summary(
         &self,
@@ -69,7 +72,7 @@ pub trait StorageEngine {
         &self,
         digest: &Digest,
         start_offset: Option<u64>,
-    ) -> Result<Self::Reader, RegistryError>;
+    ) -> Result<Box<dyn StorageEngineReader>, RegistryError>;
 
     async fn delete_blob(&self, digest: &Digest) -> Result<(), RegistryError>;
 
