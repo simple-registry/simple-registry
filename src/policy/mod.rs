@@ -76,7 +76,7 @@ impl ClientIdentity {
         if let Some(policies) = policies {
             self.check_policies(action, identity_id, policies, default_allow)
         } else {
-            error!(
+            debug!(
                 "Applying default policy to repository '{:?}' and action '{:?}'",
                 repository, action
             );
@@ -93,7 +93,7 @@ impl ClientIdentity {
         if default_allow {
             Ok(())
         } else {
-            error!(
+            debug!(
                 "Default policy denied access: {:?} from {:?}",
                 action, identity_id
             );
@@ -103,7 +103,11 @@ impl ClientIdentity {
         }
     }
 
-    fn build_policy_context(&self, identity_id: &Option<String>, action: &ClientAction) -> Context {
+    fn build_policy_context(
+        &self,
+        identity_id: &Option<String>,
+        action: &ClientAction,
+    ) -> Result<Context, RegistryError> {
         let request = CELRequest::from(action.clone());
         debug!("Policy context (request) : {:?}", request);
 
@@ -119,9 +123,18 @@ impl ClientIdentity {
         debug!("Policy context (identity) : {:?}", identity);
 
         let mut context = Context::default();
-        context.add_variable("request", &request).unwrap();
-        context.add_variable("identity", &identity).unwrap();
-        context
+        context.add_variable("request", &request).map_err(|e| {
+            error!("Failed to add request to policy context: {}", e);
+            RegistryError::Unauthorized(Some("Failed to add request to policy context".to_string()))
+        })?;
+        context.add_variable("identity", &identity).map_err(|e| {
+            error!("Failed to add identity to policy context: {}", e);
+            RegistryError::Unauthorized(Some(
+                "Failed to add identity to policy context".to_string(),
+            ))
+        })?;
+
+        Ok(context)
     }
 
     fn check_policies(
@@ -131,7 +144,7 @@ impl ClientIdentity {
         policies: &[Program],
         default_allow: bool,
     ) -> Result<(), RegistryError> {
-        let context = self.build_policy_context(&identity_id, &action);
+        let context = self.build_policy_context(&identity_id, &action)?;
 
         for policy in policies {
             let evaluation_result = policy.execute(&context).map_err(|e| {

@@ -43,7 +43,7 @@ impl Registry {
                 RegistryError::ManifestUnknown
             })?;
         let (manifest, size) = parse_reader::<Manifest, _>(reader).await.map_err(|e| {
-            error!("Failed to deserialize manifest: {}", e);
+            debug!("Failed to deserialize manifest: {}", e);
             RegistryError::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
         })?;
 
@@ -71,7 +71,7 @@ impl Registry {
         reader.read_to_end(&mut content).await?;
 
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|e| {
-            error!("Failed to deserialize manifest: {}", e);
+            debug!("Failed to deserialize manifest: {}", e);
             RegistryError::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
         })?;
 
@@ -94,7 +94,7 @@ impl Registry {
         self.validate_namespace(namespace)?;
 
         let manifest: Manifest = serde_json::from_slice(body).map_err(|e| {
-            error!("Failed to deserialize manifest: {}", e);
+            debug!("Failed to deserialize manifest: {}", e);
             RegistryError::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
         })?;
 
@@ -194,7 +194,7 @@ impl Registry {
 
         debug!("Deserializing manifest");
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|e| {
-            error!("Failed to deserialize manifest: {}", e);
+            debug!("Failed to deserialize manifest: {}", e);
             RegistryError::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
         })?;
 

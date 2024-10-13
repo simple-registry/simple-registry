@@ -33,16 +33,16 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn from_config(config: &Config) -> Self {
-        Self {
+    pub fn try_from_config(config: &Config) -> Result<Self, RegistryError> {
+        let res = Self {
             storage: config.build_storage_engine(),
             credentials: config.build_credentials(),
             repositories: config.build_repositories_list(),
             repository_default_allow: config.build_repository_default_allow_list(),
-            repository_policies: config
-                .build_repository_policies()
-                .expect("Failed to build policy rules"),
-        }
+            repository_policies: config.build_repository_policies()?,
+        };
+
+        Ok(res)
     }
 
     pub fn validate_namespace(&self, namespace: &str) -> Result<(), RegistryError> {

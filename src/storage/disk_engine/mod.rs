@@ -75,7 +75,7 @@ impl DiskStorageEngine {
         match fs::metadata(&path).await {
             Ok(metadata) => Ok(Some(metadata.len())),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into())
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -120,7 +120,7 @@ impl DiskStorageEngine {
         let mut read_dir = match fs::read_dir(&path).await {
             Ok(rd) => rd,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(entries),
-            Err(e) => return Err(e.into())
+            Err(e) => return Err(e.into()),
         };
 
         while let Some(entry) = read_dir.next_entry().await? {
@@ -153,7 +153,7 @@ impl DiskStorageEngine {
                 break;
             }
 
-            error!("Deleting empty parent dir: {}", parent_path.display());
+            debug!("Deleting empty parent dir: {}", parent_path.display());
             fs::remove_dir(parent_path).await?;
             parent = parent_path.parent();
         }
@@ -411,7 +411,7 @@ impl StorageEngine for DiskStorageEngine {
         let mut file = match File::open(&path).await {
             Ok(file) => file,
             Err(e) if e.kind() == ErrorKind::NotFound => return Err(RegistryError::BlobUnknown),
-            Err(e) => return Err(e.into())
+            Err(e) => return Err(e.into()),
         };
 
         if let Some(offset) = start_offset {

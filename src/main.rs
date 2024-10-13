@@ -103,7 +103,12 @@ pub struct BlobParameters {
 pub fn reload_config() -> Result<(), io::Error> {
     let config = Config::load(CONFIG_PATH)?;
 
-    REGISTRY.store(Arc::new(Registry::from_config(&config)));
+    let registry = Registry::try_from_config(&config).map_err(|e| {
+        error!("Failed to create registry: {}", e);
+        io::Error::new(io::ErrorKind::Other, "Failed to create registry")
+    })?;
+
+    REGISTRY.store(Arc::new(registry));
     CONFIG.store(Arc::new(config));
 
     Ok(())
@@ -140,7 +145,9 @@ pub fn set_watcher_path(watcher: &mut FsEventWatcher, path: &str) -> io::Result<
 }
 
 fn config_watcher_event_handler(event: Result<Event, notify::Error>) {
-    let event = event.unwrap();
+    let Ok(event) = event else {
+        return;
+    };
 
     if event.kind.is_modify() {
         if let Err(err) = reload_config() {
@@ -150,7 +157,9 @@ fn config_watcher_event_handler(event: Result<Event, notify::Error>) {
 }
 
 fn tls_watcher_event_handler(event: Result<Event, notify::Error>) {
-    let event = event.unwrap();
+    let Ok(event) = event else {
+        return;
+    };
 
     if event.kind.is_modify() {
         if let Err(err) = reload_tls() {
@@ -201,11 +210,9 @@ async fn serve_tls() -> io::Result<()> {
     loop {
         let (tcp, remote_address) = listener.accept().await?;
 
-        let tls_acceptor = TLS_ACCEPTOR
-            .load()
-            .as_ref()
-            .clone()
-            .expect("TLS acceptor not initialized");
+        let Some(tls_acceptor) = TLS_ACCEPTOR.load().as_ref().clone() else {
+            continue;
+        };
 
         if let Ok(tls) = tls_acceptor.accept(tcp).await {
             let (_, session) = tls.get_ref();
