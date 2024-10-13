@@ -567,41 +567,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "distribution"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "argon2",
- "async-trait",
- "base64",
- "bytes",
- "cel-interpreter",
- "chrono",
- "env_logger",
- "futures-util",
- "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
- "lazy_static",
- "log",
- "notify",
- "regex",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha2",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "toml",
- "uuid",
- "x509-parser",
-]
-
-[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1297,6 +1262,41 @@ name = "once_cell"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3fdb12b2476b595f9358c5161aa467c2438859caa136dec86c26fdd2efe17b92"
+
+[[package]]
+name = "origin"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "argon2",
+ "async-trait",
+ "base64",
+ "bytes",
+ "cel-interpreter",
+ "chrono",
+ "env_logger",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "lazy_static",
+ "log",
+ "notify",
+ "regex",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "toml",
+ "uuid",
+ "x509-parser",
+]
 
 [[package]]
 name = "parking_lot"
