@@ -41,7 +41,9 @@ impl DiskUploadWriter {
                 if e.kind() == ErrorKind::NotFound {
                     RegistryError::BlobUploadUnknown
                 } else {
-                    RegistryError::InternalServerError(Some("Error opening upload file".to_string()))
+                    RegistryError::InternalServerError(Some(
+                        "Error opening upload file".to_string(),
+                    ))
                 }
             })?;
 

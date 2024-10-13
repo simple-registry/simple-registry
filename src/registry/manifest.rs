@@ -34,7 +34,10 @@ impl Registry {
 
         let digest = self.storage.read_link(namespace, &reference).await?;
 
-        let reader = self.storage.build_blob_reader(&digest, None).await
+        let reader = self
+            .storage
+            .build_blob_reader(&digest, None)
+            .await
             .map_err(|e| {
                 error!("Failed to build blob reader: {}", e);
                 RegistryError::ManifestUnknown

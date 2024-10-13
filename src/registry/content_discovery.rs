@@ -7,7 +7,7 @@ impl Registry {
         &self,
         namespace: &str,
         digest: Digest,
-        artifact_type: Option<String>
+        artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, RegistryError> {
         self.validate_namespace(namespace)?;
 

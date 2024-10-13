@@ -47,10 +47,14 @@ impl RegistryError {
             RegistryError::Unsupported => (StatusCode::BAD_REQUEST, "UNSUPPORTED"),
             RegistryError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "TOOMANYREQUESTS"),
             // Convenience
-            RegistryError::RangeNotSatisfiable => (StatusCode::RANGE_NOT_SATISFIABLE, "SIZE_INVALID"), // Can't find a better code from the OCI spec
+            RegistryError::RangeNotSatisfiable => {
+                (StatusCode::RANGE_NOT_SATISFIABLE, "SIZE_INVALID")
+            } // Can't find a better code from the OCI spec
             // Catch-all
             RegistryError::NotFound => (StatusCode::NOT_FOUND, "NOT_FOUND"),
-            RegistryError::InternalServerError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_SERVER_ERROR"),
+            RegistryError::InternalServerError(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_SERVER_ERROR")
+            }
         };
 
         let body = serde_json::json!({
@@ -92,7 +96,9 @@ impl Display for RegistryError {
             RegistryError::BlobUploadInvalid => "blob upload invalid",
             RegistryError::BlobUploadUnknown => "blob upload unknown to registry",
             RegistryError::DigestInvalid => "provided digest did not match uploaded content",
-            RegistryError::ManifestBlobUnknown => "manifest references a manifest or blob unknown to registry",
+            RegistryError::ManifestBlobUnknown => {
+                "manifest references a manifest or blob unknown to registry"
+            }
             RegistryError::ManifestInvalid(Some(s)) => s.as_str(),
             RegistryError::ManifestInvalid(None) => "manifest invalid",
             RegistryError::ManifestUnknown => "manifest unknown to registry",
@@ -152,7 +158,9 @@ impl From<hyper::http::Error> for RegistryError {
 impl From<serde_json::Error> for RegistryError {
     fn from(error: serde_json::Error) -> Self {
         error!("Serde JSON error: {:?}", error);
-        RegistryError::InternalServerError(Some("(De)Serialization error during operations".to_string()))
+        RegistryError::InternalServerError(Some(
+            "(De)Serialization error during operations".to_string(),
+        ))
     }
 }
 

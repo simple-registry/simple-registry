@@ -29,14 +29,18 @@ impl ClientIdentity {
             .map(|o| o.as_str().map(String::from))
             .collect::<Result<Vec<String>, _>>()
             .map_err(|_| {
-                RegistryError::Unauthorized(Some("Unable to parse provided certificate".to_string()))
+                RegistryError::Unauthorized(Some(
+                    "Unable to parse provided certificate".to_string(),
+                ))
             })?;
         let cert_common_name = subject
             .iter_common_name()
             .map(|o| o.as_str().map(String::from))
             .collect::<Result<Vec<String>, _>>()
             .map_err(|_| {
-                RegistryError::Unauthorized(Some("Unable to parse provided certificate".to_string()))
+                RegistryError::Unauthorized(Some(
+                    "Unable to parse provided certificate".to_string(),
+                ))
             })?;
 
         Ok(ClientIdentity {
@@ -93,9 +97,9 @@ impl ClientIdentity {
                 "Default policy denied access: {:?} from {:?}",
                 action, identity_id
             );
-            Err(RegistryError::Unauthorized(
-                Some("Access denied (by policy)".to_string()),
-            ))
+            Err(RegistryError::Unauthorized(Some(
+                "Access denied (by policy)".to_string(),
+            )))
         }
     }
 
@@ -144,16 +148,16 @@ impl ClientIdentity {
                 }
                 Value::Bool(false) if default_allow => {
                     error!("Policy matched, denying access");
-                    return Err(RegistryError::Unauthorized(
-                        Some("Access denied (by policy)".to_string()),
-                    ));
+                    return Err(RegistryError::Unauthorized(Some(
+                        "Access denied (by policy)".to_string(),
+                    )));
                 }
                 Value::Bool(_) => {} // Not validated, continue checking
                 _ => {
                     error!("Policy returned invalid value, denying access");
-                    return Err(RegistryError::Unauthorized(
-                        Some("Access denied (by policy)".to_string()),
-                    ));
+                    return Err(RegistryError::Unauthorized(Some(
+                        "Access denied (by policy)".to_string(),
+                    )));
                 }
             }
         }
