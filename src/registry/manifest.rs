@@ -219,18 +219,26 @@ impl Registry {
             self.storage.delete_link(namespace, &link_reference).await?;
         }
 
-        if let Reference::Tag(_) = reference {
-            debug!("Deleting links for manifest");
+        debug!("Deleting links for manifest digests and tags");
+        match reference {
+            Reference::Digest(_) => {
+                let link_reference = LinkReference::Digest(digest.clone());
+                self.storage.delete_link(namespace, &link_reference).await?;
 
-            let link_reference = LinkReference::Digest(digest.clone());
-            self.storage.delete_link(namespace, &link_reference).await?;
+                let (tags, _) = self.storage.list_tags(namespace, None).await?;
+                for tag in tags {
+                    let link_reference = LinkReference::Tag(tag.clone());
 
-            // TODO: if not a tag, manifest deletion must also delete all related tags!
+                    if self.storage.read_link(namespace, &link_reference).await? == digest {
+                        self.storage.delete_link(namespace, &link_reference).await?;
+                    }
+                }
+            }
+            Reference::Tag(tag) => {
+                let link_reference = LinkReference::Tag(tag);
+                self.storage.delete_link(namespace, &link_reference).await?;
+            }
         }
-
-        debug!("Deleting link for reference");
-        let link_reference = reference.clone().into();
-        self.storage.delete_link(namespace, &link_reference).await?;
 
         Ok(())
     }

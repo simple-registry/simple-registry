@@ -32,15 +32,14 @@ pub trait StorageEngine: Send + Sync {
     async fn list_tags(
         &self,
         namespace: &str,
-        n: u32,
-        last: String,
+        pagination: Option<(u32, String)>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError>;
 
     async fn list_referrers(
         &self,
         namespace: &str,
         digest: &Digest,
-        artifact_type: Option<String>
+        artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, RegistryError>;
 
     async fn create_upload(&self, namespace: &str, uuid: Uuid) -> Result<String, RegistryError>;

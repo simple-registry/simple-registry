@@ -70,8 +70,6 @@ impl Registry {
 
         self.storage.delete_blob(&digest).await?;
 
-        // TODO: delete manifests referencing this blob?
-
         Ok(())
     }
 }

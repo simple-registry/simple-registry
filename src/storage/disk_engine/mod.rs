@@ -224,6 +224,15 @@ impl DiskStorageEngine {
 
         Ok(())
     }
+
+    pub async fn get_all_tags(&self, name: &str) -> Result<Vec<String>, RegistryError> {
+        let path = self.tree.manifest_tags_dir(name);
+        debug!("Listing tags in path: {}", path);
+        let mut tags = self.collect_directory_entries(&path).await?;
+        tags.sort();
+
+        Ok(tags)
+    }
 }
 
 #[async_trait]
@@ -247,14 +256,15 @@ impl StorageEngine for DiskStorageEngine {
     async fn list_tags(
         &self,
         name: &str,
-        n: u32,
-        last: String,
+        pagination: Option<(u32, String)>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
-        let path = self.tree.manifest_tags_dir(name);
-        debug!("Listing tags in path: {}", path);
-        let mut tags = self.collect_directory_entries(&path).await?;
-        tags.sort();
-        Ok(paginate(&tags, n, last))
+        let tags = self.get_all_tags(name).await?;
+
+        if let Some((n, last)) = pagination {
+            return Ok(paginate(&tags, n, last));
+        }
+
+        Ok((tags, None))
     }
 
     async fn list_referrers(
