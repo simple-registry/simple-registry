@@ -52,7 +52,7 @@ pub async fn load_hash_state(
     let state = state
         .as_slice()
         .try_into()
-        .map_err(|_| RegistryError::InternalServerError(None))?;
+        .map_err(|_| RegistryError::InternalServerError(Some("Unable to resume hash state".to_string())))?;
     let state = Sha256::deserialize(state)?;
     let hasher = Sha256::from(state);
 
@@ -186,7 +186,7 @@ impl DiskStorageEngine {
         debug!("Updating reference count");
         let count = count.map_err(|err| {
             error!("Error parsing reference count: {}", err);
-            RegistryError::InternalServerError(None)
+            RegistryError::InternalServerError(Some("Unable to parse reference count".to_string()))
         })?;
         let count = operation(count);
 
