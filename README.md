@@ -6,20 +6,35 @@ Goals
 - Resource efficient: Asynchronous, Streaming operations
 - Secure: mTLS, advanced RBAC support powered by CEL policies
 - Scalable: light footprint
-- Easy to operate: online garbage collection
+- Easy to operate: online garbage collection, auto-reload of configuration and certificates
 
 > [!WARNING]
 > This project is in early development and is not yet suitable for production use.
+>
 > **REALLY**, DO NOT USE THIS IN PRODUCTION.
 
 ## Ecosystem
 
 ### Kubernetes Operator
 
-- TODO: Reloadable configuration
 - TODO: Operator (separate project)
 
 ## Configuration
+
+The configuration file, `config.toml`, is located in the working directory.
+It is automatically reloaded whenever the file is modified, provided the changes are valid.
+
+This feature is particularly useful for tasks like rotating certificates, updating policies, or adjusting other settings.
+
+However, certain options cannot be changed during runtime:
+- `server.bind_address`
+- `server.port`
+- `server.tls.server_certificate_bundle`
+- `server.tls.server_private_key`
+- `server.tls.client_ca_bundle`
+
+Although the TLS file paths themselves cannot be added, removed, or modified at runtime, the corresponding files are
+automatically reloaded on changes if they are valid.
 
 ### Server parameters (`server`)
 
@@ -94,20 +109,12 @@ The following `request.action` actions are supported:
 
 ## Roadmap
 
-- [x] Reasonable Docker compatibility
-- [x] Full OCI compliance
-- [x] Ref-counting + Online garbage collection
-- [x] mTLS support
-- [x] Auth Policies
-    - [x] Login/Password
-    - [x] mTLS
 - [ ] Code quality
     - [ ] Re-check official error codes / endpoints matches
     - [ ] Error handling, abusive .unwrap(), etc. 
     - [ ] Missing features & important TODOs
     - [ ] Concurrent operations (e.g. on disk)
 - [ ] Scrub tooling
-- [ ] Renovate
 - [ ] CI
     - [ ] Formatting
     - [ ] Linting

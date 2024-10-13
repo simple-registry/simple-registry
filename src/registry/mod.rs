@@ -17,7 +17,7 @@ pub use upload::NewUpload;
 
 use crate::config::Config;
 use crate::error::RegistryError;
-use crate::storage::StorageEngine;
+use crate::storage::{DiskStorageEngine, StorageEngine};
 
 lazy_static! {
     static ref NAMESPACE_RE: Regex =
@@ -102,5 +102,17 @@ impl Registry {
 
     pub fn get_repository_policies(&self, namespace: &str) -> Option<&Vec<Program>> {
         self.repository_policies.get(namespace)
+    }
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self {
+            storage: Box::new(DiskStorageEngine::new("./registry".to_string())),
+            credentials: Default::default(),
+            repositories: Default::default(),
+            repository_default_allow: Default::default(),
+            repository_policies: Default::default(),
+        }
     }
 }
