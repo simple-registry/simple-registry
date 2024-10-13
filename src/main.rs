@@ -117,12 +117,12 @@ pub fn reload_tls() -> Result<(), io::Error> {
     Ok(())
 }
 
-pub fn get_registry(identity: ClientIdentity, action: ClientAction) -> Result<Arc<Registry>, RegistryError> {
+pub fn get_registry(
+    identity: ClientIdentity,
+    action: ClientAction,
+) -> Result<Arc<Registry>, RegistryError> {
     let registry = REGISTRY.load().clone();
-    identity.can_do(
-        &registry,
-        action,
-    )?;
+    identity.can_do(&registry, action)?;
 
     Ok(registry)
 }
@@ -312,14 +312,14 @@ async fn router(
             info!("API version check: {}", path);
             return handle_get_api_version(identity).await;
         }
-        return Err(RegistryError::Unsupported)
+        return Err(RegistryError::Unsupported);
     } else if let Some(parameters) = parse_regex::<NewUploadParameters>(&path, &ROUTE_UPLOADS_REGEX)
     {
         if method == Method::POST {
             info!("Start upload: {}", path);
             return handle_start_upload(req, identity, parameters).await;
         }
-        return Err(RegistryError::Unsupported)
+        return Err(RegistryError::Unsupported);
     } else if let Some(parameters) = parse_regex::<UploadParameters>(&path, &ROUTE_UPLOAD_REGEX) {
         if method == Method::GET {
             info!("Get upload progress: {}", path);
@@ -337,7 +337,7 @@ async fn router(
             info!("Delete upload: {}", path);
             return handle_delete_upload(identity, parameters).await;
         }
-        return Err(RegistryError::Unsupported)
+        return Err(RegistryError::Unsupported);
     } else if let Some(parameters) = parse_regex::<BlobParameters>(&path, &ROUTE_BLOB_REGEX) {
         if method == Method::GET {
             info!("Get blob: {}", path);
@@ -351,7 +351,7 @@ async fn router(
             info!("Delete blob: {}", path);
             return handle_delete_blob(identity, parameters).await;
         }
-        return Err(RegistryError::Unsupported)
+        return Err(RegistryError::Unsupported);
     } else if let Some(parameters) = parse_regex::<ManifestParameters>(&path, &ROUTE_MANIFEST_REGEX)
     {
         if method == Method::GET {
@@ -370,7 +370,7 @@ async fn router(
             info!("Delete manifest: {}", path);
             return handle_delete_manifest(identity, parameters).await;
         }
-        return Err(RegistryError::Unsupported)
+        return Err(RegistryError::Unsupported);
     } else if let Some(parameters) =
         parse_regex::<ReferrerParameters>(&path, &ROUTE_REFERRERS_REGEX)
     {
@@ -388,7 +388,7 @@ async fn router(
             info!("List tags: {}", path);
             return handle_list_tags(req, identity, parameters).await;
         }
-        return Err(RegistryError::Unsupported)
+        return Err(RegistryError::Unsupported);
     }
 
     Err(RegistryError::NotFound)
@@ -411,7 +411,10 @@ async fn handle_get_manifest(
     identity: ClientIdentity,
     parameters: ManifestParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::GetManifest(parameters.name.clone(), parameters.reference.clone()))?;
+    let registry = get_registry(
+        identity,
+        ClientAction::GetManifest(parameters.name.clone(), parameters.reference.clone()),
+    )?;
 
     let manifest = registry
         .get_manifest(&parameters.name, parameters.reference.into())
@@ -430,7 +433,10 @@ async fn handle_head_manifest(
     identity: ClientIdentity,
     parameters: ManifestParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::GetManifest(parameters.name.clone(), parameters.reference.clone()))?;
+    let registry = get_registry(
+        identity,
+        ClientAction::GetManifest(parameters.name.clone(), parameters.reference.clone()),
+    )?;
 
     let manifest = registry
         .head_manifest(&parameters.name, parameters.reference.into())
@@ -451,9 +457,16 @@ async fn handle_get_blob(
     identity: ClientIdentity,
     parameters: BlobParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()))?;
+    let registry = get_registry(
+        identity,
+        ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()),
+    )?;
 
-    let range = req.headers().get("range").map(parse_range_header).transpose()?;
+    let range = req
+        .headers()
+        .get("range")
+        .map(parse_range_header)
+        .transpose()?;
 
     let res = match registry
         .get_blob(&parameters.name, &parameters.digest, range)
@@ -492,7 +505,10 @@ async fn handle_head_blob(
     identity: ClientIdentity,
     parameters: BlobParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()))?;
+    let registry = get_registry(
+        identity,
+        ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()),
+    )?;
 
     let blob = registry
         .head_blob(&parameters.name, parameters.digest)
@@ -651,7 +667,10 @@ async fn handle_delete_blob(
     identity: ClientIdentity,
     parameters: BlobParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::DeleteBlob(parameters.name.clone(), parameters.digest.clone()))?;
+    let registry = get_registry(
+        identity,
+        ClientAction::DeleteBlob(parameters.name.clone(), parameters.digest.clone()),
+    )?;
 
     registry
         .delete_blob(&parameters.name, parameters.digest)
@@ -669,22 +688,31 @@ async fn handle_put_manifest(
     identity: ClientIdentity,
     parameters: ManifestParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::PutManifest(parameters.name.clone(), parameters.reference.clone()))?;
+    let registry = get_registry(
+        identity,
+        ClientAction::PutManifest(parameters.name.clone(), parameters.reference.clone()),
+    )?;
 
     let content_type = request
         .headers()
         .get("Content-Type")
         .map(|h| h.to_str())
         .transpose()
-        .map_err(|_| RegistryError::ManifestInvalid(Some("Unable to parse provided Content-Type header".to_string())))?
-        .ok_or(RegistryError::ManifestInvalid(Some("No Content-Type header provided".to_string())))?
+        .map_err(|_| {
+            RegistryError::ManifestInvalid(Some(
+                "Unable to parse provided Content-Type header".to_string(),
+            ))
+        })?
+        .ok_or(RegistryError::ManifestInvalid(Some(
+            "No Content-Type header provided".to_string(),
+        )))?
         .to_string();
 
-    let request_body = request
-        .into_body()
-        .collect()
-        .await
-        .map_err(|_| RegistryError::ManifestInvalid(Some("Unable to retrieve manifest from client query".to_string())))?;
+    let request_body = request.into_body().collect().await.map_err(|_| {
+        RegistryError::ManifestInvalid(Some(
+            "Unable to retrieve manifest from client query".to_string(),
+        ))
+    })?;
     let body = request_body.to_bytes();
 
     let manifest = registry
@@ -718,7 +746,10 @@ async fn handle_delete_manifest(
     identity: ClientIdentity,
     parameters: ManifestParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::DeleteManifest(parameters.name.clone(), parameters.reference.clone()))?;
+    let registry = get_registry(
+        identity,
+        ClientAction::DeleteManifest(parameters.name.clone(), parameters.reference.clone()),
+    )?;
 
     registry
         .delete_manifest(&parameters.name, parameters.reference)
@@ -736,7 +767,10 @@ async fn handle_get_referrers(
     identity: ClientIdentity,
     parameters: ReferrerParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::GetReferrers(parameters.name.clone(), parameters.digest.clone()))?;
+    let registry = get_registry(
+        identity,
+        ClientAction::GetReferrers(parameters.name.clone(), parameters.digest.clone()),
+    )?;
 
     #[derive(Deserialize, Default)]
     #[serde(rename_all = "camelCase")]
@@ -747,7 +781,11 @@ async fn handle_get_referrers(
     let query: GetReferrersQuery = parse_query_parameters(request.uri().query())?;
 
     let manifests = registry
-        .get_referrers(&parameters.name, parameters.digest, query.artifact_type)
+        .get_referrers(
+            &parameters.name,
+            parameters.digest,
+            query.artifact_type.clone(),
+        )
         .await?;
 
     let referrer_list = ReferrerList {
@@ -756,10 +794,17 @@ async fn handle_get_referrers(
     };
     let referrer_list = serde_json::to_string(&referrer_list)?.into_bytes();
 
-    let res = Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/vnd.oci.image.index.v1+json")
-        .body(RegistryResponseBody::fixed(referrer_list))?;
+    let res = match query.artifact_type {
+        Some(_) => Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/vnd.oci.image.index.v1+json")
+            .header("OCI-Filters-Applied", "artifactType")
+            .body(RegistryResponseBody::fixed(referrer_list))?,
+        None => Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/vnd.oci.image.index.v1+json")
+            .body(RegistryResponseBody::fixed(referrer_list))?,
+    };
 
     Ok(res)
 }
