@@ -267,8 +267,6 @@ impl StorageEngine for DiskStorageEngine {
         let all_manifest = self.collect_directory_entries(&path).await?;
         let mut referrers = Vec::new();
 
-        // TODO: implement filtering on artifact type
-
         // TODO: instead of having the digest in the filename, we could have it in file content!
 
         for manifest_digest in all_manifest {
@@ -278,6 +276,20 @@ impl StorageEngine for DiskStorageEngine {
             let raw_manifest = fs::read(&blob_path).await?;
             let manifest: Manifest = serde_json::from_slice(&raw_manifest)?;
 
+            if let Some(artifact_type) = artifact_type.clone() {
+                if let Some(manifest_artifact_type) = manifest.artifact_type.clone() {
+                    if manifest_artifact_type != artifact_type {
+                        continue;
+                    }
+                } else if let Some(manifest_config) = manifest.config {
+                    if manifest_config.media_type != artifact_type {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+
             referrers.push(Descriptor {
                 media_type: manifest.media_type,
                 digest: manifest_digest.to_string(),
@@ -286,6 +298,7 @@ impl StorageEngine for DiskStorageEngine {
                 artifact_type: manifest.artifact_type,
             });
         }
+
         Ok(referrers)
     }
 
