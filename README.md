@@ -109,10 +109,8 @@ The following `request.action` actions are supported:
 
 ## Roadmap
 
-- [ ] Code quality
-    - [ ] Error handling, abusive .unwrap(), etc. 
-    - [ ] Missing features & important TODOs
-    - [ ] Concurrent operations (e.g. on disk)
+- [ ] disk storage engine: Concurrent operations
+- [ ] s3 storage engine: implementation
 - [ ] Scrub tooling
 - [ ] CI
     - [ ] Formatting
@@ -121,7 +119,6 @@ The following `request.action` actions are supported:
     - [ ] Building
     - [ ] Conformance Testing
     - [ ] Publishing
-- [ ] S3-compatible storage (requires conditional writes or another way to lock objects)
 - [ ] Kubernetes Operator (new project)
 - [ ] OpenMetrics exporter
 - [ ] Tracing
