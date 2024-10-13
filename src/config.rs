@@ -207,10 +207,7 @@ impl Config {
 
             for policy in &repo.policies {
                 debug!("Compiling policy: {}", policy);
-                let program = Program::compile(policy).map_err(|err| {
-                    error!("Failed to compile policy: {}", err);
-                    RegistryError::InternalServerError
-                })?; // TODO: better error please
+                let program = Program::compile(policy)?;
                 policies.push(program);
             }
 

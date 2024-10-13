@@ -20,7 +20,7 @@ pub enum Reference {
 impl Reference {
     pub fn from_str(s: &str) -> Result<Self, RegistryError> {
         if s.is_empty() {
-            return Err(RegistryError::NotFound);
+            return Err(RegistryError::ManifestBlobUnknown);
         }
 
         if s.contains(':') {
@@ -28,7 +28,7 @@ impl Reference {
         } else if TAG_REGEX.is_match(s) {
             Ok(Reference::Tag(s.to_string()))
         } else {
-            Err(RegistryError::NotFound)
+            Err(RegistryError::ManifestBlobUnknown)
         }
     }
 }

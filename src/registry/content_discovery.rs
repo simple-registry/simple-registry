@@ -7,12 +7,13 @@ impl Registry {
         &self,
         namespace: &str,
         digest: Digest,
+        artifact_type: Option<String>
     ) -> Result<Vec<Descriptor>, RegistryError> {
         self.validate_namespace(namespace)?;
 
         let referrers = self
             .storage
-            .list_referrers(namespace, &digest)
+            .list_referrers(namespace, &digest, artifact_type)
             .await
             .unwrap_or_default();
 

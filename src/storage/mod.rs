@@ -40,6 +40,7 @@ pub trait StorageEngine: Send + Sync {
         &self,
         namespace: &str,
         digest: &Digest,
+        artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, RegistryError>;
 
     async fn create_upload(&self, namespace: &str, uuid: Uuid) -> Result<String, RegistryError>;

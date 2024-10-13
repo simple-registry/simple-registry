@@ -64,18 +64,18 @@ impl Registry {
         let (identity_id, identity_password) = self
             .credentials
             .get(username)
-            .ok_or_else(|| RegistryError::Unauthorized("Invalid credentials".to_string()))?;
+            .ok_or_else(|| RegistryError::Unauthorized(Some("Invalid credentials".to_string())))?;
 
         let identity_password = PasswordHash::new(identity_password).map_err(|e| {
             error!("Unable to hash password: {}", e);
-            RegistryError::Unauthorized("Unable to verify credentials".to_string())
+            RegistryError::Unauthorized(Some("Unable to verify credentials".to_string()))
         })?;
 
         Argon2::default()
             .verify_password(password.as_bytes(), &identity_password)
             .map_err(|e| {
                 error!("Unable to verify password: {}", e);
-                RegistryError::Unauthorized("Invalid credentials".to_string())
+                RegistryError::Unauthorized(Some("Invalid credentials".to_string()))
             })?;
 
         Ok(Some(identity_id.clone()))

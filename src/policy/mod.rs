@@ -29,14 +29,14 @@ impl ClientIdentity {
             .map(|o| o.as_str().map(String::from))
             .collect::<Result<Vec<String>, _>>()
             .map_err(|_| {
-                RegistryError::Unauthorized("Unable to parse provided certificate".to_string())
+                RegistryError::Unauthorized(Some("Unable to parse provided certificate".to_string()))
             })?;
         let cert_common_name = subject
             .iter_common_name()
             .map(|o| o.as_str().map(String::from))
             .collect::<Result<Vec<String>, _>>()
             .map_err(|_| {
-                RegistryError::Unauthorized("Unable to parse provided certificate".to_string())
+                RegistryError::Unauthorized(Some("Unable to parse provided certificate".to_string()))
             })?;
 
         Ok(ClientIdentity {
@@ -59,7 +59,7 @@ impl ClientIdentity {
 
         let repository = registry
             .get_repository(&namespace)
-            .ok_or_else(|| RegistryError::Unauthorized("Repository not found".to_string()))?;
+            .ok_or_else(|| RegistryError::Unauthorized(Some("Repository not found".to_string())))?;
 
         let default_allow = registry.is_repository_policy_default_allow(&repository);
         debug!(
@@ -94,7 +94,7 @@ impl ClientIdentity {
                 action, identity_id
             );
             Err(RegistryError::Unauthorized(
-                "Access denied (by policy)".to_string(),
+                Some("Access denied (by policy)".to_string()),
             ))
         }
     }
@@ -132,7 +132,7 @@ impl ClientIdentity {
         for policy in policies {
             let evaluation_result = policy.execute(&context).map_err(|e| {
                 error!("Policy execution failed: {}", e);
-                RegistryError::Unauthorized("Policy execution failed".to_string())
+                RegistryError::Unauthorized(Some("Policy execution failed".to_string()))
             })?;
             debug!("CEL program content {:?}", policy);
             debug!("CEL program evaluates to {:?}", evaluation_result);
@@ -145,14 +145,14 @@ impl ClientIdentity {
                 Value::Bool(false) if default_allow => {
                     error!("Policy matched, denying access");
                     return Err(RegistryError::Unauthorized(
-                        "Access denied (by policy)".to_string(),
+                        Some("Access denied (by policy)".to_string()),
                     ));
                 }
                 Value::Bool(_) => {} // Not validated, continue checking
                 _ => {
                     error!("Policy returned invalid value, denying access");
                     return Err(RegistryError::Unauthorized(
-                        "Access denied (by policy)".to_string(),
+                        Some("Access denied (by policy)".to_string()),
                     ));
                 }
             }

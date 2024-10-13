@@ -39,9 +39,9 @@ impl DiskUploadWriter {
             .map_err(|e| {
                 error!("Error opening upload file {:}: {}", file_path, e);
                 if e.kind() == ErrorKind::NotFound {
-                    RegistryError::NotFound
+                    RegistryError::BlobUploadUnknown
                 } else {
-                    RegistryError::InternalServerError
+                    RegistryError::InternalServerError(Some("Error opening upload file".to_string()))
                 }
             })?;
 

@@ -10,7 +10,7 @@ use crate::registry::{LinkReference, Registry};
 pub struct ManifestData {
     pub media_type: String,
     pub digest: Digest,
-    pub content: Vec<u8>, // TODO: This should be an async Reader instead
+    pub content: Vec<u8>,
 }
 
 pub struct ManifestSummary {
@@ -34,10 +34,14 @@ impl Registry {
 
         let digest = self.storage.read_link(namespace, &reference).await?;
 
-        let reader = self.storage.build_blob_reader(&digest, None).await?;
+        let reader = self.storage.build_blob_reader(&digest, None).await
+            .map_err(|e| {
+                error!("Failed to build blob reader: {}", e);
+                RegistryError::ManifestUnknown
+            })?;
         let (manifest, size) = parse_reader::<Manifest, _>(reader).await.map_err(|e| {
             error!("Failed to deserialize manifest: {}", e);
-            RegistryError::ManifestInvalid
+            RegistryError::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
         })?;
 
         let media_type = manifest.media_type.clone();
@@ -61,14 +65,11 @@ impl Registry {
         let mut reader = self.storage.build_blob_reader(&digest, None).await?;
 
         let mut content = Vec::new();
-        if let Err(e) = reader.read_to_end(&mut content).await {
-            error!("Failed to read manifest content: {}", e);
-            return Err(RegistryError::InternalServerError);
-        }
+        reader.read_to_end(&mut content).await?;
 
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|e| {
             error!("Failed to deserialize manifest: {}", e);
-            RegistryError::ManifestInvalid
+            RegistryError::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
         })?;
 
         let media_type = manifest.media_type.clone();
@@ -91,7 +92,7 @@ impl Registry {
 
         let manifest: Manifest = serde_json::from_slice(body).map_err(|e| {
             error!("Failed to deserialize manifest: {}", e);
-            RegistryError::ManifestInvalid
+            RegistryError::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
         })?;
 
         if manifest.media_type != content_type {
@@ -99,7 +100,9 @@ impl Registry {
                 "Content-Type header does not match manifest media type: {} != {}",
                 content_type, manifest.media_type
             );
-            return Err(RegistryError::ManifestInvalid);
+            return Err(RegistryError::ManifestInvalid(Some(
+                "Content-Type header does not match manifest media type".to_string(),
+            )));
         }
 
         let upload_uuid = Uuid::new_v4();
@@ -184,15 +187,12 @@ impl Registry {
         let mut reader = self.storage.build_blob_reader(&digest, None).await?;
 
         let mut content = Vec::new();
-        if let Err(e) = reader.read_to_end(&mut content).await {
-            error!("Failed to read manifest content: {}", e);
-            return Err(RegistryError::InternalServerError);
-        }
+        reader.read_to_end(&mut content).await?;
 
         debug!("Deserializing manifest");
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|e| {
             error!("Failed to deserialize manifest: {}", e);
-            RegistryError::ManifestInvalid
+            RegistryError::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
         })?;
 
         debug!("Deleting links for subject");

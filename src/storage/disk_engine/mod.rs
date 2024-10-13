@@ -52,7 +52,7 @@ pub async fn load_hash_state(
     let state = state
         .as_slice()
         .try_into()
-        .map_err(|_| RegistryError::InternalServerError)?;
+        .map_err(|_| RegistryError::InternalServerError(None))?;
     let state = Sha256::deserialize(state)?;
     let hasher = Sha256::from(state);
 
@@ -75,10 +75,7 @@ impl DiskStorageEngine {
         match fs::metadata(&path).await {
             Ok(metadata) => Ok(Some(metadata.len())),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-            Err(e) => {
-                error!("Error accessing file metadata {}: {}", path, e);
-                Err(RegistryError::InternalServerError)
-            }
+            Err(e) => Err(e.into())
         }
     }
 
@@ -123,10 +120,7 @@ impl DiskStorageEngine {
         let mut read_dir = match fs::read_dir(&path).await {
             Ok(rd) => rd,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(entries),
-            Err(e) => {
-                error!("Error reading directory {}: {}", path, e);
-                return Err(RegistryError::InternalServerError);
-            }
+            Err(e) => return Err(e.into())
         };
 
         while let Some(entry) = read_dir.next_entry().await? {
@@ -186,11 +180,14 @@ impl DiskStorageEngine {
         let count = match fs::read_to_string(&path).await {
             Ok(content) => content.parse::<u32>(),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(0),
-            Err(_) => return Err(RegistryError::InternalServerError),
+            Err(e) => return Err(e.into()),
         };
 
         debug!("Updating reference count");
-        let count = count.map_err(|_| RegistryError::InternalServerError)?;
+        let count = count.map_err(|err| {
+            error!("Error parsing reference count: {}", err);
+            RegistryError::InternalServerError(None)
+        })?;
         let count = operation(count);
 
         debug!("Writing reference count to path: {}", path);
@@ -264,11 +261,16 @@ impl StorageEngine for DiskStorageEngine {
         &self,
         name: &str,
         digest: &Digest,
+        artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, RegistryError> {
         let path = self.tree.manifest_referrers_dir(name, digest);
         let all_manifest = self.collect_directory_entries(&path).await?;
         let mut referrers = Vec::new();
+
+        // TODO: implement filtering on artifact type
+
         // TODO: instead of having the digest in the filename, we could have it in file content!
+
         for manifest_digest in all_manifest {
             let manifest_digest = Digest::from_str(&manifest_digest)?;
             let blob_path = self.tree.blob_path(&manifest_digest);
@@ -396,10 +398,7 @@ impl StorageEngine for DiskStorageEngine {
         let mut file = match File::open(&path).await {
             Ok(file) => file,
             Err(e) if e.kind() == ErrorKind::NotFound => return Err(RegistryError::BlobUnknown),
-            Err(e) => {
-                error!("Error opening blob file {}: {}", path, e);
-                return Err(RegistryError::InternalServerError);
-            }
+            Err(e) => return Err(e.into())
         };
 
         if let Some(offset) = start_offset {
