@@ -7,8 +7,16 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::tokio::TokioIo;
 use lazy_static::lazy_static;
-use log::{debug, error, info};
 use notify::{recommended_watcher, Event, FsEventWatcher, RecursiveMode, Watcher};
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::{global, KeyValue};
+use opentelemetry_sdk::trace::{BatchConfig, RandomIdGenerator, Sampler, Tracer, TracerProvider};
+use opentelemetry_sdk::{runtime, Resource};
+use opentelemetry_semantic_conventions::{
+    attribute::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_NAME, SERVICE_VERSION},
+    SCHEMA_URL,
+};
+use opentelemetry_stdout as stdout;
 use regex::Regex;
 use registry::Registry;
 use serde::{Deserialize, Serialize};
@@ -20,6 +28,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::pin;
 use tokio_rustls::TlsAcceptor;
+use tracing::{debug, error, info, instrument, Level};
+use tracing_opentelemetry::OpenTelemetryLayer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
@@ -66,35 +78,35 @@ lazy_static! {
 
 const CONFIG_PATH: &str = "config.toml";
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct NewUploadParameters {
     pub name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct UploadParameters {
     pub name: String,
     pub uuid: Uuid,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ManifestParameters {
     pub name: String,
     pub reference: Reference,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ReferrerParameters {
     pub name: String,
     pub digest: Digest,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct TagsParameters {
     pub name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct BlobParameters {
     pub name: String,
     pub digest: Digest,
@@ -168,12 +180,75 @@ fn tls_watcher_event_handler(event: Result<Event, notify::Error>) {
     }
 }
 
+// TODO: Tracing setup: to be moved in more appropriate location
+fn resource() -> Resource {
+    Resource::from_schema_url(
+        [
+            KeyValue::new(SERVICE_NAME, env!("CARGO_PKG_NAME")),
+            KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+            KeyValue::new(DEPLOYMENT_ENVIRONMENT_NAME, "develop"),
+        ],
+        SCHEMA_URL,
+    )
+}
+
+fn init_tracer(sampling_rate: f64) -> Tracer {
+    let provider = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_trace_config(
+            opentelemetry_sdk::trace::Config::default()
+                .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+                    sampling_rate,
+                ))))
+                .with_id_generator(RandomIdGenerator::default())
+                .with_resource(resource()),
+        )
+        .with_batch_config(BatchConfig::default())
+        .with_exporter(opentelemetry_otlp::new_exporter().tonic())
+        .install_batch(runtime::Tokio)
+        .unwrap();
+
+    global::set_tracer_provider(provider.clone());
+    provider.tracer("tracing-otel-subscriber")
+}
+
+fn setup_tracing() {
+    let config = CONFIG
+        .load()
+        .observability
+        .clone()
+        .and_then(|observability| observability.tracing.clone());
+
+    if let Some(tracing) = config {
+        let tracer = init_tracer(tracing.sampling_rate);
+
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::from_level(
+                Level::INFO,
+            ))
+            .with(tracing_subscriber::fmt::layer())
+            .with(OpenTelemetryLayer::new(tracer))
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::from_level(
+                Level::INFO,
+            ))
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    env_logger::init();
-
     reload_config()?;
     reload_tls()?;
+
+    let _ = TracerProvider::builder()
+        .with_simple_exporter(stdout::SpanExporter::default())
+        .build();
+
+    setup_tracing();
 
     let mut config_watcher = recommended_watcher(config_watcher_event_handler).map_err(|err| {
         error!("Failed to create watcher: {}", err);
@@ -296,6 +371,7 @@ where
     });
 }
 
+#[instrument]
 async fn router(
     req: Request<Incoming>,
     mut identity: ClientIdentity,
@@ -401,6 +477,7 @@ async fn router(
     Err(RegistryError::NotFound)
 }
 
+#[instrument]
 async fn handle_get_api_version(
     identity: ClientIdentity,
 ) -> Result<Response<RegistryResponseBody>, RegistryError> {
@@ -414,6 +491,7 @@ async fn handle_get_api_version(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_get_manifest(
     identity: ClientIdentity,
     parameters: ManifestParameters,
@@ -436,6 +514,7 @@ async fn handle_get_manifest(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_head_manifest(
     identity: ClientIdentity,
     parameters: ManifestParameters,
@@ -459,6 +538,7 @@ async fn handle_head_manifest(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_get_blob(
     req: Request<Incoming>,
     identity: ClientIdentity,
@@ -508,6 +588,7 @@ async fn handle_get_blob(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_head_blob(
     identity: ClientIdentity,
     parameters: BlobParameters,
@@ -530,6 +611,7 @@ async fn handle_head_blob(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_start_upload(
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -565,6 +647,7 @@ async fn handle_start_upload(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_patch_upload(
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -599,6 +682,7 @@ async fn handle_patch_upload(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_put_upload(
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -630,6 +714,7 @@ async fn handle_put_upload(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_delete_upload(
     identity: ClientIdentity,
     parameters: UploadParameters,
@@ -647,6 +732,7 @@ async fn handle_delete_upload(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_get_upload_progress(
     identity: ClientIdentity,
     parameters: UploadParameters,
@@ -670,6 +756,7 @@ async fn handle_get_upload_progress(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_delete_blob(
     identity: ClientIdentity,
     parameters: BlobParameters,
@@ -690,6 +777,7 @@ async fn handle_delete_blob(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_put_manifest(
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -749,6 +837,7 @@ async fn handle_put_manifest(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_delete_manifest(
     identity: ClientIdentity,
     parameters: ManifestParameters,
@@ -769,6 +858,7 @@ async fn handle_delete_manifest(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_get_referrers(
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -816,6 +906,7 @@ async fn handle_get_referrers(
     Ok(res)
 }
 
+#[instrument]
 async fn handle_list_catalog(
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -843,6 +934,7 @@ async fn handle_list_catalog(
     paginated_response(catalog, link)
 }
 
+#[instrument]
 async fn handle_list_tags(
     request: Request<Incoming>,
     identity: ClientIdentity,

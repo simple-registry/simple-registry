@@ -1,6 +1,5 @@
-use log::{debug, error, warn};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use uuid::Uuid;
+use tokio::io::AsyncReadExt;
+use tracing::{debug, error, instrument, warn};
 
 use crate::error::RegistryError;
 use crate::io_helpers::parse_reader;
@@ -25,6 +24,7 @@ pub struct NewManifest {
 }
 
 impl Registry {
+    #[instrument]
     pub async fn head_manifest(
         &self,
         namespace: &str,
@@ -56,6 +56,7 @@ impl Registry {
         })
     }
 
+    #[instrument]
     pub async fn get_manifest(
         &self,
         namespace: &str,
@@ -84,6 +85,7 @@ impl Registry {
         })
     }
 
+    #[instrument]
     pub async fn put_manifest(
         &self,
         namespace: &str,
@@ -175,6 +177,7 @@ impl Registry {
         })
     }
 
+    #[instrument]
     pub async fn delete_manifest(
         &self,
         namespace: &str,

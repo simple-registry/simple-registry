@@ -1,6 +1,6 @@
 use cel::{CELIdentity, CELIdentityCertificate, CELRequest};
 use cel_interpreter::{Context, Program, Value};
-use log::{debug, error};
+use tracing::{debug, error, instrument};
 use x509_parser::prelude::X509Certificate;
 
 mod cel;
@@ -22,6 +22,7 @@ impl ClientIdentity {
         ClientIdentity::default()
     }
 
+    #[instrument]
     pub fn from_cert(cert: &X509Certificate) -> Result<ClientIdentity, RegistryError> {
         let subject = cert.subject();
         let cert_organizations = subject
@@ -54,6 +55,7 @@ impl ClientIdentity {
         self.credentials = Some((username, password));
     }
 
+    #[instrument]
     pub fn can_do(&self, registry: &Registry, action: ClientAction) -> Result<(), RegistryError> {
         let identity_id = registry.validate_credentials(&self.credentials)?;
 
@@ -84,6 +86,7 @@ impl ClientIdentity {
         }
     }
 
+    #[instrument]
     fn apply_default_policy(
         &self,
         action: ClientAction,
@@ -103,6 +106,7 @@ impl ClientIdentity {
         }
     }
 
+    #[instrument]
     fn build_policy_context(
         &self,
         identity_id: &Option<String>,
@@ -137,6 +141,7 @@ impl ClientIdentity {
         Ok(context)
     }
 
+    #[instrument]
     fn check_policies(
         &self,
         action: ClientAction,

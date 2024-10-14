@@ -2,8 +2,8 @@ use bytes::Buf;
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
-use log::debug;
 use tokio::io::AsyncWriteExt;
+use tracing::{debug, instrument};
 use uuid::Uuid;
 
 use crate::error::RegistryError;
@@ -16,6 +16,7 @@ pub enum NewUpload {
 }
 
 impl Registry {
+    #[instrument]
     pub async fn start_upload(
         &self,
         namespace: &str,
@@ -36,6 +37,7 @@ impl Registry {
         Ok(NewUpload::Session(location, session_uuid))
     }
 
+    #[instrument]
     pub async fn patch_upload(
         &self,
         namespace: &str,
@@ -81,6 +83,7 @@ impl Registry {
         Ok(summary.size - 1)
     }
 
+    #[instrument]
     pub async fn complete_upload(
         &self,
         namespace: &str,
@@ -118,12 +121,14 @@ impl Registry {
         self.storage.delete_upload(namespace, uuid).await
     }
 
+    #[instrument]
     pub async fn delete_upload(&self, namespace: &str, uuid: Uuid) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
         self.storage.delete_upload(namespace, uuid).await
     }
 
+    #[instrument]
     pub async fn get_upload_range_max(
         &self,
         namespace: &str,

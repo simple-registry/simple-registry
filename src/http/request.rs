@@ -3,9 +3,9 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use hyper::header::HeaderValue;
 use lazy_static::lazy_static;
-use log::{debug, warn};
 use regex::Regex;
 use serde::de::DeserializeOwned;
+use tracing::{debug, warn};
 
 lazy_static! {
     static ref RANGE_RE: Regex = Regex::new(r"^(?:bytes=)?(?P<start>\d+)-(?P<end>\d+)$").unwrap();

@@ -1,10 +1,10 @@
-use log::{error, info};
 use rustls::RootCertStore;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::fmt::Display;
 use std::io;
 use std::path::Path;
+use tracing::{error, info};
 
 pub fn load_private_key(path: &str) -> io::Result<PrivateKeyDer<'static>> {
     info!("Loading private key from {}", path);

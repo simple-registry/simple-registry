@@ -1,8 +1,10 @@
 use crate::error::RegistryError;
 use crate::oci::{Descriptor, Digest};
 use crate::registry::Registry;
+use tracing::instrument;
 
 impl Registry {
+    #[instrument]
     pub async fn get_referrers(
         &self,
         namespace: &str,
@@ -20,6 +22,7 @@ impl Registry {
         Ok(referrers)
     }
 
+    #[instrument]
     pub async fn list_catalog(
         &self,
         n: Option<u32>,
@@ -33,6 +36,7 @@ impl Registry {
         Ok((namespaces, link))
     }
 
+    #[instrument]
     pub async fn list_tags(
         &self,
         namespace: &str,

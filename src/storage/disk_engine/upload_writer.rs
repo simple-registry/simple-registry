@@ -1,11 +1,11 @@
 use futures_util::ready;
-use log::error;
 use sha2::{Digest, Sha256};
 use std::io::{ErrorKind, SeekFrom};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWrite};
+use tracing::error;
 use uuid::Uuid;
 
 use crate::error::RegistryError;

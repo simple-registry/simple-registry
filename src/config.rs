@@ -1,8 +1,8 @@
 use crate::error::RegistryError;
+use crate::storage::{DiskStorageEngine, StorageEngine};
 use crate::tls::{build_root_store, load_certificate_bundle, load_private_key};
 use cel_interpreter::Program;
 use lazy_static::lazy_static;
-use log::{debug, error};
 use regex::Regex;
 use rustls::server::WebPkiClientVerifier;
 use serde::Deserialize;
@@ -13,8 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, io};
 use tokio_rustls::TlsAcceptor;
-
-use crate::storage::{DiskStorageEngine, StorageEngine};
+use tracing::{debug, error};
 
 lazy_static! {
     // This regex is used to validate repository names.
@@ -31,6 +30,8 @@ pub struct Config {
     pub identity: HashMap<String, IdentityConfig>, // hashmap of identity_id <-> identity_config (username, password)
     #[serde(default)]
     pub repository: Vec<RepositoryConfig>,
+    #[serde(default)]
+    pub observability: Option<ObservabilityConfig>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -96,6 +97,17 @@ pub struct RepositoryConfig {
     pub policy_default_allow: bool,
     #[serde(default)]
     pub policies: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ObservabilityConfig {
+    pub tracing: Option<TracingConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct TracingConfig {
+    // TODO: additional options
+    pub sampling_rate: f64,
 }
 
 impl Config {

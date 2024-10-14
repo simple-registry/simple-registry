@@ -1,10 +1,9 @@
-use log::warn;
-use tokio::io::{AsyncRead, AsyncSeek};
-
 use crate::error::RegistryError;
 use crate::oci::Digest;
 use crate::registry::Registry;
 use crate::storage::StorageEngineReader;
+use tokio::io::{AsyncRead, AsyncSeek};
+use tracing::{instrument, warn};
 
 pub enum BlobData<R>
 where
@@ -21,6 +20,7 @@ pub struct BlobSummary {
 }
 
 impl Registry {
+    #[instrument]
     pub async fn head_blob(
         &self,
         namespace: &str,
@@ -33,6 +33,7 @@ impl Registry {
         Ok(BlobSummary { digest, size })
     }
 
+    #[instrument]
     pub async fn get_blob(
         &self,
         namespace: &str,
@@ -65,6 +66,7 @@ impl Registry {
         }
     }
 
+    #[instrument]
     pub async fn delete_blob(&self, namespace: &str, digest: Digest) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 

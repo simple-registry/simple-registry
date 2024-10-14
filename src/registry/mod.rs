@@ -5,14 +5,14 @@ mod manifest;
 mod upload;
 
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
+pub use blob::BlobData;
 use cel_interpreter::Program;
 use lazy_static::lazy_static;
-use log::{debug, error};
+pub use link_reference::LinkReference;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
-
-pub use blob::BlobData;
-pub use link_reference::LinkReference;
+use std::fmt::Debug;
+use tracing::{debug, error, instrument};
 pub use upload::NewUpload;
 
 use crate::config::Config;
@@ -24,6 +24,7 @@ lazy_static! {
         Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap();
 }
 
+#[derive(Debug)]
 pub struct Registry {
     pub storage: Box<dyn StorageEngine>,
     pub credentials: HashMap<String, (String, String)>,
@@ -33,6 +34,7 @@ pub struct Registry {
 }
 
 impl Registry {
+    #[instrument]
     pub fn try_from_config(config: &Config) -> Result<Self, RegistryError> {
         let res = Self {
             storage: config.build_storage_engine(),
@@ -45,6 +47,7 @@ impl Registry {
         Ok(res)
     }
 
+    #[instrument]
     pub fn validate_namespace(&self, namespace: &str) -> Result<(), RegistryError> {
         if NAMESPACE_RE.is_match(namespace) {
             Ok(())
@@ -53,6 +56,7 @@ impl Registry {
         }
     }
 
+    #[instrument]
     pub fn validate_credentials(
         &self,
         credentials: &Option<(String, String)>,
@@ -81,6 +85,7 @@ impl Registry {
         Ok(Some(identity_id.clone()))
     }
 
+    #[instrument]
     pub fn get_repository(&self, namespace: &str) -> Option<String> {
         debug!("Looking for repository matching namespace: {}", namespace);
         let repository = self
@@ -93,6 +98,7 @@ impl Registry {
         repository
     }
 
+    #[instrument]
     pub fn is_repository_policy_default_allow(&self, namespace: &str) -> bool {
         *self
             .repository_default_allow
@@ -100,6 +106,7 @@ impl Registry {
             .unwrap_or(&false)
     }
 
+    #[instrument]
     pub fn get_repository_policies(&self, namespace: &str) -> Option<&Vec<Program>> {
         self.repository_policies.get(namespace)
     }

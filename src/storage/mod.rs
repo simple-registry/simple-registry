@@ -2,6 +2,8 @@ mod disk_engine;
 mod tree_manager;
 
 use async_trait::async_trait;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use uuid::Uuid;
 
@@ -111,4 +113,10 @@ pub fn paginate(items: &[String], n: u32, last: String) -> (Vec<String>, Option<
     };
 
     (items[start..end].to_vec(), next)
+}
+
+impl Debug for (dyn StorageEngine + 'static) {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StorageEngine").finish()
+    }
 }

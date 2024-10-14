@@ -3,6 +3,7 @@ use uuid::Uuid;
 use crate::oci::Digest;
 use crate::registry::LinkReference;
 
+#[derive(Debug)]
 pub struct TreeManager {
     pub root_dir: String,
 }

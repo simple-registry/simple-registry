@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::AsyncSeekExt;
+use tokio::sync::Mutex;
+use tracing::{debug, error, instrument, warn};
 use uuid::Uuid;
 
 use crate::error::RegistryError;
@@ -39,6 +41,7 @@ pub async fn save_hash_state(
     Ok(())
 }
 
+#[instrument]
 pub async fn load_hash_state(
     tree_manager: &TreeManager,
     name: &str,
@@ -49,17 +52,16 @@ pub async fn load_hash_state(
     let path = tree_manager.upload_hash_context_path(name, uuid, algorithm, offset);
     let state = fs::read(&path).await?;
 
-    let state = state
-        .as_slice()
-        .try_into()
-        .map_err(|_| RegistryError::InternalServerError(Some("Unable to resume hash state".to_string())))?;
+    let state = state.as_slice().try_into().map_err(|_| {
+        RegistryError::InternalServerError(Some("Unable to resume hash state".to_string()))
+    })?;
     let state = Sha256::deserialize(state)?;
     let hasher = Sha256::from(state);
 
     Ok(hasher)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DiskStorageEngine {
     pub tree: Arc<TreeManager>,
 }
@@ -71,6 +73,7 @@ impl DiskStorageEngine {
         }
     }
 
+    #[instrument]
     pub async fn get_file_size(&self, path: &String) -> Result<Option<u64>, RegistryError> {
         match fs::metadata(&path).await {
             Ok(metadata) => Ok(Some(metadata.len())),
@@ -79,6 +82,7 @@ impl DiskStorageEngine {
         }
     }
 
+    #[instrument]
     async fn collect_repositories(&self, base_path: &Path, repositories: &mut HashSet<String>) {
         let mut path_stack: Vec<PathBuf> = vec![base_path.to_path_buf()];
 
@@ -112,6 +116,7 @@ impl DiskStorageEngine {
         }
     }
 
+    #[instrument]
     pub async fn collect_directory_entries(
         &self,
         path: &String,
@@ -132,11 +137,9 @@ impl DiskStorageEngine {
         Ok(entries)
     }
 
-    pub async fn delete_empty_parent_dirs(
-        &self,
-        path: impl AsRef<Path>,
-    ) -> Result<(), RegistryError> {
-        let path = PathBuf::from(path.as_ref());
+    #[instrument]
+    pub async fn delete_empty_parent_dirs(&self, path: &str) -> Result<(), RegistryError> {
+        let path = PathBuf::from(path);
         let root_dir = Path::new(&self.tree.root_dir);
 
         let mut parent = path.parent();
@@ -197,12 +200,7 @@ impl DiskStorageEngine {
         Ok(count)
     }
 
-    pub async fn blob_rc_init(&self, digest: &Digest) -> Result<(), RegistryError> {
-        debug!("Initializing reference count for digest: {}", digest);
-        let _ = self.blob_rc_update(digest, |_| 0).await?;
-        Ok(())
-    }
-
+    #[instrument]
     pub async fn blob_rc_increase(&self, digest: &Digest) -> Result<(), RegistryError> {
         debug!("Increasing reference count for digest: {}", digest);
         let _ = self.blob_rc_update(digest, |count| count + 1).await?;
@@ -210,6 +208,7 @@ impl DiskStorageEngine {
         Ok(())
     }
 
+    #[instrument]
     pub async fn blob_rc_decrease(&self, digest: &Digest) -> Result<(), RegistryError> {
         debug!("Decreasing reference count for digest: {}", digest);
         if self.blob_rc_update(digest, |count| if count > 0 {
@@ -225,6 +224,7 @@ impl DiskStorageEngine {
         Ok(())
     }
 
+    #[instrument]
     pub async fn get_all_tags(&self, name: &str) -> Result<Vec<String>, RegistryError> {
         let path = self.tree.manifest_tags_dir(name);
         debug!("Listing tags in path: {}", path);
@@ -237,6 +237,7 @@ impl DiskStorageEngine {
 
 #[async_trait]
 impl StorageEngine for DiskStorageEngine {
+    #[instrument]
     async fn read_catalog(
         &self,
         n: u32,
@@ -253,6 +254,7 @@ impl StorageEngine for DiskStorageEngine {
         Ok(paginate(&repositories, n, last))
     }
 
+    #[instrument]
     async fn list_tags(
         &self,
         name: &str,
@@ -267,6 +269,7 @@ impl StorageEngine for DiskStorageEngine {
         Ok((tags, None))
     }
 
+    #[instrument]
     async fn list_referrers(
         &self,
         name: &str,
@@ -336,6 +339,7 @@ impl StorageEngine for DiskStorageEngine {
         Ok(uuid.to_string())
     }
 
+    #[instrument]
     async fn build_upload_writer(
         &self,
         name: &str,
@@ -347,6 +351,7 @@ impl StorageEngine for DiskStorageEngine {
         ))
     }
 
+    #[instrument]
     async fn read_upload_summary(
         &self,
         name: &str,
@@ -359,12 +364,13 @@ impl StorageEngine for DiskStorageEngine {
             .ok_or(RegistryError::BlobUnknown)?;
 
         let hasher = load_hash_state(&self.tree, name, &uuid, "sha256", size).await?;
-        let hash = hasher.finalize();
+        let digest = hasher.finalize();
+        let digest = Digest::Sha256(hex::encode(digest));
 
-        let digest = Digest::Sha256(hex::encode(hash));
         Ok(UploadSummary { digest, size })
     }
 
+    #[instrument]
     async fn complete_upload(
         &self,
         name: &str,
@@ -380,9 +386,8 @@ impl StorageEngine for DiskStorageEngine {
             Some(digest) => digest,
             None => {
                 let hasher = load_hash_state(&self.tree, name, &uuid, "sha256", size).await?;
-                let hash = hasher.finalize();
-                let digest = hex::encode(hash);
-                Digest::Sha256(digest)
+                let digest = hasher.finalize();
+                Digest::Sha256(hex::encode(digest))
             }
         };
 
@@ -392,19 +397,19 @@ impl StorageEngine for DiskStorageEngine {
         let blob_path = self.tree.blob_path(&digest);
         fs::rename(&upload_path, &blob_path).await?;
 
-        self.blob_rc_init(&digest).await?;
-
         self.delete_upload(name, uuid).await?;
 
         Ok(digest)
     }
 
+    #[instrument]
     async fn delete_upload(&self, name: &str, uuid: Uuid) -> Result<(), RegistryError> {
         let path = self.tree.upload_container_path(name, &uuid);
         let _ = fs::remove_dir_all(&path).await;
         self.delete_empty_parent_dirs(&path).await
     }
 
+    #[instrument]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, RegistryError> {
         let path = self.tree.blob_path(digest);
         self.get_file_size(&path)
@@ -412,6 +417,7 @@ impl StorageEngine for DiskStorageEngine {
             .ok_or(RegistryError::BlobUnknown)
     }
 
+    #[instrument]
     async fn build_blob_reader(
         &self,
         digest: &Digest,
@@ -431,12 +437,14 @@ impl StorageEngine for DiskStorageEngine {
         Ok(Box::new(file))
     }
 
+    #[instrument]
     async fn delete_blob(&self, digest: &Digest) -> Result<(), RegistryError> {
         let path = self.tree.blob_container_dir(digest);
         fs::remove_dir_all(&path).await?;
         self.delete_empty_parent_dirs(&path).await
     }
 
+    #[instrument]
     async fn read_link(
         &self,
         name: &str,
@@ -453,6 +461,7 @@ impl StorageEngine for DiskStorageEngine {
         Digest::from_str(&link)
     }
 
+    #[instrument]
     async fn create_link(
         &self,
         namespace: &str,
@@ -476,6 +485,7 @@ impl StorageEngine for DiskStorageEngine {
         self.blob_rc_increase(digest).await
     }
 
+    #[instrument]
     async fn delete_link(
         &self,
         name: &str,

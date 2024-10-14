@@ -121,4 +121,3 @@ The following `request.action` actions are supported:
     - [ ] Publishing
 - [ ] Kubernetes Operator (new project)
 - [ ] OpenMetrics exporter
-- [ ] Tracing

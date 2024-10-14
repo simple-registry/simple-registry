@@ -1,10 +1,10 @@
 use crate::RegistryResponseBody;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
-use log::{debug, error};
 use sha2::digest::crypto_common::hazmat;
 use std::cmp::PartialEq;
 use std::fmt::Display;
+use tracing::{debug, error};
 
 #[derive(Debug, PartialEq)]
 pub enum RegistryError {
