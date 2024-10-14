@@ -32,6 +32,7 @@ However, certain options cannot be changed during runtime:
 - `server.tls.server_certificate_bundle`
 - `server.tls.server_private_key`
 - `server.tls.client_ca_bundle`
+- `observability.tracing.sampling_rate`
 
 Although the TLS file paths themselves cannot be added, removed, or modified at runtime, the corresponding files are
 automatically reloaded on changes if they are valid.
@@ -73,6 +74,12 @@ This section is repeated for each repository.
 - `policy_default_allow` (bool): If true, the default policy is to allow access. If false, the default policy is to deny access.
 - `policies` (list of string): A list of CEL policies that must be satisfied for the identity to access the repository.
 
+### Tracing (`observability.tracing`)
+
+If not provided, tracing is disabled.
+
+- `sampling_rate` (f64): Sampling rate for tracing
+
 ## CEL Policies
 
 Policies are expressed with CEL, the "Common Expression Language".
@@ -109,7 +116,7 @@ The following `request.action` actions are supported:
 
 ## Roadmap
 
-- [ ] disk storage engine: Concurrent operations
+- [ ] disk storage engine: (scalable) concurrent operations
 - [ ] s3 storage engine: implementation
 - [ ] Scrub tooling
 - [ ] CI

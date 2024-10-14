@@ -1,0 +1,38 @@
+[server]
+bind_address = "0.0.0.0"
+port = 8000
+
+[server.tls]
+server_certificate_bundle = "tls.d/server-ca-bundle.pem"
+server_private_key = "tls.d/server-private-key.pem"
+client_ca_bundle   = "tls.d/client-ca-bundle.pem"
+
+[storage.fs]
+root_dir = "./data-origin"
+
+[observability.tracing]
+sampling_rate = 1.0
+
+[identity.phil]
+username = "philippe"
+password = "$argon2id$v=19$m=16,t=2,p=1$MTIzNDU2Nzg$lurg6dYCXXrJP3zaFwu35w" # test
+
+[[repository]]
+namespace = "nginx"
+policy_default_allow = true
+
+[[repository]]
+namespace = "test"
+policy_default_allow = false
+policies = [
+    'identity.username in ["philippe"]',
+    '"philippe" in identity.certificate.common_names',
+    '"admins" in identity.certificate.organizations',
+    """identity.id == "phil" && (request.action in [
+    "get-api-version",
+    "put-blob", "get-blob", "delete-blob",
+    "put-manifest", "get-manifest", "delete-manifest",
+    "get-referrers",
+    "list-catalog",
+    "list-tags"])"""
+]
