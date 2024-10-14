@@ -123,5 +123,6 @@ The following `request.action` actions are supported:
 - [ ] disk storage engine: (scalable) concurrent operations
 - [ ] s3 storage engine: implementation
 - [ ] Scrub tooling
+- [ ] Pull-through cache
 - [ ] Kubernetes Operator (new project)
 - [ ] OpenMetrics exporter
