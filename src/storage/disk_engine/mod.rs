@@ -478,26 +478,39 @@ impl StorageEngine for DiskStorageEngine {
         fs::create_dir_all(&path).await?;
 
         let link_path = self.tree.get_link_path(reference, namespace);
-        debug!("Creating link at path: {}", link_path);
-        fs::write(&link_path, digest.to_string()).await?;
+        if fs::metadata(&link_path).await.is_err() {
+            debug!("Creating link at path: {}", link_path);
+            fs::write(&link_path, digest.to_string()).await?;
 
-        debug!("Increasing reference count for digest: {}", digest);
-        self.blob_rc_increase(digest).await
+            debug!("Increasing reference count for digest: {}", digest);
+            self.blob_rc_increase(digest).await?;
+        }
+
+        Ok(())
     }
 
     #[instrument]
     async fn delete_link(
         &self,
-        name: &str,
+        namespace: &str,
         reference: &LinkReference,
     ) -> Result<(), RegistryError> {
         debug!(
             "Deleting link for namespace: {}, reference: {:?}",
-            name, reference
+            namespace, reference
         );
-        let digest = self.read_link(name, reference).await?;
+        let digest = match self.read_link(namespace, reference).await {
+            Ok(digest) => digest,
+            Err(RegistryError::NameUnknown) => return Ok(()),
+            Err(e) => return Err(e),
+        };
 
-        let path = self.tree.get_link_container_path(reference, name);
+        let link_path = self.tree.get_link_path(reference, namespace);
+        if fs::metadata(&link_path).await.is_err() {
+            return Ok(());
+        }
+
+        let path = self.tree.get_link_container_path(reference, namespace);
         debug!("Deleting link at path: {}", path);
         let _ = fs::remove_dir_all(&path).await;
         self.delete_empty_parent_dirs(&path).await?;
