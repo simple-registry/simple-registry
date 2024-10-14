@@ -9,7 +9,7 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::error::RegistryError;
-use crate::storage::disk_engine::{load_hash_state, save_hash_state};
+use crate::storage::filesystem::{load_hash_state, save_hash_state};
 use crate::storage::tree_manager::TreeManager;
 
 pub struct DiskUploadWriter {

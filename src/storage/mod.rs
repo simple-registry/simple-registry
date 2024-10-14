@@ -1,4 +1,4 @@
-mod disk_engine;
+mod filesystem;
 mod tree_manager;
 
 use async_trait::async_trait;
@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::error::RegistryError;
 use crate::oci::{Descriptor, Digest};
 use crate::registry::LinkReference;
-pub use disk_engine::DiskStorageEngine;
+pub use filesystem::FileSystemStorageEngine;
 
 pub struct UploadSummary {
     pub digest: Digest,

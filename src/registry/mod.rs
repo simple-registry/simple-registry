@@ -17,7 +17,7 @@ pub use upload::NewUpload;
 
 use crate::config::Config;
 use crate::error::RegistryError;
-use crate::storage::{DiskStorageEngine, StorageEngine};
+use crate::storage::{FileSystemStorageEngine, StorageEngine};
 
 lazy_static! {
     static ref NAMESPACE_RE: Regex =
@@ -115,7 +115,7 @@ impl Registry {
 impl Default for Registry {
     fn default() -> Self {
         Self {
-            storage: Box::new(DiskStorageEngine::new("./registry".to_string())),
+            storage: Box::new(FileSystemStorageEngine::new("./registry".to_string())),
             credentials: Default::default(),
             repositories: Default::default(),
             repository_default_allow: Default::default(),

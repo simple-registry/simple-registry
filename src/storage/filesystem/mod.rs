@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::error::RegistryError;
 use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::LinkReference;
-use crate::storage::disk_engine::upload_writer::DiskUploadWriter;
+use crate::storage::filesystem::upload_writer::DiskUploadWriter;
 use crate::storage::tree_manager::TreeManager;
 use crate::storage::{
     paginate, StorageEngine, StorageEngineReader, StorageEngineWriter, UploadSummary,
@@ -68,11 +68,11 @@ pub async fn load_hash_state(
 }
 
 #[derive(Clone, Debug)]
-pub struct DiskStorageEngine {
+pub struct FileSystemStorageEngine {
     pub tree: Arc<TreeManager>,
 }
 
-impl DiskStorageEngine {
+impl FileSystemStorageEngine {
     pub fn new(root_dir: String) -> Self {
         Self {
             tree: Arc::new(TreeManager { root_dir }),
@@ -244,7 +244,7 @@ impl DiskStorageEngine {
 }
 
 #[async_trait]
-impl StorageEngine for DiskStorageEngine {
+impl StorageEngine for FileSystemStorageEngine {
     #[instrument]
     async fn read_catalog(
         &self,

@@ -1,5 +1,5 @@
 use crate::error::RegistryError;
-use crate::storage::{DiskStorageEngine, StorageEngine};
+use crate::storage::{FileSystemStorageEngine, StorageEngine};
 use crate::tls::{build_root_store, load_certificate_bundle, load_private_key};
 use cel_interpreter::Program;
 use lazy_static::lazy_static;
@@ -174,7 +174,7 @@ impl Config {
     pub fn build_storage_engine(&self) -> Box<dyn StorageEngine> {
         match &self.storage.backend {
             StorageBackendConfig::FS(fs_config) => {
-                Box::new(DiskStorageEngine::new(fs_config.root_dir.clone()))
+                Box::new(FileSystemStorageEngine::new(fs_config.root_dir.clone()))
             }
         }
     }
