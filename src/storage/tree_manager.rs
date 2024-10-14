@@ -28,7 +28,7 @@ impl TreeManager {
     }
 
     pub fn blob_ref_path(&self, digest: &Digest) -> String {
-        format!("{}/ref", self.blob_container_dir(digest))
+        format!("{}/index.json", self.blob_container_dir(digest))
     }
 
     pub fn repository_dir(&self) -> String {
@@ -126,6 +126,26 @@ impl TreeManager {
         )
     }
 
+    pub fn config_root_dir(&self, namespace: &str) -> String {
+        format!("{}/{}/_config", self.repository_dir(), namespace)
+    }
+
+    pub fn manifest_config_link_container_dir(&self, name: &str, digest: &Digest) -> String {
+        format!(
+            "{}/{}/{}",
+            self.config_root_dir(name),
+            digest.algorithm(),
+            digest.hash()
+        )
+    }
+
+    pub fn manifest_config_link_path(&self, name: &str, digest: &Digest) -> String {
+        format!(
+            "{}/link",
+            self.manifest_config_link_container_dir(name, digest)
+        )
+    }
+
     pub fn manifest_referrers_dir(&self, name: &str, subject: &Digest) -> String {
         format!(
             "{}/referrers/{}/{}",
@@ -184,6 +204,7 @@ impl TreeManager {
             LinkReference::Tag(tag) => self.manifest_tag_link_path(name, tag),
             LinkReference::Digest(digest) => self.manifest_revisions_link_path(name, digest),
             LinkReference::Layer(digest) => self.manifest_layer_link_path(name, digest),
+            LinkReference::Config(digest) => self.manifest_config_link_path(name, digest),
             LinkReference::Referrer(subject, referrer) => {
                 self.manifest_referrer_link_path(name, subject, referrer)
             }
@@ -204,6 +225,7 @@ impl TreeManager {
                 self.manifest_revisions_link_container_dir(name, digest)
             }
             LinkReference::Layer(digest) => self.manifest_layer_link_container_dir(name, digest),
+            LinkReference::Config(digest) => self.manifest_config_link_container_dir(name, digest),
             LinkReference::Referrer(subject, referrer) => {
                 self.manifest_referrer_link_container_dir(name, subject, referrer)
             }

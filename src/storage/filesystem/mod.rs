@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::AsyncSeekExt;
 use tokio::sync::Mutex;
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
 use crate::error::RegistryError;
@@ -19,7 +19,8 @@ use crate::registry::LinkReference;
 use crate::storage::filesystem::upload_writer::DiskUploadWriter;
 use crate::storage::tree_manager::TreeManager;
 use crate::storage::{
-    paginate, StorageEngine, StorageEngineReader, StorageEngineWriter, UploadSummary,
+    paginate, BlobReferenceIndex, StorageEngine, StorageEngineReader, StorageEngineWriter,
+    UploadSummary,
 };
 
 mod upload_writer;
@@ -170,16 +171,15 @@ impl FileSystemStorageEngine {
         Ok(())
     }
 
-    pub async fn blob_rc_update<O>(
+    pub async fn blob_link_index_update<O>(
         &self,
+        namespace: &str,
         digest: &Digest,
         operation: O,
-    ) -> Result<u32, RegistryError>
+    ) -> Result<HashSet<LinkReference>, RegistryError>
     where
-        O: FnOnce(u32) -> u32,
+        O: FnOnce(&mut HashSet<LinkReference>),
     {
-        let _ = RC_LOCK.lock().await;
-
         debug!("Ensuring container directory for digest: {}", digest);
         let path = self.tree.blob_container_dir(digest);
         fs::create_dir_all(&path).await?;
@@ -187,45 +187,90 @@ impl FileSystemStorageEngine {
         debug!("Updating reference count for digest: {}", digest);
         let path = self.tree.blob_ref_path(digest);
 
-        debug!("Reading reference count from path: {}", path);
-        let count = match fs::read_to_string(&path).await {
-            Ok(content) => content.parse::<u32>(),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(0),
+        let mut reference_index = match fs::read_to_string(&path).await {
+            Ok(content) => serde_json::from_str::<BlobReferenceIndex>(&content),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(BlobReferenceIndex::default()),
             Err(e) => return Err(e.into()),
-        };
+        }?;
 
         debug!("Updating reference count");
-        let count = count.map_err(|err| {
-            error!("Error parsing reference count: {}", err);
-            RegistryError::InternalServerError(Some("Unable to parse reference count".to_string()))
-        })?;
-        let count = operation(count);
+        let mut index = reference_index.namespace.get_mut(namespace);
+        if index.is_none() {
+            reference_index
+                .namespace
+                .insert(namespace.to_string(), HashSet::new());
+            index = reference_index.namespace.get_mut(namespace);
+        };
+
+        let Some(index) = index else {
+            // Not supposed to happen as we just inserted it
+            warn!("Unable to reliably create reference index for {}", digest);
+            return Err(RegistryError::NameUnknown);
+        };
+
+        operation(index);
+        let res = index.clone();
 
         debug!("Writing reference count to path: {}", path);
-        fs::write(&path, count.to_string()).await?;
+        let content = serde_json::to_string(&reference_index)?;
+        fs::write(&path, content).await?;
 
-        debug!("Reference count for {} updated to {}", digest, count);
-        Ok(count)
+        debug!("Reference index for {} updated", digest);
+        Ok(res)
     }
 
     #[instrument]
-    pub async fn blob_rc_increase(&self, digest: &Digest) -> Result<(), RegistryError> {
-        debug!("Increasing reference count for digest: {}", digest);
-        let _ = self.blob_rc_update(digest, |count| count + 1).await?;
+    pub async fn blob_link_index_init(
+        &self,
+        namespace: &str,
+        digest: &Digest,
+    ) -> Result<(), RegistryError> {
+        let _ = RC_LOCK.lock().await;
+        let _ = self
+            .blob_link_index_update(namespace, digest, |_| { /* NO-OP */ })
+            .await?;
+        Ok(())
+    }
+
+    #[instrument]
+    pub async fn blob_link_index_add(
+        &self,
+        namespace: &str,
+        reference: &LinkReference,
+        digest: &Digest,
+    ) -> Result<(), RegistryError> {
+        let _ = RC_LOCK.lock().await;
+
+        debug!("Registering reference: {:?}", reference);
+
+        let _ = self
+            .blob_link_index_update(namespace, digest, |index| {
+                index.insert(reference.clone());
+            })
+            .await?;
 
         Ok(())
     }
 
     #[instrument]
-    pub async fn blob_rc_decrease(&self, digest: &Digest) -> Result<(), RegistryError> {
-        debug!("Decreasing reference count for digest: {}", digest);
-        if self.blob_rc_update(digest, |count| if count > 0 {
-            count - 1
-        } else {
-            warn!("Reference count for digest {} is already 0, reference counting is maybe inconsistent", digest);
-            0
-        }).await? == 0 {
-            debug!("Deleting blob with digest since RC = 0: {}", digest);
+    pub async fn blob_link_index_remove(
+        &self,
+        namespace: &str,
+        reference: &LinkReference,
+        digest: &Digest,
+    ) -> Result<(), RegistryError> {
+        let _ = RC_LOCK.lock().await;
+
+        debug!("Unregistering reference: {:?}", reference);
+
+        let references = self
+            .blob_link_index_update(namespace, digest, |index| {
+                index.remove(reference);
+            })
+            .await?;
+
+        if references.is_empty() {
+            debug!("Deleting empty reference index for digest: {}", digest);
             self.delete_blob(digest).await?;
         }
 
@@ -409,6 +454,7 @@ impl StorageEngine for FileSystemStorageEngine {
 
         let blob_path = self.tree.blob_path(&digest);
         fs::rename(&upload_path, &blob_path).await?;
+        self.blob_link_index_init(name, &digest).await?;
 
         self.delete_upload(name, uuid).await?;
 
@@ -518,7 +564,8 @@ impl StorageEngine for FileSystemStorageEngine {
             fs::write(&link_path, digest.to_string()).await?;
 
             debug!("Increasing reference count for digest: {}", digest);
-            self.blob_rc_increase(digest).await?;
+            self.blob_link_index_add(namespace, reference, digest)
+                .await?;
         }
 
         Ok(())
@@ -550,6 +597,7 @@ impl StorageEngine for FileSystemStorageEngine {
         let _ = fs::remove_dir_all(&path).await;
         self.delete_empty_parent_dirs(&path).await?;
 
-        self.blob_rc_decrease(&digest).await
+        self.blob_link_index_remove(namespace, reference, &digest)
+            .await
     }
 }

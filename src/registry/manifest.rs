@@ -179,13 +179,17 @@ impl Registry {
         }
 
         if let Some(config_digest) = manifest_digests.config {
-            let link = LinkReference::Layer(config_digest.clone());
-            self.storage.create_link(namespace, &link, &digest).await?;
+            let link = LinkReference::Config(config_digest.clone());
+            self.storage
+                .create_link(namespace, &link, &config_digest)
+                .await?;
         }
 
         for layer_digest in manifest_digests.layers {
             let link = LinkReference::Layer(layer_digest.clone());
-            self.storage.create_link(namespace, &link, &digest).await?;
+            self.storage
+                .create_link(namespace, &link, &layer_digest)
+                .await?;
         }
 
         Ok(NewManifest {
@@ -217,7 +221,7 @@ impl Registry {
         }
 
         if let Some(digest) = manifest_digests.config {
-            let link = LinkReference::Layer(digest.clone());
+            let link = LinkReference::Config(digest.clone());
             self.storage.delete_link(namespace, &link).await?;
         }
 

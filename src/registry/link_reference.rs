@@ -1,10 +1,12 @@
 use crate::oci::{Digest, Reference};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum LinkReference {
     Tag(String),
     Digest(Digest),
     Layer(Digest),
+    Config(Digest),
     Referrer(Digest, Digest),
 }
 

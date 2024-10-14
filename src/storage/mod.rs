@@ -1,4 +1,5 @@
 mod filesystem;
+mod reference;
 mod tree_manager;
 
 use async_trait::async_trait;
@@ -10,7 +11,9 @@ use uuid::Uuid;
 use crate::error::RegistryError;
 use crate::oci::{Descriptor, Digest};
 use crate::registry::LinkReference;
+
 pub use filesystem::FileSystemStorageEngine;
+pub use reference::BlobReferenceIndex;
 
 pub struct UploadSummary {
     pub digest: Digest,
