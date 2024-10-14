@@ -68,6 +68,10 @@ pub trait StorageEngine: Send + Sync {
 
     async fn delete_upload(&self, namespace: &str, uuid: Uuid) -> Result<(), RegistryError>;
 
+    async fn create_blob(&self, content: &[u8]) -> Result<Digest, RegistryError>;
+
+    async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, RegistryError>;
+
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, RegistryError>;
 
     async fn build_blob_reader(

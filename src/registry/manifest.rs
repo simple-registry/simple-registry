@@ -23,6 +23,56 @@ pub struct NewManifest {
     pub subject: Option<Digest>,
 }
 
+struct ManifestDigests {
+    subject: Option<Digest>,
+    config: Option<Digest>,
+    layers: Vec<Digest>,
+}
+
+fn parse_manifest_digests(
+    body: &[u8],
+    expected_content_type: Option<String>,
+) -> Result<ManifestDigests, RegistryError> {
+    let manifest: Manifest = serde_json::from_slice(body).map_err(|e| {
+        debug!("Failed to deserialize manifest: {}", e);
+        RegistryError::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
+    })?;
+
+    if let Some(expected_content_type) = expected_content_type {
+        if manifest.media_type != expected_content_type {
+            warn!(
+                "Expected manifest media type mismatch: {} (expected) != {} (found)",
+                expected_content_type, manifest.media_type
+            );
+            return Err(RegistryError::ManifestInvalid(Some(
+                "Expected manifest media type mismatch".to_string(),
+            )));
+        }
+    }
+
+    let subject = manifest
+        .subject
+        .map(|subject| Digest::from_str(&subject.digest))
+        .transpose()?;
+
+    let config = manifest
+        .config
+        .map(|config| Digest::from_str(&config.digest))
+        .transpose()?;
+
+    let layers = manifest
+        .layers
+        .iter()
+        .map(|layer| Digest::from_str(&layer.digest))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(ManifestDigests {
+        subject,
+        config,
+        layers,
+    })
+}
+
 impl Registry {
     #[instrument]
     pub async fn head_manifest(
@@ -95,85 +145,50 @@ impl Registry {
     ) -> Result<NewManifest, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let manifest: Manifest = serde_json::from_slice(body).map_err(|e| {
-            debug!("Failed to deserialize manifest: {}", e);
-            RegistryError::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
-        })?;
+        let manifest_digests = parse_manifest_digests(body, Some(content_type))?;
 
-        if manifest.media_type != content_type {
-            warn!(
-                "Content-Type header does not match manifest media type: {} != {}",
-                content_type, manifest.media_type
-            );
-            return Err(RegistryError::ManifestInvalid(Some(
-                "Content-Type header does not match manifest media type".to_string(),
-            )));
+        let digest = self.storage.create_blob(body).await?;
+
+        match reference {
+            Reference::Tag(tag) => {
+                let link = LinkReference::Tag(tag);
+                self.storage.create_link(namespace, &link, &digest).await?;
+                let link = LinkReference::Digest(digest.clone());
+                self.storage.create_link(namespace, &link, &digest).await?;
+            }
+            Reference::Digest(provided_digest) => {
+                if provided_digest != digest {
+                    warn!(
+                        "Provided digest does not match calculated digest: {} != {}",
+                        provided_digest, digest
+                    );
+                    return Err(RegistryError::ManifestInvalid(Some(
+                        "Provided digest does not match calculated digest".to_string(),
+                    )));
+                }
+                let link = LinkReference::Digest(digest.clone());
+                self.storage.create_link(namespace, &link, &digest).await?;
+            }
         }
 
-        let upload_uuid = Uuid::new_v4();
-        self.storage.create_upload(namespace, upload_uuid).await?;
-
-        let mut writer = self
-            .storage
-            .build_upload_writer(namespace, upload_uuid, None)
-            .await?;
-
-        writer.write_all(body).await?;
-        writer.flush().await?;
-
-        let manifest_digest = self
-            .storage
-            .complete_upload(namespace, upload_uuid, None)
-            .await?;
-
-        let link_reference = reference.clone().into();
-        debug!("link_reference: {:?}", link_reference);
-
-        self.storage
-            .create_link(namespace, &link_reference, &manifest_digest)
-            .await?;
-
-        if let Reference::Tag(_) = reference {
-            let link_reference = LinkReference::Digest(manifest_digest.clone());
-            self.storage
-                .create_link(namespace, &link_reference, &manifest_digest)
-                .await?;
+        if let Some(subject) = &manifest_digests.subject {
+            let link = LinkReference::Referrer(subject.clone(), digest.clone());
+            self.storage.create_link(namespace, &link, &digest).await?;
         }
 
-        if let Some(config) = manifest.config {
-            let digest = Digest::from_str(&config.digest)?;
-            let link_reference = LinkReference::Layer(digest.clone());
-            self.storage
-                .create_link(namespace, &link_reference, &digest)
-                .await?;
+        if let Some(config_digest) = manifest_digests.config {
+            let link = LinkReference::Layer(config_digest.clone());
+            self.storage.create_link(namespace, &link, &digest).await?;
         }
 
-        for layer in manifest.layers {
-            let digest = Digest::from_str(&layer.digest)?;
-            let link_reference = LinkReference::Layer(digest.clone());
-            self.storage
-                .create_link(namespace, &link_reference, &digest)
-                .await?;
-        }
-
-        let subject;
-
-        if let Some(subject_descriptor) = manifest.subject {
-            let digest = Digest::from_str(&subject_descriptor.digest)?;
-            let link_reference = LinkReference::Referrer(digest.clone(), manifest_digest.clone());
-
-            self.storage
-                .create_link(namespace, &link_reference, &digest)
-                .await?;
-
-            subject = Some(digest);
-        } else {
-            subject = None;
+        for layer_digest in manifest_digests.layers {
+            let link = LinkReference::Layer(layer_digest.clone());
+            self.storage.create_link(namespace, &link, &digest).await?;
         }
 
         Ok(NewManifest {
-            digest: manifest_digest,
-            subject,
+            digest,
+            subject: manifest_digests.subject,
         })
     }
 
@@ -185,49 +200,40 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let digest = self
-            .storage
-            .read_link(namespace, &reference.clone().into())
-            .await?;
+        let link = match &reference {
+            Reference::Tag(tag) => LinkReference::Tag(tag.clone()),
+            Reference::Digest(digest) => LinkReference::Digest(digest.clone()),
+        };
 
-        let mut reader = self.storage.build_blob_reader(&digest, None).await?;
+        let digest = self.storage.read_link(namespace, &link).await?;
+        let content = self.storage.read_blob(&digest).await?;
+        let manifest_digests = parse_manifest_digests(&content, None)?;
 
-        let mut content = Vec::new();
-        reader.read_to_end(&mut content).await?;
-
-        debug!("Deserializing manifest");
-        let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|e| {
-            debug!("Failed to deserialize manifest: {}", e);
-            RegistryError::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
-        })?;
-
-        debug!("Deleting links for subject");
-        if let Some(subject_descriptor) = manifest.subject {
-            let subject_digest = Digest::from_str(&subject_descriptor.digest)?;
-            let link_reference = LinkReference::Referrer(subject_digest.clone(), digest.clone());
-            self.storage.delete_link(namespace, &link_reference).await?;
+        if let Some(subject_digest) = manifest_digests.subject {
+            let link = LinkReference::Referrer(subject_digest.clone(), digest.clone());
+            self.storage.delete_link(namespace, &link).await?;
         }
 
-        debug!("Deleting links for layers");
-        for layer in manifest.layers {
-            let digest = Digest::from_str(&layer.digest)?;
-            let link_reference = LinkReference::Layer(digest.clone());
-            let _ = self.storage.delete_link(namespace, &link_reference).await; // TODO: should NOT be ignored
+        if let Some(digest) = manifest_digests.config {
+            let link = LinkReference::Layer(digest.clone());
+            self.storage.delete_link(namespace, &link).await?;
         }
 
-        debug!("Deleting links for config");
-        if let Some(config) = manifest.config {
-            let digest = Digest::from_str(&config.digest)?;
-            let link_reference = LinkReference::Layer(digest.clone());
-            self.storage.delete_link(namespace, &link_reference).await?;
+        for digest in manifest_digests.layers {
+            let link = LinkReference::Layer(digest.clone());
+            self.storage.delete_link(namespace, &link).await?;
         }
 
-        debug!("Deleting links for manifest digests and tags");
         match reference {
-            Reference::Digest(_) => {
-                let link_reference = LinkReference::Digest(digest.clone());
-                self.storage.delete_link(namespace, &link_reference).await?;
+            Reference::Tag(tag) => {
+                let link = LinkReference::Tag(tag);
 
+                self.storage.delete_link(namespace, &link).await?;
+                self.storage
+                    .delete_link(namespace, &LinkReference::Digest(digest))
+                    .await?;
+            }
+            Reference::Digest(digest) => {
                 let (tags, _) = self.storage.list_tags(namespace, None).await?;
                 for tag in tags {
                     let link_reference = LinkReference::Tag(tag.clone());
@@ -236,10 +242,9 @@ impl Registry {
                         self.storage.delete_link(namespace, &link_reference).await?;
                     }
                 }
-            }
-            Reference::Tag(tag) => {
-                let link_reference = LinkReference::Tag(tag);
-                self.storage.delete_link(namespace, &link_reference).await?;
+
+                let link = LinkReference::Digest(digest.clone());
+                self.storage.delete_link(namespace, &link).await?;
             }
         }
 

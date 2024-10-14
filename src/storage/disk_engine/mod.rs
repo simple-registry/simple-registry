@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use log::{debug, error, warn};
+use lazy_static::lazy_static;
 use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use std::collections::HashSet;
@@ -323,6 +323,7 @@ impl StorageEngine for DiskStorageEngine {
         Ok(referrers)
     }
 
+    #[instrument]
     async fn create_upload(&self, name: &str, uuid: Uuid) -> Result<String, RegistryError> {
         let container_dir = self.tree.upload_container_path(name, &uuid);
         fs::create_dir_all(&container_dir).await?;
@@ -415,6 +416,28 @@ impl StorageEngine for DiskStorageEngine {
         let path = self.tree.upload_container_path(name, &uuid);
         let _ = fs::remove_dir_all(&path).await;
         self.delete_empty_parent_dirs(&path).await
+    }
+
+    #[instrument]
+    async fn create_blob(&self, content: &[u8]) -> Result<Digest, RegistryError> {
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        let digest = hasher.finalize();
+        let digest = Digest::Sha256(hex::encode(digest));
+
+        let blob_root = self.tree.blob_container_dir(&digest);
+        fs::create_dir_all(&blob_root).await?;
+
+        let blob_path = self.tree.blob_path(&digest);
+        fs::write(blob_path, content).await?;
+
+        Ok(digest)
+    }
+
+    #[instrument]
+    async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, RegistryError> {
+        let path = self.tree.blob_path(digest);
+        fs::read(path).await.map_err(|e| e.into())
     }
 
     #[instrument]
