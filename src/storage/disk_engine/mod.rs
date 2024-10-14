@@ -24,6 +24,12 @@ use crate::storage::{
 
 mod upload_writer;
 
+lazy_static! {
+    // TODO: lock at the filesystem level instead!
+    static ref RC_LOCK: Mutex<()> = Mutex::new(());
+}
+
+#[instrument]
 pub async fn save_hash_state(
     tree_manager: &TreeManager,
     sha256: &Sha256,
@@ -172,6 +178,8 @@ impl DiskStorageEngine {
     where
         O: FnOnce(u32) -> u32,
     {
+        let _ = RC_LOCK.lock().await;
+
         debug!("Ensuring container directory for digest: {}", digest);
         let path = self.tree.blob_container_dir(digest);
         fs::create_dir_all(&path).await?;
