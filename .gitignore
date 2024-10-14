@@ -1,3 +1,4 @@
+/conformance
 /target
 tls.d/*.pem
 tls.d/*.srl

@@ -15,6 +15,7 @@ use std::convert::Infallible;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use clap::Command;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::pin;
@@ -60,12 +61,13 @@ lazy_static! {
     static ref ROUTE_CATALOG_REGEX: Regex = Regex::new(r"^/v2/_catalog$").unwrap();
 
     //
+    static ref CONFIG_PATH: ArcSwap<String> = ArcSwap::new(Arc::new(DEFAULT_CONFIG_PATH.to_string()));
     static ref CONFIG: ArcSwap<Config> = ArcSwap::new(Arc::new(Config::default()));
     static ref TLS_ACCEPTOR: ArcSwap<Option<TlsAcceptor>> = ArcSwap::new(Arc::new(None));
     static ref REGISTRY: ArcSwap<Registry> = ArcSwap::new(Arc::new(Registry::default()));
 }
 
-const CONFIG_PATH: &str = "config.toml";
+const DEFAULT_CONFIG_PATH: &str = "config.toml";
 
 #[derive(Debug, Deserialize)]
 pub struct NewUploadParameters {
@@ -102,7 +104,8 @@ pub struct BlobParameters {
 }
 
 pub fn reload_config() -> Result<(), io::Error> {
-    let config = Config::load(CONFIG_PATH)?;
+    let config_path = CONFIG_PATH.load();
+    let config = Config::load(config_path.as_str())?;
 
     let registry = Registry::try_from_config(&config).map_err(|e| {
         error!("Failed to create registry: {}", e);
@@ -115,8 +118,23 @@ pub fn reload_config() -> Result<(), io::Error> {
     Ok(())
 }
 
+pub fn init_config(config_path: String) -> Result<(), io::Error> {
+    CONFIG_PATH.store(Arc::new(config_path));
+    reload_config()?;
+
+    let mut config_watcher = recommended_watcher(config_watcher_event_handler).map_err(|err| {
+        error!("Failed to create watcher: {}", err);
+        io::Error::new(io::ErrorKind::Other, err)
+    })?;
+
+    let config_path = CONFIG_PATH.load();
+    set_watcher_path(&mut config_watcher, config_path.as_str())?;
+    Ok(())
+}
+
 pub fn reload_tls() -> Result<(), io::Error> {
-    let config = Config::load(CONFIG_PATH)?;
+    let config_path = CONFIG_PATH.load();
+    let config = Config::load(config_path.as_str())?;
 
     TLS_ACCEPTOR.store(Arc::new(config.build_tls_acceptor()?));
 
@@ -171,17 +189,43 @@ fn tls_watcher_event_handler(event: Result<Event, notify::Error>) {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    reload_config()?;
-    reload_tls()?;
+    let matches = Command::new("origin")
+        .about("An OCI-compliant container registry")
+        .version(env!("CARGO_PKG_VERSION"))
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("serve")
+                .about("Start the registry server")
+                .version(env!("CARGO_PKG_VERSION"))
+                .arg(
+                    clap::Arg::new("config")
+                        .short('c')
+                        .long("config")
+                        .value_name("FILE")
+                        .help("Sets a custom configuration file")
+                )
+        )
+        .get_matches();
 
     tracing_helper::setup_tracing();
 
-    let mut config_watcher = recommended_watcher(config_watcher_event_handler).map_err(|err| {
-        error!("Failed to create watcher: {}", err);
-        io::Error::new(io::ErrorKind::Other, err)
-    })?;
+    //
 
-    set_watcher_path(&mut config_watcher, CONFIG_PATH)?;
+
+    //
+    match matches.subcommand() {
+        Some(("serve", serve_matches)) => {
+            let config_path = serve_matches.get_one::<String>("config").map(|s| s.clone()).unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string());
+            init_config(config_path)?;
+            serve().await
+        },
+        _ => unreachable!(),
+    }
+}
+
+async fn serve() -> io::Result<()> {
+    reload_tls()?;
 
     let mut tls_watcher = recommended_watcher(tls_watcher_event_handler).map_err(|err| {
         error!("Failed to create watcher: {}", err);

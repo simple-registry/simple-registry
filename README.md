@@ -21,8 +21,7 @@ Goals
 
 ## Configuration
 
-The configuration file, `config.toml`, is located in the working directory.
-It is automatically reloaded whenever the file is modified, provided the changes are valid.
+The configuration file (by default `config.toml`) is automatically reloaded whenever the file is modified, provided the changes are valid.
 
 This feature is particularly useful for tasks like rotating certificates, updating policies, or adjusting other settings.
 
@@ -122,7 +121,6 @@ The following `request.action` actions are supported:
 - [ ] Proper testing strategy
 - [ ] disk storage engine: (scalable) concurrent operations
 - [ ] s3 storage engine: implementation
-- [ ] Scrub tooling
 - [ ] Pull-through cache
 - [ ] Kubernetes Operator (new project)
 - [ ] OpenMetrics exporter
