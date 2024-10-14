@@ -7,7 +7,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::tokio::TokioIo;
 use lazy_static::lazy_static;
-use notify::{recommended_watcher, Event, FsEventWatcher, RecursiveMode, Watcher};
+use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_sdk::trace::{BatchConfig, RandomIdGenerator, Sampler, Tracer, TracerProvider};
@@ -144,7 +144,7 @@ pub fn get_registry(
     Ok(registry)
 }
 
-pub fn set_watcher_path(watcher: &mut FsEventWatcher, path: &str) -> io::Result<()> {
+pub fn set_watcher_path(watcher: &mut RecommendedWatcher, path: &str) -> io::Result<()> {
     watcher
         .watch(Path::new(path), RecursiveMode::Recursive)
         .map_err(|err| {
