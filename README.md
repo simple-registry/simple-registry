@@ -9,9 +9,9 @@ Goals
 - Easy to operate: online garbage collection, auto-reload of configuration and certificates
 
 > [!WARNING]
-> This project is in early development and is not yet suitable for production use.
+> This project is in early development and is not yet extensively used in production.
 >
-> **REALLY**, DO NOT USE THIS IN PRODUCTION.
+> **USE AT YOUR OWN RISK**
 
 ## Ecosystem
 
@@ -116,15 +116,12 @@ The following `request.action` actions are supported:
 
 ## Roadmap
 
+- [ ] CI
+  - [ ] Conformance Testing
+  - [ ] Publishing
+- [ ] Proper testing strategy
 - [ ] disk storage engine: (scalable) concurrent operations
 - [ ] s3 storage engine: implementation
 - [ ] Scrub tooling
-- [ ] CI
-    - [ ] Formatting
-    - [ ] Linting
-    - [ ] Unit Testing
-    - [ ] Building
-    - [ ] Conformance Testing
-    - [ ] Publishing
 - [ ] Kubernetes Operator (new project)
 - [ ] OpenMetrics exporter
