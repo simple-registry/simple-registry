@@ -505,11 +505,18 @@ async fn handle_get_manifest(
         .get_manifest(&parameters.name, parameters.reference.into())
         .await?;
 
-    let res = Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", manifest.media_type)
-        .header("Docker-Content-Digest", manifest.digest.to_string())
-        .body(RegistryResponseBody::fixed(manifest.content))?;
+    let res = if let Some(content_type) = manifest.media_type {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", content_type)
+            .header("Docker-Content-Digest", manifest.digest.to_string())
+            .body(RegistryResponseBody::fixed(manifest.content))?
+    } else {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Docker-Content-Digest", manifest.digest.to_string())
+            .body(RegistryResponseBody::fixed(manifest.content))?
+    };
 
     Ok(res)
 }
@@ -528,12 +535,20 @@ async fn handle_head_manifest(
         .head_manifest(&parameters.name, parameters.reference.into())
         .await?;
 
-    let res = Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", manifest.media_type)
-        .header("Docker-Content-Digest", manifest.digest.to_string())
-        .header("Content-Length", manifest.size)
-        .body(RegistryResponseBody::empty())?;
+    let res = if let Some(media_type) = manifest.media_type {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", media_type)
+            .header("Docker-Content-Digest", manifest.digest.to_string())
+            .header("Content-Length", manifest.size)
+            .body(RegistryResponseBody::empty())?
+    } else {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Docker-Content-Digest", manifest.digest.to_string())
+            .header("Content-Length", manifest.size)
+            .body(RegistryResponseBody::empty())?
+    };
 
     Ok(res)
 }

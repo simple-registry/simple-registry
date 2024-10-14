@@ -7,13 +7,13 @@ use crate::oci::{Digest, Manifest, Reference};
 use crate::registry::{LinkReference, Registry};
 
 pub struct ManifestData {
-    pub media_type: String,
+    pub media_type: Option<String>,
     pub digest: Digest,
     pub content: Vec<u8>,
 }
 
 pub struct ManifestSummary {
-    pub media_type: String,
+    pub media_type: Option<String>,
     pub digest: Digest,
     pub size: usize,
 }
@@ -39,9 +39,11 @@ fn parse_manifest_digests(
     })?;
 
     if let Some(expected_content_type) = expected_content_type {
-        if manifest.media_type != expected_content_type {
+        if manifest.media_type.is_some()
+            && manifest.media_type != Some(expected_content_type.clone())
+        {
             warn!(
-                "Expected manifest media type mismatch: {} (expected) != {} (found)",
+                "Expected manifest media type mismatch: {} (expected) != {:?} (found)",
                 expected_content_type, manifest.media_type
             );
             return Err(RegistryError::ManifestInvalid(Some(

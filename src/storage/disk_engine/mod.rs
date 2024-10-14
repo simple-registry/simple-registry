@@ -297,6 +297,10 @@ impl StorageEngine for DiskStorageEngine {
             let raw_manifest = fs::read(&blob_path).await?;
             let manifest: Manifest = serde_json::from_slice(&raw_manifest)?;
 
+            let Some(media_type) = manifest.media_type else {
+                continue;
+            };
+
             if let Some(artifact_type) = artifact_type.clone() {
                 if let Some(manifest_artifact_type) = manifest.artifact_type.clone() {
                     if manifest_artifact_type != artifact_type {
@@ -312,7 +316,7 @@ impl StorageEngine for DiskStorageEngine {
             }
 
             referrers.push(Descriptor {
-                media_type: manifest.media_type,
+                media_type,
                 digest: manifest_digest.to_string(),
                 size: raw_manifest.len() as u64,
                 annotations: manifest.annotations,

@@ -10,7 +10,7 @@ pub use reference::Reference;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
-    pub media_type: String,
+    pub media_type: Option<String>,
     #[serde(default)]
     pub config: Option<Descriptor>,
     #[serde(default)]
