@@ -3,10 +3,11 @@ mod reference;
 mod tree_manager;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use sha2::Sha256;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
-use uuid::Uuid;
 
 use crate::error::RegistryError;
 use crate::oci::{Descriptor, Digest};
@@ -30,50 +31,60 @@ impl<T> StorageEngineWriter for T where T: AsyncWrite + Unpin + Send {}
 pub trait StorageEngine: Send + Sync {
     async fn read_catalog(
         &self,
-        n: u32,
-        last: String,
+        pagination: Option<(u32, Option<String>)>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError>;
+
+    async fn list_uploads(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<(String, Option<Sha256>, Option<DateTime<Utc>>)>, RegistryError>; // TODO: return an iterator
+
+    async fn list_blobs(&self) -> Result<Vec<Digest>, RegistryError>; // TODO: return an iterator
+
+    async fn list_revisions(&self, namespace: &str) -> Result<Vec<Digest>, RegistryError>; // TODO: return an iterator
 
     async fn list_tags(
         &self,
         namespace: &str,
-        pagination: Option<(u32, String)>,
-    ) -> Result<(Vec<String>, Option<String>), RegistryError>;
+        pagination: Option<(u32, Option<String>)>,
+    ) -> Result<(Vec<String>, Option<String>), RegistryError>; // TODO: return an iterator
 
     async fn list_referrers(
         &self,
         namespace: &str,
         digest: &Digest,
         artifact_type: Option<String>,
-    ) -> Result<Vec<Descriptor>, RegistryError>;
+    ) -> Result<Vec<Descriptor>, RegistryError>; // TODO: return an iterator
 
-    async fn create_upload(&self, namespace: &str, uuid: Uuid) -> Result<String, RegistryError>;
+    async fn create_upload(&self, namespace: &str, uuid: &str) -> Result<String, RegistryError>;
 
     async fn build_upload_writer(
         &self,
         namespace: &str,
-        uuid: Uuid,
+        uuid: &str,
         start_offset: Option<u64>,
     ) -> Result<Box<dyn StorageEngineWriter>, RegistryError>;
 
     async fn read_upload_summary(
         &self,
         namespace: &str,
-        uuid: Uuid,
+        uuid: &str,
     ) -> Result<UploadSummary, RegistryError>;
 
     async fn complete_upload(
         &self,
         namespace: &str,
-        uuid: Uuid,
+        uuid: &str,
         digest: Option<Digest>,
     ) -> Result<Digest, RegistryError>;
 
-    async fn delete_upload(&self, namespace: &str, uuid: Uuid) -> Result<(), RegistryError>;
+    async fn delete_upload(&self, namespace: &str, uuid: &str) -> Result<(), RegistryError>;
 
     async fn create_blob(&self, content: &[u8]) -> Result<Digest, RegistryError>;
 
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, RegistryError>;
+
+    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobReferenceIndex, RegistryError>;
 
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, RegistryError>;
 
@@ -105,11 +116,14 @@ pub trait StorageEngine: Send + Sync {
     ) -> Result<(), RegistryError>;
 }
 
-pub fn paginate(items: &[String], n: u32, last: String) -> (Vec<String>, Option<String>) {
-    let start = if last.is_empty() {
-        0
-    } else {
+pub fn paginate<T>(items: &[T], n: u32, last: Option<T>) -> (Vec<T>, Option<T>)
+where
+    T: Clone + PartialEq,
+{
+    let start = if let Some(last) = last {
         items.iter().position(|x| x == &last).map_or(0, |i| i + 1)
+    } else {
+        0
     };
 
     let end = usize::min(start + n as usize, items.len());

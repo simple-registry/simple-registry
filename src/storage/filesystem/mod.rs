@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use lazy_static::lazy_static;
 use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest as ShaDigestTrait, Sha256};
@@ -11,7 +11,6 @@ use tokio::fs::{self, File};
 use tokio::io::AsyncSeekExt;
 use tokio::sync::Mutex;
 use tracing::{debug, instrument, warn};
-use uuid::Uuid;
 
 use crate::error::RegistryError;
 use crate::oci::{Descriptor, Digest, Manifest};
@@ -35,7 +34,7 @@ pub async fn save_hash_state(
     tree_manager: &TreeManager,
     sha256: &Sha256,
     name: &str,
-    uuid: &Uuid,
+    uuid: &str,
     algorithm: &str,
     offset: u64,
 ) -> Result<(), RegistryError> {
@@ -52,7 +51,7 @@ pub async fn save_hash_state(
 pub async fn load_hash_state(
     tree_manager: &TreeManager,
     name: &str,
-    uuid: &Uuid,
+    uuid: &str,
     algorithm: &str,
     offset: u64,
 ) -> Result<Sha256, RegistryError> {
@@ -81,7 +80,7 @@ impl FileSystemStorageEngine {
     }
 
     #[instrument]
-    pub async fn get_file_size(&self, path: &String) -> Result<Option<u64>, RegistryError> {
+    pub async fn get_file_size(&self, path: &str) -> Result<Option<u64>, RegistryError> {
         match fs::metadata(&path).await {
             Ok(metadata) => Ok(Some(metadata.len())),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
@@ -126,7 +125,7 @@ impl FileSystemStorageEngine {
     #[instrument]
     pub async fn collect_directory_entries(
         &self,
-        path: &String,
+        path: &str,
     ) -> Result<Vec<String>, RegistryError> {
         let mut entries = Vec::new();
         let mut read_dir = match fs::read_dir(&path).await {
@@ -185,7 +184,7 @@ impl FileSystemStorageEngine {
         fs::create_dir_all(&path).await?;
 
         debug!("Updating reference count for digest: {}", digest);
-        let path = self.tree.blob_ref_path(digest);
+        let path = self.tree.blob_index_path(digest);
 
         let mut reference_index = match fs::read_to_string(&path).await {
             Ok(content) => serde_json::from_str::<BlobReferenceIndex>(&content),
@@ -293,8 +292,7 @@ impl StorageEngine for FileSystemStorageEngine {
     #[instrument]
     async fn read_catalog(
         &self,
-        n: u32,
-        last: String,
+        pagination: Option<(u32, Option<String>)>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         let base_path = self.tree.repository_dir();
         let base_path = Path::new(&base_path);
@@ -304,14 +302,94 @@ impl StorageEngine for FileSystemStorageEngine {
 
         let mut repositories: Vec<String> = repositories.into_iter().collect();
         repositories.sort();
-        Ok(paginate(&repositories, n, last))
+
+        if let Some((n, last)) = pagination {
+            return Ok(paginate(&repositories, n, last));
+        }
+
+        Ok((repositories, None))
+    }
+
+    #[instrument]
+    async fn list_uploads(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<(String, Option<Sha256>, Option<DateTime<Utc>>)>, RegistryError> {
+        let path = self.tree.uploads_root_dir(namespace);
+        let mut all_uploads = self.collect_directory_entries(&path).await?;
+        all_uploads.sort();
+
+        let mut uploads = Vec::new();
+        for upload in all_uploads {
+            let hash = load_hash_state(&self.tree, namespace, &upload, "sha256", 0)
+                .await
+                .ok();
+
+            let date = self.tree.upload_start_date_path(namespace, &upload);
+            let date = fs::read_to_string(&date)
+                .await
+                .ok()
+                .and_then(|date| DateTime::parse_from_rfc3339(&date).ok())
+                .map(|d| d.with_timezone(&Utc));
+
+            uploads.push((upload, hash, date));
+        }
+
+        Ok(uploads)
+    }
+
+    #[instrument]
+    async fn list_blobs(&self) -> Result<Vec<Digest>, RegistryError> {
+        let path = PathBuf::new()
+            .join(self.tree.blobs_root_dir())
+            .join("sha256")
+            .to_string_lossy()
+            .to_string();
+
+        let all_prefixes = self.collect_directory_entries(&path).await?;
+
+        let mut digests = Vec::new();
+
+        for prefix in all_prefixes {
+            let blob_path = PathBuf::from(&path)
+                .join(&prefix)
+                .to_string_lossy()
+                .to_string();
+
+            let all_digests = self.collect_directory_entries(&blob_path).await?;
+
+            for digest in all_digests {
+                let digest = format!("sha256:{}", digest);
+                let digest = Digest::from_str(&digest)?;
+                digests.push(digest);
+            }
+        }
+
+        Ok(digests)
+    }
+
+    async fn list_revisions(&self, namespace: &str) -> Result<Vec<Digest>, RegistryError> {
+        let path = self
+            .tree
+            .manifest_revisions_link_root_dir(namespace, "sha256"); // HACK: hardcoded sha256
+
+        let all_revisions = self.collect_directory_entries(&path).await?;
+        let mut revisions = Vec::new();
+
+        for revision in all_revisions {
+            let revision = format!("{}:{}", "sha256", revision);
+            let revision = Digest::from_str(&revision)?;
+            revisions.push(revision);
+        }
+
+        Ok(revisions)
     }
 
     #[instrument]
     async fn list_tags(
         &self,
         name: &str,
-        pagination: Option<(u32, String)>,
+        pagination: Option<(u32, Option<String>)>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         let tags = self.get_all_tags(name).await?;
 
@@ -373,26 +451,26 @@ impl StorageEngine for FileSystemStorageEngine {
     }
 
     #[instrument]
-    async fn create_upload(&self, name: &str, uuid: Uuid) -> Result<String, RegistryError> {
-        let container_dir = self.tree.upload_container_path(name, &uuid);
+    async fn create_upload(&self, name: &str, uuid: &str) -> Result<String, RegistryError> {
+        let container_dir = self.tree.upload_container_path(name, uuid);
         fs::create_dir_all(&container_dir).await?;
 
-        let content_path = self.tree.upload_path(name, &uuid);
+        let content_path = self.tree.upload_path(name, uuid);
         fs::write(content_path, "").await?;
 
-        let container_dir = self.tree.upload_start_date_container_dir(name, &uuid);
+        let container_dir = self.tree.upload_start_date_container_dir(name, uuid);
         fs::create_dir_all(&container_dir).await?;
 
-        let date_path = self.tree.upload_start_date_path(name, &uuid);
+        let date_path = self.tree.upload_start_date_path(name, uuid);
         fs::write(date_path, Utc::now().to_rfc3339()).await?;
 
         let container_dir = self
             .tree
-            .upload_hash_context_container_path(name, &uuid, "sha256");
+            .upload_hash_context_container_path(name, uuid, "sha256");
         fs::create_dir_all(&container_dir).await?;
 
         let hasher = Sha256::new();
-        save_hash_state(&self.tree, &hasher, name, &uuid, "sha256", 0).await?;
+        save_hash_state(&self.tree, &hasher, name, uuid, "sha256", 0).await?;
 
         Ok(uuid.to_string())
     }
@@ -401,11 +479,17 @@ impl StorageEngine for FileSystemStorageEngine {
     async fn build_upload_writer(
         &self,
         name: &str,
-        uuid: Uuid,
+        uuid: &str,
         start_offset: Option<u64>,
     ) -> Result<Box<dyn StorageEngineWriter>, RegistryError> {
         Ok(Box::new(
-            DiskUploadWriter::new(self.tree.clone(), name, uuid, start_offset.unwrap_or(0)).await?,
+            DiskUploadWriter::new(
+                self.tree.clone(),
+                name,
+                uuid.to_string(),
+                start_offset.unwrap_or(0),
+            )
+            .await?,
         ))
     }
 
@@ -413,15 +497,15 @@ impl StorageEngine for FileSystemStorageEngine {
     async fn read_upload_summary(
         &self,
         name: &str,
-        uuid: Uuid,
+        uuid: &str,
     ) -> Result<UploadSummary, RegistryError> {
-        let file_path = self.tree.upload_path(name, &uuid);
+        let file_path = self.tree.upload_path(name, uuid);
         let size = self
             .get_file_size(&file_path)
             .await?
             .ok_or(RegistryError::BlobUnknown)?;
 
-        let hasher = load_hash_state(&self.tree, name, &uuid, "sha256", size).await?;
+        let hasher = load_hash_state(&self.tree, name, uuid, "sha256", size).await?;
         let digest = hasher.finalize();
         let digest = Digest::Sha256(hex::encode(digest));
 
@@ -432,10 +516,10 @@ impl StorageEngine for FileSystemStorageEngine {
     async fn complete_upload(
         &self,
         name: &str,
-        uuid: Uuid,
+        uuid: &str,
         digest: Option<Digest>,
     ) -> Result<Digest, RegistryError> {
-        let upload_path = self.tree.upload_path(name, &uuid);
+        let upload_path = self.tree.upload_path(name, uuid);
         let Some(size) = self.get_file_size(&upload_path).await? else {
             return Err(RegistryError::BlobUnknown);
         };
@@ -443,7 +527,7 @@ impl StorageEngine for FileSystemStorageEngine {
         let digest = match digest {
             Some(digest) => digest,
             None => {
-                let hasher = load_hash_state(&self.tree, name, &uuid, "sha256", size).await?;
+                let hasher = load_hash_state(&self.tree, name, uuid, "sha256", size).await?;
                 let digest = hasher.finalize();
                 Digest::Sha256(hex::encode(digest))
             }
@@ -462,8 +546,8 @@ impl StorageEngine for FileSystemStorageEngine {
     }
 
     #[instrument]
-    async fn delete_upload(&self, name: &str, uuid: Uuid) -> Result<(), RegistryError> {
-        let path = self.tree.upload_container_path(name, &uuid);
+    async fn delete_upload(&self, name: &str, uuid: &str) -> Result<(), RegistryError> {
+        let path = self.tree.upload_container_path(name, uuid);
         let _ = fs::remove_dir_all(&path).await;
         self.delete_empty_parent_dirs(&path).await
     }
@@ -488,6 +572,15 @@ impl StorageEngine for FileSystemStorageEngine {
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, RegistryError> {
         let path = self.tree.blob_path(digest);
         fs::read(path).await.map_err(|e| e.into())
+    }
+
+    #[instrument]
+    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobReferenceIndex, RegistryError> {
+        let path = self.tree.blob_index_path(digest);
+        let content = fs::read_to_string(&path).await?;
+
+        let index = serde_json::from_str(&content)?;
+        Ok(index)
     }
 
     #[instrument]
@@ -554,19 +647,28 @@ impl StorageEngine for FileSystemStorageEngine {
             namespace, reference
         );
 
+        let valid_link = self
+            .read_link(namespace, reference)
+            .await
+            .ok()
+            .map(|d| d == digest.clone())
+            .unwrap_or(false);
+
+        if valid_link {
+            return Ok(());
+        }
+
         let path = self.tree.get_link_parent_path(reference, namespace);
         debug!("Creating link container dir at path: {}", path);
         fs::create_dir_all(&path).await?;
 
         let link_path = self.tree.get_link_path(reference, namespace);
-        if fs::metadata(&link_path).await.is_err() {
-            debug!("Creating link at path: {}", link_path);
-            fs::write(&link_path, digest.to_string()).await?;
+        debug!("Creating link at path: {}", link_path);
+        fs::write(&link_path, digest.to_string()).await?;
 
-            debug!("Increasing reference count for digest: {}", digest);
-            self.blob_link_index_add(namespace, reference, digest)
-                .await?;
-        }
+        debug!("Increasing reference count for digest: {}", digest);
+        self.blob_link_index_add(namespace, reference, digest)
+            .await?;
 
         Ok(())
     }

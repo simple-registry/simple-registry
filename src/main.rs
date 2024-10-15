@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 use arc_swap::ArcSwap;
+use clap::Command;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -15,7 +16,6 @@ use std::convert::Infallible;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use clap::Command;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::pin;
@@ -31,6 +31,7 @@ mod io_helpers;
 mod oci;
 mod policy;
 mod registry;
+mod scrub;
 mod storage;
 mod tls;
 mod tracing_helper;
@@ -118,7 +119,7 @@ pub fn reload_config() -> Result<(), io::Error> {
     Ok(())
 }
 
-pub fn init_config(config_path: String) -> Result<(), io::Error> {
+pub fn init_config(config_path: String, with_watcher: bool) -> Result<(), io::Error> {
     CONFIG_PATH.store(Arc::new(config_path));
     reload_config()?;
 
@@ -127,8 +128,13 @@ pub fn init_config(config_path: String) -> Result<(), io::Error> {
         io::Error::new(io::ErrorKind::Other, err)
     })?;
 
+    if !with_watcher {
+        return Ok(());
+    }
+
     let config_path = CONFIG_PATH.load();
     set_watcher_path(&mut config_watcher, config_path.as_str())?;
+
     Ok(())
 }
 
@@ -195,6 +201,25 @@ async fn main() -> io::Result<()> {
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
+            Command::new("scrub")
+                .about("Check the registry storage engine for inconsistencies and fix them")
+                .version(env!("CARGO_PKG_VERSION"))
+                .arg(
+                    clap::Arg::new("config")
+                        .short('c')
+                        .long("config")
+                        .value_name("FILE")
+                        .help("Sets a custom configuration file"),
+                )
+                .arg(
+                    clap::Arg::new("auto-fix")
+                        .short('f')
+                        .long("auto-fix")
+                        .value_name("AUTO_FIX")
+                        .help("Automatically fix any inconsistencies found"),
+                ),
+        )
+        .subcommand(
             Command::new("serve")
                 .about("Start the registry server")
                 .version(env!("CARGO_PKG_VERSION"))
@@ -203,23 +228,36 @@ async fn main() -> io::Result<()> {
                         .short('c')
                         .long("config")
                         .value_name("FILE")
-                        .help("Sets a custom configuration file")
-                )
+                        .help("Sets a custom configuration file"),
+                ),
         )
         .get_matches();
 
     tracing_helper::setup_tracing();
 
     //
-
-
-    //
     match matches.subcommand() {
+        Some(("scrub", serve_matches)) => {
+            let config_path = serve_matches
+                .get_one::<String>("config")
+                .cloned()
+                .unwrap_or(DEFAULT_CONFIG_PATH.to_string());
+            let auto_fix = serve_matches
+                .get_one::<bool>("auto-fix")
+                .cloned()
+                .unwrap_or(false);
+
+            init_config(config_path, false)?;
+            scrub::scrub(auto_fix).await
+        }
         Some(("serve", serve_matches)) => {
-            let config_path = serve_matches.get_one::<String>("config").map(|s| s.clone()).unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string());
-            init_config(config_path)?;
+            let config_path = serve_matches
+                .get_one::<String>("config")
+                .cloned()
+                .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string());
+            init_config(config_path, true)?;
             serve().await
-        },
+        }
         _ => unreachable!(),
     }
 }

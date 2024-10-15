@@ -23,13 +23,13 @@ pub struct NewManifest {
     pub subject: Option<Digest>,
 }
 
-struct ManifestDigests {
-    subject: Option<Digest>,
-    config: Option<Digest>,
-    layers: Vec<Digest>,
+pub struct ManifestDigests {
+    pub subject: Option<Digest>,
+    pub config: Option<Digest>,
+    pub layers: Vec<Digest>,
 }
 
-fn parse_manifest_digests(
+pub fn parse_manifest_digests(
     body: &[u8],
     expected_content_type: Option<String>,
 ) -> Result<ManifestDigests, RegistryError> {
@@ -253,6 +253,9 @@ impl Registry {
                 self.storage.delete_link(namespace, &link).await?;
             }
         }
+
+        // TODO: check _referrers, _config, and _layers links are correctly deleted only when ALL
+        // referencing manifests are deleted as well!
 
         Ok(())
     }

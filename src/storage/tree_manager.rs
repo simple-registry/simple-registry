@@ -1,5 +1,3 @@
-use uuid::Uuid;
-
 use crate::oci::Digest;
 use crate::registry::LinkReference;
 
@@ -27,7 +25,7 @@ impl TreeManager {
         format!("{}/data", self.blob_container_dir(digest))
     }
 
-    pub fn blob_ref_path(&self, digest: &Digest) -> String {
+    pub fn blob_index_path(&self, digest: &Digest) -> String {
         format!("{}/index.json", self.blob_container_dir(digest))
     }
 
@@ -39,18 +37,18 @@ impl TreeManager {
         format!("{}/{}/_uploads", self.repository_dir(), namespace)
     }
 
-    pub fn upload_container_path(&self, name: &str, uuid: &Uuid) -> String {
+    pub fn upload_container_path(&self, name: &str, uuid: &str) -> String {
         format!("{}/{}", self.uploads_root_dir(name), uuid)
     }
 
-    pub fn upload_path(&self, name: &str, uuid: &Uuid) -> String {
+    pub fn upload_path(&self, name: &str, uuid: &str) -> String {
         format!("{}/data", self.upload_container_path(name, uuid))
     }
 
     pub fn upload_hash_context_container_path(
         &self,
         name: &str,
-        uuid: &Uuid,
+        uuid: &str,
         algorithm: &str,
     ) -> String {
         format!(
@@ -64,7 +62,7 @@ impl TreeManager {
     pub fn upload_hash_context_path(
         &self,
         name: &str,
-        uuid: &Uuid,
+        uuid: &str,
         algorithm: &str,
         offset: u64,
     ) -> String {
@@ -75,11 +73,11 @@ impl TreeManager {
         )
     }
 
-    pub fn upload_start_date_container_dir(&self, name: &str, uuid: &Uuid) -> String {
+    pub fn upload_start_date_container_dir(&self, name: &str, uuid: &str) -> String {
         format!("{}/{}", self.uploads_root_dir(name), uuid)
     }
 
-    pub fn upload_start_date_path(&self, name: &str, uuid: &Uuid) -> String {
+    pub fn upload_start_date_path(&self, name: &str, uuid: &str) -> String {
         format!(
             "{}/startedat",
             self.upload_start_date_container_dir(name, uuid),
@@ -90,11 +88,14 @@ impl TreeManager {
         format!("{}/{}/_manifests", self.repository_dir(), namespace)
     }
 
+    pub fn manifest_revisions_link_root_dir(&self, name: &str, algorithm: &str) -> String {
+        format!("{}/revisions/{}", self.manifests_root_dir(name), algorithm)
+    }
+
     pub fn manifest_revisions_link_container_dir(&self, name: &str, digest: &Digest) -> String {
         format!(
-            "{}/revisions/{}/{}",
-            self.manifests_root_dir(name),
-            digest.algorithm(),
+            "{}/{}",
+            self.manifest_revisions_link_root_dir(name, digest.algorithm()),
             digest.hash()
         )
     }

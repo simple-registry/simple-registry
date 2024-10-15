@@ -30,7 +30,7 @@ impl Registry {
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         let (n, last) = (n.unwrap_or(100), last.unwrap_or_default());
 
-        let (namespaces, next_last) = self.storage.read_catalog(n, last).await?;
+        let (namespaces, next_last) = self.storage.read_catalog(Some((n, Some(last)))).await?;
         let link = next_last.map(|next_last| format!("/v2/_catalog?n={}&last={}", n, next_last));
 
         Ok((namespaces, link))
@@ -47,7 +47,10 @@ impl Registry {
 
         let (n, last) = (n.unwrap_or(100), last.unwrap_or_default());
 
-        let (tags, next_last) = self.storage.list_tags(namespace, Some((n, last))).await?;
+        let (tags, next_last) = self
+            .storage
+            .list_tags(namespace, Some((n, Some(last))))
+            .await?;
         let link = next_last
             .map(|next_last| format!("/v2/{}/tags/list?n={}&last={}", namespace, n, next_last));
 

@@ -6,7 +6,6 @@ use tokio::fs;
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWrite};
 use tracing::error;
-use uuid::Uuid;
 
 use crate::error::RegistryError;
 use crate::storage::filesystem::{load_hash_state, save_hash_state};
@@ -17,7 +16,7 @@ pub struct DiskUploadWriter {
     hasher: Sha256,
     offset: u64,
     name: String,
-    uuid: Uuid,
+    uuid: String,
     tree_manager: Arc<TreeManager>,
 }
 
@@ -25,7 +24,7 @@ impl DiskUploadWriter {
     pub async fn new(
         tree_manager: Arc<TreeManager>,
         name: &str,
-        uuid: Uuid,
+        uuid: String,
         offset: u64,
     ) -> Result<Self, RegistryError> {
         let file_path = tree_manager.upload_path(name, &uuid);
@@ -64,7 +63,7 @@ impl DiskUploadWriter {
     fn save_hashstate_sync(&self) -> Result<(), RegistryError> {
         let storage = self.tree_manager.clone();
         let name = self.name.clone();
-        let uuid = self.uuid;
+        let uuid = self.uuid.clone();
         let offset = self.offset;
 
         tokio::task::block_in_place(|| {

@@ -12,7 +12,7 @@ use crate::registry::Registry;
 
 pub enum NewUpload {
     ExistingBlob(Digest),
-    Session(String, Uuid),
+    Session(String, String),
 }
 
 impl Registry {
@@ -30,8 +30,8 @@ impl Registry {
             }
         }
 
-        let session_uuid = Uuid::new_v4();
-        self.storage.create_upload(namespace, session_uuid).await?;
+        let session_uuid = Uuid::new_v4().to_string();
+        self.storage.create_upload(namespace, &session_uuid).await?;
 
         let location = format!("/v2/{}/blobs/uploads/{}", namespace, session_uuid);
         Ok(NewUpload::Session(location, session_uuid))
@@ -47,10 +47,11 @@ impl Registry {
     ) -> Result<u64, RegistryError> {
         self.validate_namespace(namespace)?;
 
+        let session_id = session_id.to_string();
         if let Some(start_offset) = start_offset {
             let summary = self
                 .storage
-                .read_upload_summary(namespace, session_id)
+                .read_upload_summary(namespace, &session_id)
                 .await?;
 
             if start_offset != summary.size {
@@ -60,7 +61,7 @@ impl Registry {
 
         let mut writer = self
             .storage
-            .build_upload_writer(namespace, session_id, start_offset)
+            .build_upload_writer(namespace, &session_id, start_offset)
             .await?;
 
         let mut body = body.into_data_stream();
@@ -73,7 +74,7 @@ impl Registry {
 
         let summary = self
             .storage
-            .read_upload_summary(namespace, session_id)
+            .read_upload_summary(namespace, &session_id)
             .await?;
 
         if summary.size < 1 {
@@ -93,9 +94,10 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
+        let uuid = uuid.to_string();
         let mut writer = self
             .storage
-            .build_upload_writer(namespace, uuid, None)
+            .build_upload_writer(namespace, &uuid, None)
             .await?;
 
         let mut body = body.into_data_stream();
@@ -105,7 +107,7 @@ impl Registry {
         }
         writer.flush().await?;
 
-        let summary = self.storage.read_upload_summary(namespace, uuid).await?;
+        let summary = self.storage.read_upload_summary(namespace, &uuid).await?;
 
         if summary.digest != digest {
             debug!(
@@ -116,16 +118,17 @@ impl Registry {
         }
 
         self.storage
-            .complete_upload(namespace, uuid, Some(digest.clone()))
+            .complete_upload(namespace, &uuid, Some(digest.clone()))
             .await?;
-        self.storage.delete_upload(namespace, uuid).await
+        self.storage.delete_upload(namespace, &uuid).await
     }
 
     #[instrument]
     pub async fn delete_upload(&self, namespace: &str, uuid: Uuid) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        self.storage.delete_upload(namespace, uuid).await
+        let uuid = uuid.to_string();
+        self.storage.delete_upload(namespace, &uuid).await
     }
 
     #[instrument]
@@ -136,7 +139,8 @@ impl Registry {
     ) -> Result<u64, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let summary = self.storage.read_upload_summary(namespace, uuid).await?;
+        let uuid = uuid.to_string();
+        let summary = self.storage.read_upload_summary(namespace, &uuid).await?;
 
         if summary.size < 1 {
             return Ok(0);

@@ -1,18 +1,20 @@
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use cel_interpreter::Program;
+use lazy_static::lazy_static;
+use regex::Regex;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
+use tracing::{debug, error, instrument};
+
 mod blob;
 mod content_discovery;
 mod link_reference;
 mod manifest;
 mod upload;
 
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
 pub use blob::BlobData;
-use cel_interpreter::Program;
-use lazy_static::lazy_static;
 pub use link_reference::LinkReference;
-use regex::Regex;
-use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
-use tracing::{debug, error, instrument};
+pub use manifest::parse_manifest_digests;
 pub use upload::NewUpload;
 
 use crate::config::Config;
