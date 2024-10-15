@@ -240,7 +240,7 @@ impl Registry {
                     .await?;
             }
             Reference::Digest(digest) => {
-                let (tags, _) = self.storage.list_tags(namespace, None).await?;
+                let tags = self.storage.list_tags(namespace).await?;
                 for tag in tags {
                     let link_reference = LinkReference::Tag(tag.clone());
 

@@ -29,32 +29,34 @@ impl<T> StorageEngineWriter for T where T: AsyncWrite + Unpin + Send {}
 
 #[async_trait]
 pub trait StorageEngine: Send + Sync {
-    async fn read_catalog(
-        &self,
-        pagination: Option<(u32, Option<String>)>,
-    ) -> Result<(Vec<String>, Option<String>), RegistryError>;
+    async fn list_namespaces(&self) -> Result<Box<dyn Iterator<Item = String>>, RegistryError>;
 
     async fn list_uploads(
         &self,
         namespace: &str,
-    ) -> Result<Vec<(String, Option<Sha256>, Option<DateTime<Utc>>)>, RegistryError>; // TODO: return an iterator
+    ) -> Result<
+        Box<dyn Iterator<Item = (String, Option<Sha256>, Option<DateTime<Utc>>)>>,
+        RegistryError,
+    >;
 
-    async fn list_blobs(&self) -> Result<Vec<Digest>, RegistryError>; // TODO: return an iterator
+    async fn list_blobs(&self) -> Result<Box<dyn Iterator<Item = Digest>>, RegistryError>;
 
-    async fn list_revisions(&self, namespace: &str) -> Result<Vec<Digest>, RegistryError>; // TODO: return an iterator
+    async fn list_revisions(
+        &self,
+        namespace: &str,
+    ) -> Result<Box<dyn Iterator<Item = Digest>>, RegistryError>;
 
     async fn list_tags(
         &self,
         namespace: &str,
-        pagination: Option<(u32, Option<String>)>,
-    ) -> Result<(Vec<String>, Option<String>), RegistryError>; // TODO: return an iterator
+    ) -> Result<Box<dyn Iterator<Item = String> + Send + Sync>, RegistryError>;
 
     async fn list_referrers(
         &self,
         namespace: &str,
         digest: &Digest,
         artifact_type: Option<String>,
-    ) -> Result<Vec<Descriptor>, RegistryError>; // TODO: return an iterator
+    ) -> Result<Box<dyn Iterator<Item = Descriptor>>, RegistryError>;
 
     async fn create_upload(&self, namespace: &str, uuid: &str) -> Result<String, RegistryError>;
 
@@ -114,26 +116,6 @@ pub trait StorageEngine: Send + Sync {
         namespace: &str,
         reference: &LinkReference,
     ) -> Result<(), RegistryError>;
-}
-
-pub fn paginate<T>(items: &[T], n: u32, last: Option<T>) -> (Vec<T>, Option<T>)
-where
-    T: Clone + PartialEq,
-{
-    let start = if let Some(last) = last {
-        items.iter().position(|x| x == &last).map_or(0, |i| i + 1)
-    } else {
-        0
-    };
-
-    let end = usize::min(start + n as usize, items.len());
-    let next = if end < items.len() {
-        Some(items[end - 1].clone())
-    } else {
-        None
-    };
-
-    (items[start..end].to_vec(), next)
 }
 
 impl Debug for (dyn StorageEngine + 'static) {

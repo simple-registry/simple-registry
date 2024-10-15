@@ -18,8 +18,7 @@ use crate::registry::LinkReference;
 use crate::storage::filesystem::upload_writer::DiskUploadWriter;
 use crate::storage::tree_manager::TreeManager;
 use crate::storage::{
-    paginate, BlobReferenceIndex, StorageEngine, StorageEngineReader, StorageEngineWriter,
-    UploadSummary,
+    BlobReferenceIndex, StorageEngine, StorageEngineReader, StorageEngineWriter, UploadSummary,
 };
 
 mod upload_writer;
@@ -290,31 +289,23 @@ impl FileSystemStorageEngine {
 #[async_trait]
 impl StorageEngine for FileSystemStorageEngine {
     #[instrument]
-    async fn read_catalog(
-        &self,
-        pagination: Option<(u32, Option<String>)>,
-    ) -> Result<(Vec<String>, Option<String>), RegistryError> {
+    async fn list_namespaces(&self) -> Result<Box<dyn Iterator<Item = String>>, RegistryError> {
         let base_path = self.tree.repository_dir();
         let base_path = Path::new(&base_path);
         let mut repositories = HashSet::new();
         self.collect_repositories(base_path, &mut repositories)
             .await;
-
-        let mut repositories: Vec<String> = repositories.into_iter().collect();
-        repositories.sort();
-
-        if let Some((n, last)) = pagination {
-            return Ok(paginate(&repositories, n, last));
-        }
-
-        Ok((repositories, None))
+        Ok(Box::new(repositories.into_iter()))
     }
 
     #[instrument]
     async fn list_uploads(
         &self,
         namespace: &str,
-    ) -> Result<Vec<(String, Option<Sha256>, Option<DateTime<Utc>>)>, RegistryError> {
+    ) -> Result<
+        Box<dyn Iterator<Item = (String, Option<Sha256>, Option<DateTime<Utc>>)>>,
+        RegistryError,
+    > {
         let path = self.tree.uploads_root_dir(namespace);
         let mut all_uploads = self.collect_directory_entries(&path).await?;
         all_uploads.sort();
@@ -335,11 +326,11 @@ impl StorageEngine for FileSystemStorageEngine {
             uploads.push((upload, hash, date));
         }
 
-        Ok(uploads)
+        Ok(Box::new(uploads.into_iter()))
     }
 
     #[instrument]
-    async fn list_blobs(&self) -> Result<Vec<Digest>, RegistryError> {
+    async fn list_blobs(&self) -> Result<Box<dyn Iterator<Item = Digest>>, RegistryError> {
         let path = PathBuf::new()
             .join(self.tree.blobs_root_dir())
             .join("sha256")
@@ -365,10 +356,13 @@ impl StorageEngine for FileSystemStorageEngine {
             }
         }
 
-        Ok(digests)
+        Ok(Box::new(digests.into_iter()))
     }
 
-    async fn list_revisions(&self, namespace: &str) -> Result<Vec<Digest>, RegistryError> {
+    async fn list_revisions(
+        &self,
+        namespace: &str,
+    ) -> Result<Box<dyn Iterator<Item = Digest>>, RegistryError> {
         let path = self
             .tree
             .manifest_revisions_link_root_dir(namespace, "sha256"); // HACK: hardcoded sha256
@@ -382,22 +376,17 @@ impl StorageEngine for FileSystemStorageEngine {
             revisions.push(revision);
         }
 
-        Ok(revisions)
+        Ok(Box::new(revisions.into_iter()))
     }
 
     #[instrument]
     async fn list_tags(
         &self,
         name: &str,
-        pagination: Option<(u32, Option<String>)>,
-    ) -> Result<(Vec<String>, Option<String>), RegistryError> {
+    ) -> Result<Box<dyn Iterator<Item = String> + Send + Sync>, RegistryError> {
         let tags = self.get_all_tags(name).await?;
 
-        if let Some((n, last)) = pagination {
-            return Ok(paginate(&tags, n, last));
-        }
-
-        Ok((tags, None))
+        Ok(Box::new(tags.into_iter()))
     }
 
     #[instrument]
@@ -406,7 +395,7 @@ impl StorageEngine for FileSystemStorageEngine {
         name: &str,
         digest: &Digest,
         artifact_type: Option<String>,
-    ) -> Result<Vec<Descriptor>, RegistryError> {
+    ) -> Result<Box<dyn Iterator<Item = Descriptor>>, RegistryError> {
         let path = self.tree.manifest_referrers_dir(name, digest);
         let all_manifest = self.collect_directory_entries(&path).await?;
         let mut referrers = Vec::new();
@@ -447,7 +436,7 @@ impl StorageEngine for FileSystemStorageEngine {
             });
         }
 
-        Ok(referrers)
+        Ok(Box::new(referrers.into_iter()))
     }
 
     #[instrument]

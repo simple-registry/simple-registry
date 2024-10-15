@@ -13,13 +13,15 @@ impl Registry {
     ) -> Result<Vec<Descriptor>, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let referrers = self
+        match self
             .storage
             .list_referrers(namespace, &digest, artifact_type)
             .await
-            .unwrap_or_default();
-
-        Ok(referrers)
+        {
+            Ok(referrers) => Ok(referrers.collect()),
+            Err(RegistryError::BlobUnknown) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 
     #[instrument]
@@ -28,9 +30,21 @@ impl Registry {
         n: Option<u32>,
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
-        let (n, last) = (n.unwrap_or(100), last.unwrap_or_default());
+        let n = n.unwrap_or(1);
 
-        let (namespaces, next_last) = self.storage.read_catalog(Some((n, Some(last)))).await?;
+        let mut namespaces = self.storage.list_namespaces().await?;
+
+        if let Some(last) = last {
+            for namespace in namespaces.by_ref() {
+                if namespace == last {
+                    break;
+                }
+            }
+        }
+
+        let namespaces = namespaces.take(n as usize).collect::<Vec<_>>();
+        let next_last = namespaces.last().cloned();
+
         let link = next_last.map(|next_last| format!("/v2/_catalog?n={}&last={}", n, next_last));
 
         Ok((namespaces, link))
@@ -45,12 +59,21 @@ impl Registry {
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let (n, last) = (n.unwrap_or(100), last.unwrap_or_default());
+        let n = n.unwrap_or(100);
 
-        let (tags, next_last) = self
-            .storage
-            .list_tags(namespace, Some((n, Some(last))))
-            .await?;
+        let mut tags = self.storage.list_tags(namespace).await?;
+
+        if let Some(last) = last {
+            for tag in tags.by_ref() {
+                if tag == last {
+                    break;
+                }
+            }
+        }
+
+        let tags = tags.take(n as usize).collect::<Vec<_>>();
+        let next_last = tags.last().cloned();
+
         let link = next_last
             .map(|next_last| format!("/v2/{}/tags/list?n={}&last={}", namespace, n, next_last));
 

@@ -66,14 +66,14 @@ pub async fn scrub(auto_fix: bool) -> io::Result<()> {
 
 async fn cleanup_uploads(registry: &Guard<Arc<Registry>>, max_age: Duration, auto_fix: bool) {
     info!("Checking for obsolete uploads");
-    let Ok((namespaces, _)) = registry.storage.read_catalog(None).await else {
+    let Ok(namespaces) = registry.storage.list_namespaces().await else {
         error!("Failed to read catalog");
         exit(1);
     };
 
-    for namespace in &namespaces {
+    for namespace in namespaces {
         debug!("Checking namespace {} for obsolete uploads", namespace);
-        let Ok(uploads) = registry.storage.list_uploads(namespace).await else {
+        let Ok(uploads) = registry.storage.list_uploads(&namespace).await else {
             error!("Failed to list uploads for namespace '{}'", namespace);
             continue;
         };
@@ -85,7 +85,7 @@ async fn cleanup_uploads(registry: &Guard<Arc<Registry>>, max_age: Duration, aut
                     uuid, namespace
                 );
                 if auto_fix {
-                    if let Err(err) = registry.storage.delete_upload(namespace, &uuid).await {
+                    if let Err(err) = registry.storage.delete_upload(&namespace, &uuid).await {
                         error!("Failed to delete upload '{}': {}", uuid, err);
                     }
                 }
@@ -102,7 +102,8 @@ async fn cleanup_uploads(registry: &Guard<Arc<Registry>>, max_age: Duration, aut
                             uuid, namespace
                         );
                         if auto_fix {
-                            if let Err(err) = registry.storage.delete_upload(namespace, &uuid).await
+                            if let Err(err) =
+                                registry.storage.delete_upload(&namespace, &uuid).await
                             {
                                 error!("Failed to delete upload '{}': {}", uuid, err);
                             }
@@ -115,7 +116,7 @@ async fn cleanup_uploads(registry: &Guard<Arc<Registry>>, max_age: Duration, aut
                         uuid, namespace
                     );
                     if auto_fix {
-                        if let Err(err) = registry.storage.delete_upload(namespace, &uuid).await {
+                        if let Err(err) = registry.storage.delete_upload(&namespace, &uuid).await {
                             error!("Failed to delete upload '{}': {}", uuid, err);
                         }
                     }
@@ -127,37 +128,40 @@ async fn cleanup_uploads(registry: &Guard<Arc<Registry>>, max_age: Duration, aut
 
 async fn ensure_tags_have_revision(registry: &Registry, auto_fix: bool) {
     info!("Checking tags & revision inconsistencies");
-    let Ok((namespaces, _)) = registry.storage.read_catalog(None).await else {
+    let Ok(namespaces) = registry.storage.list_namespaces().await else {
         error!("Failed to read catalog");
         exit(1);
     };
 
-    for namespace in &namespaces {
+    for namespace in namespaces {
         debug!(
             "Checking namespace {} for tag to revision inconsistencies",
             namespace
         );
-        if let Ok((tags, _)) = registry.storage.list_tags(namespace, None).await {
-            for tag in tags {
-                check_tag_revision(registry, namespace, &tag, auto_fix).await;
-            }
+        let Ok(tags) = registry.storage.list_tags(&namespace).await else {
+            error!("Failed to list tags for namespace '{}'", namespace);
+            continue;
+        };
+
+        for tag in tags {
+            check_tag_revision(registry, &namespace, &tag, auto_fix).await;
         }
     }
 }
 
 async fn ensure_revisions_are_coherent(registry: &Registry, auto_fix: bool) {
     info!("Checking revisions & other links consistency");
-    let Ok((namespaces, _)) = registry.storage.read_catalog(None).await else {
+    let Ok(namespaces) = registry.storage.list_namespaces().await else {
         error!("Failed to read catalog");
         exit(1);
     };
 
-    for namespace in &namespaces {
+    for namespace in namespaces {
         debug!(
             "Checking namespace {} for tag to revision inconsistencies",
             namespace
         );
-        if let Ok(revisions) = registry.storage.list_revisions(namespace).await {
+        if let Ok(revisions) = registry.storage.list_revisions(&namespace).await {
             for revision in revisions {
                 let Ok(content) = registry.storage.read_blob(&revision).await else {
                     error!("Failed to read revision: {}@{}", namespace, revision);
@@ -171,7 +175,7 @@ async fn ensure_revisions_are_coherent(registry: &Registry, auto_fix: bool) {
 
                 check_manifest_layers(
                     registry,
-                    namespace,
+                    &namespace,
                     &revision,
                     &manifest_digests.layers,
                     auto_fix,
@@ -179,7 +183,7 @@ async fn ensure_revisions_are_coherent(registry: &Registry, auto_fix: bool) {
                 .await;
                 check_manifest_config(
                     registry,
-                    namespace,
+                    &namespace,
                     &revision,
                     manifest_digests.config,
                     auto_fix,
@@ -187,7 +191,7 @@ async fn ensure_revisions_are_coherent(registry: &Registry, auto_fix: bool) {
                 .await;
                 check_manifest_subject(
                     registry,
-                    namespace,
+                    &namespace,
                     &revision,
                     manifest_digests.subject,
                     auto_fix,
