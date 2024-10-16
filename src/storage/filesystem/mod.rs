@@ -174,7 +174,7 @@ impl FileSystemStorageEngine {
         namespace: &str,
         digest: &Digest,
         operation: O,
-    ) -> Result<HashSet<LinkReference>, RegistryError>
+    ) -> Result<bool, RegistryError>
     where
         O: FnOnce(&mut HashSet<LinkReference>),
     {
@@ -207,14 +207,19 @@ impl FileSystemStorageEngine {
         };
 
         operation(index);
-        let res = index.clone();
+        if index.is_empty() {
+            reference_index.namespace.remove(namespace);
+        }
+
+        let is_referenced = !reference_index.namespace.is_empty();
 
         debug!("Writing reference count to path: {}", path);
         let content = serde_json::to_string(&reference_index)?;
         fs::write(&path, content).await?;
 
         debug!("Reference index for {} updated", digest);
-        Ok(res)
+
+        Ok(is_referenced)
     }
 
     #[instrument]
@@ -261,14 +266,14 @@ impl FileSystemStorageEngine {
 
         debug!("Unregistering reference: {:?}", reference);
 
-        let references = self
+        let is_referenced = self
             .blob_link_index_update(namespace, digest, |index| {
                 index.remove(reference);
             })
             .await?;
 
-        if references.is_empty() {
-            debug!("Deleting empty reference index for digest: {}", digest);
+        if !is_referenced {
+            debug!("Deleting no longer referenced Blob: {}", digest);
             self.delete_blob(digest).await?;
         }
 
