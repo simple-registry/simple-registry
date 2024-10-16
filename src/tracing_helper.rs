@@ -65,7 +65,10 @@ pub fn setup_tracing() {
             .with(tracing_subscriber::fmt::layer())
             .with(OpenTelemetryLayer::new(tracer))
             .init();
-        info!("Tracing enabled with sampling rate: {}", tracing.sampling_rate);
+        info!(
+            "Tracing enabled with sampling rate: {}",
+            tracing.sampling_rate
+        );
     } else {
         tracing_subscriber::registry()
             .with(tracing_subscriber::filter::LevelFilter::from_level(

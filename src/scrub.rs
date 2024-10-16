@@ -246,9 +246,8 @@ async fn cleanup_orphan_blobs(registry: &Registry, auto_fix: bool) {
         if blob_index.namespace.is_empty() {
             warn!("Orphan blob: {}", blog_digest);
             if auto_fix {
-                if let Err(e) = registry.storage.delete_blob( & blog_digest).await {
-                    error!("Failed to delete blob: {}",
-                    e);
+                if let Err(err) = registry.storage.delete_blob(&blog_digest).await {
+                    error!("Failed to delete blob: {}", err);
                 }
             }
         }
