@@ -206,38 +206,10 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let link = match &reference {
-            Reference::Tag(tag) => LinkReference::Tag(tag.clone()),
-            Reference::Digest(digest) => LinkReference::Digest(digest.clone()),
-        };
-
-        let digest = self.storage.read_link(namespace, &link).await?;
-        let content = self.storage.read_blob(&digest).await?;
-        let manifest_digests = parse_manifest_digests(&content, None)?;
-
-        if let Some(subject_digest) = manifest_digests.subject {
-            let link = LinkReference::Referrer(subject_digest.clone(), digest.clone());
-            self.storage.delete_link(namespace, &link).await?;
-        }
-
-        if let Some(digest) = manifest_digests.config {
-            let link = LinkReference::Config(digest.clone());
-            self.storage.delete_link(namespace, &link).await?;
-        }
-
-        for digest in manifest_digests.layers {
-            let link = LinkReference::Layer(digest.clone());
-            self.storage.delete_link(namespace, &link).await?;
-        }
-
         match reference {
             Reference::Tag(tag) => {
                 let link = LinkReference::Tag(tag);
-
                 self.storage.delete_link(namespace, &link).await?;
-                self.storage
-                    .delete_link(namespace, &LinkReference::Digest(digest))
-                    .await?;
             }
             Reference::Digest(digest) => {
                 let tags = self.storage.list_tags(namespace).await?;
@@ -250,12 +222,29 @@ impl Registry {
                 }
 
                 let link = LinkReference::Digest(digest.clone());
+
+                let digest = self.storage.read_link(namespace, &link).await?;
+                let content = self.storage.read_blob(&digest).await?;
+                let manifest_digests = parse_manifest_digests(&content, None)?;
+
+                if let Some(subject_digest) = manifest_digests.subject {
+                    let link = LinkReference::Referrer(subject_digest.clone(), digest.clone());
+                    self.storage.delete_link(namespace, &link).await?;
+                }
+
+                if let Some(digest) = manifest_digests.config {
+                    let link = LinkReference::Config(digest.clone());
+                    self.storage.delete_link(namespace, &link).await?;
+                }
+
+                for digest in manifest_digests.layers {
+                    let link = LinkReference::Layer(digest.clone());
+                    self.storage.delete_link(namespace, &link).await?;
+                }
+
                 self.storage.delete_link(namespace, &link).await?;
             }
         }
-
-        // TODO: check _referrers, _config, and _layers links are correctly deleted only when ALL
-        // referencing manifests are deleted as well!
 
         Ok(())
     }
