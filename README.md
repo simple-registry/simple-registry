@@ -10,6 +10,7 @@ Goals
 
 > [!WARNING]
 > This project is in early development and is not yet extensively used in production.
+> In particular, concurrent write operations can lead to data corruption.
 >
 > **USE AT YOUR OWN RISK**
 
@@ -115,11 +116,11 @@ The following `request.action` actions are supported:
 
 ## Roadmap
 
+- [ ] (Scalable) Concurrent write operations
 - [ ] CI
   - [ ] Conformance Testing
   - [ ] Publishing
 - [ ] Proper testing strategy
-- [ ] disk storage engine: (scalable) concurrent operations
 - [ ] s3 storage engine: implementation
 - [ ] Pull-through cache
 - [ ] Kubernetes Operator (new project)

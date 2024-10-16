@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use lazy_static::lazy_static;
 use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use std::collections::HashSet;
@@ -9,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::AsyncSeekExt;
-use tokio::sync::Mutex;
 use tracing::{debug, instrument, warn};
 
 use crate::error::RegistryError;
@@ -22,11 +20,6 @@ use crate::storage::{
 };
 
 mod upload_writer;
-
-lazy_static! {
-    // TODO: lock at the filesystem level instead!
-    static ref RC_LOCK: Mutex<()> = Mutex::new(());
-}
 
 #[instrument]
 pub async fn save_hash_state(
@@ -228,7 +221,6 @@ impl FileSystemStorageEngine {
         namespace: &str,
         digest: &Digest,
     ) -> Result<(), RegistryError> {
-        let _ = RC_LOCK.lock().await;
         let _ = self
             .blob_link_index_update(namespace, digest, |_| { /* NO-OP */ })
             .await?;
@@ -242,8 +234,6 @@ impl FileSystemStorageEngine {
         reference: &LinkReference,
         digest: &Digest,
     ) -> Result<(), RegistryError> {
-        let _ = RC_LOCK.lock().await;
-
         debug!("Registering reference: {:?}", reference);
 
         let _ = self
@@ -262,8 +252,6 @@ impl FileSystemStorageEngine {
         reference: &LinkReference,
         digest: &Digest,
     ) -> Result<(), RegistryError> {
-        let _ = RC_LOCK.lock().await;
-
         debug!("Unregistering reference: {:?}", reference);
 
         let is_referenced = self
