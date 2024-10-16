@@ -4,7 +4,7 @@ A fully OCI-compliant container registry that performs reasonably well with clas
 
 Goals
 - Resource efficient: Asynchronous, Streaming operations
-- Secure: mTLS, advanced RBAC support powered by CEL policies
+- Secure: mTLS, authorization policies (powered by CEL)
 - Scalable: light footprint
 - Easy to operate: online garbage collection, auto-reload of configuration and certificates
 
@@ -123,5 +123,7 @@ The following `request.action` actions are supported:
 - [ ] Proper testing strategy
 - [ ] s3 storage engine: implementation
 - [ ] Pull-through cache
+- [ ] Global CEL policies
+- [ ] Auto-delete CEL policies
 - [ ] Kubernetes Operator (new project)
 - [ ] OpenMetrics exporter
