@@ -101,6 +101,7 @@ pub struct RepositoryConfig {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ObservabilityConfig {
+    #[serde(default)]
     pub tracing: Option<TracingConfig>,
 }
 

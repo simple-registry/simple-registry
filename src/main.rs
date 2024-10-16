@@ -13,6 +13,7 @@ use regex::Regex;
 use registry::Registry;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
+use std::fmt::Debug;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -233,8 +234,6 @@ async fn main() -> io::Result<()> {
         )
         .get_matches();
 
-    tracing_helper::setup_tracing();
-
     //
     match matches.subcommand() {
         Some(("scrub", serve_matches)) => {
@@ -248,6 +247,8 @@ async fn main() -> io::Result<()> {
                 .unwrap_or(false);
 
             init_config(config_path, false)?;
+            tracing_helper::setup_tracing();
+
             scrub::scrub(auto_fix).await
         }
         Some(("serve", serve_matches)) => {
@@ -255,7 +256,10 @@ async fn main() -> io::Result<()> {
                 .get_one::<String>("config")
                 .cloned()
                 .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string());
+
             init_config(config_path, true)?;
+            tracing_helper::setup_tracing();
+
             serve().await
         }
         _ => unreachable!(),
@@ -333,9 +337,10 @@ async fn serve_insecure() -> io::Result<()> {
     }
 }
 
+#[instrument]
 fn serve_request<S>(io: TokioIo<S>, identity: ClientIdentity)
 where
-    S: Unpin + AsyncWrite + AsyncRead + Send + 'static,
+    S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
     tokio::task::spawn(async move {
         let identity = identity.clone();

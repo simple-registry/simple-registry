@@ -8,7 +8,7 @@ use opentelemetry_semantic_conventions::{
     SCHEMA_URL,
 };
 use opentelemetry_stdout as stdout;
-use tracing::Level;
+use tracing::{info, Level};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -65,6 +65,7 @@ pub fn setup_tracing() {
             .with(tracing_subscriber::fmt::layer())
             .with(OpenTelemetryLayer::new(tracer))
             .init();
+        info!("Tracing enabled with sampling rate: {}", tracing.sampling_rate);
     } else {
         tracing_subscriber::registry()
             .with(tracing_subscriber::filter::LevelFilter::from_level(
@@ -72,5 +73,6 @@ pub fn setup_tracing() {
             ))
             .with(tracing_subscriber::fmt::layer())
             .init();
+        info!("Tracing disabled");
     }
 }
