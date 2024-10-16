@@ -228,9 +228,12 @@ async fn cleanup_orphan_blobs(registry: &Registry, auto_fix: bool) {
                         continue;
                     };
 
+                    warn!(
+                        "Orphan link: {}@{} -> {:?}",
+                        namespace, blog_digest, link_reference
+                    );
                     if auto_fix {
                         index.remove(&link_reference);
-                        // TODO: save
                     }
                 }
             }
@@ -240,9 +243,13 @@ async fn cleanup_orphan_blobs(registry: &Registry, auto_fix: bool) {
             .namespace
             .retain(|_, references| !references.is_empty());
 
-        if blob_index.namespace.is_empty() && auto_fix {
-            if let Err(e) = registry.storage.delete_blob(&blog_digest).await {
-                error!("Failed to delete blob: {}", e);
+        if blob_index.namespace.is_empty() {
+            warn!("Orphan blob: {}", blog_digest);
+            if auto_fix {
+                if let Err(e) = registry.storage.delete_blob( & blog_digest).await {
+                    error!("Failed to delete blob: {}",
+                    e);
+                }
             }
         }
     }

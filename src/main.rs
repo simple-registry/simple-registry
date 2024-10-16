@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 use arc_swap::ArcSwap;
-use clap::Command;
+use clap::{ArgAction, Command};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -216,7 +216,7 @@ async fn main() -> io::Result<()> {
                     clap::Arg::new("auto-fix")
                         .short('f')
                         .long("auto-fix")
-                        .value_name("AUTO_FIX")
+                        .action(ArgAction::SetTrue)
                         .help("Automatically fix any inconsistencies found"),
                 ),
         )
