@@ -121,25 +121,6 @@ pub fn reload_config() -> Result<(), io::Error> {
     Ok(())
 }
 
-pub fn init_config(config_path: String, with_watcher: bool) -> Result<(), io::Error> {
-    CONFIG_PATH.store(Arc::new(config_path));
-    reload_config()?;
-
-    let mut config_watcher = recommended_watcher(config_watcher_event_handler).map_err(|err| {
-        error!("Failed to create watcher: {}", err);
-        io::Error::new(io::ErrorKind::Other, err)
-    })?;
-
-    if !with_watcher {
-        return Ok(());
-    }
-
-    let config_path = CONFIG_PATH.load();
-    set_watcher_path(&mut config_watcher, config_path.as_str())?;
-
-    Ok(())
-}
-
 pub fn reload_tls() -> Result<(), io::Error> {
     let config_path = CONFIG_PATH.load();
     let config = Config::load(config_path.as_str())?;
@@ -235,6 +216,11 @@ async fn main() -> io::Result<()> {
         )
         .get_matches();
 
+    let mut config_watcher = recommended_watcher(config_watcher_event_handler).map_err(|err| {
+        error!("Failed to create watcher: {}", err);
+        io::Error::new(io::ErrorKind::Other, err)
+    })?;
+
     //
     match matches.subcommand() {
         Some(("scrub", serve_matches)) => {
@@ -247,7 +233,9 @@ async fn main() -> io::Result<()> {
                 .cloned()
                 .unwrap_or(false);
 
-            init_config(config_path, false)?;
+            CONFIG_PATH.store(Arc::new(config_path.clone()));
+            reload_config()?;
+
             tracing_helper::setup_tracing();
 
             scrub::scrub(auto_fix).await
@@ -258,8 +246,12 @@ async fn main() -> io::Result<()> {
                 .cloned()
                 .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string());
 
-            init_config(config_path, true)?;
+
+            CONFIG_PATH.store(Arc::new(config_path.clone()));
+            reload_config()?;
+
             tracing_helper::setup_tracing();
+            set_watcher_path(&mut config_watcher, config_path.as_str())?;
 
             serve().await
         }
@@ -355,16 +347,35 @@ where
                     let start_time = std::time::Instant::now();
                     let method = request.method().clone();
                     let path = request.uri().path().to_string();
+                    let error_level;
 
                     let response = match router(request, identity).await {
-                        Ok(res) => Ok::<Response<RegistryResponseBody>, Infallible>(res),
-                        Err(e) => Ok(e.to_response()),
+                        Ok(res) => {
+                            error_level = false;
+                            Ok::<Response<RegistryResponseBody>, Infallible>(res)
+                        },
+                        Err(e) => {
+                            match e {
+                                RegistryError::InternalServerError(_) => {
+                                    error_level = true;
+                                }
+                                _ => { error_level = false; }
+                            }
+                            Ok(e.to_response())
+                        },
                     };
 
                     let elapsed = start_time.elapsed();
-                    let status = response.as_ref().map(|r| r.status().to_string())
+                    let status = response
+                        .as_ref()
+                        .map(|r| r.status().to_string())
                         .unwrap_or("(UNKNOWN STATUS)".to_string());
-                    info!("{} {:?} {} {}", status, elapsed, method, path);
+
+                    if error_level {
+                        error!("{} {:?} {} {}", status, elapsed, method, path);
+                    } else {
+                        info!("{} {:?} {} {}", status, elapsed, method, path);
+                    }
 
                     response
                 }
