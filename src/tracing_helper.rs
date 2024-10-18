@@ -8,9 +8,9 @@ use opentelemetry_semantic_conventions::{
     SCHEMA_URL,
 };
 use opentelemetry_stdout as stdout;
-use tracing::{info, Level};
+use tracing::{info};
 use tracing_opentelemetry::OpenTelemetryLayer;
-use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 
 fn resource() -> Resource {
@@ -59,9 +59,7 @@ pub fn setup_tracing() {
         let tracer = init_tracer(tracing.sampling_rate);
 
         tracing_subscriber::registry()
-            .with(tracing_subscriber::filter::LevelFilter::from_level(
-                Level::INFO,
-            ))
+            .with(EnvFilter::from_default_env())
             .with(tracing_subscriber::fmt::layer())
             .with(OpenTelemetryLayer::new(tracer))
             .init();
@@ -71,9 +69,7 @@ pub fn setup_tracing() {
         );
     } else {
         tracing_subscriber::registry()
-            .with(tracing_subscriber::filter::LevelFilter::from_level(
-                Level::INFO,
-            ))
+            .with(EnvFilter::from_default_env())
             .with(tracing_subscriber::fmt::layer())
             .init();
         info!("Tracing disabled");
