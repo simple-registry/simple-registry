@@ -632,12 +632,16 @@ impl StorageEngine for FileSystemStorageEngine {
         let valid_link = self
             .read_link(namespace, reference)
             .await
-            .ok()
-            .map(|d| d == digest.clone())
-            .unwrap_or(false);
+            .ok();
 
-        if valid_link {
-            return Ok(());
+        match valid_link {
+            Some(existing_digest) if existing_digest == digest.clone() => {
+                return Ok(())
+            },
+            Some(existing_digest) if existing_digest != digest.clone() => {
+                self.delete_link(namespace, reference).await?;
+            }
+            _ => {}
         }
 
         let path = self.tree.get_link_parent_path(reference, namespace);
