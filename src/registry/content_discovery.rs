@@ -34,7 +34,7 @@ impl Registry {
         n: Option<u32>,
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
-        let n = n.unwrap_or(1);
+        let n = n.unwrap_or(100);
 
         let mut namespaces = self.storage.list_namespaces().await?;
 
