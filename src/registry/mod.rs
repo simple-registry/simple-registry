@@ -3,8 +3,9 @@ use cel_interpreter::Program;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use tracing::{debug, error, instrument};
+use uuid::Uuid;
 
 mod blob;
 mod content_discovery;
@@ -19,6 +20,8 @@ pub use upload::NewUpload;
 
 use crate::config::Config;
 use crate::error::RegistryError;
+use crate::oci::{Digest, Reference};
+use crate::shared_lock::{ReadGuard, SharedRwLock, WriteGuard};
 use crate::storage::{FileSystemStorageEngine, StorageEngine};
 
 lazy_static! {
@@ -27,7 +30,25 @@ lazy_static! {
 }
 
 #[derive(Debug)]
+pub enum LockTarget {
+    Upload(Uuid),
+    Blob(Digest),
+    Manifest(Reference),
+}
+
+impl Display for LockTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Upload(uuid) => write!(f, "upload:{}", uuid),
+            Self::Blob(digest) => write!(f, "blob:{}", digest),
+            Self::Manifest(reference) => write!(f, "manifest:{}", reference),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Registry {
+    shared_lock_manager: SharedRwLock,
     pub storage: Box<dyn StorageEngine>,
     pub credentials: HashMap<String, (String, String)>,
     pub repositories: HashSet<String>,
@@ -39,6 +60,7 @@ impl Registry {
     #[instrument]
     pub fn try_from_config(config: &Config) -> Result<Self, RegistryError> {
         let res = Self {
+            shared_lock_manager: config.build_lock_manager()?,
             storage: config.build_storage_engine(),
             credentials: config.build_credentials(),
             repositories: config.build_repositories_list(),
@@ -112,11 +134,24 @@ impl Registry {
     pub fn get_repository_policies(&self, namespace: &str) -> Option<&Vec<Program>> {
         self.repository_policies.get(namespace)
     }
+
+    #[instrument]
+    pub async fn read_lock(&self, target: LockTarget) -> Result<ReadGuard, RegistryError> {
+        self.shared_lock_manager.read_lock(target.to_string()).await
+    }
+
+    #[instrument]
+    pub async fn write_lock(&self, target: LockTarget) -> Result<WriteGuard, RegistryError> {
+        self.shared_lock_manager
+            .write_lock(target.to_string())
+            .await
+    }
 }
 
 impl Default for Registry {
     fn default() -> Self {
         Self {
+            shared_lock_manager: SharedRwLock::new_in_memory(),
             storage: Box::new(FileSystemStorageEngine::new("./registry".to_string())),
             credentials: Default::default(),
             repositories: Default::default(),

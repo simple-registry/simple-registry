@@ -7,6 +7,10 @@ server_certificate_bundle = "tls.d/server-ca-bundle.pem"
 server_private_key = "tls.d/server-private-key.pem"
 client_ca_bundle   = "tls.d/client-ca-bundle.pem"
 
+#[locking.redis]
+#url = "redis://localhost:6379/0"
+#ttl = 5
+
 [storage.fs]
 root_dir = "./data-origin"
 

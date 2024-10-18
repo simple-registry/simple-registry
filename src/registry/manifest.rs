@@ -4,7 +4,7 @@ use tracing::{debug, error, instrument, warn};
 use crate::error::RegistryError;
 use crate::io_helpers::parse_reader;
 use crate::oci::{Digest, Manifest, Reference};
-use crate::registry::{LinkReference, Registry};
+use crate::registry::{LinkReference, LockTarget, Registry};
 
 pub struct ManifestData {
     pub media_type: Option<String>,
@@ -80,11 +80,18 @@ impl Registry {
     pub async fn head_manifest(
         &self,
         namespace: &str,
-        reference: LinkReference,
+        reference: Reference,
     ) -> Result<ManifestSummary, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let digest = self.storage.read_link(namespace, &reference).await?;
+        let _ = self
+            .read_lock(LockTarget::Manifest(reference.clone()))
+            .await?;
+
+        let link = reference.into();
+        let digest = self.storage.read_link(namespace, &link).await?;
+
+        let _ = self.read_lock(LockTarget::Blob(digest.clone())).await?;
 
         let reader = self
             .storage
@@ -112,11 +119,18 @@ impl Registry {
     pub async fn get_manifest(
         &self,
         namespace: &str,
-        reference: LinkReference,
+        reference: Reference,
     ) -> Result<ManifestData, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let digest = self.storage.read_link(namespace, &reference).await?;
+        let _ = self
+            .read_lock(LockTarget::Manifest(reference.clone()))
+            .await?;
+
+        let link = reference.into();
+        let digest = self.storage.read_link(namespace, &link).await?;
+
+        let _ = self.read_lock(LockTarget::Blob(digest.clone())).await?;
 
         let mut reader = self.storage.build_blob_reader(&digest, None).await?;
 
@@ -148,6 +162,10 @@ impl Registry {
         self.validate_namespace(namespace)?;
 
         let manifest_digests = parse_manifest_digests(body, Some(content_type))?;
+
+        let _ = self
+            .write_lock(LockTarget::Manifest(reference.clone()))
+            .await?;
 
         let digest = self.storage.create_blob(body).await?;
 
@@ -205,6 +223,10 @@ impl Registry {
         reference: Reference,
     ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
+
+        let _ = self
+            .write_lock(LockTarget::Manifest(reference.clone()))
+            .await?;
 
         match reference {
             Reference::Tag(tag) => {

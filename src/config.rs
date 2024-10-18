@@ -1,4 +1,5 @@
 use crate::error::RegistryError;
+use crate::shared_lock::SharedRwLock;
 use crate::storage::{FileSystemStorageEngine, StorageEngine};
 use crate::tls::{build_root_store, load_certificate_bundle, load_private_key};
 use cel_interpreter::Program;
@@ -13,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, io};
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 lazy_static! {
     // This regex is used to validate repository names.
@@ -25,6 +26,7 @@ lazy_static! {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
+    pub locking: Option<LockingConfig>,
     pub storage: StorageConfig,
     #[serde(default)]
     pub identity: HashMap<String, IdentityConfig>, // hashmap of identity_id <-> identity_config (username, password)
@@ -43,6 +45,24 @@ pub struct ServerConfig {
     #[serde(default = "ServerConfig::default_query_timeout_grace_period")]
     pub query_timeout_grace_period: u64,
     pub tls: Option<ServerTlsConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct LockingConfig {
+    #[serde(flatten)]
+    pub backend: LockingBackendConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub enum LockingBackendConfig {
+    #[serde(rename = "redis")]
+    Redis(RedisLockingConfig),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RedisLockingConfig {
+    pub url: String,
+    pub ttl: usize,
 }
 
 impl ServerConfig {
@@ -170,6 +190,21 @@ impl Config {
         };
 
         Ok(Some(TlsAcceptor::from(Arc::new(tls_config))))
+    }
+
+    pub fn build_lock_manager(&self) -> Result<SharedRwLock, RegistryError> {
+        match &self.locking {
+            Some(LockingConfig { backend }) => match backend {
+                LockingBackendConfig::Redis(redis_config) => {
+                    info!("Building Redis lock manager");
+                    SharedRwLock::new_redis(&redis_config.url, redis_config.ttl)
+                }
+            },
+            None => {
+                info!("Building in-memory lock manager");
+                Ok(SharedRwLock::new_in_memory())
+            }
+        }
     }
 
     pub fn build_storage_engine(&self) -> Box<dyn StorageEngine> {

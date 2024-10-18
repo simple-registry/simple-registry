@@ -1,6 +1,6 @@
 use crate::error::RegistryError;
-use crate::oci::{Descriptor, Digest};
-use crate::registry::Registry;
+use crate::oci::{Descriptor, Digest, Reference};
+use crate::registry::{LockTarget, Registry};
 use tracing::instrument;
 
 impl Registry {
@@ -12,6 +12,10 @@ impl Registry {
         artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, RegistryError> {
         self.validate_namespace(namespace)?;
+
+        let _ = self
+            .read_lock(LockTarget::Manifest(Reference::Digest(digest.clone())))
+            .await?;
 
         match self
             .storage

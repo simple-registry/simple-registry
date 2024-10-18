@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::error::RegistryError;
 use crate::oci::Digest;
-use crate::registry::Registry;
+use crate::registry::{LockTarget, Registry};
 
 pub enum NewUpload {
     ExistingBlob(Digest),
@@ -46,6 +46,8 @@ impl Registry {
         body: Incoming,
     ) -> Result<u64, RegistryError> {
         self.validate_namespace(namespace)?;
+
+        let _ = self.write_lock(LockTarget::Upload(session_id)).await?;
 
         let session_id = session_id.to_string();
         if let Some(start_offset) = start_offset {
@@ -88,13 +90,16 @@ impl Registry {
     pub async fn complete_upload(
         &self,
         namespace: &str,
-        uuid: Uuid,
+        session_id: Uuid,
         digest: Digest,
         body: Incoming,
     ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let uuid = uuid.to_string();
+        let _ = self.write_lock(LockTarget::Upload(session_id)).await?;
+        let _ = self.write_lock(LockTarget::Blob(digest.clone())).await?;
+
+        let uuid = session_id.to_string();
         let mut writer = self
             .storage
             .build_upload_writer(namespace, &uuid, None)
@@ -124,10 +129,16 @@ impl Registry {
     }
 
     #[instrument]
-    pub async fn delete_upload(&self, namespace: &str, uuid: Uuid) -> Result<(), RegistryError> {
+    pub async fn delete_upload(
+        &self,
+        namespace: &str,
+        session_id: Uuid,
+    ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let uuid = uuid.to_string();
+        let _ = self.write_lock(LockTarget::Upload(session_id)).await?;
+
+        let uuid = session_id.to_string();
         self.storage.delete_upload(namespace, &uuid).await
     }
 
@@ -135,11 +146,13 @@ impl Registry {
     pub async fn get_upload_range_max(
         &self,
         namespace: &str,
-        uuid: Uuid,
+        session_id: Uuid,
     ) -> Result<u64, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let uuid = uuid.to_string();
+        let _ = self.read_lock(LockTarget::Upload(session_id)).await?;
+
+        let uuid = session_id.to_string();
         let summary = self.storage.read_upload_summary(namespace, &uuid).await?;
 
         if summary.size < 1 {

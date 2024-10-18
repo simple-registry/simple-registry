@@ -30,6 +30,7 @@ opentelemetry-otlp = "0.26.0"
 opentelemetry_sdk = { version = "0.26.0", features = ["rt-tokio"] }
 opentelemetry-semantic-conventions = { version = "0.26.0", features = ["semconv_experimental"] }
 opentelemetry-stdout = "0.26.0"
+redis = { version = "0.27.4", features = ["tokio-comp"] }
 regex = "1.11.0"
 rustls = { version = "0.23.14", features = ["aws-lc-rs"] }
 rustls-pki-types = "1.9.0"

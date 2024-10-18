@@ -1,6 +1,6 @@
 use crate::error::RegistryError;
 use crate::oci::Digest;
-use crate::registry::Registry;
+use crate::registry::{LockTarget, Registry};
 use crate::storage::StorageEngineReader;
 use tokio::io::{AsyncRead, AsyncSeek};
 use tracing::{instrument, warn};
@@ -70,7 +70,14 @@ impl Registry {
     pub async fn delete_blob(&self, namespace: &str, digest: Digest) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        self.storage.delete_blob(&digest).await?;
+        let _ = self.write_lock(LockTarget::Blob(digest.clone())).await?;
+
+        let blob_index = self.storage.read_blob_index(&digest).await?;
+        if !blob_index.namespace.contains_key(namespace) {
+            return Err(RegistryError::BlobUnknown);
+        }
+
+        self.storage.delete_blob(&digest).await?; // XXX: delete only for namespace, not globally!
 
         Ok(())
     }

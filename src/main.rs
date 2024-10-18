@@ -33,6 +33,7 @@ mod oci;
 mod policy;
 mod registry;
 mod scrub;
+mod shared_lock;
 mod storage;
 mod tls;
 mod tracing_helper;
@@ -515,7 +516,7 @@ async fn handle_get_manifest(
     )?;
 
     let manifest = registry
-        .get_manifest(&parameters.name, parameters.reference.into())
+        .get_manifest(&parameters.name, parameters.reference)
         .await?;
 
     let res = if let Some(content_type) = manifest.media_type {
@@ -545,7 +546,7 @@ async fn handle_head_manifest(
     )?;
 
     let manifest = registry
-        .head_manifest(&parameters.name, parameters.reference.into())
+        .head_manifest(&parameters.name, parameters.reference)
         .await?;
 
     let res = if let Some(media_type) = manifest.media_type {

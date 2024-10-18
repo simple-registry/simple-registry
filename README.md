@@ -10,7 +10,7 @@ Goals
 
 > [!WARNING]
 > This project is in early development and is not yet extensively used in production.
-> In particular, concurrent write operations can lead to data corruption.
+> In particular, blob delete operations can lead to data corruption
 >
 > **USE AT YOUR OWN RISK**
 
@@ -33,6 +33,7 @@ However, certain options cannot be changed during runtime:
 - `server.tls.server_private_key`
 - `server.tls.client_ca_bundle`
 - `observability.tracing.sampling_rate`
+- distributed locking backend
 
 Although the TLS file paths themselves cannot be added, removed, or modified at runtime, the corresponding files are
 automatically reloaded on changes if they are valid.
@@ -51,6 +52,17 @@ If not provided, the server will run on top of an _insecure_ plaintext socket.
 - `server_certificate_bundle` (string): The path to the server certificate bundle.
 - `server_private_key` (string): The path to the server private key.
 - `client_ca_bundle` (optional string): The path to the client CA bundle for mTLS
+
+### Distributed Locking (`locking`)
+
+Distribution locking is used to prevent concurrent operations that could lead to data corruption.
+If no configuration is provided, an in-memory locking mechanism is used, which is not suitable for
+multi-replica deployments.
+
+#### Redis Locking (`locking.redis`)
+
+- `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
+- `prefix` (string): The prefix for the keys in Redis
 
 ### Storage (`storage`)
 
@@ -116,7 +128,6 @@ The following `request.action` actions are supported:
 
 ## Roadmap
 
-- [ ] (Scalable) Concurrent write operations
 - [ ] CI
   - [ ] Conformance Testing
   - [ ] Publishing
