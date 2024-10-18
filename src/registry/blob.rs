@@ -28,6 +28,8 @@ impl Registry {
     ) -> Result<BlobSummary, RegistryError> {
         self.validate_namespace(namespace)?;
 
+        let _ = self.read_lock(LockTarget::Blob(digest.clone())).await?;
+
         let size = self.storage.get_blob_size(&digest).await?;
 
         Ok(BlobSummary { digest, size })
@@ -53,6 +55,8 @@ impl Registry {
         } else {
             None
         };
+
+        let _ = self.read_lock(LockTarget::Blob(digest.clone())).await?;
 
         let reader = match self.storage.build_blob_reader(digest, start).await {
             Ok(reader) => reader,
