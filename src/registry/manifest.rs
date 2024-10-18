@@ -151,7 +151,7 @@ impl Registry {
         })
     }
 
-    #[instrument]
+    #[instrument(skip(body))]
     pub async fn put_manifest(
         &self,
         namespace: &str,

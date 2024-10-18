@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use cel::{CELIdentity, CELIdentityCertificate, CELRequest};
 use cel_interpreter::{Context, Program, Value};
 use tracing::{debug, error, instrument};
@@ -10,11 +11,22 @@ use crate::error::RegistryError;
 use crate::registry::Registry;
 pub use client_action::ClientAction;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct ClientIdentity {
     pub cert_organizations: Vec<String>,
     pub cert_common_name: Vec<String>,
     pub credentials: Option<(String, String)>,
+}
+
+impl Debug for ClientIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let credentials = self.credentials.clone().map(|(username, _)| username.clone());
+        f.debug_struct("ClientIdentity")
+            .field("cert_organizations", &self.cert_organizations.len())
+            .field("cert_common_name", &self.cert_common_name.len())
+            .field("credentials", &credentials)
+            .finish()
+    }
 }
 
 impl ClientIdentity {
@@ -22,7 +34,7 @@ impl ClientIdentity {
         ClientIdentity::default()
     }
 
-    #[instrument]
+    #[instrument(skip(cert))]
     pub fn from_cert(cert: &X509Certificate) -> Result<ClientIdentity, RegistryError> {
         let subject = cert.subject();
         let cert_organizations = subject
@@ -55,7 +67,7 @@ impl ClientIdentity {
         self.credentials = Some((username, password));
     }
 
-    #[instrument]
+    #[instrument(skip(registry))]
     pub fn can_do(&self, registry: &Registry, action: ClientAction) -> Result<(), RegistryError> {
         let identity_id = registry.validate_credentials(&self.credentials)?;
 
@@ -141,7 +153,7 @@ impl ClientIdentity {
         Ok(context)
     }
 
-    #[instrument]
+    #[instrument(skip(policies))]
     fn check_policies(
         &self,
         action: ClientAction,

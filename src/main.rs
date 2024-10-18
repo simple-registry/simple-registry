@@ -348,14 +348,25 @@ where
 
         let conn = http1::Builder::new().serve_connection(
             io,
-            service_fn(move |req| {
+            service_fn(move |request| {
                 let identity = identity.clone();
 
                 async move {
-                    match router(req, identity).await {
+                    let start_time = std::time::Instant::now();
+                    let method = request.method().clone();
+                    let path = request.uri().path().to_string();
+
+                    let response = match router(request, identity).await {
                         Ok(res) => Ok::<Response<RegistryResponseBody>, Infallible>(res),
                         Err(e) => Ok(e.to_response()),
-                    }
+                    };
+
+                    let elapsed = start_time.elapsed();
+                    let status = response.as_ref().map(|r| r.status().to_string())
+                        .unwrap_or("(UNKNOWN STATUS)".to_string());
+                    info!("{} {:?} {} {}", status, elapsed, method, path);
+
+                    response
                 }
             }),
         );
@@ -385,15 +396,15 @@ where
     });
 }
 
-#[instrument]
+#[instrument(skip(request))]
 async fn router(
-    req: Request<Incoming>,
+    request: Request<Incoming>,
     mut identity: ClientIdentity,
 ) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let method = req.method().clone();
-    let path = req.uri().path().to_string();
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
 
-    let basic_auth_credentials = req
+    let basic_auth_credentials = request
         .headers()
         .get("Authorization")
         .and_then(parse_authorization_header);
@@ -414,7 +425,7 @@ async fn router(
     {
         if method == Method::POST {
             info!("Start upload: {}", path);
-            return handle_start_upload(req, identity, parameters).await;
+            return handle_start_upload(request, identity, parameters).await;
         }
         return Err(RegistryError::Unsupported);
     } else if let Some(parameters) = parse_regex::<UploadParameters>(&path, &ROUTE_UPLOAD_REGEX) {
@@ -424,11 +435,11 @@ async fn router(
         }
         if method == Method::PATCH {
             info!("Patch upload: {}", path);
-            return handle_patch_upload(req, identity, parameters).await;
+            return handle_patch_upload(request, identity, parameters).await;
         }
         if method == Method::PUT {
             info!("Put upload: {}", path);
-            return handle_put_upload(req, identity, parameters).await;
+            return handle_put_upload(request, identity, parameters).await;
         }
         if method == Method::DELETE {
             info!("Delete upload: {}", path);
@@ -438,7 +449,7 @@ async fn router(
     } else if let Some(parameters) = parse_regex::<BlobParameters>(&path, &ROUTE_BLOB_REGEX) {
         if method == Method::GET {
             info!("Get blob: {}", path);
-            return handle_get_blob(req, identity, parameters).await;
+            return handle_get_blob(request, identity, parameters).await;
         }
         if method == Method::HEAD {
             info!("Head blob: {}", path);
@@ -461,7 +472,7 @@ async fn router(
         }
         if method == Method::PUT {
             info!("Put manifest: {}", path);
-            return handle_put_manifest(req, identity, parameters).await;
+            return handle_put_manifest(request, identity, parameters).await;
         }
         if method == Method::DELETE {
             info!("Delete manifest: {}", path);
@@ -473,17 +484,17 @@ async fn router(
     {
         if method == Method::GET {
             info!("Get referrers: {}", path);
-            return handle_get_referrers(req, identity, parameters).await;
+            return handle_get_referrers(request, identity, parameters).await;
         }
     } else if ROUTE_CATALOG_REGEX.is_match(&path) {
         if method == Method::GET {
             info!("List catalog: {}", path);
-            return handle_list_catalog(req, identity).await;
+            return handle_list_catalog(request, identity).await;
         }
     } else if let Some(parameters) = parse_regex::<TagsParameters>(&path, &ROUTE_LIST_TAGS_REGEX) {
         if method == Method::GET {
             info!("List tags: {}", path);
-            return handle_list_tags(req, identity, parameters).await;
+            return handle_list_tags(request, identity, parameters).await;
         }
         return Err(RegistryError::Unsupported);
     }
@@ -567,9 +578,9 @@ async fn handle_head_manifest(
     Ok(res)
 }
 
-#[instrument]
+#[instrument(skip(request))]
 async fn handle_get_blob(
-    req: Request<Incoming>,
+    request: Request<Incoming>,
     identity: ClientIdentity,
     parameters: BlobParameters,
 ) -> Result<Response<RegistryResponseBody>, RegistryError> {
@@ -578,7 +589,7 @@ async fn handle_get_blob(
         ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()),
     )?;
 
-    let range = req
+    let range = request
         .headers()
         .get("range")
         .map(parse_range_header)
@@ -640,7 +651,7 @@ async fn handle_head_blob(
     Ok(res)
 }
 
-#[instrument]
+#[instrument(skip(request))]
 async fn handle_start_upload(
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -676,7 +687,7 @@ async fn handle_start_upload(
     Ok(res)
 }
 
-#[instrument]
+#[instrument(skip(request))]
 async fn handle_patch_upload(
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -711,7 +722,7 @@ async fn handle_patch_upload(
     Ok(res)
 }
 
-#[instrument]
+#[instrument(skip(request))]
 async fn handle_put_upload(
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -806,7 +817,7 @@ async fn handle_delete_blob(
     Ok(res)
 }
 
-#[instrument]
+#[instrument(skip(request))]
 async fn handle_put_manifest(
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -887,7 +898,7 @@ async fn handle_delete_manifest(
     Ok(res)
 }
 
-#[instrument]
+#[instrument(skip(request))]
 async fn handle_get_referrers(
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -935,7 +946,7 @@ async fn handle_get_referrers(
     Ok(res)
 }
 
-#[instrument]
+#[instrument(skip(request))]
 async fn handle_list_catalog(
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -963,7 +974,7 @@ async fn handle_list_catalog(
     paginated_response(catalog, link)
 }
 
-#[instrument]
+#[instrument(skip(request))]
 async fn handle_list_tags(
     request: Request<Incoming>,
     identity: ClientIdentity,

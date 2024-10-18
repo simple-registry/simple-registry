@@ -37,7 +37,7 @@ impl Registry {
         Ok(NewUpload::Session(location, session_uuid))
     }
 
-    #[instrument]
+    #[instrument(skip(body))]
     pub async fn patch_upload(
         &self,
         namespace: &str,
@@ -86,7 +86,7 @@ impl Registry {
         Ok(summary.size - 1)
     }
 
-    #[instrument]
+    #[instrument(skip(body))]
     pub async fn complete_upload(
         &self,
         namespace: &str,

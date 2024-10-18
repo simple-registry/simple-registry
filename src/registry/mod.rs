@@ -46,7 +46,6 @@ impl Display for LockTarget {
     }
 }
 
-#[derive(Debug)]
 pub struct Registry {
     shared_lock_manager: SharedRwLock,
     pub storage: Box<dyn StorageEngine>,
@@ -56,8 +55,21 @@ pub struct Registry {
     pub repository_policies: HashMap<String, Vec<Program>>,
 }
 
+impl Debug for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registry")
+            .field("shared_lock_manager", &"SharedRwLock")
+            .field("storage", &self.storage)
+            .field("credentials", &self.credentials.len())
+            .field("repositories", &self.repositories.len())
+            .field("repository_default_allow", &self.repository_default_allow.len())
+            .field("repository_policies", &self.repository_policies.len())
+            .finish()
+    }
+}
+
 impl Registry {
-    #[instrument]
+    #[instrument(skip(config))]
     pub fn try_from_config(config: &Config) -> Result<Self, RegistryError> {
         let res = Self {
             shared_lock_manager: config.build_lock_manager()?,
@@ -80,7 +92,7 @@ impl Registry {
         }
     }
 
-    #[instrument]
+    #[instrument(skip(credentials))]
     pub fn validate_credentials(
         &self,
         credentials: &Option<(String, String)>,

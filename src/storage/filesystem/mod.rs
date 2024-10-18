@@ -80,7 +80,7 @@ impl FileSystemStorageEngine {
         }
     }
 
-    #[instrument]
+    #[instrument(skip(repositories))]
     async fn collect_repositories(&self, base_path: &Path, repositories: &mut HashSet<String>) {
         let mut path_stack: Vec<PathBuf> = vec![base_path.to_path_buf()];
 
@@ -534,7 +534,7 @@ impl StorageEngine for FileSystemStorageEngine {
         self.delete_empty_parent_dirs(&path).await
     }
 
-    #[instrument]
+    #[instrument(skip(content))]
     async fn create_blob(&self, content: &[u8]) -> Result<Digest, RegistryError> {
         let mut hasher = Sha256::new();
         hasher.update(content);
