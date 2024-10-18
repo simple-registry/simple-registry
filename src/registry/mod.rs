@@ -62,7 +62,10 @@ impl Debug for Registry {
             .field("storage", &self.storage)
             .field("credentials", &self.credentials.len())
             .field("repositories", &self.repositories.len())
-            .field("repository_default_allow", &self.repository_default_allow.len())
+            .field(
+                "repository_default_allow",
+                &self.repository_default_allow.len(),
+            )
             .field("repository_policies", &self.repository_policies.len())
             .finish()
     }

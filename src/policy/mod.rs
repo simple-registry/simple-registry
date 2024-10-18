@@ -1,6 +1,6 @@
-use std::fmt::Debug;
 use cel::{CELIdentity, CELIdentityCertificate, CELRequest};
 use cel_interpreter::{Context, Program, Value};
+use std::fmt::Debug;
 use tracing::{debug, error, instrument};
 use x509_parser::prelude::X509Certificate;
 
@@ -20,7 +20,10 @@ pub struct ClientIdentity {
 
 impl Debug for ClientIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let credentials = self.credentials.clone().map(|(username, _)| username.clone());
+        let credentials = self
+            .credentials
+            .clone()
+            .map(|(username, _)| username.clone());
         f.debug_struct("ClientIdentity")
             .field("cert_organizations", &self.cert_organizations.len())
             .field("cert_common_name", &self.cert_common_name.len())
