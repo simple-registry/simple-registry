@@ -1,6 +1,8 @@
 use crate::RegistryResponseBody;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
+use serde::Serialize;
+use serde_json::json;
 use sha2::digest::crypto_common::hazmat;
 use std::cmp::PartialEq;
 use std::fmt::Display;
@@ -30,7 +32,10 @@ pub enum RegistryError {
 }
 
 impl RegistryError {
-    pub fn to_response(&self) -> Response<RegistryResponseBody> {
+    pub fn to_response_raw<T>(&self, details: T) -> Response<RegistryResponseBody>
+    where
+        T: Serialize,
+    {
         let (status, code) = match self {
             RegistryError::BlobUnknown => (StatusCode::NOT_FOUND, "BLOB_UNKNOWN"),
             RegistryError::BlobUploadInvalid => (StatusCode::BAD_REQUEST, "BLOB_UPLOAD_INVALID"),
@@ -61,7 +66,7 @@ impl RegistryError {
             "errors": [{
                 "code": code,
                 "message": self.to_string(),
-                "detail": null
+                "detail": details
             }]
         });
 
@@ -85,6 +90,24 @@ impl RegistryError {
                 .header("Content-Type", "application/json")
                 .body(RegistryResponseBody::Fixed(Full::new(body)))
                 .unwrap(),
+        }
+    }
+
+    pub fn to_response(&self) -> Response<RegistryResponseBody> {
+        self.to_response_raw::<Option<String>>(None)
+    }
+
+    pub fn to_response_with_span_id(
+        &self,
+        span_id: Option<tracing::Id>,
+    ) -> Response<RegistryResponseBody> {
+        let span_id = span_id.as_ref().map(|id| format!("{:x}", id.into_u64()));
+        if let Some(span_id) = span_id {
+            self.to_response_raw(json!({
+                "span_id": span_id
+            }))
+        } else {
+            self.to_response()
         }
     }
 }

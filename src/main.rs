@@ -340,46 +340,7 @@ where
 
         let conn = http1::Builder::new().serve_connection(
             io,
-            service_fn(move |request| {
-                let identity = identity.clone();
-
-                async move {
-                    let start_time = std::time::Instant::now();
-                    let method = request.method().clone();
-                    let path = request.uri().path().to_string();
-                    let error_level;
-
-                    let response = match router(request, identity).await {
-                        Ok(res) => {
-                            error_level = false;
-                            Ok::<Response<RegistryResponseBody>, Infallible>(res)
-                        },
-                        Err(e) => {
-                            match e {
-                                RegistryError::InternalServerError(_) => {
-                                    error_level = true;
-                                }
-                                _ => { error_level = false; }
-                            }
-                            Ok(e.to_response())
-                        },
-                    };
-
-                    let elapsed = start_time.elapsed();
-                    let status = response
-                        .as_ref()
-                        .map(|r| r.status().to_string())
-                        .unwrap_or("(UNKNOWN STATUS)".to_string());
-
-                    if error_level {
-                        error!("{} {:?} {} {}", status, elapsed, method, path);
-                    } else {
-                        info!("{} {:?} {} {}", status, elapsed, method, path);
-                    }
-
-                    response
-                }
-            }),
+            service_fn(move |request| handle_incoming_request(request, identity.clone())),
         );
         pin!(conn);
 
@@ -405,6 +366,57 @@ where
             }
         }
     });
+}
+
+#[instrument(skip(request))]
+async fn handle_incoming_request(
+    request: Request<Incoming>,
+    identity: ClientIdentity,
+) -> Result<Response<RegistryResponseBody>, Infallible> {
+    let start_time = std::time::Instant::now();
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let error_level;
+
+    let response = match router(request, identity).await {
+        Ok(res) => {
+            error_level = false;
+            Ok::<Response<RegistryResponseBody>, Infallible>(res)
+        }
+        Err(e) => {
+            match e {
+                RegistryError::InternalServerError(_) => {
+                    error_level = true;
+                }
+                _ => {
+                    error_level = false;
+                }
+            }
+
+            error!("Error: {:?}", e);
+            Ok(e.to_response_with_span_id(tracing::Span::current().id()))
+        }
+    };
+
+    let elapsed = start_time.elapsed();
+    let status = response
+        .as_ref()
+        .map(|r| r.status().to_string())
+        .unwrap_or("(UNKNOWN STATUS)".to_string());
+
+    let span_id = tracing::Span::current()
+        .id()
+        .as_ref()
+        .map(|id| format!("{:x}", id.into_u64()))
+        .unwrap_or_default();
+
+    if error_level {
+        error!("{}, {} {:?} {} {}", span_id, status, elapsed, method, path);
+    } else {
+        info!("{}, {} {:?} {} {}", span_id, status, elapsed, method, path);
+    }
+
+    response
 }
 
 #[instrument(skip(request))]
