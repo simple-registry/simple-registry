@@ -8,10 +8,10 @@ use opentelemetry_semantic_conventions::{
     SCHEMA_URL,
 };
 use opentelemetry_stdout as stdout;
-use tracing::{info};
+use tracing::info;
 use tracing_opentelemetry::OpenTelemetryLayer;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 
 fn resource() -> Resource {
     Resource::from_schema_url(

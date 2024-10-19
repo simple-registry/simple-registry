@@ -637,15 +637,8 @@ impl StorageEngine for FileSystemStorageEngine {
             namespace, reference
         );
 
-        let valid_link = self
-            .read_link(namespace, reference)
-            .await
-            .ok();
-
-        match valid_link {
-            Some(existing_digest) if existing_digest == digest.clone() => {
-                return Ok(())
-            },
+        match self.read_link(namespace, reference).await.ok() {
+            Some(existing_digest) if existing_digest == digest.clone() => return Ok(()),
             Some(existing_digest) if existing_digest != digest.clone() => {
                 self.delete_link(namespace, reference).await?;
             }
