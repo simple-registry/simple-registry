@@ -13,7 +13,7 @@ impl Registry {
     ) -> Result<Vec<Descriptor>, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _ = self
+        let _guard = self
             .read_lock(LockTarget::Manifest(Reference::Digest(digest.clone())))
             .await?;
 

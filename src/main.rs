@@ -246,7 +246,6 @@ async fn main() -> io::Result<()> {
                 .cloned()
                 .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string());
 
-
             CONFIG_PATH.store(Arc::new(config_path.clone()));
             reload_config()?;
 

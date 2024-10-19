@@ -28,7 +28,7 @@ impl Registry {
     ) -> Result<BlobSummary, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _ = self.read_lock(LockTarget::Blob(digest.clone())).await?;
+        let _guard = self.read_lock(LockTarget::Blob(digest.clone())).await?;
 
         let size = self.storage.get_blob_size(&digest).await?;
 
@@ -56,7 +56,7 @@ impl Registry {
             None
         };
 
-        let _ = self.read_lock(LockTarget::Blob(digest.clone())).await?;
+        let _guard = self.read_lock(LockTarget::Blob(digest.clone())).await?;
 
         let reader = match self.storage.build_blob_reader(digest, start).await {
             Ok(reader) => reader,
@@ -74,7 +74,7 @@ impl Registry {
     pub async fn delete_blob(&self, namespace: &str, digest: Digest) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _ = self.write_lock(LockTarget::Blob(digest.clone())).await?;
+        let _guard = self.write_lock(LockTarget::Blob(digest.clone())).await?;
 
         let blob_index = self.storage.read_blob_index(&digest).await?;
         if !blob_index.namespace.contains_key(namespace) {

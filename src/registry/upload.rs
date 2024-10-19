@@ -1,3 +1,6 @@
+use crate::error::RegistryError;
+use crate::oci::Digest;
+use crate::registry::{LockTarget, Registry};
 use bytes::Buf;
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
@@ -5,10 +8,6 @@ use hyper::body::Incoming;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, instrument};
 use uuid::Uuid;
-
-use crate::error::RegistryError;
-use crate::oci::Digest;
-use crate::registry::{LockTarget, Registry};
 
 pub enum NewUpload {
     ExistingBlob(Digest),
@@ -47,7 +46,7 @@ impl Registry {
     ) -> Result<u64, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _ = self.write_lock(LockTarget::Upload(session_id)).await?;
+        let _guard = self.write_lock(LockTarget::Upload(session_id)).await?;
 
         let session_id = session_id.to_string();
         if let Some(start_offset) = start_offset {
@@ -96,8 +95,8 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _ = self.write_lock(LockTarget::Upload(session_id)).await?;
-        let _ = self.write_lock(LockTarget::Blob(digest.clone())).await?;
+        let _guard = self.write_lock(LockTarget::Upload(session_id)).await?;
+        let _guard = self.write_lock(LockTarget::Blob(digest.clone())).await?;
 
         let uuid = session_id.to_string();
         let mut writer = self
@@ -136,7 +135,7 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _ = self.write_lock(LockTarget::Upload(session_id)).await?;
+        let _guard = self.write_lock(LockTarget::Upload(session_id)).await?;
 
         let uuid = session_id.to_string();
         self.storage.delete_upload(namespace, &uuid).await
@@ -150,7 +149,7 @@ impl Registry {
     ) -> Result<u64, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _ = self.read_lock(LockTarget::Upload(session_id)).await?;
+        let _guard = self.read_lock(LockTarget::Upload(session_id)).await?;
 
         let uuid = session_id.to_string();
         let summary = self.storage.read_upload_summary(namespace, &uuid).await?;

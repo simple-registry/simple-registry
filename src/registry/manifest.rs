@@ -84,14 +84,14 @@ impl Registry {
     ) -> Result<ManifestSummary, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _ = self
+        let _guard = self
             .read_lock(LockTarget::Manifest(reference.clone()))
             .await?;
 
         let link = reference.into();
         let digest = self.storage.read_link(namespace, &link).await?;
 
-        let _ = self.read_lock(LockTarget::Blob(digest.clone())).await?;
+        let _guard = self.read_lock(LockTarget::Blob(digest.clone())).await?;
 
         let reader = self
             .storage
@@ -123,14 +123,14 @@ impl Registry {
     ) -> Result<ManifestData, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _ = self
+        let _guard = self
             .read_lock(LockTarget::Manifest(reference.clone()))
             .await?;
 
         let link = reference.into();
         let digest = self.storage.read_link(namespace, &link).await?;
 
-        let _ = self.read_lock(LockTarget::Blob(digest.clone())).await?;
+        let _guard = self.read_lock(LockTarget::Blob(digest.clone())).await?;
 
         let mut reader = self.storage.build_blob_reader(&digest, None).await?;
 
@@ -163,7 +163,7 @@ impl Registry {
 
         let manifest_digests = parse_manifest_digests(body, Some(content_type))?;
 
-        let _ = self
+        let _guard = self
             .write_lock(LockTarget::Manifest(reference.clone()))
             .await?;
 
@@ -224,7 +224,7 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _ = self
+        let _guard = self
             .write_lock(LockTarget::Manifest(reference.clone()))
             .await?;
 
