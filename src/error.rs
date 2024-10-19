@@ -6,7 +6,7 @@ use serde_json::json;
 use sha2::digest::crypto_common::hazmat;
 use std::cmp::PartialEq;
 use std::fmt::Display;
-use tracing::{debug, error};
+use tracing::debug;
 
 #[derive(Debug, PartialEq)]
 pub enum RegistryError {
@@ -159,28 +159,28 @@ impl From<std::io::Error> for RegistryError {
 
 impl From<regex::Error> for RegistryError {
     fn from(error: regex::Error) -> Self {
-        error!("Regex error: {:?}", error);
+        debug!("Regex error: {:?}", error);
         RegistryError::InternalServerError(Some("Regex error during operations".to_string()))
     }
 }
 
 impl From<hyper::Error> for RegistryError {
     fn from(error: hyper::Error) -> Self {
-        error!("Hyper error: {:?}", error);
+        debug!("Hyper error: {:?}", error);
         RegistryError::InternalServerError(Some("HTTP error during operations".to_string()))
     }
 }
 
 impl From<hyper::http::Error> for RegistryError {
     fn from(error: hyper::http::Error) -> Self {
-        error!("Hyper HTTP error: {:?}", error);
+        debug!("Hyper HTTP error: {:?}", error);
         RegistryError::InternalServerError(Some("HTTP error during operations".to_string()))
     }
 }
 
 impl From<serde_json::Error> for RegistryError {
     fn from(error: serde_json::Error) -> Self {
-        error!("Serde JSON error: {:?}", error);
+        debug!("Serde JSON error: {:?}", error);
         RegistryError::InternalServerError(Some(
             "(De)Serialization error during operations".to_string(),
         ))
@@ -189,14 +189,14 @@ impl From<serde_json::Error> for RegistryError {
 
 impl From<cel_interpreter::ParseError> for RegistryError {
     fn from(error: cel_interpreter::ParseError) -> Self {
-        error!("CEL error: {:?}", error);
+        debug!("CEL error: {:?}", error);
         RegistryError::InternalServerError(Some("CEL error during operations".to_string()))
     }
 }
 
 impl From<hazmat::DeserializeStateError> for RegistryError {
     fn from(error: hazmat::DeserializeStateError) -> Self {
-        error!("Crypto error: {:?}", error);
+        debug!("Crypto error: {:?}", error);
         RegistryError::InternalServerError(Some("Crypto error during operations".to_string()))
     }
 }

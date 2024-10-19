@@ -339,7 +339,7 @@ where
 
         let conn = http1::Builder::new().serve_connection(
             io,
-            service_fn(move |request| handle_incoming_request(request, identity.clone())),
+            service_fn(move |request| handle_request(request, identity.clone())),
         );
         pin!(conn);
 
@@ -367,8 +367,8 @@ where
     });
 }
 
-#[instrument(skip(request))]
-async fn handle_incoming_request(
+#[instrument(skip(request, identity))]
+async fn handle_request(
     request: Request<Incoming>,
     identity: ClientIdentity,
 ) -> Result<Response<RegistryResponseBody>, Infallible> {
@@ -383,16 +383,7 @@ async fn handle_incoming_request(
             Ok::<Response<RegistryResponseBody>, Infallible>(res)
         }
         Err(e) => {
-            match e {
-                RegistryError::InternalServerError(_) => {
-                    error_level = true;
-                }
-                _ => {
-                    error_level = false;
-                }
-            }
-
-            error!("Error: {:?}", e);
+            error_level = true;
             Ok(e.to_response_with_span_id(tracing::Span::current().id()))
         }
     };
@@ -406,13 +397,13 @@ async fn handle_incoming_request(
     let span_id = tracing::Span::current()
         .id()
         .as_ref()
-        .map(|id| format!("{:x}", id.into_u64()))
+        .map(|id| format!(" {:x}", id.into_u64()))
         .unwrap_or_default();
 
     if error_level {
-        error!("{}, {} {:?} {} {}", span_id, status, elapsed, method, path);
+        error!("{} {:?} {} {}{}", status, elapsed, method, path, span_id);
     } else {
-        info!("{}, {} {:?} {} {}", span_id, status, elapsed, method, path);
+        info!("{} {:?} {} {}{}", status, elapsed, method, path, span_id);
     }
 
     response
