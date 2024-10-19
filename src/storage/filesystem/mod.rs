@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use std::collections::HashSet;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::io::{ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -59,9 +61,15 @@ pub async fn load_hash_state(
     Ok(hasher)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FileSystemStorageEngine {
     pub tree: Arc<TreeManager>,
+}
+
+impl Debug for FileSystemStorageEngine {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileSystemStorageEngine").finish()
+    }
 }
 
 impl FileSystemStorageEngine {
