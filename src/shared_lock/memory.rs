@@ -16,12 +16,12 @@ impl InMemoryRwLock {
 
     pub async fn read_lock(&self, key: String) -> InMemoryReadLockGuard {
         let lock = self.get_lock_for_key(&key).await;
-        lock.clone().read_owned().await
+        lock.read_owned().await
     }
 
     pub async fn write_lock(&self, key: String) -> InMemoryWriteLockGuard {
         let lock = self.get_lock_for_key(&key).await;
-        lock.clone().write_owned().await
+        lock.write_owned().await
     }
 
     async fn get_lock_for_key(&self, key: &str) -> Arc<RwLock<()>> {
