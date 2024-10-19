@@ -81,7 +81,12 @@ impl Registry {
             return Err(RegistryError::BlobUnknown);
         }
 
-        self.storage.delete_blob(&digest).await?; // XXX: delete only for namespace, not globally!
+        if blob_index.namespace.len() > 1 {
+            // Blob is shared with other namespaces
+            return Err(RegistryError::Denied);
+        }
+
+        self.storage.delete_blob(&digest).await?;
 
         Ok(())
     }
