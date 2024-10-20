@@ -4,7 +4,7 @@ use tracing::{debug, error, instrument, warn};
 use crate::error::RegistryError;
 use crate::io_helpers::parse_reader;
 use crate::oci::{Digest, Manifest, Reference};
-use crate::registry::{LinkReference, LockTarget, Registry};
+use crate::registry::{LinkReference, Registry};
 
 pub struct ManifestData {
     pub media_type: Option<String>,
@@ -84,14 +84,10 @@ impl Registry {
     ) -> Result<ManifestSummary, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _guard = self
-            .read_lock(LockTarget::Manifest(reference.clone()))
-            .await?;
-
         let link = reference.into();
         let digest = self.storage.read_link(namespace, &link).await?;
 
-        let _guard = self.read_lock(LockTarget::Blob(digest.clone())).await?;
+        let _blob_guard = self.read_lock(&digest).await?;
 
         let reader = self
             .storage
@@ -123,14 +119,10 @@ impl Registry {
     ) -> Result<ManifestData, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _guard = self
-            .read_lock(LockTarget::Manifest(reference.clone()))
-            .await?;
-
         let link = reference.into();
         let digest = self.storage.read_link(namespace, &link).await?;
 
-        let _guard = self.read_lock(LockTarget::Blob(digest.clone())).await?;
+        let _guard = self.read_lock(&digest).await?;
 
         let mut reader = self.storage.build_blob_reader(&digest, None).await?;
 
@@ -163,20 +155,27 @@ impl Registry {
 
         let manifest_digests = parse_manifest_digests(body, Some(content_type))?;
 
-        let _guard = self
-            .write_lock(LockTarget::Manifest(reference.clone()))
-            .await?;
-
-        let digest = self.storage.create_blob(body).await?;
-
-        match reference {
+        let (digest, _blob_guard) = match reference {
             Reference::Tag(tag) => {
+                let digest = self.storage.create_blob(body).await?;
+                let blob_guard = self
+                    .write_lock(&digest)
+                    .await?;
+
                 let link = LinkReference::Tag(tag);
                 self.storage.create_link(namespace, &link, &digest).await?;
                 let link = LinkReference::Digest(digest.clone());
                 self.storage.create_link(namespace, &link, &digest).await?;
+
+                (digest, blob_guard)
             }
             Reference::Digest(provided_digest) => {
+                let blob_guard = self
+                    .write_lock(&provided_digest)
+                    .await?;
+
+                let digest = self.storage.create_blob(body).await?;
+
                 if provided_digest != digest {
                     warn!(
                         "Provided digest does not match calculated digest: {} != {}",
@@ -188,8 +187,10 @@ impl Registry {
                 }
                 let link = LinkReference::Digest(digest.clone());
                 self.storage.create_link(namespace, &link, &digest).await?;
+
+                (digest, blob_guard)
             }
-        }
+        };
 
         if let Some(subject) = &manifest_digests.subject {
             let link = LinkReference::Referrer(subject.clone(), digest.clone());
@@ -224,20 +225,19 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _guard = self
-            .write_lock(LockTarget::Manifest(reference.clone()))
-            .await?;
-
         match reference {
             Reference::Tag(tag) => {
                 let link = LinkReference::Tag(tag);
                 self.storage.delete_link(namespace, &link).await?;
             }
             Reference::Digest(digest) => {
+                let _guard = self
+                    .write_lock(&digest)
+                    .await?;
+
                 let tags = self.storage.list_tags(namespace).await?;
                 for tag in tags {
                     let link_reference = LinkReference::Tag(tag.clone());
-
                     if self.storage.read_link(namespace, &link_reference).await? == digest {
                         self.storage.delete_link(namespace, &link_reference).await?;
                     }

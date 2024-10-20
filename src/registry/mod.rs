@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
-use tracing::{debug, error, instrument};
+use tracing::{debug, error, instrument, warn};
 use uuid::Uuid;
 
 mod blob;
@@ -27,23 +27,6 @@ use crate::storage::{FileSystemStorageEngine, StorageEngine};
 lazy_static! {
     static ref NAMESPACE_RE: Regex =
         Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap();
-}
-
-#[derive(Debug)]
-pub enum LockTarget {
-    Upload(Uuid),
-    Blob(Digest),
-    Manifest(Reference),
-}
-
-impl Display for LockTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Upload(uuid) => write!(f, "upload:{}", uuid),
-            Self::Blob(digest) => write!(f, "blob:{}", digest),
-            Self::Manifest(reference) => write!(f, "manifest:{}", reference),
-        }
-    }
 }
 
 pub struct Registry {
@@ -151,14 +134,14 @@ impl Registry {
     }
 
     #[instrument]
-    pub async fn read_lock(&self, target: LockTarget) -> Result<ReadGuard, RegistryError> {
-        self.shared_lock_manager.read_lock(target.to_string()).await
+    pub async fn read_lock(&self, digest: &Digest) -> Result<ReadGuard, RegistryError> {
+        self.shared_lock_manager.read_lock(digest.to_string()).await
     }
 
     #[instrument]
-    pub async fn write_lock(&self, target: LockTarget) -> Result<WriteGuard, RegistryError> {
+    pub async fn write_lock(&self, digest: &Digest) -> Result<WriteGuard, RegistryError> {
         self.shared_lock_manager
-            .write_lock(target.to_string())
+            .write_lock(digest.to_string())
             .await
     }
 }
