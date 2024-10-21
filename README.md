@@ -7,11 +7,10 @@ Goals
 - Secure: mTLS, authorization policies (powered by CEL)
 - Scalable: light footprint
 - Easy to operate: online garbage collection, auto-reload of configuration and certificates
+- Cross-platform: should be portable on most mainstream operating systems
 
 > [!WARNING]
-> This project is in early development and is not yet extensively used in production.
-> In particular, blob delete operations can lead to data corruption
->
+> This project is not battle-tested in production.
 > **USE AT YOUR OWN RISK**
 
 ## Ecosystem
@@ -129,12 +128,13 @@ The following `request.action` actions are supported:
 ## Roadmap
 
 - [ ] CI
+  - [ ] Unit Testing
   - [ ] Conformance Testing
   - [ ] Publishing
-- [ ] Proper testing strategy
 - [ ] s3 storage engine: implementation
 - [ ] Pull-through cache
 - [ ] Global CEL policies
-- [ ] Auto-delete CEL policies
+- [ ] Tag & Digest auto-delete CEL policies
 - [ ] Kubernetes Operator (new project)
+  - [ ] Kubernetes locking backend (?)
 - [ ] OpenMetrics exporter
