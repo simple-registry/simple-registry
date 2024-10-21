@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::error;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RedisRwLock {
     client: Client,
     ttl: usize,

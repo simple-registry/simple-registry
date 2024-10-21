@@ -28,8 +28,6 @@ impl Registry {
     ) -> Result<BlobSummary, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _guard = self.read_lock(&digest).await?;
-
         let size = self.storage.get_blob_size(&digest).await?;
 
         Ok(BlobSummary { digest, size })
@@ -56,8 +54,6 @@ impl Registry {
             None
         };
 
-        let _guard = self.read_lock(&digest).await?;
-
         let reader = match self.storage.build_blob_reader(digest, start).await {
             Ok(reader) => reader,
             Err(RegistryError::BlobUnknown) => return Ok(BlobData::Empty),
@@ -74,19 +70,16 @@ impl Registry {
     pub async fn delete_blob(&self, namespace: &str, digest: Digest) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _guard = self.write_lock(&digest).await?;
-
-        let blob_index = self.storage.read_blob_index(&digest).await?;
-        if !blob_index.namespace.contains_key(namespace) {
-            return Err(RegistryError::BlobUnknown);
+        // TODO: ensure that the blob is not used by any other layer or config!
+        let link = LinkReference::Layer(digest.clone());
+        if let Err(e) = self.storage.delete_link(namespace, &link).await {
+            warn!("Failed to delete layer link: {:?}", e);
         }
 
-        if blob_index.namespace.len() > 1 {
-            // Blob is shared with other namespaces
-            return Err(RegistryError::Denied);
+        let link = LinkReference::Config(digest.clone());
+        if let Err(e) = self.storage.delete_link(namespace, &link).await {
+            warn!("Failed to delete config link: {:?}", e);
         }
-
-        self.storage.delete_blob(&digest).await?;
 
         Ok(())
     }

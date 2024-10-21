@@ -93,8 +93,6 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _guard = self.write_lock(&digest).await?;
-
         let uuid = session_id.to_string();
         let mut writer = self
             .storage

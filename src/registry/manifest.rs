@@ -1,4 +1,3 @@
-use tokio::io::AsyncReadExt;
 use tracing::{debug, error, instrument, warn};
 
 use crate::error::RegistryError;
@@ -87,8 +86,6 @@ impl Registry {
         let link = reference.into();
         let digest = self.storage.read_link(namespace, &link).await?;
 
-        let _blob_guard = self.read_lock(&digest).await?;
-
         let reader = self
             .storage
             .build_blob_reader(&digest, None)
@@ -122,12 +119,7 @@ impl Registry {
         let link = reference.into();
         let digest = self.storage.read_link(namespace, &link).await?;
 
-        let _guard = self.read_lock(&digest).await?;
-
-        let mut reader = self.storage.build_blob_reader(&digest, None).await?;
-
-        let mut content = Vec::new();
-        reader.read_to_end(&mut content).await?;
+        let content = self.storage.read_blob(&digest).await?;
 
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|e| {
             debug!("Failed to deserialize manifest: {}", e);
@@ -155,25 +147,18 @@ impl Registry {
 
         let manifest_digests = parse_manifest_digests(body, Some(content_type))?;
 
-        let (digest, _blob_guard) = match reference {
+        let digest = match reference {
             Reference::Tag(tag) => {
                 let digest = self.storage.create_blob(body).await?;
-                let blob_guard = self
-                    .write_lock(&digest)
-                    .await?;
 
                 let link = LinkReference::Tag(tag);
                 self.storage.create_link(namespace, &link, &digest).await?;
                 let link = LinkReference::Digest(digest.clone());
                 self.storage.create_link(namespace, &link, &digest).await?;
 
-                (digest, blob_guard)
+                digest
             }
             Reference::Digest(provided_digest) => {
-                let blob_guard = self
-                    .write_lock(&provided_digest)
-                    .await?;
-
                 let digest = self.storage.create_blob(body).await?;
 
                 if provided_digest != digest {
@@ -188,7 +173,7 @@ impl Registry {
                 let link = LinkReference::Digest(digest.clone());
                 self.storage.create_link(namespace, &link, &digest).await?;
 
-                (digest, blob_guard)
+                digest
             }
         };
 
@@ -231,10 +216,6 @@ impl Registry {
                 self.storage.delete_link(namespace, &link).await?;
             }
             Reference::Digest(digest) => {
-                let _guard = self
-                    .write_lock(&digest)
-                    .await?;
-
                 let tags = self.storage.list_tags(namespace).await?;
                 for tag in tags {
                     let link_reference = LinkReference::Tag(tag.clone());
@@ -251,16 +232,6 @@ impl Registry {
 
                 if let Some(subject_digest) = manifest_digests.subject {
                     let link = LinkReference::Referrer(subject_digest.clone(), digest.clone());
-                    self.storage.delete_link(namespace, &link).await?;
-                }
-
-                if let Some(digest) = manifest_digests.config {
-                    let link = LinkReference::Config(digest.clone());
-                    self.storage.delete_link(namespace, &link).await?;
-                }
-
-                for digest in manifest_digests.layers {
-                    let link = LinkReference::Layer(digest.clone());
                     self.storage.delete_link(namespace, &link).await?;
                 }
 

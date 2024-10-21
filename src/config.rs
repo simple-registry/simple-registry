@@ -207,10 +207,14 @@ impl Config {
         }
     }
 
-    pub fn build_storage_engine(&self) -> Box<dyn StorageEngine> {
+    pub fn build_storage_engine(&self) -> Result<Box<dyn StorageEngine>, RegistryError> {
         match &self.storage.backend {
             StorageBackendConfig::FS(fs_config) => {
-                Box::new(FileSystemStorageEngine::new(fs_config.root_dir.clone()))
+                let fs_storage_engine = FileSystemStorageEngine::new(
+                    fs_config.root_dir.clone(),
+                    self.build_lock_manager()?
+                );
+                Ok(Box::new(fs_storage_engine))
             }
         }
     }

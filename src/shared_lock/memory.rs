@@ -2,15 +2,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct InMemoryRwLock {
-    locks: AsyncMutex<HashMap<String, Weak<RwLock<()>>>>,
+    locks: Arc<AsyncMutex<HashMap<String, Weak<RwLock<()>>>>>,
 }
 
 impl InMemoryRwLock {
     pub fn new() -> Self {
         Self {
-            locks: AsyncMutex::new(HashMap::new()),
+            locks: Arc::new(AsyncMutex::new(HashMap::new())),
         }
     }
 

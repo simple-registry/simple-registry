@@ -13,10 +13,6 @@ impl Registry {
     ) -> Result<Vec<Descriptor>, RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let _guard = self
-            .read_lock(&digest)
-            .await?;
-
         match self
             .storage
             .list_referrers(namespace, &digest, artifact_type)

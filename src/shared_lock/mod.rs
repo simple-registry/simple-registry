@@ -6,7 +6,7 @@ use tracing::error;
 mod memory;
 mod redis;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SharedRwLock {
     Redis(RedisRwLock),
     InMemory(InMemoryRwLock),

@@ -3,9 +3,8 @@ use cel_interpreter::Program;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
-use std::fmt::{Debug, Display};
+use std::fmt::Debug;
 use tracing::{debug, error, instrument, warn};
-use uuid::Uuid;
 
 mod blob;
 mod content_discovery;
@@ -20,7 +19,7 @@ pub use upload::NewUpload;
 
 use crate::config::Config;
 use crate::error::RegistryError;
-use crate::oci::{Digest, Reference};
+use crate::oci::Digest;
 use crate::shared_lock::{ReadGuard, SharedRwLock, WriteGuard};
 use crate::storage::{FileSystemStorageEngine, StorageEngine};
 
@@ -30,7 +29,6 @@ lazy_static! {
 }
 
 pub struct Registry {
-    shared_lock_manager: SharedRwLock,
     pub storage: Box<dyn StorageEngine>,
     pub credentials: HashMap<String, (String, String)>,
     pub repositories: HashSet<String>,
@@ -58,8 +56,7 @@ impl Registry {
     #[instrument(skip(config))]
     pub fn try_from_config(config: &Config) -> Result<Self, RegistryError> {
         let res = Self {
-            shared_lock_manager: config.build_lock_manager()?,
-            storage: config.build_storage_engine(),
+            storage: config.build_storage_engine()?,
             credentials: config.build_credentials(),
             repositories: config.build_repositories_list(),
             repository_default_allow: config.build_repository_default_allow_list(),
@@ -132,25 +129,16 @@ impl Registry {
     pub fn get_repository_policies(&self, namespace: &str) -> Option<&Vec<Program>> {
         self.repository_policies.get(namespace)
     }
-
-    #[instrument]
-    pub async fn read_lock(&self, digest: &Digest) -> Result<ReadGuard, RegistryError> {
-        self.shared_lock_manager.read_lock(digest.to_string()).await
-    }
-
-    #[instrument]
-    pub async fn write_lock(&self, digest: &Digest) -> Result<WriteGuard, RegistryError> {
-        self.shared_lock_manager
-            .write_lock(digest.to_string())
-            .await
-    }
 }
 
 impl Default for Registry {
     fn default() -> Self {
+        let storage_engine = FileSystemStorageEngine::new(
+            "./registry".to_string(),
+            SharedRwLock::new_in_memory(),
+        );
         Self {
-            shared_lock_manager: SharedRwLock::new_in_memory(),
-            storage: Box::new(FileSystemStorageEngine::new("./registry".to_string())),
+            storage: Box::new(storage_engine),
             credentials: Default::default(),
             repositories: Default::default(),
             repository_default_allow: Default::default(),

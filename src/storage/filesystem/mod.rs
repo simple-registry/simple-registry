@@ -15,6 +15,7 @@ use tracing::{debug, instrument, warn};
 use crate::error::RegistryError;
 use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::LinkReference;
+use crate::shared_lock::SharedRwLock;
 use crate::storage::filesystem::upload_writer::DiskUploadWriter;
 use crate::storage::tree_manager::TreeManager;
 use crate::storage::{
@@ -63,6 +64,7 @@ pub async fn load_hash_state(
 
 #[derive(Clone)]
 pub struct FileSystemStorageEngine {
+    lock_manager: SharedRwLock,
     pub tree: Arc<TreeManager>,
 }
 
@@ -73,9 +75,10 @@ impl Debug for FileSystemStorageEngine {
 }
 
 impl FileSystemStorageEngine {
-    pub fn new(root_dir: String) -> Self {
+    pub fn new(root_dir: String, lock_manager: SharedRwLock) -> Self {
         Self {
             tree: Arc::new(TreeManager { root_dir }),
+            lock_manager,
         }
     }
 
@@ -148,6 +151,8 @@ impl FileSystemStorageEngine {
         let path = PathBuf::from(path);
         let root_dir = Path::new(&self.tree.root_dir);
 
+        let _ = fs::remove_dir_all(&path).await;
+
         let mut parent = path.parent();
         while let Some(parent_path) = parent {
             if parent_path == root_dir {
@@ -164,6 +169,7 @@ impl FileSystemStorageEngine {
 
             debug!("Deleting empty parent dir: {}", parent_path.display());
             fs::remove_dir(parent_path).await?;
+
             parent = parent_path.parent();
         }
 
@@ -224,59 +230,6 @@ impl FileSystemStorageEngine {
     }
 
     #[instrument]
-    pub async fn blob_link_index_init(
-        &self,
-        namespace: &str,
-        digest: &Digest,
-    ) -> Result<(), RegistryError> {
-        let _ = self
-            .blob_link_index_update(namespace, digest, |_| { /* NO-OP */ })
-            .await?;
-        Ok(())
-    }
-
-    #[instrument]
-    pub async fn blob_link_index_add(
-        &self,
-        namespace: &str,
-        reference: &LinkReference,
-        digest: &Digest,
-    ) -> Result<(), RegistryError> {
-        debug!("Registering reference: {:?}", reference);
-
-        let _ = self
-            .blob_link_index_update(namespace, digest, |index| {
-                index.insert(reference.clone());
-            })
-            .await?;
-
-        Ok(())
-    }
-
-    #[instrument]
-    pub async fn blob_link_index_remove(
-        &self,
-        namespace: &str,
-        reference: &LinkReference,
-        digest: &Digest,
-    ) -> Result<(), RegistryError> {
-        debug!("Unregistering reference: {:?}", reference);
-
-        let is_referenced = self
-            .blob_link_index_update(namespace, digest, |index| {
-                index.remove(reference);
-            })
-            .await?;
-
-        if !is_referenced {
-            debug!("Deleting no longer referenced Blob: {}", digest);
-            self.delete_blob(digest).await?;
-        }
-
-        Ok(())
-    }
-
-    #[instrument]
     pub async fn get_all_tags(&self, name: &str) -> Result<Vec<String>, RegistryError> {
         let path = self.tree.manifest_tags_dir(name);
         debug!("Listing tags in path: {}", path);
@@ -289,7 +242,7 @@ impl FileSystemStorageEngine {
 
 #[async_trait]
 impl StorageEngine for FileSystemStorageEngine {
-    #[instrument]
+    #[instrument(skip(self))]
     async fn list_namespaces(&self) -> Result<Box<dyn Iterator<Item = String>>, RegistryError> {
         let base_path = self.tree.repository_dir();
         let base_path = Path::new(&base_path);
@@ -299,7 +252,7 @@ impl StorageEngine for FileSystemStorageEngine {
         Ok(Box::new(repositories.into_iter()))
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn list_uploads(
         &self,
         namespace: &str,
@@ -330,7 +283,7 @@ impl StorageEngine for FileSystemStorageEngine {
         Ok(Box::new(uploads.into_iter()))
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn list_blobs(&self) -> Result<Box<dyn Iterator<Item = Digest>>, RegistryError> {
         let path = PathBuf::new()
             .join(self.tree.blobs_root_dir())
@@ -380,7 +333,7 @@ impl StorageEngine for FileSystemStorageEngine {
         Ok(Box::new(revisions.into_iter()))
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn list_tags(
         &self,
         name: &str,
@@ -390,13 +343,14 @@ impl StorageEngine for FileSystemStorageEngine {
         Ok(Box::new(tags.into_iter()))
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn list_referrers(
         &self,
         name: &str,
         digest: &Digest,
         artifact_type: Option<String>,
     ) -> Result<Box<dyn Iterator<Item = Descriptor>>, RegistryError> {
+        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
         let path = self.tree.manifest_referrers_dir(name, digest);
         let all_manifest = self.collect_directory_entries(&path).await?;
         let mut referrers = Vec::new();
@@ -440,8 +394,9 @@ impl StorageEngine for FileSystemStorageEngine {
         Ok(Box::new(referrers.into_iter()))
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn create_upload(&self, name: &str, uuid: &str) -> Result<String, RegistryError> {
+        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
         let container_dir = self.tree.upload_container_path(name, uuid);
         fs::create_dir_all(&container_dir).await?;
 
@@ -465,7 +420,7 @@ impl StorageEngine for FileSystemStorageEngine {
         Ok(uuid.to_string())
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn build_upload_writer(
         &self,
         name: &str,
@@ -483,7 +438,7 @@ impl StorageEngine for FileSystemStorageEngine {
         ))
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn read_upload_summary(
         &self,
         name: &str,
@@ -502,7 +457,7 @@ impl StorageEngine for FileSystemStorageEngine {
         Ok(UploadSummary { digest, size })
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn complete_upload(
         &self,
         name: &str,
@@ -523,31 +478,45 @@ impl StorageEngine for FileSystemStorageEngine {
             }
         };
 
+        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+
+        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
         let blob_root = self.tree.blob_container_dir(&digest);
         fs::create_dir_all(&blob_root).await?;
 
         let blob_path = self.tree.blob_path(&digest);
         fs::rename(&upload_path, &blob_path).await?;
-        self.blob_link_index_init(name, &digest).await?;
 
-        self.delete_upload(name, uuid).await?;
+        let _ = self
+            .blob_link_index_update(name, &digest, |_| { /* NO-OP */ })
+            .await?;
+
+        let path = self.tree.upload_container_path(name, uuid);
+        let _ = self.delete_empty_parent_dirs(&path).await;
 
         Ok(digest)
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn delete_upload(&self, name: &str, uuid: &str) -> Result<(), RegistryError> {
+        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
+
         let path = self.tree.upload_container_path(name, uuid);
-        let _ = fs::remove_dir_all(&path).await;
-        self.delete_empty_parent_dirs(&path).await
+        let _ = self.delete_empty_parent_dirs(&path).await;
+
+        Ok(())
     }
 
-    #[instrument(skip(content))]
+    #[instrument(skip(self, content))]
     async fn create_blob(&self, content: &[u8]) -> Result<Digest, RegistryError> {
         let mut hasher = Sha256::new();
         hasher.update(content);
         let digest = hasher.finalize();
         let digest = Digest::Sha256(hex::encode(digest));
+
+        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+
+        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
 
         let blob_root = self.tree.blob_container_dir(&digest);
         fs::create_dir_all(&blob_root).await?;
@@ -558,14 +527,16 @@ impl StorageEngine for FileSystemStorageEngine {
         Ok(digest)
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, RegistryError> {
+        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
         let path = self.tree.blob_path(digest);
-        fs::read(path).await.map_err(|e| e.into())
+        Ok(fs::read(path).await?)
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobReferenceIndex, RegistryError> {
+        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
         let path = self.tree.blob_index_path(digest);
         let content = fs::read_to_string(&path).await?;
 
@@ -573,20 +544,23 @@ impl StorageEngine for FileSystemStorageEngine {
         Ok(index)
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, RegistryError> {
+        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
         let path = self.tree.blob_path(digest);
         self.get_file_size(&path)
             .await?
             .ok_or(RegistryError::BlobUnknown)
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn build_blob_reader(
         &self,
         digest: &Digest,
         start_offset: Option<u64>,
     ) -> Result<Box<dyn StorageEngineReader>, RegistryError> {
+        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
+
         let path = self.tree.blob_path(digest);
         let mut file = match File::open(&path).await {
             Ok(file) => file,
@@ -601,14 +575,18 @@ impl StorageEngine for FileSystemStorageEngine {
         Ok(Box::new(file))
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn delete_blob(&self, digest: &Digest) -> Result<(), RegistryError> {
+        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
+
         let path = self.tree.blob_container_dir(digest);
-        fs::remove_dir_all(&path).await?;
-        self.delete_empty_parent_dirs(&path).await
+        let _ = self.delete_empty_parent_dirs(&path).await;
+
+        Ok(())
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn read_link(
         &self,
         name: &str,
@@ -622,10 +600,12 @@ impl StorageEngine for FileSystemStorageEngine {
         debug!("Reading link at path: {}", path);
 
         let link = fs::read_to_string(path).await?;
+        debug!("Link content: {}", link);
+
         Digest::from_str(&link)
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn create_link(
         &self,
         namespace: &str,
@@ -640,10 +620,14 @@ impl StorageEngine for FileSystemStorageEngine {
         match self.read_link(namespace, reference).await.ok() {
             Some(existing_digest) if existing_digest == digest.clone() => return Ok(()),
             Some(existing_digest) if existing_digest != digest.clone() => {
+                // NOTE: no locks here, the delete_link will take care of it
                 self.delete_link(namespace, reference).await?;
             }
             _ => {}
         }
+
+        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
 
         let path = self.tree.get_link_parent_path(reference, namespace);
         debug!("Creating link container dir at path: {}", path);
@@ -654,13 +638,17 @@ impl StorageEngine for FileSystemStorageEngine {
         fs::write(&link_path, digest.to_string()).await?;
 
         debug!("Increasing reference count for digest: {}", digest);
-        self.blob_link_index_add(namespace, reference, digest)
+
+        let _ = self
+            .blob_link_index_update(namespace, digest, |index| {
+                index.insert(reference.clone());
+            })
             .await?;
 
         Ok(())
     }
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn delete_link(
         &self,
         namespace: &str,
@@ -683,10 +671,26 @@ impl StorageEngine for FileSystemStorageEngine {
 
         let path = self.tree.get_link_container_path(reference, namespace);
         debug!("Deleting link at path: {}", path);
-        let _ = fs::remove_dir_all(&path).await;
-        self.delete_empty_parent_dirs(&path).await?;
 
-        self.blob_link_index_remove(namespace, reference, &digest)
-            .await
+        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
+
+        let _ = self.delete_empty_parent_dirs(&path).await;
+
+        debug!("Unregistering reference: {:?}", reference);
+
+        let is_referenced = self
+            .blob_link_index_update(namespace, &digest, |index| {
+                index.remove(reference);
+            })
+            .await?;
+
+        if !is_referenced {
+            debug!("Deleting no longer referenced Blob: {}", digest);
+            let path = self.tree.blob_container_dir(&digest);
+            let _ = self.delete_empty_parent_dirs(&path).await;
+        }
+
+        Ok(())
     }
 }
