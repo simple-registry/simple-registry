@@ -19,8 +19,7 @@ pub use upload::NewUpload;
 
 use crate::config::Config;
 use crate::error::RegistryError;
-use crate::oci::Digest;
-use crate::shared_lock::{ReadGuard, SharedRwLock, WriteGuard};
+use crate::shared_lock::SharedRwLock;
 use crate::storage::{FileSystemStorageEngine, StorageEngine};
 
 lazy_static! {
