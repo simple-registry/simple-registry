@@ -396,7 +396,10 @@ impl StorageEngine for FileSystemStorageEngine {
 
     #[instrument(skip(self))]
     async fn create_upload(&self, name: &str, uuid: &str) -> Result<String, RegistryError> {
-        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
+        let _guard = self
+            .lock_manager
+            .write_lock("dir-management".to_string())
+            .await;
         let container_dir = self.tree.upload_container_path(name, uuid);
         fs::create_dir_all(&container_dir).await?;
 
@@ -480,7 +483,10 @@ impl StorageEngine for FileSystemStorageEngine {
 
         let _guard = self.lock_manager.write_lock(digest.to_string()).await;
 
-        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
+        let _guard = self
+            .lock_manager
+            .write_lock("dir-management".to_string())
+            .await;
         let blob_root = self.tree.blob_container_dir(&digest);
         fs::create_dir_all(&blob_root).await?;
 
@@ -499,7 +505,10 @@ impl StorageEngine for FileSystemStorageEngine {
 
     #[instrument(skip(self))]
     async fn delete_upload(&self, name: &str, uuid: &str) -> Result<(), RegistryError> {
-        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
+        let _guard = self
+            .lock_manager
+            .write_lock("dir-management".to_string())
+            .await;
 
         let path = self.tree.upload_container_path(name, uuid);
         let _ = self.delete_empty_parent_dirs(&path).await;
@@ -516,7 +525,10 @@ impl StorageEngine for FileSystemStorageEngine {
 
         let _guard = self.lock_manager.write_lock(digest.to_string()).await;
 
-        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
+        let _guard = self
+            .lock_manager
+            .write_lock("dir-management".to_string())
+            .await;
 
         let blob_root = self.tree.blob_container_dir(&digest);
         fs::create_dir_all(&blob_root).await?;
@@ -578,7 +590,10 @@ impl StorageEngine for FileSystemStorageEngine {
     #[instrument(skip(self))]
     async fn delete_blob(&self, digest: &Digest) -> Result<(), RegistryError> {
         let _guard = self.lock_manager.write_lock(digest.to_string()).await;
-        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
+        let _guard = self
+            .lock_manager
+            .write_lock("dir-management".to_string())
+            .await;
 
         let path = self.tree.blob_container_dir(digest);
         let _ = self.delete_empty_parent_dirs(&path).await;
@@ -627,7 +642,10 @@ impl StorageEngine for FileSystemStorageEngine {
         }
 
         let _guard = self.lock_manager.write_lock(digest.to_string()).await;
-        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
+        let _guard = self
+            .lock_manager
+            .write_lock("dir-management".to_string())
+            .await;
 
         let path = self.tree.get_link_parent_path(reference, namespace);
         debug!("Creating link container dir at path: {}", path);
@@ -673,7 +691,10 @@ impl StorageEngine for FileSystemStorageEngine {
         debug!("Deleting link at path: {}", path);
 
         let _guard = self.lock_manager.write_lock(digest.to_string()).await;
-        let _guard = self.lock_manager.write_lock("dir-management".to_string()).await;
+        let _guard = self
+            .lock_manager
+            .write_lock("dir-management".to_string())
+            .await;
 
         let _ = self.delete_empty_parent_dirs(&path).await;
 

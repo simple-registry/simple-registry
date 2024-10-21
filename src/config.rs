@@ -212,7 +212,7 @@ impl Config {
             StorageBackendConfig::FS(fs_config) => {
                 let fs_storage_engine = FileSystemStorageEngine::new(
                     fs_config.root_dir.clone(),
-                    self.build_lock_manager()?
+                    self.build_lock_manager()?,
                 );
                 Ok(Box::new(fs_storage_engine))
             }

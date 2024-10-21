@@ -133,10 +133,8 @@ impl Registry {
 
 impl Default for Registry {
     fn default() -> Self {
-        let storage_engine = FileSystemStorageEngine::new(
-            "./registry".to_string(),
-            SharedRwLock::new_in_memory(),
-        );
+        let storage_engine =
+            FileSystemStorageEngine::new("./registry".to_string(), SharedRwLock::new_in_memory());
         Self {
             storage: Box::new(storage_engine),
             credentials: Default::default(),
