@@ -13,7 +13,7 @@ arc-swap = "1.7.1"
 argon2 = "0.5.3"
 async-trait = "0.1.83"
 base64 = "0.22.1"
-bytes = "1.7.2"
+bytes = "1.8.0"
 cel-interpreter = "0.8.1"
 chrono = "0.4.38"
 clap = "4.5.20"
@@ -21,7 +21,7 @@ env_logger = "0.11.5"
 futures-util = { version = "0.3.31", default-features = false }
 hex = "0.4.3"
 http-body-util = "0.1.2"
-hyper = { version = "1.4.1" , features = ["full"]}
+hyper = { version = "1.5.0" , features = ["full"]}
 hyper-util = { version = "0.1.9", features = ["tokio"] }
 lazy_static = "1.5.0"
 notify = "6.1.1"
@@ -32,10 +32,10 @@ opentelemetry-semantic-conventions = { version = "0.26.0", features = ["semconv_
 opentelemetry-stdout = "0.26.0"
 redis = { version = "0.27.4", features = ["tokio-comp"] }
 regex = "1.11.0"
-rustls = { version = "0.23.14", features = ["aws-lc-rs"] }
+rustls = { version = "0.23.15", features = ["aws-lc-rs"] }
 rustls-pki-types = "1.9.0"
 serde = { version = "1.0.210", features = ["derive"] }
-serde_json = "1.0.128"
+serde_json = "1.0.132"
 serde_urlencoded = "0.7.1"
 sha2 = "0.11.0-pre.4"
 tokio = { version = "1.40.0", features = ["full"] }
@@ -45,5 +45,5 @@ toml = "0.8.19"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 tracing-opentelemetry = "0.27.0"
-uuid = { version = "1.10.0", features = ["v4", "serde"] }
+uuid = { version = "1.11.0", features = ["v4", "serde"] }
 x509-parser = "0.16.0"
