@@ -19,7 +19,7 @@ pub use upload::NewUpload;
 
 use crate::config::Config;
 use crate::error::RegistryError;
-use crate::shared_lock::SharedRwLock;
+use crate::lock_manager::LockManager;
 use crate::storage::{FileSystemStorageEngine, StorageEngine};
 
 lazy_static! {
@@ -38,7 +38,6 @@ pub struct Registry {
 impl Debug for Registry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Registry")
-            .field("shared_lock_manager", &"SharedRwLock")
             .field("storage", &self.storage)
             .field("credentials", &self.credentials.len())
             .field("repositories", &self.repositories.len())
@@ -133,7 +132,7 @@ impl Registry {
 impl Default for Registry {
     fn default() -> Self {
         let storage_engine =
-            FileSystemStorageEngine::new("./registry".to_string(), SharedRwLock::new_in_memory());
+            FileSystemStorageEngine::new("./registry".to_string(), LockManager::new_in_memory());
         Self {
             storage: Box::new(storage_engine),
             credentials: Default::default(),

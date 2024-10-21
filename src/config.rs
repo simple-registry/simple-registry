@@ -1,5 +1,5 @@
 use crate::error::RegistryError;
-use crate::shared_lock::SharedRwLock;
+use crate::lock_manager::LockManager;
 use crate::storage::{FileSystemStorageEngine, StorageEngine};
 use crate::tls::{build_root_store, load_certificate_bundle, load_private_key};
 use cel_interpreter::Program;
@@ -192,17 +192,17 @@ impl Config {
         Ok(Some(TlsAcceptor::from(Arc::new(tls_config))))
     }
 
-    pub fn build_lock_manager(&self) -> Result<SharedRwLock, RegistryError> {
+    pub fn build_lock_manager(&self) -> Result<LockManager, RegistryError> {
         match &self.locking {
             Some(LockingConfig { backend }) => match backend {
                 LockingBackendConfig::Redis(redis_config) => {
                     info!("Building Redis lock manager");
-                    SharedRwLock::new_redis(&redis_config.url, redis_config.ttl)
+                    LockManager::new_redis(&redis_config.url, redis_config.ttl)
                 }
             },
             None => {
                 info!("Building in-memory lock manager");
-                Ok(SharedRwLock::new_in_memory())
+                Ok(LockManager::new_in_memory())
             }
         }
     }

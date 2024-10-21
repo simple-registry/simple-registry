@@ -3,11 +3,11 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 #[derive(Debug, Default, Clone)]
-pub struct InMemoryRwLock {
+pub struct MemoryLockManager {
     locks: Arc<AsyncMutex<HashMap<String, Weak<RwLock<()>>>>>,
 }
 
-impl InMemoryRwLock {
+impl MemoryLockManager {
     pub fn new() -> Self {
         Self {
             locks: Arc::new(AsyncMutex::new(HashMap::new())),

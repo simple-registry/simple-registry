@@ -13,9 +13,9 @@ use tokio::io::AsyncSeekExt;
 use tracing::{debug, instrument, warn};
 
 use crate::error::RegistryError;
+use crate::lock_manager::LockManager;
 use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::LinkReference;
-use crate::shared_lock::SharedRwLock;
 use crate::storage::filesystem::upload_writer::DiskUploadWriter;
 use crate::storage::tree_manager::TreeManager;
 use crate::storage::{
@@ -64,7 +64,7 @@ pub async fn load_hash_state(
 
 #[derive(Clone)]
 pub struct FileSystemStorageEngine {
-    lock_manager: SharedRwLock,
+    lock_manager: LockManager,
     pub tree: Arc<TreeManager>,
 }
 
@@ -75,7 +75,7 @@ impl Debug for FileSystemStorageEngine {
 }
 
 impl FileSystemStorageEngine {
-    pub fn new(root_dir: String, lock_manager: SharedRwLock) -> Self {
+    pub fn new(root_dir: String, lock_manager: LockManager) -> Self {
         Self {
             tree: Arc::new(TreeManager { root_dir }),
             lock_manager,

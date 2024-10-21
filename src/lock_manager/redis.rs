@@ -8,7 +8,7 @@ use tokio::time;
 use tracing::error;
 
 #[derive(Debug, Clone)]
-pub struct RedisRwLock {
+pub struct RedisLockManager {
     client: Client,
     ttl: usize,
 }
@@ -48,10 +48,10 @@ const RELEASE_READ_LOCK_SCRIPT: &str = r#"
     return 1
 "#;
 
-impl RedisRwLock {
+impl RedisLockManager {
     pub fn new(redis_url: &str, ttl: usize) -> redis::RedisResult<Self> {
         let client = Client::open(redis_url)?;
-        Ok(RedisRwLock { client, ttl })
+        Ok(RedisLockManager { client, ttl })
     }
 
     pub async fn read_lock(&self, key: String) -> Result<RedisLockGuard, RegistryError> {
