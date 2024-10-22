@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use std::collections::HashSet;
 use std::fmt;
@@ -19,48 +18,11 @@ use crate::registry::LinkReference;
 use crate::storage::filesystem::upload_writer::DiskUploadWriter;
 use crate::storage::tree_manager::TreeManager;
 use crate::storage::{
-    BlobReferenceIndex, StorageEngine, StorageEngineReader, StorageEngineWriter, UploadSummary,
+    deserialize_hash_state, serialize_hash_state, BlobReferenceIndex, StorageEngine,
+    StorageEngineReader, StorageEngineWriter, UploadSummary,
 };
 
 mod upload_writer;
-
-#[instrument]
-pub async fn save_hash_state(
-    tree_manager: &TreeManager,
-    sha256: &Sha256,
-    name: &str,
-    uuid: &str,
-    algorithm: &str,
-    offset: u64,
-) -> Result<(), RegistryError> {
-    let path = tree_manager.upload_hash_context_path(name, uuid, algorithm, offset);
-
-    let state = sha256.serialize();
-    let state = state.as_slice().to_vec();
-
-    fs::write(&path, state).await?;
-    Ok(())
-}
-
-#[instrument]
-pub async fn load_hash_state(
-    tree_manager: &TreeManager,
-    name: &str,
-    uuid: &str,
-    algorithm: &str,
-    offset: u64,
-) -> Result<Sha256, RegistryError> {
-    let path = tree_manager.upload_hash_context_path(name, uuid, algorithm, offset);
-    let state = fs::read(&path).await?;
-
-    let state = state.as_slice().try_into().map_err(|_| {
-        RegistryError::InternalServerError(Some("Unable to resume hash state".to_string()))
-    })?;
-    let state = Sha256::deserialize(state)?;
-    let hasher = Sha256::from(state);
-
-    Ok(hasher)
-}
 
 #[derive(Clone)]
 pub struct FileSystemStorageEngine {
@@ -266,9 +228,12 @@ impl StorageEngine for FileSystemStorageEngine {
 
         let mut uploads = Vec::new();
         for upload in all_uploads {
-            let hash = load_hash_state(&self.tree, namespace, &upload, "sha256", 0)
-                .await
-                .ok();
+            let path = self
+                .tree
+                .upload_hash_context_path(namespace, &upload, "sha256", 0);
+            let state = fs::read(&path).await?;
+
+            let hash = deserialize_hash_state(state).await.ok();
 
             let date = self.tree.upload_start_date_path(namespace, &upload);
             let date = fs::read_to_string(&date)
@@ -418,7 +383,10 @@ impl StorageEngine for FileSystemStorageEngine {
         fs::create_dir_all(&container_dir).await?;
 
         let hasher = Sha256::new();
-        save_hash_state(&self.tree, &hasher, name, uuid, "sha256", 0).await?;
+
+        let path = self.tree.upload_hash_context_path(name, uuid, "sha256", 0);
+        let state = serialize_hash_state(&hasher).await?;
+        fs::write(&path, state).await?;
 
         Ok(uuid.to_string())
     }
@@ -453,7 +421,12 @@ impl StorageEngine for FileSystemStorageEngine {
             .await?
             .ok_or(RegistryError::BlobUnknown)?;
 
-        let hasher = load_hash_state(&self.tree, name, uuid, "sha256", size).await?;
+        let path = self
+            .tree
+            .upload_hash_context_path(name, uuid, "sha256", size);
+        let state = fs::read(&path).await?;
+
+        let hasher = deserialize_hash_state(state).await?;
         let digest = hasher.finalize();
         let digest = Digest::Sha256(hex::encode(digest));
 
@@ -475,7 +448,11 @@ impl StorageEngine for FileSystemStorageEngine {
         let digest = match digest {
             Some(digest) => digest,
             None => {
-                let hasher = load_hash_state(&self.tree, name, uuid, "sha256", size).await?;
+                let path = self
+                    .tree
+                    .upload_hash_context_path(name, uuid, "sha256", size);
+                let state = fs::read(&path).await?;
+                let hasher = deserialize_hash_state(state).await?;
                 let digest = hasher.finalize();
                 Digest::Sha256(hex::encode(digest))
             }

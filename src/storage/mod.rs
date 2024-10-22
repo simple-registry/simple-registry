@@ -2,16 +2,16 @@ mod filesystem;
 mod reference;
 mod tree_manager;
 
+use crate::error::RegistryError;
+use crate::oci::{Descriptor, Digest};
+use crate::registry::LinkReference;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::Sha256;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
-
-use crate::error::RegistryError;
-use crate::oci::{Descriptor, Digest};
-use crate::registry::LinkReference;
 
 pub use filesystem::FileSystemStorageEngine;
 pub use reference::BlobReferenceIndex;
@@ -122,4 +122,21 @@ impl Debug for (dyn StorageEngine + 'static) {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("StorageEngine").finish()
     }
+}
+
+// Hash helpers
+
+pub async fn serialize_hash_state(sha256: &Sha256) -> Result<Vec<u8>, RegistryError> {
+    let state = sha256.serialize();
+    Ok(state.as_slice().to_vec())
+}
+
+pub async fn deserialize_hash_state(state: Vec<u8>) -> Result<Sha256, RegistryError> {
+    let state = state.as_slice().try_into().map_err(|_| {
+        RegistryError::InternalServerError(Some("Unable to resume hash state".to_string()))
+    })?;
+    let state = Sha256::deserialize(state)?;
+    let hasher = Sha256::from(state);
+
+    Ok(hasher)
 }

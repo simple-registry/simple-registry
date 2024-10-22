@@ -8,7 +8,7 @@ use tokio::io::{AsyncSeekExt, AsyncWrite};
 use tracing::error;
 
 use crate::error::RegistryError;
-use crate::storage::filesystem::{load_hash_state, save_hash_state};
+use crate::storage::filesystem::{deserialize_hash_state, serialize_hash_state};
 use crate::storage::tree_manager::TreeManager;
 
 pub struct DiskUploadWriter {
@@ -48,7 +48,9 @@ impl DiskUploadWriter {
 
         file.seek(SeekFrom::Start(offset)).await?;
 
-        let hasher = load_hash_state(&tree_manager, name, &uuid, "sha256", offset).await?;
+        let path = tree_manager.upload_hash_context_path(name, &uuid, "sha256", offset);
+        let state = fs::read(&path).await?;
+        let hasher = deserialize_hash_state(state).await?;
 
         Ok(Self {
             file,
@@ -61,15 +63,18 @@ impl DiskUploadWriter {
     }
 
     fn save_hashstate_sync(&self) -> Result<(), RegistryError> {
-        let storage = self.tree_manager.clone();
-        let name = self.name.clone();
-        let uuid = self.uuid.clone();
-        let offset = self.offset;
+        let path = self.tree_manager.upload_hash_context_path(
+            &self.name,
+            &self.uuid,
+            "sha256",
+            self.offset,
+        );
 
         tokio::task::block_in_place(|| {
             let rt = tokio::runtime::Handle::current();
             rt.block_on(async move {
-                save_hash_state(&storage, &self.hasher, &name, &uuid, "sha256", offset).await
+                let state = serialize_hash_state(&self.hasher).await?;
+                Ok(fs::write(&path, state).await?)
             })
         })
     }
