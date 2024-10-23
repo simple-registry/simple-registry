@@ -11,7 +11,7 @@ use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::Sha256;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
-use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use filesystem::FileSystemStorageEngine;
 pub use reference::BlobReferenceIndex;
@@ -21,8 +21,8 @@ pub struct UploadSummary {
     pub size: u64,
 }
 
-pub trait StorageEngineReader: AsyncSeek + AsyncRead + Unpin + Send {}
-impl<T> StorageEngineReader for T where T: AsyncSeek + AsyncRead + Unpin + Send {}
+pub trait StorageEngineReader: AsyncRead + Unpin + Send {}
+impl<T> StorageEngineReader for T where T: AsyncRead + Unpin + Send {}
 
 pub trait StorageEngineWriter: AsyncWrite + Unpin + Send {}
 impl<T> StorageEngineWriter for T where T: AsyncWrite + Unpin + Send {}
