@@ -8,21 +8,18 @@ use std::io::{ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, File};
-use tokio::io::AsyncSeekExt;
-use tracing::{debug, instrument, warn};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tracing::{debug, error, instrument, warn};
 
 use crate::error::RegistryError;
 use crate::lock_manager::LockManager;
 use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::LinkReference;
-use crate::storage::filesystem::upload_writer::DiskUploadWriter;
 use crate::storage::tree_manager::TreeManager;
 use crate::storage::{
     deserialize_hash_state, serialize_hash_state, BlobReferenceIndex, StorageEngine,
-    StorageEngineReader, StorageEngineWriter, UploadSummary,
+    StorageEngineReader, UploadSummary,
 };
-
-mod upload_writer;
 
 #[derive(Clone)]
 pub struct FileSystemStorageEngine {
@@ -391,22 +388,62 @@ impl StorageEngine for FileSystemStorageEngine {
         Ok(uuid.to_string())
     }
 
-    #[instrument(skip(self))]
-    async fn build_upload_writer(
+    #[instrument(skip(self, source_reader))]
+    async fn write_upload(
         &self,
         name: &str,
         uuid: &str,
         start_offset: Option<u64>,
-    ) -> Result<Box<dyn StorageEngineWriter>, RegistryError> {
-        Ok(Box::new(
-            DiskUploadWriter::new(
-                self.tree.clone(),
-                name,
-                uuid.to_string(),
-                start_offset.unwrap_or(0),
-            )
-            .await?,
-        ))
+        mut source_reader: Box<dyn AsyncRead + Send + Sync + Unpin>,
+    ) -> Result<(), RegistryError> {
+        let start_offset = start_offset.unwrap_or(0);
+
+        let file_path = self.tree.upload_path(name, &uuid);
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .append(false)
+            .write(true)
+            .open(&file_path)
+            .await
+            .map_err(|e| {
+                error!("Error opening upload file {:}: {}", file_path, e);
+                if e.kind() == ErrorKind::NotFound {
+                    RegistryError::BlobUploadUnknown
+                } else {
+                    RegistryError::InternalServerError(Some(
+                        "Error opening upload file".to_string(),
+                    ))
+                }
+            })?;
+
+        file.seek(SeekFrom::Start(start_offset)).await?;
+
+        let path = self.tree.upload_hash_context_path(name, &uuid, "sha256", start_offset);
+        let state = fs::read(&path).await?;
+        let mut hasher = deserialize_hash_state(state).await?;
+
+        file.seek(SeekFrom::Start(start_offset)).await?;
+
+        let mut total_bytes_written = 0u64;
+        let mut buffer = [0u8; 8192];
+
+        loop {
+            let n = source_reader.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buffer[..n]).await?;
+            hasher.update(&buffer[..n]);
+            total_bytes_written += n as u64;
+        }
+
+        let offset = start_offset + total_bytes_written;
+        let path = self.tree.upload_hash_context_path(name, &uuid, "sha256", offset);
+        let state = serialize_hash_state(&hasher).await?;
+        fs::write(&path, &state).await?;
+
+        Ok(())
     }
 
     #[instrument(skip(self))]

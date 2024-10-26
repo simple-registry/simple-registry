@@ -1,12 +1,11 @@
 use crate::error::RegistryError;
 use crate::oci::Digest;
 use crate::registry::Registry;
-use bytes::Buf;
-use futures_util::StreamExt;
+use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
-use tokio::io::AsyncWriteExt;
-use tracing::{debug, instrument};
+use tokio_util::io::StreamReader;
+use tracing::{debug, error, instrument};
 use uuid::Uuid;
 
 pub enum NewUpload {
@@ -58,23 +57,24 @@ impl Registry {
             }
         };
 
-        let mut writer = self
+        let body = body.into_data_stream().map_err(|e| {
+            error!("Data stream error: {}", e);
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        });
+        let body = StreamReader::new(body);
+
+        self
             .storage
-            .build_upload_writer(namespace, &session_id, start_offset)
+            .write_upload(namespace, &session_id, start_offset, Box::new(body))
             .await?;
-
-        let mut body = body.into_data_stream();
-        while let Some(data) = body.next().await {
-            let data = data?;
-            writer.write_all(data.chunk()).await?;
-        }
-
-        writer.flush().await?;
 
         let summary = self
             .storage
             .read_upload_summary(namespace, &session_id)
-            .await?;
+            .await.map_err(|e| {
+            error!("Error reading uploaded file: {:?}", e);
+            e
+        })?;
 
         if summary.size < 1 {
             return Ok(0);
@@ -94,17 +94,16 @@ impl Registry {
         self.validate_namespace(namespace)?;
 
         let uuid = session_id.to_string();
-        let mut writer = self
-            .storage
-            .build_upload_writer(namespace, &uuid, None)
-            .await?;
+        let body = body.into_data_stream().map_err(|e| {
+            error!("Data stream error: {}", e);
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        });
+        let body = StreamReader::new(body);
 
-        let mut body = body.into_data_stream();
-        while let Some(data) = body.next().await {
-            let data = data?;
-            writer.write_all(data.chunk()).await?;
-        }
-        writer.flush().await?;
+        self
+            .storage
+            .write_upload(namespace, &uuid, None, Box::new(body))
+            .await?;
 
         let summary = self.storage.read_upload_summary(namespace, &uuid).await?;
 

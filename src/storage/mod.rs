@@ -11,10 +11,14 @@ use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::Sha256;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::AsyncRead;
 
 pub use filesystem::FileSystemStorageEngine;
 pub use reference::BlobReferenceIndex;
+
+use crate::error::RegistryError;
+use crate::oci::{Descriptor, Digest};
+use crate::registry::LinkReference;
 
 pub struct UploadSummary {
     pub digest: Digest,
@@ -23,9 +27,6 @@ pub struct UploadSummary {
 
 pub trait StorageEngineReader: AsyncRead + Unpin + Send {}
 impl<T> StorageEngineReader for T where T: AsyncRead + Unpin + Send {}
-
-pub trait StorageEngineWriter: AsyncWrite + Unpin + Send {}
-impl<T> StorageEngineWriter for T where T: AsyncWrite + Unpin + Send {}
 
 #[async_trait]
 pub trait StorageEngine: Send + Sync {
@@ -60,12 +61,13 @@ pub trait StorageEngine: Send + Sync {
 
     async fn create_upload(&self, namespace: &str, uuid: &str) -> Result<String, RegistryError>;
 
-    async fn build_upload_writer(
+    async fn write_upload(
         &self,
         namespace: &str,
         uuid: &str,
         start_offset: Option<u64>,
-    ) -> Result<Box<dyn StorageEngineWriter>, RegistryError>;
+        source_reader: Box<dyn AsyncRead + Send + Sync + Unpin>,
+    ) -> Result<(), RegistryError>;
 
     async fn read_upload_summary(
         &self,
