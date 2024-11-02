@@ -65,7 +65,7 @@ impl Registry {
 
         self
             .storage
-            .write_upload(namespace, &session_id, start_offset, Box::new(body))
+            .write_upload(namespace, &session_id, Box::new(body), true)
             .await?;
 
         let summary = self
@@ -102,7 +102,7 @@ impl Registry {
 
         self
             .storage
-            .write_upload(namespace, &uuid, None, Box::new(body))
+            .write_upload(namespace, &uuid, Box::new(body), false)
             .await?;
 
         let summary = self.storage.read_upload_summary(namespace, &uuid).await?;

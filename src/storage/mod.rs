@@ -65,8 +65,8 @@ pub trait StorageEngine: Send + Sync {
         &self,
         namespace: &str,
         uuid: &str,
-        start_offset: Option<u64>,
         source_reader: Box<dyn AsyncRead + Send + Sync + Unpin>,
+        append: bool,
     ) -> Result<(), RegistryError>;
 
     async fn read_upload_summary(

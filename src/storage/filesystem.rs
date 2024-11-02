@@ -393,10 +393,15 @@ impl StorageEngine for FileSystemStorageEngine {
         &self,
         name: &str,
         uuid: &str,
-        start_offset: Option<u64>,
         mut source_reader: Box<dyn AsyncRead + Send + Sync + Unpin>,
+        append: bool,
     ) -> Result<(), RegistryError> {
-        let start_offset = start_offset.unwrap_or(0);
+        let start_offset = if append {
+            let summary = self.read_upload_summary(name, uuid).await?;
+            summary.size
+        } else {
+            0
+        };
 
         let file_path = self.tree.upload_path(name, &uuid);
         let mut file = fs::OpenOptions::new()
