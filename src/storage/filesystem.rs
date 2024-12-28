@@ -215,23 +215,13 @@ impl StorageEngine for FileSystemStorageEngine {
     async fn list_uploads(
         &self,
         namespace: &str,
-    ) -> Result<
-        Box<dyn Iterator<Item = (String, Option<Sha256>, Option<DateTime<Utc>>)>>,
-        RegistryError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (String, Option<DateTime<Utc>>)>>, RegistryError> {
         let path = self.tree.uploads_root_dir(namespace);
         let mut all_uploads = self.collect_directory_entries(&path).await?;
         all_uploads.sort();
 
         let mut uploads = Vec::new();
         for upload in all_uploads {
-            let path = self
-                .tree
-                .upload_hash_context_path(namespace, &upload, "sha256", 0);
-            let state = fs::read(&path).await?;
-
-            let hash = deserialize_hash_state(state).await.ok();
-
             let date = self.tree.upload_start_date_path(namespace, &upload);
             let date = fs::read_to_string(&date)
                 .await
@@ -239,7 +229,7 @@ impl StorageEngine for FileSystemStorageEngine {
                 .and_then(|date| DateTime::parse_from_rfc3339(&date).ok())
                 .map(|d| d.with_timezone(&Utc));
 
-            uploads.push((upload, hash, date));
+            uploads.push((upload, date));
         }
 
         Ok(Box::new(uploads.into_iter()))

@@ -33,10 +33,7 @@ pub trait StorageEngine: Send + Sync {
     async fn list_uploads(
         &self,
         namespace: &str,
-    ) -> Result<
-        Box<dyn Iterator<Item = (String, Option<Sha256>, Option<DateTime<Utc>>)>>,
-        RegistryError,
-    >;
+    ) -> Result<Box<dyn Iterator<Item = (String, Option<DateTime<Utc>>)>>, RegistryError>;
 
     async fn list_blobs(&self) -> Result<Box<dyn Iterator<Item = Digest>>, RegistryError>;
 

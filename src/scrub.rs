@@ -78,20 +78,7 @@ async fn cleanup_uploads(registry: &Guard<Arc<Registry>>, max_age: Duration, aut
             continue;
         };
 
-        for (uuid, hash, start_date) in uploads {
-            if hash.is_none() {
-                warn!(
-                    "Unreadable hash state for upload '{}' of namespace '{}'",
-                    uuid, namespace
-                );
-                if auto_fix {
-                    if let Err(err) = registry.storage.delete_upload(&namespace, &uuid).await {
-                        error!("Failed to delete upload '{}': {}", uuid, err);
-                    }
-                }
-                continue;
-            }
-
+        for (uuid, start_date) in uploads {
             match start_date {
                 Some(start_date) => {
                     let now = Utc::now();

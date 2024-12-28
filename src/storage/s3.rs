@@ -87,10 +87,7 @@ impl StorageEngine for S3StorageEngine {
     async fn list_uploads(
         &self,
         _namespace: &str,
-    ) -> Result<
-        Box<dyn Iterator<Item = (String, Option<Sha256>, Option<DateTime<Utc>>)>>,
-        RegistryError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = (String, Option<DateTime<Utc>>)>>, RegistryError> {
         todo!("Implement this function")
     }
 
