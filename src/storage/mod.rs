@@ -1,5 +1,6 @@
 mod filesystem;
 mod reference;
+mod s3;
 mod tree_manager;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -11,6 +12,7 @@ use tokio::io::AsyncRead;
 
 pub use filesystem::FileSystemStorageEngine;
 pub use reference::BlobReferenceIndex;
+pub use s3::S3StorageEngine;
 
 use crate::error::RegistryError;
 use crate::oci::{Descriptor, Digest};

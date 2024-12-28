@@ -1,6 +1,6 @@
 use crate::error::RegistryError;
 use crate::lock_manager::LockManager;
-use crate::storage::{FileSystemStorageEngine, StorageEngine};
+use crate::storage::{FileSystemStorageEngine, S3StorageEngine, StorageEngine};
 use crate::tls::{build_root_store, load_certificate_bundle, load_private_key};
 use cel_interpreter::Program;
 use lazy_static::lazy_static;
@@ -92,6 +92,8 @@ pub struct StorageConfig {
 pub enum StorageBackendConfig {
     #[serde(rename = "fs")]
     FS(StorageFSConfig),
+    #[serde(rename = "s3")]
+    S3(StorageS3Config),
 }
 
 impl Default for StorageBackendConfig {
@@ -103,6 +105,17 @@ impl Default for StorageBackendConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct StorageFSConfig {
     pub root_dir: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct StorageS3Config {
+    pub access_key_id: String,
+    pub secret_key: String,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    #[serde(default)]
+    pub key_prefix: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -215,6 +228,12 @@ impl Config {
                     self.build_lock_manager()?,
                 );
                 Ok(Box::new(fs_storage_engine))
+            }
+            StorageBackendConfig::S3(s3_config) => {
+                let s3_storage_engine =
+                    S3StorageEngine::new(s3_config, self.build_lock_manager()?)?;
+
+                Ok(Box::new(s3_storage_engine))
             }
         }
     }

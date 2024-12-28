@@ -65,11 +65,20 @@ multi-replica deployments.
 
 ### Storage (`storage`)
 
-Multiple storage backends are supported, but only the filesystem backend is currently implemented.
+Multiple storage backends are supported: filesystem or s3-baked.
 
 #### Filesystem Storage (`storage.fs`)
 
 - `root_dir` (string): The root directory for the storage.
+
+#### S3 Storage (`storage.s3`)
+
+- `access_key_id` (string): The access key ID for the S3 server
+- `secret_key` (string): The secret access key for the S3 server
+- `endpoint` (string): The endpoint for the S3 server
+- `bucket` (string): The bucket for the S3 server
+- `region` (string): The region for the S3 server
+- `key_prefix` (optional, string): The key prefix for all s3 keys
 
 ### Identity (`identity.<identity-id>`)
 
@@ -131,7 +140,6 @@ The following `request.action` actions are supported:
   - [ ] Unit Testing
   - [ ] Conformance Testing
   - [ ] Publishing
-- [ ] s3 storage engine: implementation
 - [ ] Pull-through cache
 - [ ] Global CEL policies
 - [ ] Tag & Digest auto-delete CEL policies
