@@ -49,7 +49,7 @@ impl<'de> Deserialize<'de> for Reference {
     {
         struct ReferenceVisitor;
 
-        impl<'de> Visitor<'de> for ReferenceVisitor {
+        impl Visitor<'_> for ReferenceVisitor {
             type Value = Reference;
 
             fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {

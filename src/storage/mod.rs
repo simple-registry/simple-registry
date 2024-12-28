@@ -1,14 +1,10 @@
 mod filesystem;
 mod reference;
 mod tree_manager;
-
-use crate::error::RegistryError;
-use crate::oci::{Descriptor, Digest};
-use crate::registry::LinkReference;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sha2::digest::crypto_common::hazmat::SerializableState;
-use sha2::Sha256;
+use sha2::{Digest as Sha256Digest, Sha256};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use tokio::io::AsyncRead;
@@ -131,6 +127,11 @@ impl Debug for (dyn StorageEngine + 'static) {
 pub async fn serialize_hash_state(sha256: &Sha256) -> Result<Vec<u8>, RegistryError> {
     let state = sha256.serialize();
     Ok(state.as_slice().to_vec())
+}
+
+pub async fn serialize_hash_empty_state() -> Result<Vec<u8>, RegistryError> {
+    let state = Sha256::new();
+    serialize_hash_state(&state).await
 }
 
 pub async fn deserialize_hash_state(state: Vec<u8>) -> Result<Sha256, RegistryError> {

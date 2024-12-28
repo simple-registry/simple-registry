@@ -29,7 +29,7 @@ struct CapturesDeserializer<'a> {
     captures: &'a Captures<'a>,
 }
 
-impl<'de, 'a> serde::Deserializer<'de> for CapturesDeserializer<'a> {
+impl<'de> serde::Deserializer<'de> for CapturesDeserializer<'_> {
     type Error = de::value::Error;
 
     fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
@@ -76,7 +76,7 @@ struct CapturesMapAccess<'a> {
     field_index: usize,
 }
 
-impl<'de, 'a> MapAccess<'de> for CapturesMapAccess<'a> {
+impl<'de> MapAccess<'de> for CapturesMapAccess<'_> {
     type Error = de::value::Error;
 
     fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>

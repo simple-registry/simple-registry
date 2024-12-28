@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
-use http_body_util::{Empty, Full, StreamBody};
+use http_body_util::{Full, StreamBody};
 use hyper::body::{Body, Frame};
 use hyper::{Response, StatusCode};
 use std::io;
@@ -14,14 +14,14 @@ use crate::error::RegistryError;
 type BytesFrameStream = Pin<Box<dyn Stream<Item = Result<Frame<Bytes>, io::Error>> + Send>>;
 
 pub enum RegistryResponseBody {
-    Empty(Empty<Bytes>),
+    Empty,
     Fixed(Full<Bytes>),
     Streaming(StreamBody<BytesFrameStream>),
 }
 
 impl RegistryResponseBody {
     pub fn empty() -> Self {
-        RegistryResponseBody::Empty(Empty::new())
+        RegistryResponseBody::Empty
     }
 
     pub fn fixed(data: Vec<u8>) -> Self {
@@ -47,9 +47,7 @@ impl Body for RegistryResponseBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         match self.get_mut() {
-            RegistryResponseBody::Empty(body) => Pin::new(body)
-                .poll_frame(cx)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
+            RegistryResponseBody::Empty => Poll::Ready(None),
             RegistryResponseBody::Fixed(body) => Pin::new(body)
                 .poll_frame(cx)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),

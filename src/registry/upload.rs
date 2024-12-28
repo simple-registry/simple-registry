@@ -63,18 +63,18 @@ impl Registry {
         });
         let body = StreamReader::new(body);
 
-        self
-            .storage
+        self.storage
             .write_upload(namespace, &session_id, Box::new(body), true)
             .await?;
 
         let summary = self
             .storage
             .read_upload_summary(namespace, &session_id)
-            .await.map_err(|e| {
-            error!("Error reading uploaded file: {:?}", e);
-            e
-        })?;
+            .await
+            .map_err(|e| {
+                error!("Error reading uploaded file: {:?}", e);
+                e
+            })?;
 
         if summary.size < 1 {
             return Ok(0);
@@ -100,8 +100,7 @@ impl Registry {
         });
         let body = StreamReader::new(body);
 
-        self
-            .storage
+        self.storage
             .write_upload(namespace, &uuid, Box::new(body), false)
             .await?;
 

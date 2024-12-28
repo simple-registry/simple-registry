@@ -13,7 +13,6 @@ impl TreeManager {
         } else {
             format!("{}/v2/blobs", self.root_dir)
         }
-
     }
 
     pub fn blob_container_dir(&self, digest: &Digest) -> String {

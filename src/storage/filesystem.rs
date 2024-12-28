@@ -17,8 +17,8 @@ use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::LinkReference;
 use crate::storage::tree_manager::TreeManager;
 use crate::storage::{
-    deserialize_hash_state, serialize_hash_state, BlobReferenceIndex, StorageEngine,
-    StorageEngineReader, UploadSummary,
+    deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobReferenceIndex,
+    StorageEngine, StorageEngineReader, UploadSummary,
 };
 
 #[derive(Clone)]
@@ -379,10 +379,8 @@ impl StorageEngine for FileSystemStorageEngine {
             .upload_hash_context_container_path(name, uuid, "sha256");
         fs::create_dir_all(&container_dir).await?;
 
-        let hasher = Sha256::new();
-
         let path = self.tree.upload_hash_context_path(name, uuid, "sha256", 0);
-        let state = serialize_hash_state(&hasher).await?;
+        let state = serialize_hash_empty_state().await?;
         fs::write(&path, state).await?;
 
         Ok(uuid.to_string())
@@ -403,7 +401,7 @@ impl StorageEngine for FileSystemStorageEngine {
             0
         };
 
-        let file_path = self.tree.upload_path(name, &uuid);
+        let file_path = self.tree.upload_path(name, uuid);
         let mut file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -424,7 +422,9 @@ impl StorageEngine for FileSystemStorageEngine {
 
         file.seek(SeekFrom::Start(start_offset)).await?;
 
-        let path = self.tree.upload_hash_context_path(name, &uuid, "sha256", start_offset);
+        let path = self
+            .tree
+            .upload_hash_context_path(name, uuid, "sha256", start_offset);
         let state = fs::read(&path).await?;
         let mut hasher = deserialize_hash_state(state).await?;
 
@@ -444,7 +444,9 @@ impl StorageEngine for FileSystemStorageEngine {
         }
 
         let offset = start_offset + total_bytes_written;
-        let path = self.tree.upload_hash_context_path(name, &uuid, "sha256", offset);
+        let path = self
+            .tree
+            .upload_hash_context_path(name, uuid, "sha256", offset);
         let state = serialize_hash_state(&hasher).await?;
         fs::write(&path, &state).await?;
 
