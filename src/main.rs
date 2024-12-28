@@ -228,8 +228,8 @@ async fn main() -> io::Result<()> {
                 .get_one::<String>("config")
                 .cloned()
                 .unwrap_or(DEFAULT_CONFIG_PATH.to_string());
-            let auto_fix = serve_matches
-                .get_one::<bool>("auto-fix")
+            let dry_run = serve_matches
+                .get_one::<bool>("dry-run")
                 .cloned()
                 .unwrap_or(false);
 
@@ -238,7 +238,11 @@ async fn main() -> io::Result<()> {
 
             tracing_helper::setup_tracing();
 
-            scrub::scrub(auto_fix).await
+            let registry_scrub = scrub::RegistryScrub::new(REGISTRY.load().clone(), dry_run);
+            if let Err(e) = registry_scrub.scrub().await {
+                error!("Failed to scrub registry: {}", e);
+            }
+            Ok(())
         }
         Some(("serve", serve_matches)) => {
             let config_path = serve_matches

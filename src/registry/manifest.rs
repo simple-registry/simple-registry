@@ -216,26 +216,36 @@ impl Registry {
                 self.storage.delete_link(namespace, &link).await?;
             }
             Reference::Digest(digest) => {
-                let tags = self.storage.list_tags(namespace).await?;
-                for tag in tags {
-                    let link_reference = LinkReference::Tag(tag.clone());
-                    if self.storage.read_link(namespace, &link_reference).await? == digest {
-                        self.storage.delete_link(namespace, &link_reference).await?;
+                let mut marker = None;
+                loop {
+                    let (tags, next_marker) =
+                        self.storage.list_tags(namespace, 100, marker).await?;
+                    for tag in tags {
+                        let link_reference = LinkReference::Tag(tag.clone());
+                        if self.storage.read_link(namespace, &link_reference).await? == digest {
+                            self.storage.delete_link(namespace, &link_reference).await?;
+                        }
                     }
-                }
 
-                let link = LinkReference::Digest(digest.clone());
+                    let link = LinkReference::Digest(digest.clone());
 
-                let digest = self.storage.read_link(namespace, &link).await?;
-                let content = self.storage.read_blob(&digest).await?;
-                let manifest_digests = parse_manifest_digests(&content, None)?;
+                    let digest = self.storage.read_link(namespace, &link).await?;
+                    let content = self.storage.read_blob(&digest).await?;
+                    let manifest_digests = parse_manifest_digests(&content, None)?;
 
-                if let Some(subject_digest) = manifest_digests.subject {
-                    let link = LinkReference::Referrer(subject_digest.clone(), digest.clone());
+                    if let Some(subject_digest) = manifest_digests.subject {
+                        let link = LinkReference::Referrer(subject_digest.clone(), digest.clone());
+                        self.storage.delete_link(namespace, &link).await?;
+                    }
+
                     self.storage.delete_link(namespace, &link).await?;
-                }
 
-                self.storage.delete_link(namespace, &link).await?;
+                    if next_marker.is_none() {
+                        break;
+                    }
+
+                    marker = next_marker;
+                }
             }
         }
 

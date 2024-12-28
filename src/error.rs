@@ -1,4 +1,7 @@
 use crate::RegistryResponseBody;
+use aws_sdk_s3::config::http::HttpResponse;
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
 use serde::Serialize;
@@ -6,7 +9,7 @@ use serde_json::json;
 use sha2::digest::crypto_common::hazmat;
 use std::cmp::PartialEq;
 use std::fmt::Display;
-use tracing::debug;
+use tracing::{debug, error};
 
 #[derive(Debug, PartialEq)]
 pub enum RegistryError {
@@ -198,5 +201,12 @@ impl From<hazmat::DeserializeStateError> for RegistryError {
     fn from(error: hazmat::DeserializeStateError) -> Self {
         debug!("Crypto error: {:?}", error);
         RegistryError::InternalServerError(Some("Crypto error during operations".to_string()))
+    }
+}
+
+impl From<SdkError<ListObjectsV2Error, HttpResponse>> for RegistryError {
+    fn from(error: SdkError<ListObjectsV2Error, HttpResponse>) -> Self {
+        error!("Error listing objects: {}", error);
+        RegistryError::InternalServerError(Some("S3 error during operations".to_string()))
     }
 }

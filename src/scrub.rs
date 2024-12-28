@@ -1,210 +1,337 @@
 use crate::error::RegistryError;
 use crate::oci::Digest;
 use crate::registry::{parse_manifest_digests, LinkReference, Registry};
-use crate::REGISTRY;
-use arc_swap::Guard;
 use chrono::{Duration, Utc};
 use std::io;
 use std::process::exit;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-async fn ensure_link(
-    registry: &Registry,
-    namespace: &str,
-    link_reference: &LinkReference,
-    digest: &Digest,
-    auto_fix: bool,
-) -> Result<(), RegistryError> {
-    let blob_digest = registry
-        .storage
-        .read_link(namespace, link_reference)
-        .await
-        .ok();
+pub struct RegistryScrub {
+    registry: Arc<Registry>,
+    dry_mode: bool,
+    upload_timeout: Duration,
+    check_uploads: bool,
+    check_tags: bool,
+    check_revisions: bool,
+    check_blobs: bool,
+}
 
-    if blob_digest != Some(digest.clone()) {
-        warn!(
-            "Invalid revision: expected '{:?}', found '{:?}'",
-            digest, blob_digest
-        );
-        if auto_fix {
-            registry
+impl RegistryScrub {
+    pub fn new(registry: Arc<Registry>, dry_mode: bool) -> Self {
+        // TODO: customizable options
+        Self {
+            registry,
+            dry_mode,
+            upload_timeout: Duration::hours(24),
+            check_uploads: true,
+            check_tags: true,
+            check_revisions: true,
+            check_blobs: true,
+        }
+    }
+
+    pub async fn scrub(&self) -> io::Result<()> {
+        if self.dry_mode {
+            info!("Dry-run mode: no changes will be made to the storage");
+        }
+
+        let mut marker = None;
+        loop {
+            let Ok((namespaces, next_marker)) =
+                self.registry.storage.list_namespaces(100, marker).await
+            else {
+                error!("Failed to read catalog");
+                exit(1);
+            };
+
+            for namespace in namespaces {
+                if self.check_uploads {
+                    // Step 1: check upload directories
+                    // - for incomplete uploads (threshold from config file)
+                    // - delete corrupted upload directories (here we are incompatible with docker "distribution")
+                    let _ = self.scrub_uploads(&namespace).await;
+                }
+
+                if self.check_tags {
+                    // Step 2: for each manifest tags "_manifests/tags/<tag-name>/current/link", ensure the
+                    // revision exists: "_manifests/revisions/sha256/<hash>/link"
+                    let _ = self.scrub_tags(&namespace).await;
+                }
+
+                if self.check_revisions {
+                    // Step 3: for each revision "_manifests/revisions/sha256/<hash>/link", read the manifest,
+                    // and ensure related links exists
+                    let _ = self.scrub_revisions(&namespace).await;
+                }
+            }
+
+            if next_marker.is_none() {
+                break;
+            }
+
+            marker = next_marker;
+        }
+
+        if self.check_blobs {
+            // Step 4: blob garbage collection
+            let _ = self.cleanup_orphan_blobs().await;
+        }
+
+        Ok(())
+    }
+
+    async fn scrub_uploads(&self, namespace: &str) -> Result<(), RegistryError> {
+        info!("'{}': Checking for obsolete uploads", namespace);
+
+        let mut marker = None;
+        loop {
+            let (uploads, next_marker) = self
+                .registry
                 .storage
-                .create_link(namespace, link_reference, digest)
+                .list_uploads(namespace, 100, marker)
+                .await?;
+
+            for uuid in uploads {
+                if let Err(error) = self.check_upload(namespace, &uuid).await {
+                    error!("Failed to check upload '{}': {}", uuid, error);
+                }
+            }
+
+            if next_marker.is_none() {
+                break;
+            }
+            marker = next_marker;
+        }
+
+        Ok(())
+    }
+
+    async fn check_upload(&self, namespace: &str, uuid: &str) -> Result<(), RegistryError> {
+        let summary = self
+            .registry
+            .storage
+            .read_upload_summary(namespace, uuid)
+            .await?;
+
+        let now = Utc::now();
+        let duration = now.signed_duration_since(summary.start_date);
+
+        if duration <= self.upload_timeout {
+            return Ok(());
+        }
+
+        warn!("'{}': upload '{}' is obsolete", namespace, uuid);
+        if !self.dry_mode {
+            if let Err(err) = self.registry.storage.delete_upload(namespace, uuid).await {
+                error!("Failed to delete upload '{}': {}", uuid, err);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn scrub_tags(&self, namespace: &str) -> Result<(), RegistryError> {
+        info!("'{}': Checking tags/revision inconsistencies", namespace);
+
+        let mut marker = None;
+        loop {
+            let (tags, next_marker) = self
+                .registry
+                .storage
+                .list_tags(namespace, 100, marker)
+                .await?;
+
+            for tag in tags {
+                if let Err(error) = self.check_tag(namespace, &tag).await {
+                    error!("Failed to check tag '{}': {}", tag, error);
+                }
+            }
+
+            if next_marker.is_none() {
+                break;
+            }
+            marker = next_marker;
+        }
+
+        Ok(())
+    }
+
+    async fn check_tag(&self, namespace: &str, tag: &str) -> Result<(), RegistryError> {
+        debug!(
+            "Checking {}:{} for revision inconsistencies",
+            namespace, tag
+        );
+        let digest = self
+            .registry
+            .storage
+            .read_link(namespace, &LinkReference::Tag(tag.to_string()))
+            .await?;
+
+        let link_reference = LinkReference::Digest(digest.clone());
+        if let Err(e) = self.ensure_link(namespace, &link_reference, &digest).await {
+            warn!("Failed to ensure link: {}", e);
+        }
+
+        Ok(())
+    }
+
+    async fn scrub_revisions(&self, namespace: &str) -> Result<(), RegistryError> {
+        info!("'{}': Checking for revision inconsistencies", namespace);
+
+        let mut marker = None;
+
+        loop {
+            let (revisions, next_marker) = self
+                .registry
+                .storage
+                .list_revisions(namespace, 0, marker)
+                .await?;
+
+            for revision in revisions {
+                let content = self.registry.storage.read_blob(&revision).await?;
+                let manifest = parse_manifest_digests(&content, None)?;
+
+                self.check_layers(namespace, &revision, &manifest.layers)
+                    .await?;
+                self.check_config(namespace, &revision, manifest.config)
+                    .await?;
+                self.check_subject(namespace, &revision, manifest.subject)
+                    .await?;
+            }
+
+            if next_marker.is_none() {
+                break;
+            }
+
+            marker = next_marker;
+        }
+
+        Ok(())
+    }
+
+    async fn check_config(
+        &self,
+        namespace: &str,
+        revision: &Digest,
+        config: Option<Digest>,
+    ) -> Result<(), RegistryError> {
+        let Some(config_digest) = config else {
+            return Ok(());
+        };
+
+        debug!(
+            "Checking {}@{} config link: {}",
+            namespace, revision, config_digest
+        );
+
+        let link_reference = LinkReference::Config(config_digest.clone());
+        self.ensure_link(namespace, &link_reference, &config_digest)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn check_subject(
+        &self,
+        namespace: &str,
+        revision: &Digest,
+        subject_digest: Option<Digest>,
+    ) -> Result<(), RegistryError> {
+        let Some(subject_digest) = subject_digest else {
+            return Ok(());
+        };
+
+        debug!(
+            "Checking {}@{} subject link: {}",
+            namespace, revision, subject_digest
+        );
+        let link_reference = LinkReference::Referrer(subject_digest.clone(), revision.clone());
+        self.ensure_link(namespace, &link_reference, revision)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn check_layers(
+        &self,
+        namespace: &str,
+        revision: &Digest,
+        layers: &Vec<Digest>,
+    ) -> Result<(), RegistryError> {
+        for layer_digest in layers {
+            debug!(
+                "Checking {}@{} layer link: {}",
+                namespace, revision, layer_digest
+            );
+
+            let link_reference = LinkReference::Layer(layer_digest.clone());
+            self.ensure_link(namespace, &link_reference, layer_digest)
                 .await?;
         }
-    }
-    Ok(())
-}
 
-pub async fn scrub(auto_fix: bool) -> io::Result<()> {
-    if !auto_fix {
-        info!("Dry-run mode: no changes will be made to the storage");
+        Ok(())
     }
 
-    let registry = REGISTRY.load();
-    // TODO: allow to run only selected steps (e.g. --uploads, --tags, --revisions, --blobs)
+    async fn ensure_link(
+        &self,
+        namespace: &str,
+        link_reference: &LinkReference,
+        digest: &Digest,
+    ) -> Result<(), RegistryError> {
+        let blob_digest = self
+            .registry
+            .storage
+            .read_link(namespace, link_reference)
+            .await
+            .ok();
 
-    // Step 1: check upload directories
-    // - for incomplete uploads (threshold from config file)
-    // - delete corrupted upload directories (here we are incompatible with docker "distribution")
-    cleanup_uploads(&registry, Duration::hours(24), auto_fix).await; // TODO: customizable threshold
-
-    // Step 2: for each manifest tags "_manifests/tags/<tag-name>/current/link", ensure the
-    // revision exists: "_manifests/revisions/sha256/<hash>/link"
-    ensure_tags_have_revision(&registry, auto_fix).await;
-
-    // Step 3: for each revision "_manifests/revisions/sha256/<hash>/link", read the manifest,
-    // and ensure related links exists
-    ensure_revisions_are_coherent(&registry, auto_fix).await;
-
-    // Step 4: blob garbage collection
-    cleanup_orphan_blobs(&registry, auto_fix).await;
-
-    Ok(())
-}
-
-async fn cleanup_uploads(registry: &Guard<Arc<Registry>>, max_age: Duration, auto_fix: bool) {
-    info!("Checking for obsolete uploads");
-    let Ok(namespaces) = registry.storage.list_namespaces().await else {
-        error!("Failed to read catalog");
-        exit(1);
-    };
-
-    for namespace in namespaces {
-        debug!("Checking namespace {} for obsolete uploads", namespace);
-        let Ok(uploads) = registry.storage.list_uploads(&namespace).await else {
-            error!("Failed to list uploads for namespace '{}'", namespace);
-            continue;
-        };
-
-        for (uuid, start_date) in uploads {
-            match start_date {
-                Some(start_date) => {
-                    let now = Utc::now();
-                    let duration = now.signed_duration_since(start_date);
-                    if duration > max_age {
-                        warn!(
-                            "Upload '{}' of namespace '{}' was not completed in time",
-                            uuid, namespace
-                        );
-                        if auto_fix {
-                            if let Err(err) =
-                                registry.storage.delete_upload(&namespace, &uuid).await
-                            {
-                                error!("Failed to delete upload '{}': {}", uuid, err);
-                            }
-                        }
-                    }
-                }
-                None => {
-                    warn!(
-                        "Upload '{}' of namespace '{}' invalid start date",
-                        uuid, namespace
-                    );
-                    if auto_fix {
-                        if let Err(err) = registry.storage.delete_upload(&namespace, &uuid).await {
-                            error!("Failed to delete upload '{}': {}", uuid, err);
-                        }
-                    }
-                }
+        if blob_digest != Some(digest.clone()) {
+            warn!(
+                "Invalid revision: expected '{:?}', found '{:?}'",
+                digest, blob_digest
+            );
+            if !self.dry_mode {
+                self.registry
+                    .storage
+                    .create_link(namespace, link_reference, digest)
+                    .await?;
             }
         }
+        Ok(())
     }
-}
 
-async fn ensure_tags_have_revision(registry: &Registry, auto_fix: bool) {
-    info!("Checking tags & revision inconsistencies");
-    let Ok(namespaces) = registry.storage.list_namespaces().await else {
-        error!("Failed to read catalog");
-        exit(1);
-    };
+    async fn cleanup_orphan_blobs(&self) -> Result<(), RegistryError> {
+        info!("Checking for orphan blobs");
 
-    for namespace in namespaces {
-        debug!(
-            "Checking namespace {} for tag to revision inconsistencies",
-            namespace
-        );
-        let Ok(tags) = registry.storage.list_tags(&namespace).await else {
-            error!("Failed to list tags for namespace '{}'", namespace);
-            continue;
-        };
+        let mut marker = None;
+        loop {
+            let Ok((blobs, next_marker)) = self.registry.storage.list_blobs(100, marker).await
+            else {
+                error!("Failed to list blobs");
+                exit(1);
+            };
 
-        for tag in tags {
-            check_tag_revision(registry, &namespace, &tag, auto_fix).await;
-        }
-    }
-}
-
-async fn ensure_revisions_are_coherent(registry: &Registry, auto_fix: bool) {
-    info!("Checking revisions & other links consistency");
-    let Ok(namespaces) = registry.storage.list_namespaces().await else {
-        error!("Failed to read catalog");
-        exit(1);
-    };
-
-    for namespace in namespaces {
-        debug!(
-            "Checking namespace {} for tag to revision inconsistencies",
-            namespace
-        );
-        if let Ok(revisions) = registry.storage.list_revisions(&namespace).await {
-            for revision in revisions {
-                let Ok(content) = registry.storage.read_blob(&revision).await else {
-                    error!("Failed to read revision: {}@{}", namespace, revision);
-                    continue;
-                };
-
-                let Ok(manifest_digests) = parse_manifest_digests(&content, None) else {
-                    error!("Failed to parse manifest: {}@{}", namespace, revision);
-                    continue;
-                };
-
-                check_manifest_layers(
-                    registry,
-                    &namespace,
-                    &revision,
-                    &manifest_digests.layers,
-                    auto_fix,
-                )
-                .await;
-                check_manifest_config(
-                    registry,
-                    &namespace,
-                    &revision,
-                    manifest_digests.config,
-                    auto_fix,
-                )
-                .await;
-                check_manifest_subject(
-                    registry,
-                    &namespace,
-                    &revision,
-                    manifest_digests.subject,
-                    auto_fix,
-                )
-                .await;
+            for blob in blobs {
+                self.check_blob(&blob).await?;
             }
+
+            if next_marker.is_none() {
+                break;
+            }
+            marker = next_marker;
         }
+
+        Ok(())
     }
-}
 
-async fn cleanup_orphan_blobs(registry: &Registry, auto_fix: bool) {
-    info!("Checking for orphan blobs");
-    let Ok(blobs) = registry.storage.list_blobs().await else {
-        error!("Failed to list blobs");
-        exit(1);
-    };
-
-    for blog_digest in blobs {
-        let Ok(mut blob_index) = registry.storage.read_blob_index(&blog_digest).await else {
-            error!("Failed to read blob index: {}", blog_digest);
-            continue;
-        };
+    async fn check_blob(&self, blob: &Digest) -> Result<(), RegistryError> {
+        let mut blob_index = self.registry.storage.read_blob_index(blob).await?;
 
         for (namespace, references) in blob_index.namespace.clone() {
             for link_reference in references {
-                if registry
+                if self
+                    .registry
                     .storage
                     .read_link(&namespace, &link_reference)
                     .await
@@ -217,9 +344,9 @@ async fn cleanup_orphan_blobs(registry: &Registry, auto_fix: bool) {
 
                     warn!(
                         "Orphan link: {}@{} -> {:?}",
-                        namespace, blog_digest, link_reference
+                        namespace, blob, link_reference
                     );
-                    if auto_fix {
+                    if !self.dry_mode {
                         index.remove(&link_reference);
                     }
                 }
@@ -231,106 +358,13 @@ async fn cleanup_orphan_blobs(registry: &Registry, auto_fix: bool) {
             .retain(|_, references| !references.is_empty());
 
         if blob_index.namespace.is_empty() {
-            warn!("Orphan blob: {}", blog_digest);
-            if auto_fix {
-                if let Err(err) = registry.storage.delete_blob(&blog_digest).await {
+            warn!("Orphan blob: {}", blob);
+            if !self.dry_mode {
+                if let Err(err) = self.registry.storage.delete_blob(blob).await {
                     error!("Failed to delete blob: {}", err);
                 }
             }
         }
-    }
-}
-
-async fn check_tag_revision(registry: &Registry, namespace: &str, tag: &str, auto_fix: bool) {
-    debug!(
-        "Checking {}:{} for revision inconsistencies",
-        namespace, tag
-    );
-
-    let Ok(digest) = registry
-        .storage
-        .read_link(namespace, &LinkReference::Tag(tag.to_string()))
-        .await
-    else {
-        error!("Failed to read link for tag: {}", tag);
-        return;
-    };
-
-    let link_reference = LinkReference::Digest(digest.clone());
-    if let Err(e) = ensure_link(registry, namespace, &link_reference, &digest, auto_fix).await {
-        warn!("Failed to ensure link: {}", e);
-    }
-}
-
-async fn check_manifest_config(
-    registry: &Registry,
-    namespace: &str,
-    revision: &Digest,
-    config_digest: Option<Digest>,
-    auto_fix: bool,
-) {
-    let Some(config_digest) = config_digest else {
-        return;
-    };
-
-    debug!(
-        "Checking {}@{} config link: {}",
-        namespace, revision, config_digest
-    );
-
-    let link_reference = LinkReference::Config(config_digest.clone());
-    if let Err(e) = ensure_link(
-        registry,
-        namespace,
-        &link_reference,
-        &config_digest,
-        auto_fix,
-    )
-    .await
-    {
-        warn!("Failed to ensure link: {}", e);
-    }
-}
-
-async fn check_manifest_subject(
-    registry: &Registry,
-    namespace: &str,
-    revision: &Digest,
-    subject_digest: Option<Digest>,
-    auto_fix: bool,
-) {
-    let Some(subject_digest) = subject_digest else {
-        return;
-    };
-
-    debug!(
-        "Checking {}@{} subject link: {}",
-        namespace, revision, subject_digest
-    );
-    let link_reference = LinkReference::Referrer(subject_digest.clone(), revision.clone());
-    if let Err(e) = ensure_link(registry, namespace, &link_reference, revision, auto_fix).await {
-        warn!("Failed to ensure link: {}", e);
-    }
-}
-
-async fn check_manifest_layers(
-    registry: &Registry,
-    namespace: &str,
-    revision: &Digest,
-    layers: &Vec<Digest>,
-    auto_fix: bool,
-) {
-    for layer_digest in layers {
-        debug!(
-            "Checking {}@{} layer link: {}",
-            namespace, revision, layer_digest
-        );
-
-        let link_reference = LinkReference::Layer(layer_digest.clone());
-        if let Err(e) =
-            ensure_link(registry, namespace, &link_reference, layer_digest, auto_fix).await
-        {
-            warn!("Failed to ensure link: {}", e);
-        }
+        Ok(())
     }
 }

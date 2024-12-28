@@ -18,7 +18,7 @@ impl Registry {
             .list_referrers(namespace, &digest, artifact_type)
             .await
         {
-            Ok(referrers) => Ok(referrers.collect()),
+            Ok(referrers) => Ok(referrers),
             Err(RegistryError::BlobUnknown) => Ok(Vec::new()),
             Err(e) => Err(e),
         }
@@ -32,21 +32,13 @@ impl Registry {
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         let n = n.unwrap_or(100);
 
-        let mut namespaces = self.storage.list_namespaces().await?;
-
-        if let Some(last) = last {
-            for namespace in namespaces.by_ref() {
-                if namespace == last {
-                    break;
-                }
-            }
-        }
-
-        let namespaces = namespaces.take(n as usize).collect::<Vec<_>>();
-        let next_last = namespaces.last().cloned();
-
+        let (namespaces, next_last) = self.storage.list_revisions("test/nginx", n, last).await?;
         let link = next_last.map(|next_last| format!("/v2/_catalog?n={}&last={}", n, next_last));
 
+        let namespaces = namespaces
+            .into_iter()
+            .map(|digest| digest.to_string())
+            .collect();
         Ok((namespaces, link))
     }
 
@@ -61,19 +53,7 @@ impl Registry {
 
         let n = n.unwrap_or(100);
 
-        let mut tags = self.storage.list_tags(namespace).await?;
-
-        if let Some(last) = last {
-            for tag in tags.by_ref() {
-                if tag == last {
-                    break;
-                }
-            }
-        }
-
-        let tags = tags.take(n as usize).collect::<Vec<_>>();
-        let next_last = tags.last().cloned();
-
+        let (tags, next_last) = self.storage.list_tags(namespace, n, last).await?;
         let link = next_last
             .map(|next_last| format!("/v2/{}/tags/list?n={}&last={}", namespace, n, next_last));
 

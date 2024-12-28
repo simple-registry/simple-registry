@@ -50,9 +50,10 @@ impl FileSystemStorageEngine {
         }
     }
 
-    #[instrument(skip(repositories))]
-    async fn collect_repositories(&self, base_path: &Path, repositories: &mut HashSet<String>) {
+    #[instrument]
+    async fn collect_repositories(&self, base_path: &Path) -> Vec<String> {
         let mut path_stack: Vec<PathBuf> = vec![base_path.to_path_buf()];
+        let mut repositories = Vec::new();
 
         while let Some(current_path) = path_stack.pop() {
             if let Ok(mut entries) = fs::read_dir(&current_path).await {
@@ -70,7 +71,7 @@ impl FileSystemStorageEngine {
                                 {
                                     if let Some(name) = name.to_str() {
                                         debug!("Found repository: {}", name);
-                                        repositories.insert(name.to_string());
+                                        repositories.push(name.to_string());
                                     }
                                 }
                             } else {
@@ -82,6 +83,9 @@ impl FileSystemStorageEngine {
                 }
             }
         }
+
+        repositories.sort();
+        repositories
     }
 
     #[instrument]
@@ -188,122 +192,78 @@ impl FileSystemStorageEngine {
         Ok(is_referenced)
     }
 
-    #[instrument]
-    pub async fn get_all_tags(&self, name: &str) -> Result<Vec<String>, RegistryError> {
-        let path = self.tree.manifest_tags_dir(name);
-        debug!("Listing tags in path: {}", path);
-        let mut tags = self.collect_directory_entries(&path).await?;
-        tags.sort();
+    pub fn paginate<T>(
+        &self,
+        items: Vec<T>,
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> (Vec<T>, Option<String>)
+    where
+        T: Clone + ToString,
+    {
+        let start = match continuation_token {
+            Some(continuation_token) => {
+                // search for the index of element lexicographically immediately after the continuation token
+                items
+                    .iter()
+                    .position(|r| r.to_string() > continuation_token)
+                    .unwrap_or(items.len())
+            }
+            None => 0,
+        };
 
-        Ok(tags)
+        let end = (start + n as usize).min(items.len());
+
+        let items = items[start..end].to_vec();
+        if end < items.len() {
+            let next = items[end].clone();
+            (items, Some(next.to_string()))
+        } else {
+            (items, None)
+        }
     }
 }
 
 #[async_trait]
 impl StorageEngine for FileSystemStorageEngine {
     #[instrument(skip(self))]
-    async fn list_namespaces(&self) -> Result<Box<dyn Iterator<Item = String>>, RegistryError> {
+    async fn list_namespaces(
+        &self,
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         let base_path = self.tree.repository_dir();
         let base_path = Path::new(&base_path);
-        let mut repositories = HashSet::new();
-        self.collect_repositories(base_path, &mut repositories)
-            .await;
-        Ok(Box::new(repositories.into_iter()))
-    }
 
-    #[instrument(skip(self))]
-    async fn list_uploads(
-        &self,
-        namespace: &str,
-    ) -> Result<Box<dyn Iterator<Item = (String, Option<DateTime<Utc>>)>>, RegistryError> {
-        let path = self.tree.uploads_root_dir(namespace);
-        let mut all_uploads = self.collect_directory_entries(&path).await?;
-        all_uploads.sort();
+        let repositories = self.collect_repositories(base_path).await;
 
-        let mut uploads = Vec::new();
-        for upload in all_uploads {
-            let date = self.tree.upload_start_date_path(namespace, &upload);
-            let date = fs::read_to_string(&date)
-                .await
-                .ok()
-                .and_then(|date| DateTime::parse_from_rfc3339(&date).ok())
-                .map(|d| d.with_timezone(&Utc));
-
-            uploads.push((upload, date));
-        }
-
-        Ok(Box::new(uploads.into_iter()))
-    }
-
-    #[instrument(skip(self))]
-    async fn list_blobs(&self) -> Result<Box<dyn Iterator<Item = Digest>>, RegistryError> {
-        let path = PathBuf::new()
-            .join(self.tree.blobs_root_dir())
-            .join("sha256")
-            .to_string_lossy()
-            .to_string();
-
-        let all_prefixes = self.collect_directory_entries(&path).await?;
-
-        let mut digests = Vec::new();
-
-        for prefix in all_prefixes {
-            let blob_path = PathBuf::from(&path)
-                .join(&prefix)
-                .to_string_lossy()
-                .to_string();
-
-            let all_digests = self.collect_directory_entries(&blob_path).await?;
-
-            for digest in all_digests {
-                let digest = format!("sha256:{}", digest);
-                let digest = Digest::from_str(&digest)?;
-                digests.push(digest);
-            }
-        }
-
-        Ok(Box::new(digests.into_iter()))
-    }
-
-    async fn list_revisions(
-        &self,
-        namespace: &str,
-    ) -> Result<Box<dyn Iterator<Item = Digest>>, RegistryError> {
-        let path = self
-            .tree
-            .manifest_revisions_link_root_dir(namespace, "sha256"); // HACK: hardcoded sha256
-
-        let all_revisions = self.collect_directory_entries(&path).await?;
-        let mut revisions = Vec::new();
-
-        for revision in all_revisions {
-            let revision = format!("{}:{}", "sha256", revision);
-            let revision = Digest::from_str(&revision)?;
-            revisions.push(revision);
-        }
-
-        Ok(Box::new(revisions.into_iter()))
+        Ok(self.paginate(repositories, n, continuation_token))
     }
 
     #[instrument(skip(self))]
     async fn list_tags(
         &self,
-        name: &str,
-    ) -> Result<Box<dyn Iterator<Item = String> + Send + Sync>, RegistryError> {
-        let tags = self.get_all_tags(name).await?;
+        namespace: &str,
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<String>, Option<String>), RegistryError> {
+        let path = self.tree.manifest_tags_dir(namespace);
+        debug!("Listing tags in path: {}", path);
+        let mut tags = self.collect_directory_entries(&path).await?;
+        tags.sort();
 
-        Ok(Box::new(tags.into_iter()))
+        Ok(self.paginate(tags, n, continuation_token))
     }
 
     #[instrument(skip(self))]
     async fn list_referrers(
         &self,
-        name: &str,
+        namespace: &str,
         digest: &Digest,
         artifact_type: Option<String>,
-    ) -> Result<Box<dyn Iterator<Item = Descriptor>>, RegistryError> {
+    ) -> Result<Vec<Descriptor>, RegistryError> {
         let _guard = self.lock_manager.read_lock(digest.to_string()).await;
-        let path = self.tree.manifest_referrers_dir(name, digest);
+        let path = self.tree.manifest_referrers_dir(namespace, digest);
         let all_manifest = self.collect_directory_entries(&path).await?;
         let mut referrers = Vec::new();
 
@@ -343,7 +303,80 @@ impl StorageEngine for FileSystemStorageEngine {
             });
         }
 
-        Ok(Box::new(referrers.into_iter()))
+        Ok(referrers)
+    }
+
+    #[instrument(skip(self))]
+    async fn list_uploads(
+        &self,
+        namespace: &str,
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<String>, Option<String>), RegistryError> {
+        let path = self.tree.uploads_root_dir(namespace);
+
+        let mut uploads = Vec::new();
+        for upload in self.collect_directory_entries(&path).await? {
+            uploads.push(upload);
+        }
+
+        Ok(self.paginate(uploads, n, continuation_token))
+    }
+
+    #[instrument(skip(self))]
+    async fn list_blobs(
+        &self,
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<Digest>, Option<String>), RegistryError> {
+        let path = PathBuf::new()
+            .join(self.tree.blobs_root_dir())
+            .join("sha256")
+            .to_string_lossy()
+            .to_string();
+
+        let all_prefixes = self.collect_directory_entries(&path).await?;
+
+        let mut digests = Vec::new();
+
+        for prefix in all_prefixes {
+            let blob_path = PathBuf::from(&path)
+                .join(&prefix)
+                .to_string_lossy()
+                .to_string();
+
+            let all_digests = self.collect_directory_entries(&blob_path).await?;
+
+            for digest in all_digests {
+                let digest = format!("sha256:{}", digest);
+                let digest = Digest::from_str(&digest)?;
+                digests.push(digest);
+            }
+        }
+
+        Ok(self.paginate(digests, n, continuation_token))
+    }
+
+    async fn list_revisions(
+        &self,
+        namespace: &str,
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<Digest>, Option<String>), RegistryError> {
+        let path = self
+            .tree
+            .manifest_revisions_link_root_dir(namespace, "sha256"); // HACK: hardcoded sha256
+
+        let all_revisions = self.collect_directory_entries(&path).await?;
+        let mut revisions = Vec::new();
+
+        for revision in all_revisions {
+            let revision = format!("{}:{}", "sha256", revision);
+            let revision = Digest::from_str(&revision)?;
+            revisions.push(revision);
+        }
+
+        Ok(self.paginate(revisions, n, continuation_token))
     }
 
     #[instrument(skip(self))]
@@ -464,7 +497,19 @@ impl StorageEngine for FileSystemStorageEngine {
         let digest = hasher.finalize();
         let digest = Digest::Sha256(hex::encode(digest));
 
-        Ok(UploadSummary { digest, size })
+        let date = self.tree.upload_start_date_path(name, uuid);
+        let start_date = fs::read_to_string(&date)
+            .await
+            .ok()
+            .and_then(|date| DateTime::parse_from_rfc3339(&date).ok())
+            .unwrap_or_default() // Fallbacks to epoch
+            .with_timezone(&Utc);
+
+        Ok(UploadSummary {
+            digest,
+            size,
+            start_date,
+        })
     }
 
     #[instrument(skip(self))]

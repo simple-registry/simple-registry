@@ -21,6 +21,7 @@ use crate::registry::LinkReference;
 pub struct UploadSummary {
     pub digest: Digest,
     pub size: u64,
+    pub start_date: DateTime<Utc>,
 }
 
 pub trait StorageEngineReader: AsyncRead + Unpin + Send {}
@@ -28,31 +29,46 @@ impl<T> StorageEngineReader for T where T: AsyncRead + Unpin + Send {}
 
 #[async_trait]
 pub trait StorageEngine: Send + Sync {
-    async fn list_namespaces(&self) -> Result<Box<dyn Iterator<Item = String>>, RegistryError>;
-
-    async fn list_uploads(
+    async fn list_namespaces(
         &self,
-        namespace: &str,
-    ) -> Result<Box<dyn Iterator<Item = (String, Option<DateTime<Utc>>)>>, RegistryError>;
-
-    async fn list_blobs(&self) -> Result<Box<dyn Iterator<Item = Digest>>, RegistryError>;
-
-    async fn list_revisions(
-        &self,
-        namespace: &str,
-    ) -> Result<Box<dyn Iterator<Item = Digest>>, RegistryError>;
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<String>, Option<String>), RegistryError>;
 
     async fn list_tags(
         &self,
         namespace: &str,
-    ) -> Result<Box<dyn Iterator<Item = String> + Send + Sync>, RegistryError>;
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<String>, Option<String>), RegistryError>;
 
     async fn list_referrers(
+        // TODO: unify with other listing methods
         &self,
         namespace: &str,
         digest: &Digest,
         artifact_type: Option<String>,
-    ) -> Result<Box<dyn Iterator<Item = Descriptor>>, RegistryError>;
+    ) -> Result<Vec<Descriptor>, RegistryError>;
+
+    async fn list_uploads(
+        &self,
+        namespace: &str,
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<String>, Option<String>), RegistryError>;
+
+    async fn list_blobs(
+        &self,
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<Digest>, Option<String>), RegistryError>;
+
+    async fn list_revisions(
+        &self,
+        namespace: &str,
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<Digest>, Option<String>), RegistryError>;
 
     async fn create_upload(&self, namespace: &str, uuid: &str) -> Result<String, RegistryError>;
 
