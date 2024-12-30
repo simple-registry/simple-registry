@@ -53,6 +53,10 @@ impl TreeManager {
         format!("{}/data", self.upload_container_path(name, uuid))
     }
 
+    pub fn upload_staged_container_path(&self, name: &str, uuid: &str, offset: u64) -> String {
+        format!("{}/{}/staged/{}", self.uploads_root_dir(name), uuid, offset)
+    }
+
     pub fn upload_hash_context_container_path(
         &self,
         name: &str,

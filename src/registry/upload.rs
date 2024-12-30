@@ -88,7 +88,6 @@ impl Registry {
 
         let session_id = session_id.to_string();
 
-        // TODO: append = false is probably not correct...
         self.upload_body_chunk(namespace, &session_id, body, false)
             .await?;
 
@@ -113,7 +112,7 @@ impl Registry {
         namespace: &str,
         session_id: &str,
         mut body: BodyDataStream<Request<Incoming>>,
-        append: bool,
+        mut append: bool,
     ) -> Result<(), RegistryError> {
         let mut chunk = Vec::new();
         while let Some(frame) = body.next().await {
@@ -123,12 +122,19 @@ impl Registry {
             })?;
             chunk.extend_from_slice(&frame);
 
-            while chunk.len() >= 10 * 1024 * 1024 {
+            let streaming_size = self.streaming_chunk_size as usize;
+
+            while chunk.len() >= streaming_size {
                 error!("Chunk too large, creating a part: {}", chunk.len());
-                let (current_part, next_part) = chunk.split_at(10 * 1024 * 1024);
+                let (current_part, next_part) = chunk.split_at(streaming_size);
+
                 self.storage
                     .write_upload(namespace, session_id, current_part, append)
                     .await?;
+
+                if !append {
+                    append = true;
+                }
                 chunk = next_part.to_vec();
             }
         }

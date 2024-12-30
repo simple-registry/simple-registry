@@ -6,7 +6,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
-use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::builders::{CompletedMultipartUploadBuilder, CompletedPartBuilder};
 use aws_sdk_s3::types::CompletedPart;
@@ -17,7 +16,6 @@ use aws_sdk_s3::{
 };
 use chrono::{DateTime, Utc};
 use sha2::{Digest as ShaDigestTrait, Sha256};
-use tokio::fs;
 use tracing::{debug, error, instrument};
 
 use crate::config::StorageS3Config;
@@ -79,56 +77,6 @@ impl S3StorageEngine {
             bucket: config.bucket.clone(),
             lock_manager,
         })
-    }
-
-    async fn list_objects(
-        &self,
-        prefix: &str,
-        continuation_token: Option<String>,
-        max_keys: Option<i32>,
-    ) -> Result<ListObjectsV2Output, RegistryError> {
-        let max_keys = max_keys.unwrap_or(1000);
-
-        let res = self
-            .s3_client
-            .list_objects_v2()
-            .bucket(&self.bucket)
-            .prefix(prefix)
-            .delimiter("/")
-            .set_continuation_token(continuation_token)
-            .max_keys(max_keys)
-            .send()
-            .await?;
-
-        Ok(res)
-    }
-
-    #[instrument]
-    async fn collect_directory_entries(&self, prefix: &str) -> Result<Vec<String>, RegistryError> {
-        let mut entries = Vec::new();
-        let mut continuation_token = None;
-
-        loop {
-            let res = self.list_objects(prefix, continuation_token, None).await?;
-
-            if let Some(contents) = res.contents.as_ref() {
-                for object in contents {
-                    if let Some(key) = object.key.as_ref() {
-                        let name = key.trim_end_matches('/');
-                        let name = name.strip_prefix(prefix).unwrap_or(name);
-                        entries.push(name.to_string());
-                    }
-                }
-            }
-
-            if res.is_truncated.unwrap_or_default() {
-                continuation_token = res.next_continuation_token;
-            } else {
-                break;
-            }
-        }
-
-        Ok(entries)
     }
 
     async fn head_object(&self, key: &str) -> Result<HeadObjectOutput, RegistryError> {
@@ -272,6 +220,38 @@ impl S3StorageEngine {
         }
 
         Ok(())
+    }
+
+    async fn store_staged_chunk(
+        &self,
+        namespace: &str,
+        upload_id: &str,
+        chunk: Vec<u8>,
+        offset: u64,
+    ) -> Result<(), RegistryError> {
+        let key = self
+            .tree
+            .upload_staged_container_path(namespace, upload_id, offset);
+        self.put_object(&key, chunk.to_vec()).await
+    }
+
+    async fn load_staged_chunk(
+        &self,
+        namespace: &str,
+        upload_id: &str,
+        offset: u64,
+    ) -> Result<Vec<u8>, RegistryError> {
+        let key = self
+            .tree
+            .upload_staged_container_path(namespace, upload_id, offset);
+        match self.get_object_body_as_vec(&key, None).await {
+            Ok(data) => {
+                self.delete_object(&key).await?;
+                Ok(data)
+            }
+            Err(RegistryError::NotFound) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn blob_link_index_update<O>(
@@ -420,11 +400,12 @@ impl S3StorageEngine {
         key: &str,
         upload_id: &str,
         part_number: i32,
-        body: &[u8],
-    ) -> Result<(), RegistryError> {
+        body: Vec<u8>,
+    ) -> Result<String, RegistryError> {
         let body = ByteStream::from(body.to_vec());
 
-        self.s3_client
+        let res = self
+            .s3_client
             .upload_part()
             .bucket(&self.bucket)
             .key(key)
@@ -438,6 +419,27 @@ impl S3StorageEngine {
                 RegistryError::InternalServerError(Some("Error uploading part".to_string()))
             })?;
 
+        Ok(res.e_tag.unwrap_or_default())
+    }
+
+    async fn abort_pending_uploads(&self, key: &str) -> Result<(), RegistryError> {
+        while let Some(upload_id) = self.search_multipart_upload_id(key).await? {
+            let _ = self
+                .s3_client
+                .abort_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(upload_id)
+                .send()
+                .await
+                .map_err(|e| {
+                    error!("Error aborting multipart upload: {:?}", e);
+                    RegistryError::InternalServerError(Some(
+                        "Error aborting multipart upload".to_string(),
+                    ))
+                })?;
+        }
+
         Ok(())
     }
 }
@@ -448,11 +450,11 @@ impl StorageEngine for S3StorageEngine {
     async fn list_namespaces(
         &self,
         n: u32,
-        continuation_token: Option<String>,
+        last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         debug!(
             "Fetching {} namespace(s) with continuation token: {:?}",
-            n, continuation_token
+            n, last
         );
         let base_prefix = format!("{}/", self.tree.repository_dir());
         let base_prefix_len = base_prefix.len();
@@ -462,11 +464,14 @@ impl StorageEngine for S3StorageEngine {
             .list_objects_v2()
             .bucket(&self.bucket)
             .prefix(&base_prefix)
-            .delimiter("_")
-            .set_continuation_token(continuation_token)
-            .max_keys(n as i32)
-            .send()
-            .await?;
+            .delimiter("_");
+
+        let res = match last {
+            Some(last) => res.start_after(last),
+            _ => res,
+        };
+
+        let res = res.max_keys(n as i32).send().await?;
 
         let mut repositories = Vec::new();
         for common_prefixes in res.common_prefixes.unwrap_or_default() {
@@ -486,7 +491,7 @@ impl StorageEngine for S3StorageEngine {
         }
 
         let next_last = match res.is_truncated {
-            Some(true) => res.next_continuation_token,
+            Some(true) => repositories.last().cloned(),
             _ => None,
         };
 
@@ -498,11 +503,11 @@ impl StorageEngine for S3StorageEngine {
         &self,
         namespace: &str,
         n: u32,
-        continuation_token: Option<String>,
+        last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         error!(
             "Listing {} tag(s) for namespace '{}' starting with continuation_token '{:?}'",
-            n, namespace, continuation_token
+            n, namespace, last
         );
         let base_prefix = format!("{}/", self.tree.manifest_tags_dir(namespace));
         let base_prefix_len = base_prefix.len();
@@ -513,10 +518,14 @@ impl StorageEngine for S3StorageEngine {
             .bucket(&self.bucket)
             .prefix(&base_prefix)
             .delimiter("/")
-            .max_keys(n as i32)
-            .set_continuation_token(continuation_token)
-            .send()
-            .await?;
+            .max_keys(n as i32);
+
+        let res = match last {
+            Some(last) => res.start_after(last),
+            _ => res,
+        };
+
+        let res = res.send().await?;
 
         let mut tags = Vec::new();
         for common_prefixes in res.common_prefixes.unwrap_or_default() {
@@ -532,7 +541,7 @@ impl StorageEngine for S3StorageEngine {
         }
 
         let next_last = match res.is_truncated {
-            Some(true) => res.next_continuation_token,
+            Some(true) => tags.last().cloned(),
             _ => None,
         };
 
@@ -541,45 +550,83 @@ impl StorageEngine for S3StorageEngine {
 
     #[instrument(skip(self))]
     async fn list_referrers(
-        // TODO: cleanup & remove dependency to collect_directory_entries
         &self,
         namespace: &str,
         digest: &Digest,
         artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, RegistryError> {
-        let path = format!("{}/", self.tree.manifest_referrers_dir(namespace, digest));
-        let all_manifests = self.collect_directory_entries(&path).await?;
+        let base_prefix = format!("{}/", self.tree.manifest_referrers_dir(namespace, digest));
+        let base_prefix_len = base_prefix.len();
+
         let mut referrers = Vec::new();
 
-        for manifest_digest_str in all_manifests {
-            let manifest_digest = Digest::from_str(&manifest_digest_str)?;
-            let blob_path = self.tree.blob_path(&manifest_digest);
+        let mut continuation_token = None;
 
-            let manifest_bytes = self.get_object_body_as_vec(&blob_path, None).await;
-            if let Ok(manifest) = manifest_bytes {
-                let size = manifest.len() as u64;
-                let manifest: Manifest = serde_json::from_slice(&manifest)?;
+        loop {
+            let res = self
+                .s3_client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&base_prefix)
+                .max_keys(100)
+                .set_continuation_token(continuation_token)
+                .send()
+                .await?;
 
-                if let Some(media_type) = manifest.media_type.clone() {
-                    if let Some(ref artifact_type_filter) = artifact_type {
-                        let manifest_artifact_type = manifest
-                            .artifact_type
-                            .clone()
-                            .or_else(|| manifest.config.as_ref().map(|c| c.media_type.clone()));
+            for object in res.contents.unwrap_or_default() {
+                let Some(key) = object.key else {
+                    continue;
+                };
 
-                        if manifest_artifact_type != Some(artifact_type_filter.clone()) {
+                let mut manifest_digest = key[base_prefix_len..].to_string();
+                if manifest_digest.ends_with("/link") {
+                    manifest_digest = manifest_digest.trim_end_matches("/link").to_string();
+                }
+
+                error!("Referrer key: {} - digest: {}", key, manifest_digest);
+
+                let manifest_digest = Digest::from_str(&manifest_digest)?;
+                let blob_path = self.tree.blob_path(&manifest_digest);
+
+                let manifest = self.get_object_body_as_vec(&blob_path, None).await?;
+                let manifest_len = manifest.len();
+                let manifest = serde_json::from_slice::<Manifest>(&manifest).map_err(|e| {
+                    error!("Error deserializing manifest: {}", e);
+                    error!("Manifest: {:?}", String::from_utf8_lossy(&manifest));
+                    e
+                })?;
+
+                let Some(media_type) = manifest.media_type else {
+                    continue;
+                };
+
+                if let Some(artifact_type) = artifact_type.as_ref() {
+                    if let Some(manifest_artifact_type) = manifest.artifact_type.as_ref() {
+                        if manifest_artifact_type != artifact_type {
                             continue;
                         }
+                    } else if let Some(manifest_config) = manifest.config {
+                        if &manifest_config.media_type != artifact_type {
+                            continue;
+                        }
+                    } else {
+                        continue;
                     }
-
-                    referrers.push(Descriptor {
-                        media_type,
-                        digest: manifest_digest.to_string(),
-                        size,
-                        annotations: manifest.annotations,
-                        artifact_type: manifest.artifact_type,
-                    });
                 }
+
+                referrers.push(Descriptor {
+                    media_type,
+                    digest: manifest_digest.to_string(),
+                    size: manifest_len as u64,
+                    annotations: manifest.annotations,
+                    artifact_type: manifest.artifact_type,
+                });
+            }
+
+            if res.is_truncated == Some(true) {
+                continuation_token = res.next_continuation_token;
+            } else {
+                break;
             }
         }
 
@@ -751,25 +798,28 @@ impl StorageEngine for S3StorageEngine {
         source: &[u8],
         append: bool,
     ) -> Result<(), RegistryError> {
-        let key = self.tree.upload_path(name, uuid);
+        let upload_path = self.tree.upload_path(name, uuid);
 
         let uploaded_size;
         let uploaded_parts;
         let upload_id;
 
         if append {
-            upload_id = match self.search_multipart_upload_id(&key).await? {
+            upload_id = match self.search_multipart_upload_id(&upload_path).await? {
                 Some(upload_id) => upload_id,
-                None => self.create_multipart_upload(&key).await?,
+                None => self.create_multipart_upload(&upload_path).await?,
             };
 
-            let (parts, parts_size) = self.search_multipart_upload_parts(&key, &upload_id).await?;
+            let (parts, parts_size) = self
+                .search_multipart_upload_parts(&upload_path, &upload_id)
+                .await?;
 
             uploaded_size = parts_size;
             uploaded_parts = parts.len() as i32;
         } else {
-            // TODO: cleanup eventual dangling multipart uploads
-            upload_id = self.create_multipart_upload(&key).await?;
+            self.abort_pending_uploads(&upload_path).await?;
+
+            upload_id = self.create_multipart_upload(&upload_path).await?;
             uploaded_size = 0;
             uploaded_parts = 0;
         }
@@ -782,19 +832,27 @@ impl StorageEngine for S3StorageEngine {
             .await?;
         let mut hasher = deserialize_hash_state(state).await?;
 
-        let source_len = source.len() as u64;
-        let total_size = uploaded_size + source_len;
-
         hasher.update(source);
 
-        self.upload_part(&key, &upload_id, uploaded_parts + 1, source)
-            .await?;
-
         let state = serialize_hash_state(&hasher).await?;
-        let hash_state_path = self
-            .tree
-            .upload_hash_context_path(name, uuid, "sha256", total_size);
+        let hash_state_path =
+            self.tree
+                .upload_hash_context_path(name, uuid, "sha256", uploaded_size);
         self.put_object(&hash_state_path, state).await?;
+
+        let mut chunk = self.load_staged_chunk(name, uuid, uploaded_size).await?;
+        chunk.extend(source);
+
+        // NOTE: if the part is not big enough (at least 5M, as per the S3 protocol),
+        // store it in as a staging blob
+        if chunk.len() < 5 * 1024 * 1024 {
+            self.store_staged_chunk(name, uuid, chunk, uploaded_size)
+                .await?;
+            return Ok(());
+        }
+
+        self.upload_part(&upload_path, &upload_id, uploaded_parts + 1, chunk)
+            .await?;
 
         Ok(())
     }
@@ -829,12 +887,16 @@ impl StorageEngine for S3StorageEngine {
             RegistryError::InternalServerError(Some("Error reading upload start date".to_string()))
         })?;
 
-        let start_date = fs::read_to_string(&date)
-            .await
+        let start_date = DateTime::parse_from_rfc3339(&date)
             .ok()
-            .and_then(|date| DateTime::parse_from_rfc3339(&date).ok())
             .unwrap_or_default() // Fallbacks to epoch
             .with_timezone(&Utc);
+
+        // don't forget to count the staging blob
+        let staged_path = self.tree.upload_staged_container_path(name, uuid, size);
+        if let Ok(res) = self.head_object(&staged_path).await {
+            size += res.content_length.unwrap_or_default() as u64;
+        }
 
         Ok(UploadSummary {
             digest,
@@ -856,7 +918,16 @@ impl StorageEngine for S3StorageEngine {
             return Err(RegistryError::NotFound);
         };
 
-        let (parts, size) = self.search_multipart_upload_parts(&key, &upload_id).await?;
+        let (mut parts, size) = self.search_multipart_upload_parts(&key, &upload_id).await?;
+
+        // load the staged chunk if any and create the last part
+        let chunk = self.load_staged_chunk(name, uuid, size).await?;
+        if !chunk.is_empty() {
+            let e_tag = self
+                .upload_part(&key, &upload_id, parts.len() as i32 + 1, chunk)
+                .await?;
+            parts.push(e_tag);
+        }
 
         let digest = match digest {
             Some(digest) => digest,
@@ -930,8 +1001,10 @@ impl StorageEngine for S3StorageEngine {
 
     #[instrument(skip(self))]
     async fn delete_upload(&self, name: &str, uuid: &str) -> Result<(), RegistryError> {
+        let upload_path = self.tree.upload_path(name, uuid);
+        self.abort_pending_uploads(&upload_path).await?;
+
         let upload_path = self.tree.upload_container_path(name, uuid);
-        // TODO: abort eventual dangling multipart uploads
         self.delete_object_with_prefix(&upload_path).await
     }
 

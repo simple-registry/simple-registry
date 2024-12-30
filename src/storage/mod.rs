@@ -32,14 +32,14 @@ pub trait StorageEngine: Send + Sync {
     async fn list_namespaces(
         &self,
         n: u32,
-        continuation_token: Option<String>,
+        last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError>;
 
     async fn list_tags(
         &self,
         namespace: &str,
         n: u32,
-        continuation_token: Option<String>,
+        last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError>;
 
     async fn list_referrers(

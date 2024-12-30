@@ -230,14 +230,14 @@ impl StorageEngine for FileSystemStorageEngine {
     async fn list_namespaces(
         &self,
         n: u32,
-        continuation_token: Option<String>,
+        last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         let base_path = self.tree.repository_dir();
         let base_path = Path::new(&base_path);
 
         let repositories = self.collect_repositories(base_path).await;
 
-        Ok(self.paginate(repositories, n, continuation_token))
+        Ok(self.paginate(repositories, n, last))
     }
 
     #[instrument(skip(self))]
@@ -245,14 +245,14 @@ impl StorageEngine for FileSystemStorageEngine {
         &self,
         namespace: &str,
         n: u32,
-        continuation_token: Option<String>,
+        last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         let path = self.tree.manifest_tags_dir(namespace);
         debug!("Listing tags in path: {}", path);
         let mut tags = self.collect_directory_entries(&path).await?;
         tags.sort();
 
-        Ok(self.paginate(tags, n, continuation_token))
+        Ok(self.paginate(tags, n, last))
     }
 
     #[instrument(skip(self))]
@@ -273,20 +273,21 @@ impl StorageEngine for FileSystemStorageEngine {
             let manifest_digest = Digest::from_str(&manifest_digest)?;
             let blob_path = self.tree.blob_path(&manifest_digest);
 
-            let raw_manifest = fs::read(&blob_path).await?;
-            let manifest: Manifest = serde_json::from_slice(&raw_manifest)?;
+            let manifest = fs::read(&blob_path).await?;
+            let manifest_len = manifest.len();
+            let manifest: Manifest = serde_json::from_slice(&manifest)?;
 
             let Some(media_type) = manifest.media_type else {
                 continue;
             };
 
-            if let Some(artifact_type) = artifact_type.clone() {
-                if let Some(manifest_artifact_type) = manifest.artifact_type.clone() {
+            if let Some(artifact_type) = artifact_type.as_ref() {
+                if let Some(manifest_artifact_type) = manifest.artifact_type.as_ref() {
                     if manifest_artifact_type != artifact_type {
                         continue;
                     }
                 } else if let Some(manifest_config) = manifest.config {
-                    if manifest_config.media_type != artifact_type {
+                    if &manifest_config.media_type != artifact_type {
                         continue;
                     }
                 } else {
@@ -297,7 +298,7 @@ impl StorageEngine for FileSystemStorageEngine {
             referrers.push(Descriptor {
                 media_type,
                 digest: manifest_digest.to_string(),
-                size: raw_manifest.len() as u64,
+                size: manifest_len as u64,
                 annotations: manifest.annotations,
                 artifact_type: manifest.artifact_type,
             });
