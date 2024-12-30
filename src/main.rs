@@ -35,6 +35,7 @@ mod policy;
 mod registry;
 mod scrub;
 mod storage;
+mod storage_helper;
 mod tls;
 mod tracing_helper;
 
@@ -720,7 +721,7 @@ async fn handle_patch_upload(
 
     let start_offset = range.map(|(start, _)| start);
 
-    let body = request.into_body();
+    let body = request.into_data_stream();
     let location = format!("/v2/{}/blobs/uploads/{}", &parameters.name, parameters.uuid);
 
     let range_max = registry
@@ -755,7 +756,7 @@ async fn handle_put_upload(
     let query: CompleteUploadQuery = parse_query_parameters(request.uri().query())?;
     let digest = Digest::from_str(&query.digest)?;
 
-    let body = request.into_body();
+    let body = request.into_data_stream();
     registry
         .complete_upload(&parameters.name, parameters.uuid, digest.clone(), body)
         .await?;

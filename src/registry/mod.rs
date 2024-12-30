@@ -21,6 +21,7 @@ use crate::config::Config;
 use crate::error::RegistryError;
 use crate::lock_manager::LockManager;
 use crate::storage::{FileSystemStorageEngine, StorageEngine};
+use crate::storage_helper::StorageSize;
 
 lazy_static! {
     static ref NAMESPACE_RE: Regex =
@@ -28,6 +29,7 @@ lazy_static! {
 }
 
 pub struct Registry {
+    pub streaming_chunk_size: u64,
     pub storage: Box<dyn StorageEngine>,
     pub credentials: HashMap<String, (String, String)>,
     pub repositories: HashSet<String>,
@@ -54,6 +56,7 @@ impl Registry {
     #[instrument(skip(config))]
     pub fn try_from_config(config: &Config) -> Result<Self, RegistryError> {
         let res = Self {
+            streaming_chunk_size: config.server.streaming_chunk_size.as_bytes(),
             storage: config.build_storage_engine()?,
             credentials: config.build_credentials(),
             repositories: config.build_repositories_list(),
@@ -134,6 +137,7 @@ impl Default for Registry {
         let storage_engine =
             FileSystemStorageEngine::new("./registry".to_string(), LockManager::new_in_memory());
         Self {
+            streaming_chunk_size: StorageSize::default().as_bytes(),
             storage: Box::new(storage_engine),
             credentials: Default::default(),
             repositories: Default::default(),

@@ -1,11 +1,11 @@
 use crate::error::RegistryError;
 use crate::oci::Digest;
 use crate::registry::Registry;
-use futures_util::TryStreamExt;
-use http_body_util::BodyExt;
+use futures_util::StreamExt;
+use http_body_util::BodyDataStream;
 use hyper::body::Incoming;
-use tokio_util::io::StreamReader;
-use tracing::{debug, error, instrument};
+use hyper::Request;
+use tracing::{error, instrument, warn};
 use uuid::Uuid;
 
 pub enum NewUpload {
@@ -41,7 +41,7 @@ impl Registry {
         namespace: &str,
         session_id: Uuid,
         start_offset: Option<u64>,
-        body: Incoming,
+        body: BodyDataStream<Request<Incoming>>,
     ) -> Result<u64, RegistryError> {
         self.validate_namespace(namespace)?;
 
@@ -57,14 +57,7 @@ impl Registry {
             }
         };
 
-        let body = body.into_data_stream().map_err(|e| {
-            error!("Data stream error: {}", e);
-            std::io::Error::new(std::io::ErrorKind::Other, e)
-        });
-        let body = StreamReader::new(body);
-
-        self.storage
-            .write_upload(namespace, &session_id, Box::new(body), true)
+        self.upload_body_chunk(namespace, &session_id, body, true)
             .await?;
 
         let summary = self
@@ -89,35 +82,65 @@ impl Registry {
         namespace: &str,
         session_id: Uuid,
         digest: Digest,
-        body: Incoming,
+        body: BodyDataStream<Request<Incoming>>,
     ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let uuid = session_id.to_string();
-        let body = body.into_data_stream().map_err(|e| {
-            error!("Data stream error: {}", e);
-            std::io::Error::new(std::io::ErrorKind::Other, e)
-        });
-        let body = StreamReader::new(body);
+        let session_id = session_id.to_string();
 
-        self.storage
-            .write_upload(namespace, &uuid, Box::new(body), false)
+        // TODO: append = false is probably not correct...
+        self.upload_body_chunk(namespace, &session_id, body, false)
             .await?;
 
-        let summary = self.storage.read_upload_summary(namespace, &uuid).await?;
+        let summary = self
+            .storage
+            .read_upload_summary(namespace, &session_id)
+            .await?;
 
         if summary.digest != digest {
-            debug!(
-                "Digest mismatch: expected {}, got {}",
-                digest, summary.digest
-            );
+            warn!("Expected digest '{}', got '{}'", digest, summary.digest);
             return Err(RegistryError::DigestInvalid);
         }
 
         self.storage
-            .complete_upload(namespace, &uuid, Some(digest.clone()))
+            .complete_upload(namespace, &session_id, Some(digest.clone()))
             .await?;
-        self.storage.delete_upload(namespace, &uuid).await
+        self.storage.delete_upload(namespace, &session_id).await
+    }
+
+    async fn upload_body_chunk(
+        &self,
+        namespace: &str,
+        session_id: &str,
+        mut body: BodyDataStream<Request<Incoming>>,
+        append: bool,
+    ) -> Result<(), RegistryError> {
+        let mut chunk = Vec::new();
+        while let Some(frame) = body.next().await {
+            let frame = frame.map_err(|e| {
+                error!("Data stream error: {}", e);
+                std::io::Error::new(std::io::ErrorKind::Other, e)
+            })?;
+            chunk.extend_from_slice(&frame);
+
+            while chunk.len() >= 10 * 1024 * 1024 {
+                error!("Chunk too large, creating a part: {}", chunk.len());
+                let (current_part, next_part) = chunk.split_at(10 * 1024 * 1024);
+                self.storage
+                    .write_upload(namespace, session_id, current_part, append)
+                    .await?;
+                chunk = next_part.to_vec();
+            }
+        }
+
+        if !chunk.is_empty() {
+            error!("Remaining chunk data, creating a part: {}", chunk.len());
+            self.storage
+                .write_upload(namespace, session_id, &chunk, append)
+                .await?;
+        }
+
+        Ok(())
     }
 
     #[instrument]

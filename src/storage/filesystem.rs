@@ -8,7 +8,7 @@ use std::io::{ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, File};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::{debug, error, instrument, warn};
 
 use crate::error::RegistryError;
@@ -409,12 +409,12 @@ impl StorageEngine for FileSystemStorageEngine {
         Ok(uuid.to_string())
     }
 
-    #[instrument(skip(self, source_reader))]
+    #[instrument(skip(self, source))]
     async fn write_upload(
         &self,
         name: &str,
         uuid: &str,
-        mut source_reader: Box<dyn AsyncRead + Send + Sync + Unpin>,
+        source: &[u8],
         append: bool,
     ) -> Result<(), RegistryError> {
         let start_offset = if append {
@@ -454,17 +454,10 @@ impl StorageEngine for FileSystemStorageEngine {
         file.seek(SeekFrom::Start(start_offset)).await?;
 
         let mut total_bytes_written = 0u64;
-        let mut buffer = [0u8; 8192];
 
-        loop {
-            let n = source_reader.read(&mut buffer).await?;
-            if n == 0 {
-                break;
-            }
-            file.write_all(&buffer[..n]).await?;
-            hasher.update(&buffer[..n]);
-            total_bytes_written += n as u64;
-        }
+        file.write_all(source).await?;
+        hasher.update(source);
+        total_bytes_written += source.len() as u64;
 
         let offset = start_offset + total_bytes_written;
         let path = self
@@ -689,8 +682,8 @@ impl StorageEngine for FileSystemStorageEngine {
         );
 
         match self.read_link(namespace, reference).await.ok() {
-            Some(existing_digest) if existing_digest == digest.clone() => return Ok(()),
-            Some(existing_digest) if existing_digest != digest.clone() => {
+            Some(existing_digest) if &existing_digest == digest => return Ok(()),
+            Some(existing_digest) if &existing_digest != digest => {
                 // NOTE: no locks here, the delete_link will take care of it
                 self.delete_link(namespace, reference).await?;
             }

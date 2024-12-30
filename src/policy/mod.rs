@@ -22,7 +22,7 @@ impl Debug for ClientIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let credentials = self
             .credentials
-            .clone()
+            .as_ref()
             .map(|(username, _)| username.clone());
         f.debug_struct("ClientIdentity")
             .field("cert_organizations", &self.cert_organizations.len())

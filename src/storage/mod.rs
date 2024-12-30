@@ -76,7 +76,7 @@ pub trait StorageEngine: Send + Sync {
         &self,
         namespace: &str,
         uuid: &str,
-        source_reader: Box<dyn AsyncRead + Send + Sync + Unpin>,
+        source: &[u8],
         append: bool,
     ) -> Result<(), RegistryError>;
 

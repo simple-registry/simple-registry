@@ -18,7 +18,6 @@ use aws_sdk_s3::{
 use chrono::{DateTime, Utc};
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use tokio::fs;
-use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tracing::{debug, error, instrument};
 
 use crate::config::StorageS3Config;
@@ -31,82 +30,6 @@ use crate::storage::{
     deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobReferenceIndex,
     StorageEngine, StorageEngineReader, UploadSummary,
 };
-
-/*
-
-<bucket root>
-└── v2
-    ├── blobs
-    │   └── sha256
-    │       ├── 19
-    │       │   └── 195245f0c79279e8b8e012efa02c91dad4cf7d0e44c0f4382fea68cd93088e6c
-    │       │       ├── data
-    │       │       └── index.json
-    │       ├── 33
-    │       │   └── 33791ce134bf8cde1f6f9473576cdbd3c087aec33541fa492051bc2dbb6872ba
-    │       │       ├── data
-    │       │       └── index.json
-    │       ├── 3c
-    │       │   └── 3cad04a21c991089f34f9da43b355f48785352cee1b72182a0d9ffcad16e63d9
-    │       │       ├── data
-    │       │       └── index.json
-    │       ├── 48
-    │       │   └── 486c5264d3ad516a7daceee96f00c0999acc47c3c2230491df3f1071e3df93c3
-    │       │       ├── data
-    │       │       └── index.json
-    │       ├── 92
-    │       │   └── 92c3b3500be621c72c7ac6432a9d8f731f145f4a1535361ffd3a304e55f7ccda
-    │       │       ├── data
-    │       │       └── index.json
-    │       ├── b0
-    │       │   └── b0b54414d65769944d731c5e47f89bf217b197e36293812b0d7c1354f5008ff5
-    │       │       ├── data
-    │       │       └── index.json
-    │       ├── b3
-    │       │   └── b3fd15a82525302ad66ab4a6c8109db464206085e4755cd0b7de443dcf5bb295
-    │       │       ├── data
-    │       │       └── index.json
-    │       ├── cc
-    │       │   └── cc4f24efc205f5b338585fde826ee60f4d21fe7b9e95073e0676378a84140e22
-    │       │       ├── data
-    │       │       └── index.json
-    │       └── ee
-    │           └── ee57511b3c684acfe64e2025b557909406ca31f8dd53e0b0399a644c10ec1940
-    │               ├── data
-    │               └── index.json
-    └── repositories
-        └── test
-            └── nginx
-                ├── _config
-                │   └── sha256
-                │       └── 195245f0c79279e8b8e012efa02c91dad4cf7d0e44c0f4382fea68cd93088e6c
-                │           └── link
-                ├── _layers
-                │   └── sha256
-                │       ├── 33791ce134bf8cde1f6f9473576cdbd3c087aec33541fa492051bc2dbb6872ba
-                │       │   └── link
-                │       ├── 3cad04a21c991089f34f9da43b355f48785352cee1b72182a0d9ffcad16e63d9
-                │       │   └── link
-                │       ├── 486c5264d3ad516a7daceee96f00c0999acc47c3c2230491df3f1071e3df93c3
-                │       │   └── link
-                │       ├── 92c3b3500be621c72c7ac6432a9d8f731f145f4a1535361ffd3a304e55f7ccda
-                │       │   └── link
-                │       ├── b3fd15a82525302ad66ab4a6c8109db464206085e4755cd0b7de443dcf5bb295
-                │       │   └── link
-                │       ├── cc4f24efc205f5b338585fde826ee60f4d21fe7b9e95073e0676378a84140e22
-                │       │   └── link
-                │       └── ee57511b3c684acfe64e2025b557909406ca31f8dd53e0b0399a644c10ec1940
-                │           └── link
-                └── _manifests
-                    ├── revisions
-                    │   └── sha256
-                    │       └── b0b54414d65769944d731c5e47f89bf217b197e36293812b0d7c1354f5008ff5
-                    │           └── link
-                    └── tags
-                        └── latest
-                            └── current
-                                └── link
- */
 
 #[derive(Clone)]
 pub struct S3StorageEngine {
@@ -186,9 +109,7 @@ impl S3StorageEngine {
         let mut continuation_token = None;
 
         loop {
-            let res = self
-                .list_objects(prefix, continuation_token.clone(), None)
-                .await?;
+            let res = self.list_objects(prefix, continuation_token, None).await?;
 
             if let Some(contents) = res.contents.as_ref() {
                 for object in contents {
@@ -410,18 +331,13 @@ impl S3StorageEngine {
                 ))
             })?;
 
-            let key = key.to_string();
-            let upload_ids: Vec<String> = res
-                .uploads
-                .unwrap_or_default()
-                .iter()
-                .filter(|upload| upload.key.as_ref() == Some(&key))
-                .filter_map(|upload| upload.upload_id.clone())
-                .take(1)
-                .collect();
-
-            if let Some(upload_id) = upload_ids.first() {
-                return Ok(Some(upload_id.clone()));
+            if let Some(uploads) = res.uploads {
+                for upload in uploads {
+                    let s = upload.key.unwrap_or_default();
+                    if s.as_str() == key {
+                        return Ok(upload.upload_id);
+                    }
+                }
             }
 
             if res.is_truncated.unwrap_or_default() {
@@ -451,7 +367,7 @@ impl S3StorageEngine {
                 .key(key)
                 .upload_id(upload_id);
 
-            if let Some(marker) = part_number_marker.clone() {
+            if let Some(marker) = part_number_marker {
                 res = res.part_number_marker(marker);
             }
 
@@ -504,15 +420,17 @@ impl S3StorageEngine {
         key: &str,
         upload_id: &str,
         part_number: i32,
-        body: Vec<u8>,
+        body: &[u8],
     ) -> Result<(), RegistryError> {
+        let body = ByteStream::from(body.to_vec());
+
         self.s3_client
             .upload_part()
             .bucket(&self.bucket)
             .key(key)
             .upload_id(upload_id)
             .part_number(part_number)
-            .body(ByteStream::from(body))
+            .body(body)
             .send()
             .await
             .map_err(|e| {
@@ -825,12 +743,12 @@ impl StorageEngine for S3StorageEngine {
         Ok(uuid.to_string())
     }
 
-    #[instrument(skip(self, source_reader))]
+    #[instrument(skip(self, source))]
     async fn write_upload(
         &self,
         name: &str,
         uuid: &str,
-        source_reader: Box<dyn AsyncRead + Send + Sync + Unpin>,
+        source: &[u8],
         append: bool,
     ) -> Result<(), RegistryError> {
         let key = self.tree.upload_path(name, uuid);
@@ -847,7 +765,7 @@ impl StorageEngine for S3StorageEngine {
 
             let (parts, parts_size) = self.search_multipart_upload_parts(&key, &upload_id).await?;
 
-            uploaded_size = parts_size as usize;
+            uploaded_size = parts_size;
             uploaded_parts = parts.len() as i32;
         } else {
             // TODO: cleanup eventual dangling multipart uploads
@@ -856,18 +774,20 @@ impl StorageEngine for S3StorageEngine {
             uploaded_parts = 0;
         }
 
-        let mut hasher = Sha256::new();
+        let hasher_state_path =
+            self.tree
+                .upload_hash_context_path(name, uuid, "sha256", uploaded_size);
+        let state = self
+            .get_object_body_as_vec(&hasher_state_path, None)
+            .await?;
+        let mut hasher = deserialize_hash_state(state).await?;
 
-        // TODO: upload by chunks of fixed size
-        let mut reader = BufReader::new(source_reader);
-        let mut data = Vec::new();
+        let source_len = source.len() as u64;
+        let total_size = uploaded_size + source_len;
 
-        let read = reader.read_to_end(&mut data).await?;
-        let total_size = (uploaded_size + read) as u64;
+        hasher.update(source);
 
-        hasher.update(&data);
-
-        self.upload_part(&key, &upload_id, uploaded_parts + 1, data)
+        self.upload_part(&key, &upload_id, uploaded_parts + 1, source)
             .await?;
 
         let state = serialize_hash_state(&hasher).await?;

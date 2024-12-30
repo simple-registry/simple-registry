@@ -1,6 +1,7 @@
 use crate::error::RegistryError;
 use crate::lock_manager::LockManager;
 use crate::storage::{FileSystemStorageEngine, S3StorageEngine, StorageEngine};
+use crate::storage_helper::StorageSize;
 use crate::tls::{build_root_store, load_certificate_bundle, load_private_key};
 use cel_interpreter::Program;
 use lazy_static::lazy_static;
@@ -45,6 +46,8 @@ pub struct ServerConfig {
     #[serde(default = "ServerConfig::default_query_timeout_grace_period")]
     pub query_timeout_grace_period: u64,
     pub tls: Option<ServerTlsConfig>,
+    #[serde(default)]
+    pub streaming_chunk_size: StorageSize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
