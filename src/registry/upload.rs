@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use http_body_util::BodyDataStream;
 use hyper::body::Incoming;
 use hyper::Request;
-use tracing::{error, instrument, warn};
+use tracing::{debug, error, instrument, warn};
 use uuid::Uuid;
 
 pub enum NewUpload {
@@ -125,7 +125,7 @@ impl Registry {
             let streaming_size = self.streaming_chunk_size as usize;
 
             while chunk.len() >= streaming_size {
-                error!("Chunk too large, creating a part: {}", chunk.len());
+                debug!("Chunk too large, creating a part: {}", chunk.len());
                 let (current_part, next_part) = chunk.split_at(streaming_size);
 
                 self.storage
@@ -140,7 +140,7 @@ impl Registry {
         }
 
         if !chunk.is_empty() {
-            error!("Remaining chunk data, creating a part: {}", chunk.len());
+            debug!("Remaining chunk data, creating a part: {}", chunk.len());
             self.storage
                 .write_upload(namespace, session_id, &chunk, append)
                 .await?;

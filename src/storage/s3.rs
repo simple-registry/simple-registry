@@ -91,7 +91,7 @@ impl S3StorageEngine {
         match res {
             Err(e) => {
                 let service_error = e.into_service_error();
-                error!("Error head object: {}", service_error.to_string());
+
                 if service_error.is_not_found() {
                     Err(RegistryError::NotFound)
                 } else {
@@ -118,12 +118,11 @@ impl S3StorageEngine {
         match res.send().await {
             Err(e) => {
                 let service_error = e.into_service_error();
-                error!("Error get object: {}", service_error.to_string());
                 if service_error.is_no_such_key() {
                     Err(RegistryError::NotFound)
                 } else {
                     Err(RegistryError::InternalServerError(Some(
-                        "Error head object".to_string(),
+                        "Error get object".to_string(),
                     )))
                 }
             }
@@ -207,7 +206,7 @@ impl S3StorageEngine {
 
             for object in res.contents.unwrap_or_default() {
                 if let Some(key) = object.key {
-                    error!("Deleting object: {}", key);
+                    debug!("Deleting object: {}", key);
                     self.delete_object(&key).await?;
                 }
             }
@@ -505,7 +504,7 @@ impl StorageEngine for S3StorageEngine {
         n: u32,
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), RegistryError> {
-        error!(
+        debug!(
             "Listing {} tag(s) for namespace '{}' starting with continuation_token '{:?}'",
             n, namespace, last
         );
@@ -582,8 +581,6 @@ impl StorageEngine for S3StorageEngine {
                 if manifest_digest.ends_with("/link") {
                     manifest_digest = manifest_digest.trim_end_matches("/link").to_string();
                 }
-
-                error!("Referrer key: {} - digest: {}", key, manifest_digest);
 
                 let manifest_digest = Digest::from_str(&manifest_digest)?;
                 let blob_path = self.tree.blob_path(&manifest_digest);
