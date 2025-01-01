@@ -123,7 +123,7 @@ impl Server {
     }
 }
 
-fn serve_request<S>(
+async fn serve_request<S>(
     stream: TokioIo<S>,
     timeouts: Arc<Vec<Duration>>,
     registry: Arc<Registry>,
@@ -131,37 +131,33 @@ fn serve_request<S>(
 ) where
     S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
-    tokio::task::spawn(async move {
-        let conn = http1::Builder::new().serve_connection(
-            stream,
-            service_fn(move |request| {
-                crate::cmd::server::handle_request(registry.clone(), request, identity.clone())
-            }),
-        );
-        pin!(conn);
+    let conn = http1::Builder::new().serve_connection(
+        stream,
+        service_fn(move |request| handle_request(registry.clone(), request, identity.clone())),
+    );
+    pin!(conn);
 
-        for (iter, sleep_duration) in timeouts.iter().enumerate() {
-            debug!("iter = {} sleep_duration = {:?}", iter, sleep_duration);
-            tokio::select! {
-                res = conn.as_mut() => {
-                    // Polling the connection returned a result.
-                    // In this case print either the successful or error result for the connection
-                    // and break out of the loop.
-                    match res {
-                        Ok(()) => debug!("after polling conn, no error"),
-                        Err(e) =>  debug!("error serving connection: {:?}", e),
-                    };
-                    break;
-                }
-                _ = tokio::time::sleep(*sleep_duration) => {
-                    // tokio::time::sleep returned a result.
-                    // Call graceful_shutdown on the connection and continue the loop.
-                    debug!("iter = {} got timeout_interval, calling conn.graceful_shutdown", iter);
-                    conn.as_mut().graceful_shutdown();
-                }
+    for (iter, sleep_duration) in timeouts.iter().enumerate() {
+        debug!("iter = {} sleep_duration = {:?}", iter, sleep_duration);
+        tokio::select! {
+            res = conn.as_mut() => {
+                // Polling the connection returned a result.
+                // In this case print either the successful or error result for the connection
+                // and break out of the loop.
+                match res {
+                    Ok(()) => debug!("after polling conn, no error"),
+                    Err(e) =>  debug!("error serving connection: {:?}", e),
+                };
+                break;
+            }
+            _ = tokio::time::sleep(*sleep_duration) => {
+                // tokio::time::sleep returned a result.
+                // Call graceful_shutdown on the connection and continue the loop.
+                debug!("iter = {} got timeout_interval, calling conn.graceful_shutdown", iter);
+                conn.as_mut().graceful_shutdown();
             }
         }
-    });
+    }
 }
 
 #[instrument(skip(request))]
@@ -171,7 +167,7 @@ async fn handle_request(
     identity: ClientIdentity,
 ) -> Result<Response<RegistryResponseBody>, Infallible> {
     let start_time = std::time::Instant::now();
-    let method = request.method().clone();
+    let method = request.method().to_string();
     let path = request.uri().path().to_string();
     let error_level;
 

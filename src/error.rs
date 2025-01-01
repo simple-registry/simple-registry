@@ -2,6 +2,7 @@ use crate::registry::RegistryResponseBody;
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::SdkError;
 use http_body_util::Full;
+use hyper::body::Bytes;
 use hyper::{Response, StatusCode};
 use serde::Serialize;
 use serde_json::json;
@@ -74,7 +75,7 @@ impl RegistryError {
         });
 
         let body = body.to_string();
-        let body = bytes::Bytes::from(body);
+        let body = Bytes::from(body);
 
         match self {
             RegistryError::Unauthorized(_) => {

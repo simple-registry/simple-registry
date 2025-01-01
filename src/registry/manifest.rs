@@ -236,7 +236,7 @@ impl Registry {
                     let manifest_digests = parse_manifest_digests(&content, None)?;
 
                     if let Some(subject_digest) = manifest_digests.subject {
-                        let link = LinkReference::Referrer(subject_digest.clone(), digest.clone());
+                        let link = LinkReference::Referrer(subject_digest, digest);
                         self.storage.delete_link(namespace, &link).await?;
                     }
 

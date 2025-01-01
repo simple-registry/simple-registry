@@ -160,7 +160,8 @@ impl TlsListener {
                     timeouts.clone(),
                     registry.clone(),
                     identity.unwrap_or_default(),
-                );
+                )
+                .await;
             }
         }
     }

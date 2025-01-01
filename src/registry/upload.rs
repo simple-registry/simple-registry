@@ -102,7 +102,7 @@ impl Registry {
         }
 
         self.storage
-            .complete_upload(namespace, &session_id, Some(digest.clone()))
+            .complete_upload(namespace, &session_id, Some(digest))
             .await?;
         self.storage.delete_upload(namespace, &session_id).await
     }

@@ -74,15 +74,15 @@ pub fn set_tracing(config: &Configuration) {
                 .install_batch(runtime::Tokio)
                 .unwrap();
 
-            global::set_tracer_provider(provider.clone());
             let tracer = provider.tracer("tracing-otel-subscriber");
+            global::set_tracer_provider(provider);
+
+            subscriber.with(OpenTelemetryLayer::new(tracer)).init();
 
             info!(
                 "Enabled tracing with sampling rate: {}",
                 tracing_config.sampling_rate
             );
-
-            subscriber.with(OpenTelemetryLayer::new(tracer)).init();
 
             return;
         };

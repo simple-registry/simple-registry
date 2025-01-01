@@ -63,7 +63,8 @@ impl InsecureListener {
                 timeouts.clone(),
                 registry.clone(),
                 ClientIdentity::new(),
-            );
+            )
+            .await;
         }
     }
 }

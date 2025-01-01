@@ -1,7 +1,6 @@
-use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use http_body_util::{Full, StreamBody};
-use hyper::body::{Body, Frame};
+use hyper::body::{Body, Bytes, Frame};
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
