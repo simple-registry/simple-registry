@@ -24,12 +24,6 @@ impl DataSize {
     }
 }
 
-impl Default for DataSize {
-    fn default() -> Self {
-        Self::WithoutUnit(50_000_000) // Reasonable default of 50M
-    }
-}
-
 // StorageSize is serialized as a string with an optional unit (e.g. "10MB") or as a raw number.
 impl<'de> Deserialize<'de> for DataSize {
     fn deserialize<D>(deserializer: D) -> Result<DataSize, D::Error>

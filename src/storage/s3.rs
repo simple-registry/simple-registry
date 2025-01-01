@@ -15,6 +15,7 @@ use aws_sdk_s3::{
     Client as S3Client, Config as S3Config,
 };
 use chrono::{DateTime, Utc};
+use futures_util::future::try_join_all;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use tracing::{debug, error, instrument};
 
@@ -35,6 +36,9 @@ pub struct S3StorageEngine {
     tree: Arc<TreeManager>,
     bucket: String,
     lock_manager: LockManager,
+    multipart_copy_threshold: u64,
+    multipart_copy_chunk_size: u64,
+    multipart_copy_jobs: usize,
 }
 
 impl Debug for S3StorageEngine {
@@ -76,6 +80,9 @@ impl S3StorageEngine {
             }),
             bucket: config.bucket.clone(),
             lock_manager,
+            multipart_copy_threshold: config.multipart_copy_threshold.as_bytes(),
+            multipart_copy_chunk_size: config.multipart_copy_chunk_size.as_bytes(),
+            multipart_copy_jobs: config.multipart_copy_jobs,
         })
     }
 
@@ -251,6 +258,133 @@ impl S3StorageEngine {
             Err(RegistryError::NotFound) => Ok(Vec::new()),
             Err(e) => Err(e),
         }
+    }
+
+    pub async fn copy_object(&self, destination: &str, source: &str) -> Result<(), RegistryError> {
+        let object = self.head_object(source).await?;
+        let content_length = object.content_length.unwrap_or_default() as u64;
+
+        // AWS S3 doesn't support copying objects larger than 5GB in a single request
+        // so we need to use the multipart upload API when above this configurable threshold
+        if content_length >= self.multipart_copy_threshold {
+            debug!(
+                "Copying object '{}' to '{}' using multipart upload (max {} jobs)",
+                source, destination, self.multipart_copy_jobs
+            );
+            let res = self
+                .s3_client
+                .create_multipart_upload()
+                .bucket(&self.bucket)
+                .key(destination)
+                .send()
+                .await?;
+
+            let Some(upload_id) = res.upload_id else {
+                error!("Error creating multipart upload: upload id not found");
+                return Err(RegistryError::InternalServerError(Some(
+                    "Error creating multipart upload".to_string(),
+                )));
+            };
+
+            let mut offsets = Vec::new();
+
+            let mut offset = 0;
+            while offset < content_length {
+                let mut part_size = self.multipart_copy_chunk_size;
+                if offset + part_size > content_length {
+                    part_size = content_length - offset;
+                }
+
+                offsets.push((offset, part_size));
+                offset += part_size;
+            }
+
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(self.multipart_copy_jobs));
+            let mut tasks = Vec::new();
+
+            for (part_number, (offset, part_size)) in offsets.into_iter().enumerate() {
+                let part_number = (part_number + 1) as i32;
+                let s3_client = self.s3_client.clone();
+                let bucket = self.bucket.clone();
+                let destination = destination.to_string();
+                let source = source.to_string();
+                let upload_id = upload_id.clone();
+                let semaphore = semaphore.clone();
+
+                let task = tokio::spawn(async move {
+                    let _permit = semaphore.acquire().await.unwrap();
+                    debug!(
+                        "Copying part {} ({}-{}) of object '{}' to '{}'",
+                        part_number,
+                        offset,
+                        offset + part_size - 1,
+                        source,
+                        destination
+                    );
+
+                    let res = s3_client
+                        .upload_part_copy()
+                        .bucket(&bucket)
+                        .key(&destination)
+                        .part_number(part_number)
+                        .upload_id(&upload_id)
+                        .copy_source(format!("{}/{}", bucket, source))
+                        .copy_source_range(format!("bytes={}-{}", offset, offset + part_size - 1))
+                        .send()
+                        .await?;
+
+                    let res = res.copy_part_result.ok_or_else(|| {
+                        error!("Error copying part: copy part result not found");
+                        RegistryError::InternalServerError(Some("Error copying part".to_string()))
+                    })?;
+
+                    let e_tag = res.e_tag.ok_or_else(|| {
+                        error!("Error copying part: e_tag not found");
+                        RegistryError::InternalServerError(Some("Error copying part".to_string()))
+                    })?;
+
+                    Ok(CompletedPartBuilder::default()
+                        .part_number(part_number)
+                        .e_tag(e_tag)
+                        .build())
+                });
+
+                tasks.push(task);
+            }
+
+            let parts = try_join_all(tasks).await.map_err(|e| {
+                error!("Error copying parts: {}", e);
+                RegistryError::InternalServerError(Some("Error copying parts".to_string()))
+            })?;
+            let parts = parts
+                .into_iter()
+                .collect::<Result<Vec<CompletedPart>, RegistryError>>()?;
+
+            let _ = self
+                .s3_client
+                .complete_multipart_upload()
+                .bucket(&self.bucket)
+                .key(destination)
+                .upload_id(&upload_id)
+                .multipart_upload(
+                    CompletedMultipartUploadBuilder::default()
+                        .set_parts(Some(parts))
+                        .build(),
+                )
+                .send()
+                .await?;
+        } else {
+            debug!("Copying object '{}' to '{}'", source, destination);
+            self.s3_client
+                .copy_object()
+                .bucket(&self.bucket)
+                .key(destination)
+                .copy_source(format!("{}/{}", self.bucket, source))
+                .send()
+                .await?;
+        }
+
+        Ok(())
     }
 
     #[instrument(skip(self, operation))]
@@ -798,28 +932,42 @@ impl StorageEngine for S3StorageEngine {
             uploaded_parts = 0;
         }
 
+        let staged_size = self
+            .head_object(
+                &self
+                    .tree
+                    .upload_staged_container_path(name, uuid, uploaded_size),
+            )
+            .await
+            .ok()
+            .map(|object| object.content_length.unwrap_or_default() as u64)
+            .unwrap_or_default();
+
         let hasher_state_path =
             self.tree
-                .upload_hash_context_path(name, uuid, "sha256", uploaded_size);
+                .upload_hash_context_path(name, uuid, "sha256", uploaded_size + staged_size);
         let state = self
             .get_object_body_as_vec(&hasher_state_path, None)
             .await?;
         let mut hasher = deserialize_hash_state(state).await?;
 
         hasher.update(source);
-        let source_len = source.len() as u64;
-
-        let state = serialize_hash_state(&hasher).await?;
-        let hash_state_path =
-            self.tree
-                .upload_hash_context_path(name, uuid, "sha256", uploaded_size + source_len);
-        self.put_object(&hash_state_path, state).await?;
 
         // NOTE: if the part is not big enough (at least 5M, as per the S3 protocol),
-        // store it in as a staging blob.
+        // we store it in as a staging blob.
         // First, we load the staged chunk if any and append the new data
         let mut chunk = self.load_staged_chunk(name, uuid, uploaded_size).await?;
         chunk.extend(source);
+        let chunk_len = chunk.len() as u64;
+
+        // The hash computation must take into account:
+        // - completed parts
+        // - current staged chunk if any + source: chunk.len()
+        let state = serialize_hash_state(&hasher).await?;
+        let hash_state_path =
+            self.tree
+                .upload_hash_context_path(name, uuid, "sha256", uploaded_size + chunk_len);
+        self.put_object(&hash_state_path, state).await?;
 
         // If the chunk is still too small, store it again and return.
         // If there is no subsequent calls to this method, the chunk will be loaded back and stored
@@ -959,15 +1107,7 @@ impl StorageEngine for S3StorageEngine {
             .send()
             .await?;
 
-        let _res = self
-            .s3_client
-            .copy_object()
-            .bucket(&self.bucket)
-            .key(&blob_path)
-            .copy_source(format!("{}/{}", self.bucket, key))
-            .send()
-            .await?;
-
+        self.copy_object(&blob_path, &key).await?;
         self.blob_link_index_update(name, &digest, |_| {}).await?;
 
         // NOTE: in case of error, remaining parts will be deleted by the scrub job

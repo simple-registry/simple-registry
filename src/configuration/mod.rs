@@ -44,7 +44,7 @@ pub struct ServerConfig {
     #[serde(default = "ServerConfig::default_query_timeout_grace_period")]
     pub query_timeout_grace_period: u64,
     pub tls: Option<ServerTlsConfig>,
-    #[serde(default)]
+    #[serde(default = "ServerConfig::default_streaming_chunk_size")]
     pub streaming_chunk_size: DataSize,
 }
 
@@ -73,6 +73,10 @@ impl ServerConfig {
 
     fn default_query_timeout_grace_period() -> u64 {
         60
+    }
+
+    fn default_streaming_chunk_size() -> DataSize {
+        DataSize::WithUnit(50, "MiB".to_string())
     }
 }
 
@@ -117,6 +121,25 @@ pub struct StorageS3Config {
     pub region: String,
     #[serde(default)]
     pub key_prefix: Option<String>,
+    #[serde(default = "StorageS3Config::default_multipart_copy_threshold")]
+    pub multipart_copy_threshold: DataSize,
+    #[serde(default = "StorageS3Config::default_multipart_copy_chunk_size")]
+    pub multipart_copy_chunk_size: DataSize,
+    #[serde(default = "StorageS3Config::default_multipart_copy_jobs")]
+    pub multipart_copy_jobs: usize,
+}
+
+impl StorageS3Config {
+    fn default_multipart_copy_threshold() -> DataSize {
+        DataSize::WithUnit(5, "GB".to_string())
+    }
+    fn default_multipart_copy_chunk_size() -> DataSize {
+        DataSize::WithUnit(100, "MB".to_string())
+    }
+
+    fn default_multipart_copy_jobs() -> usize {
+        4
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
