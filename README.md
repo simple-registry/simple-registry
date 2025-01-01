@@ -28,14 +28,10 @@ This feature is particularly useful for tasks like rotating certificates, updati
 However, certain options cannot be changed during runtime:
 - `server.bind_address`
 - `server.port`
-- `server.tls.server_certificate_bundle`
-- `server.tls.server_private_key`
-- `server.tls.client_ca_bundle`
 - `observability.tracing.sampling_rate`
-- distributed locking backend
+- **enabling** or **disabling** TLS
 
-Although the TLS file paths themselves cannot be added, removed, or modified at runtime, the corresponding files are
-automatically reloaded on changes if they are valid.
+TLS files are also automatically reloaded on changes if they are valid.
 
 ### Server parameters (`server`)
 
@@ -43,6 +39,7 @@ automatically reloaded on changes if they are valid.
 - `port` (uint16): The port to bind the server to
 - `query_timeout` (uint64): The timeout for queries in seconds
 - `query_timeout_grace_period` (uint64): The grace period for queries in seconds
+- `streaming_chunk_size` (uint64 | string): The chunk size for streaming in bytes
 
 #### Optional TLS (`server.tls`)
 
@@ -54,14 +51,14 @@ If not provided, the server will run on top of an _insecure_ plaintext socket.
 
 ### Distributed Locking (`locking`)
 
-Distribution locking is used to prevent concurrent operations that could lead to data corruption.
+Distributed locking is used to prevent concurrent operations that could lead to data corruption.
 If no configuration is provided, an in-memory locking mechanism is used, which is not suitable for
 multi-replica deployments.
 
 #### Redis Locking (`locking.redis`)
 
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
-- `prefix` (string): The prefix for the keys in Redis
+- `ttl` (string): The time-to-live for the lock in seconds (e.g., `10s`)
 
 ### Storage (`storage`)
 

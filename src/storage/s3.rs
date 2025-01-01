@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use tracing::{debug, error, instrument};
 
-use crate::config::StorageS3Config;
+use crate::configuration::StorageS3Config;
 use crate::error::RegistryError;
 use crate::lock_manager::LockManager;
 use crate::oci::{Descriptor, Digest, Manifest};
@@ -79,6 +79,7 @@ impl S3StorageEngine {
         })
     }
 
+    #[instrument(skip(self))]
     async fn head_object(&self, key: &str) -> Result<HeadObjectOutput, RegistryError> {
         let res = self
             .s3_client
@@ -104,6 +105,7 @@ impl S3StorageEngine {
         }
     }
 
+    #[instrument(skip(self))]
     async fn get_object(
         &self,
         key: &str,
@@ -130,12 +132,25 @@ impl S3StorageEngine {
         }
     }
 
+    #[instrument(skip(self))]
     async fn get_object_body_as_vec(
         &self,
         key: &str,
         offset: Option<u64>,
     ) -> Result<Vec<u8>, RegistryError> {
-        let res = self.get_object(key, offset).await?;
+        let res = self.get_object(key, offset).await;
+
+        let res = match res {
+            Ok(res) => res,
+            Err(RegistryError::NotFound) => return Err(RegistryError::NotFound),
+            Err(e) => {
+                error!("Error getting object: {}", e);
+                return Err(RegistryError::InternalServerError(Some(
+                    "Error getting object".to_string(),
+                )));
+            }
+        };
+
         let body = res.body.collect().await.map_err(|e| {
             error!("Error reading object body: {}", e);
             RegistryError::InternalServerError(Some("Error reading object body".to_string()))
@@ -144,49 +159,32 @@ impl S3StorageEngine {
         Ok(body.to_vec())
     }
 
-    async fn get_object_body_as_stream(
-        &self,
-        key: &str,
-        offset: Option<u64>,
-    ) -> Result<Box<dyn StorageEngineReader>, RegistryError> {
-        let res = self.get_object(key, offset).await?;
-        Ok(Box::new(res.body.into_async_read()))
-    }
-
+    #[instrument(skip(self, data))]
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), RegistryError> {
-        let _res = self
-            .s3_client
+        self.s3_client
             .put_object()
             .bucket(&self.bucket)
             .key(key)
             .body(ByteStream::from(data))
             .send()
-            .await
-            .map_err(|e| {
-                // TODO: implement a trait for this kind of error handling
-                error!("Error putting object: {}", e);
-                RegistryError::InternalServerError(Some("Error putting object".to_string()))
-            })?;
+            .await?;
 
         Ok(())
     }
 
+    #[instrument(skip(self))]
     async fn delete_object(&self, key: &str) -> Result<(), RegistryError> {
-        let _res = self
-            .s3_client
+        self.s3_client
             .delete_object()
             .bucket(&self.bucket)
             .key(key)
             .send()
-            .await
-            .map_err(|e| {
-                error!("Error deleting object: {}", e);
-                RegistryError::InternalServerError(Some("Error deleting object".to_string()))
-            })?;
+            .await?;
 
         Ok(())
     }
 
+    #[instrument(skip(self))]
     async fn delete_object_with_prefix(&self, prefix: &str) -> Result<(), RegistryError> {
         debug!("Deleting objects with prefix: {}", prefix);
 
@@ -221,6 +219,7 @@ impl S3StorageEngine {
         Ok(())
     }
 
+    #[instrument(skip(self, chunk))]
     async fn store_staged_chunk(
         &self,
         namespace: &str,
@@ -234,6 +233,7 @@ impl S3StorageEngine {
         self.put_object(&key, chunk.to_vec()).await
     }
 
+    #[instrument(skip(self))]
     async fn load_staged_chunk(
         &self,
         namespace: &str,
@@ -253,6 +253,7 @@ impl S3StorageEngine {
         }
     }
 
+    #[instrument(skip(self, operation))]
     pub async fn blob_link_index_update<O>(
         &self,
         namespace: &str,
@@ -289,6 +290,7 @@ impl S3StorageEngine {
         Ok(is_referenced)
     }
 
+    #[instrument(skip(self))]
     async fn search_multipart_upload_id(&self, key: &str) -> Result<Option<String>, RegistryError> {
         let mut next_key_marker = None;
 
@@ -303,13 +305,7 @@ impl S3StorageEngine {
                 res = res.key_marker(key_marker);
             }
 
-            let res = res.send().await.map_err(|e| {
-                error!("Error listing multipart uploads: {}", e);
-                RegistryError::InternalServerError(Some(
-                    "Error listing multipart uploads".to_string(),
-                ))
-            })?;
-
+            let res = res.send().await?;
             if let Some(uploads) = res.uploads {
                 for upload in uploads {
                     let s = upload.key.unwrap_or_default();
@@ -329,6 +325,7 @@ impl S3StorageEngine {
         Ok(None)
     }
 
+    #[instrument(skip(self))]
     async fn search_multipart_upload_parts(
         &self,
         key: &str,
@@ -350,10 +347,7 @@ impl S3StorageEngine {
                 res = res.part_number_marker(marker);
             }
 
-            let res = res.send().await.map_err(|e| {
-                error!("Error listing parts: {}", e);
-                RegistryError::InternalServerError(Some("Error listing parts".to_string()))
-            })?;
+            let res = res.send().await?;
 
             let parts = res.parts.unwrap_or_default();
             parts_size += parts.iter().filter_map(|part| part.size).sum::<i64>() as u64;
@@ -369,6 +363,7 @@ impl S3StorageEngine {
         Ok((all_parts, parts_size))
     }
 
+    #[instrument(skip(self))]
     async fn create_multipart_upload(&self, path: &str) -> Result<String, RegistryError> {
         let res = self
             .s3_client
@@ -376,13 +371,7 @@ impl S3StorageEngine {
             .bucket(&self.bucket)
             .key(path)
             .send()
-            .await
-            .map_err(|e| {
-                error!("Error creating multipart upload: {}", e);
-                RegistryError::InternalServerError(Some(
-                    "Error creating multipart upload".to_string(),
-                ))
-            })?;
+            .await?;
 
         let Some(upload_id) = res.upload_id else {
             error!("Error creating multipart upload: upload id not found");
@@ -394,6 +383,7 @@ impl S3StorageEngine {
         Ok(upload_id)
     }
 
+    #[instrument(skip(self, body))]
     async fn upload_part(
         &self,
         key: &str,
@@ -412,15 +402,12 @@ impl S3StorageEngine {
             .part_number(part_number)
             .body(body)
             .send()
-            .await
-            .map_err(|e| {
-                error!("Error uploading part: {:?}", e);
-                RegistryError::InternalServerError(Some("Error uploading part".to_string()))
-            })?;
+            .await?;
 
         Ok(res.e_tag.unwrap_or_default())
     }
 
+    #[instrument(skip(self))]
     async fn abort_pending_uploads(&self, key: &str) -> Result<(), RegistryError> {
         while let Some(upload_id) = self.search_multipart_upload_id(key).await? {
             let _ = self
@@ -430,13 +417,7 @@ impl S3StorageEngine {
                 .key(key)
                 .upload_id(upload_id)
                 .send()
-                .await
-                .map_err(|e| {
-                    error!("Error aborting multipart upload: {:?}", e);
-                    RegistryError::InternalServerError(Some(
-                        "Error aborting multipart upload".to_string(),
-                    ))
-                })?;
+                .await?;
         }
 
         Ok(())
@@ -582,16 +563,12 @@ impl StorageEngine for S3StorageEngine {
                     manifest_digest = manifest_digest.trim_end_matches("/link").to_string();
                 }
 
-                let manifest_digest = Digest::from_str(&manifest_digest)?;
+                let manifest_digest = Digest::try_from(manifest_digest.as_str())?;
                 let blob_path = self.tree.blob_path(&manifest_digest);
 
                 let manifest = self.get_object_body_as_vec(&blob_path, None).await?;
                 let manifest_len = manifest.len();
-                let manifest = serde_json::from_slice::<Manifest>(&manifest).map_err(|e| {
-                    error!("Error deserializing manifest: {}", e);
-                    error!("Manifest: {:?}", String::from_utf8_lossy(&manifest));
-                    e
-                })?;
+                let manifest = serde_json::from_slice::<Manifest>(&manifest)?;
 
                 let Some(media_type) = manifest.media_type else {
                     continue;
@@ -830,18 +807,23 @@ impl StorageEngine for S3StorageEngine {
         let mut hasher = deserialize_hash_state(state).await?;
 
         hasher.update(source);
+        let source_len = source.len() as u64;
 
         let state = serialize_hash_state(&hasher).await?;
         let hash_state_path =
             self.tree
-                .upload_hash_context_path(name, uuid, "sha256", uploaded_size);
+                .upload_hash_context_path(name, uuid, "sha256", uploaded_size + source_len);
         self.put_object(&hash_state_path, state).await?;
 
+        // NOTE: if the part is not big enough (at least 5M, as per the S3 protocol),
+        // store it in as a staging blob.
+        // First, we load the staged chunk if any and append the new data
         let mut chunk = self.load_staged_chunk(name, uuid, uploaded_size).await?;
         chunk.extend(source);
 
-        // NOTE: if the part is not big enough (at least 5M, as per the S3 protocol),
-        // store it in as a staging blob
+        // If the chunk is still too small, store it again and return.
+        // If there is no subsequent calls to this method, the chunk will be loaded back and stored
+        // as last part in the complete_upload() method.
         if chunk.len() < 5 * 1024 * 1024 {
             self.store_staged_chunk(name, uuid, chunk, uploaded_size)
                 .await?;
@@ -868,6 +850,13 @@ impl StorageEngine for S3StorageEngine {
             size = upload_size;
         };
 
+        size += self
+            .head_object(&self.tree.upload_staged_container_path(name, uuid, size))
+            .await
+            .ok()
+            .map(|object| object.content_length.unwrap_or_default() as u64)
+            .unwrap_or_default();
+
         let hash_state_path = self
             .tree
             .upload_hash_context_path(name, uuid, "sha256", size);
@@ -879,10 +868,7 @@ impl StorageEngine for S3StorageEngine {
 
         let date_path = self.tree.upload_start_date_path(name, uuid);
         let date = self.get_object_body_as_vec(&date_path, None).await?;
-        let date = String::from_utf8(date).map_err(|e| {
-            error!("Error reading upload start date: {}", e);
-            RegistryError::InternalServerError(Some("Error reading upload start date".to_string()))
-        })?;
+        let date = String::from_utf8(date)?;
 
         let start_date = DateTime::parse_from_rfc3339(&date)
             .ok()
@@ -915,14 +901,17 @@ impl StorageEngine for S3StorageEngine {
             return Err(RegistryError::NotFound);
         };
 
-        let (mut parts, size) = self.search_multipart_upload_parts(&key, &upload_id).await?;
+        let (mut parts, mut size) = self.search_multipart_upload_parts(&key, &upload_id).await?;
 
         // load the staged chunk if any and create the last part
         let chunk = self.load_staged_chunk(name, uuid, size).await?;
         if !chunk.is_empty() {
+            size += chunk.len() as u64;
+
             let e_tag = self
                 .upload_part(&key, &upload_id, parts.len() as i32 + 1, chunk)
                 .await?;
+
             parts.push(e_tag);
         }
 
@@ -968,11 +957,7 @@ impl StorageEngine for S3StorageEngine {
                     .build(),
             )
             .send()
-            .await
-            .map_err(|e| {
-                error!("Error copying object: {:?}", e);
-                RegistryError::InternalServerError(Some("Error copying object".to_string()))
-            })?;
+            .await?;
 
         let _res = self
             .s3_client
@@ -981,11 +966,7 @@ impl StorageEngine for S3StorageEngine {
             .key(&blob_path)
             .copy_source(format!("{}/{}", self.bucket, key))
             .send()
-            .await
-            .map_err(|e| {
-                error!("Error copying object: {:?}", e);
-                RegistryError::InternalServerError(Some("Error copying object".to_string()))
-            })?;
+            .await?;
 
         self.blob_link_index_update(name, &digest, |_| {}).await?;
 
@@ -1057,7 +1038,8 @@ impl StorageEngine for S3StorageEngine {
         let _guard = self.lock_manager.read_lock(digest.to_string()).await;
 
         let path = self.tree.blob_path(digest);
-        self.get_object_body_as_stream(&path, start_offset).await
+        let res = self.get_object(&path, start_offset).await?;
+        Ok(Box::new(res.body.into_async_read()))
     }
 
     #[instrument(skip(self))]
@@ -1077,12 +1059,8 @@ impl StorageEngine for S3StorageEngine {
         let path = self.tree.get_link_path(reference, name);
         let data = self.get_object_body_as_vec(&path, None).await?;
 
-        let link = String::from_utf8(data).map_err(|e| {
-            error!("Error reading link: {}", e);
-            RegistryError::InternalServerError(Some("Error reading link".to_string()))
-        })?;
-
-        Digest::from_str(&link)
+        let link = String::from_utf8(data)?;
+        Digest::try_from(link.as_str())
     }
 
     #[instrument(skip(self))]

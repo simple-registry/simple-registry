@@ -267,10 +267,8 @@ impl StorageEngine for FileSystemStorageEngine {
         let all_manifest = self.collect_directory_entries(&path).await?;
         let mut referrers = Vec::new();
 
-        // TODO: instead of having the digest in the filename, we could have it in file content!
-
         for manifest_digest in all_manifest {
-            let manifest_digest = Digest::from_str(&manifest_digest)?;
+            let manifest_digest = Digest::try_from(manifest_digest.as_str())?;
             let blob_path = self.tree.blob_path(&manifest_digest);
 
             let manifest = fs::read(&blob_path).await?;
@@ -349,9 +347,7 @@ impl StorageEngine for FileSystemStorageEngine {
             let all_digests = self.collect_directory_entries(&blob_path).await?;
 
             for digest in all_digests {
-                let digest = format!("sha256:{}", digest);
-                let digest = Digest::from_str(&digest)?;
-                digests.push(digest);
+                digests.push(Digest::Sha256(digest));
             }
         }
 
@@ -372,9 +368,7 @@ impl StorageEngine for FileSystemStorageEngine {
         let mut revisions = Vec::new();
 
         for revision in all_revisions {
-            let revision = format!("{}:{}", "sha256", revision);
-            let revision = Digest::from_str(&revision)?;
-            revisions.push(revision);
+            revisions.push(Digest::Sha256(revision));
         }
 
         Ok(self.paginate(revisions, n, continuation_token))
@@ -667,7 +661,7 @@ impl StorageEngine for FileSystemStorageEngine {
         let link = fs::read_to_string(path).await?;
         debug!("Link content: {}", link);
 
-        Digest::from_str(&link)
+        Ok(Digest::try_from(link.as_str())?)
     }
 
     #[instrument(skip(self))]

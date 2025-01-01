@@ -24,7 +24,7 @@ impl Reference {
         }
 
         if s.contains(':') {
-            Ok(Reference::Digest(Digest::from_str(s)?))
+            Ok(Reference::Digest(Digest::try_from(s)?))
         } else if TAG_REGEX.is_match(s) {
             Ok(Reference::Tag(s.to_string()))
         } else {

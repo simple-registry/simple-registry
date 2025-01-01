@@ -43,7 +43,6 @@ pub trait StorageEngine: Send + Sync {
     ) -> Result<(Vec<String>, Option<String>), RegistryError>;
 
     async fn list_referrers(
-        // TODO: unify with other listing methods
         &self,
         namespace: &str,
         digest: &Digest,

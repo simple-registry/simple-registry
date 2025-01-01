@@ -1,7 +1,7 @@
+use tokio::io::AsyncReadExt;
 use tracing::{debug, error, instrument, warn};
 
 use crate::error::RegistryError;
-use crate::io_helpers::parse_reader;
 use crate::oci::{Digest, Manifest, Reference};
 use crate::registry::{LinkReference, Registry};
 
@@ -53,18 +53,18 @@ pub fn parse_manifest_digests(
 
     let subject = manifest
         .subject
-        .map(|subject| Digest::from_str(&subject.digest))
+        .map(|subject| Digest::try_from(subject.digest.as_str()))
         .transpose()?;
 
     let config = manifest
         .config
-        .map(|config| Digest::from_str(&config.digest))
+        .map(|config| Digest::try_from(config.digest.as_str()))
         .transpose()?;
 
     let layers = manifest
         .layers
         .iter()
-        .map(|layer| Digest::from_str(&layer.digest))
+        .map(|layer| Digest::try_from(layer.digest.as_str()))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(ManifestDigests {
@@ -86,7 +86,7 @@ impl Registry {
         let link = reference.into();
         let digest = self.storage.read_link(namespace, &link).await?;
 
-        let reader = self
+        let mut reader = self
             .storage
             .build_blob_reader(&digest, None)
             .await
@@ -94,10 +94,12 @@ impl Registry {
                 error!("Failed to build blob reader: {}", e);
                 RegistryError::ManifestUnknown
             })?;
-        let (manifest, size) = parse_reader::<Manifest, _>(reader).await.map_err(|e| {
-            debug!("Failed to deserialize manifest: {}", e);
-            RegistryError::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
-        })?;
+
+        let mut manifest_content = Vec::new();
+        reader.read_to_end(&mut manifest_content).await?;
+
+        let manifest = serde_json::from_slice::<Manifest>(&manifest_content)?;
+        let size = manifest_content.len();
 
         let media_type = manifest.media_type.clone();
 

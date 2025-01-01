@@ -2,21 +2,21 @@ use serde::de::Error;
 use serde::{Deserialize, Deserializer};
 
 #[derive(Clone, Debug)]
-pub enum StorageSize {
+pub enum DataSize {
     WithUnit(u64, String),
     WithoutUnit(u64),
 }
 
-impl StorageSize {
+impl DataSize {
     pub fn as_bytes(&self) -> u64 {
         match self {
             Self::WithUnit(size, unit) => match unit.as_str() {
                 "K" | "KB" => size * 1000,
                 "M" | "MB" => size * 1000 * 1000,
                 "G" | "GB" => size * 1000 * 1000 * 1000,
-                "Ki" | "KiB" => size * 1024,
-                "Mi" | "MiB" => size * 1024 * 1024,
-                "Gi" | "GiB" => size * 1024 * 1024 * 1024,
+                "KI" | "KIB" => size * 1024,
+                "MI" | "MIB" => size * 1024 * 1024,
+                "GI" | "GIB" => size * 1024 * 1024 * 1024,
                 _ => *size,
             },
             Self::WithoutUnit(size) => *size,
@@ -24,15 +24,15 @@ impl StorageSize {
     }
 }
 
-impl Default for StorageSize {
+impl Default for DataSize {
     fn default() -> Self {
         Self::WithoutUnit(50_000_000) // Reasonable default of 50M
     }
 }
 
 // StorageSize is serialized as a string with an optional unit (e.g. "10MB") or as a raw number.
-impl<'de> Deserialize<'de> for StorageSize {
-    fn deserialize<D>(deserializer: D) -> Result<StorageSize, D::Error>
+impl<'de> Deserialize<'de> for DataSize {
+    fn deserialize<D>(deserializer: D) -> Result<DataSize, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -52,7 +52,7 @@ impl<'de> Deserialize<'de> for StorageSize {
                     Self::WithoutUnit(size)
                 } else {
                     if ![
-                        "K", "KB", "M", "MB", "G", "GB", "Ki", "KiB", "Mi", "MiB", "Gi", "GiB",
+                        "K", "KB", "M", "MB", "G", "GB", "KI", "KIB", "MI", "MIB", "GI", "GIB",
                     ]
                     .contains(&unit.as_str())
                     {

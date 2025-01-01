@@ -26,7 +26,7 @@ pub enum WriteGuard {
 
 impl LockManager {
     pub fn new_in_memory() -> Self {
-        LockManager::InMemory(MemoryLockManager::default())
+        LockManager::InMemory(MemoryLockManager::new())
     }
 
     pub fn new_redis(redis_url: &str, lock_ttl: usize) -> Result<Self, RegistryError> {

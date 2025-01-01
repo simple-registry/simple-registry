@@ -1,22 +1,8 @@
-use crate::error::RegistryError;
 use regex::Captures;
 use serde::de;
 use serde::de::{DeserializeOwned, DeserializeSeed, IntoDeserializer, MapAccess, Visitor};
-use tokio::io::{AsyncRead, AsyncReadExt};
 
-pub async fn parse_reader<T: DeserializeOwned, R: AsyncRead + Unpin>(
-    mut reader: R,
-) -> Result<(T, usize), RegistryError> {
-    let mut manifest_content = Vec::new();
-    reader.read_to_end(&mut manifest_content).await?;
-
-    let content = serde_json::from_slice(&manifest_content)?;
-    let content_raw_size = manifest_content.len();
-
-    Ok((content, content_raw_size))
-}
-
-pub fn parse_regex<T: DeserializeOwned>(content: &str, regex: &regex::Regex) -> Option<T> {
+pub fn deserialize_params<T: DeserializeOwned>(content: &str, regex: &regex::Regex) -> Option<T> {
     regex.captures(content).and_then(|captures| {
         let deserializer = CapturesDeserializer {
             captures: &captures,

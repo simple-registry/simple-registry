@@ -1,13 +1,41 @@
-use crate::error::RegistryError;
+use crate::cmd::error::CommandError;
+use crate::configuration::Configuration;
 use crate::oci::Digest;
 use crate::registry::{parse_manifest_digests, LinkReference, Registry};
 use chrono::{Duration, Utc};
-use std::io;
 use std::process::exit;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-pub struct RegistryScrub {
+pub struct ScrubOptions {
+    pub dry_mode: Option<bool>,
+    pub upload_timeout: Option<Duration>,
+    pub check_uploads: Option<bool>,
+    pub check_tags: Option<bool>,
+    pub check_revisions: Option<bool>,
+    pub check_blobs: Option<bool>,
+}
+
+impl ScrubOptions {
+    pub fn from_matches(matches: &clap::ArgMatches) -> Self {
+        let upload_timeout = matches
+            .get_one::<u32>("upload-timeout")
+            .cloned()
+            .map(|t| t as i64);
+        let upload_timeout = upload_timeout.map(Duration::hours);
+
+        Self {
+            dry_mode: matches.get_one::<bool>("dry-run").cloned(),
+            upload_timeout,
+            check_uploads: matches.get_one::<bool>("check-uploads").map(|_| true),
+            check_tags: matches.get_one::<bool>("check-tags").map(|_| true),
+            check_revisions: matches.get_one::<bool>("check-revisions").map(|_| true),
+            check_blobs: matches.get_one::<bool>("check-blobs").map(|_| true),
+        }
+    }
+}
+
+pub struct Scrub {
     registry: Arc<Registry>,
     dry_mode: bool,
     upload_timeout: Duration,
@@ -17,21 +45,32 @@ pub struct RegistryScrub {
     check_blobs: bool,
 }
 
-impl RegistryScrub {
-    pub fn new(registry: Arc<Registry>, dry_mode: bool) -> Self {
-        // TODO: customizable options
-        Self {
+impl Scrub {
+    pub fn try_from_config(
+        config: &Configuration,
+        flags: &ScrubOptions,
+    ) -> Result<Self, CommandError> {
+        let registry = Arc::new(Registry::try_from_config(config)?);
+
+        let dry_mode = flags.dry_mode.unwrap_or(false);
+        let upload_timeout = flags.upload_timeout.unwrap_or(Duration::days(1));
+        let check_uploads = flags.check_uploads.unwrap_or(true);
+        let check_tags = flags.check_tags.unwrap_or(true);
+        let check_revisions = flags.check_revisions.unwrap_or(true);
+        let check_blobs = flags.check_blobs.unwrap_or(true);
+
+        Ok(Self {
             registry,
             dry_mode,
-            upload_timeout: Duration::hours(24),
-            check_uploads: true,
-            check_tags: true,
-            check_revisions: true,
-            check_blobs: true,
-        }
+            upload_timeout,
+            check_uploads,
+            check_tags,
+            check_revisions,
+            check_blobs,
+        })
     }
 
-    pub async fn scrub(&self) -> io::Result<()> {
+    pub async fn run(&self) -> Result<(), CommandError> {
         if self.dry_mode {
             info!("Dry-run mode: no changes will be made to the storage");
         }
@@ -81,7 +120,7 @@ impl RegistryScrub {
         Ok(())
     }
 
-    async fn scrub_uploads(&self, namespace: &str) -> Result<(), RegistryError> {
+    async fn scrub_uploads(&self, namespace: &str) -> Result<(), CommandError> {
         info!("'{}': Checking for obsolete uploads", namespace);
 
         let mut marker = None;
@@ -107,7 +146,7 @@ impl RegistryScrub {
         Ok(())
     }
 
-    async fn check_upload(&self, namespace: &str, uuid: &str) -> Result<(), RegistryError> {
+    async fn check_upload(&self, namespace: &str, uuid: &str) -> Result<(), CommandError> {
         let summary = self
             .registry
             .storage
@@ -131,7 +170,7 @@ impl RegistryScrub {
         Ok(())
     }
 
-    async fn scrub_tags(&self, namespace: &str) -> Result<(), RegistryError> {
+    async fn scrub_tags(&self, namespace: &str) -> Result<(), CommandError> {
         info!("'{}': Checking tags/revision inconsistencies", namespace);
 
         let mut marker = None;
@@ -157,7 +196,7 @@ impl RegistryScrub {
         Ok(())
     }
 
-    async fn check_tag(&self, namespace: &str, tag: &str) -> Result<(), RegistryError> {
+    async fn check_tag(&self, namespace: &str, tag: &str) -> Result<(), CommandError> {
         debug!(
             "Checking {}:{} for revision inconsistencies",
             namespace, tag
@@ -176,7 +215,7 @@ impl RegistryScrub {
         Ok(())
     }
 
-    async fn scrub_revisions(&self, namespace: &str) -> Result<(), RegistryError> {
+    async fn scrub_revisions(&self, namespace: &str) -> Result<(), CommandError> {
         info!("'{}': Checking for revision inconsistencies", namespace);
 
         let mut marker = None;
@@ -215,7 +254,7 @@ impl RegistryScrub {
         namespace: &str,
         revision: &Digest,
         config: Option<Digest>,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<(), CommandError> {
         let Some(config_digest) = config else {
             return Ok(());
         };
@@ -237,7 +276,7 @@ impl RegistryScrub {
         namespace: &str,
         revision: &Digest,
         subject_digest: Option<Digest>,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<(), CommandError> {
         let Some(subject_digest) = subject_digest else {
             return Ok(());
         };
@@ -258,7 +297,7 @@ impl RegistryScrub {
         namespace: &str,
         revision: &Digest,
         layers: &Vec<Digest>,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<(), CommandError> {
         for layer_digest in layers {
             debug!(
                 "Checking {}@{} layer link: {}",
@@ -278,7 +317,7 @@ impl RegistryScrub {
         namespace: &str,
         link_reference: &LinkReference,
         digest: &Digest,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<(), CommandError> {
         let blob_digest = self
             .registry
             .storage
@@ -301,7 +340,7 @@ impl RegistryScrub {
         Ok(())
     }
 
-    async fn cleanup_orphan_blobs(&self) -> Result<(), RegistryError> {
+    async fn cleanup_orphan_blobs(&self) -> Result<(), CommandError> {
         info!("Checking for orphan blobs");
 
         let mut marker = None;
@@ -325,7 +364,7 @@ impl RegistryScrub {
         Ok(())
     }
 
-    async fn check_blob(&self, blob: &Digest) -> Result<(), RegistryError> {
+    async fn check_blob(&self, blob: &Digest) -> Result<(), CommandError> {
         let mut blob_index = self.registry.storage.read_blob_index(blob).await?;
 
         for (namespace, references) in blob_index.namespace.clone() {

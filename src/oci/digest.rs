@@ -1,17 +1,9 @@
-use lazy_static::lazy_static;
-use regex::Regex;
 use serde::de::{Error, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
 use crate::error::RegistryError;
-use crate::io_helpers::parse_regex;
-
-lazy_static! {
-    static ref DIGEST_REGEX: Regex =
-        Regex::new(r"^(?P<algorithm>[a-z0-9]+):(?P<hash>[a-f0-9]{64})$").unwrap();
-}
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum Digest {
@@ -19,22 +11,6 @@ pub enum Digest {
 }
 
 impl Digest {
-    pub fn from_str(s: &str) -> Result<Self, RegistryError> {
-        #[derive(Deserialize)]
-        struct ParsedDigest {
-            algorithm: String,
-            hash: String,
-        }
-
-        let parsed_digest =
-            parse_regex::<ParsedDigest>(s, &DIGEST_REGEX).ok_or(RegistryError::DigestInvalid)?;
-
-        match parsed_digest.algorithm.as_str() {
-            "sha256" => Ok(Digest::Sha256(parsed_digest.hash)),
-            _ => Err(RegistryError::Unsupported),
-        }
-    }
-
     pub fn algorithm(&self) -> &str {
         match self {
             Digest::Sha256(_) => "sha256",
@@ -51,6 +27,37 @@ impl Digest {
         match self {
             Digest::Sha256(s) => &s[0..2],
         }
+    }
+}
+
+impl TryFrom<&str> for Digest {
+    type Error = RegistryError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        let (algorithm, hash) = s.split_once(':').ok_or_else(|| {
+            RegistryError::InternalServerError(Some(format!(
+                "Digest must be in the format 'algorithm:hash', got '{}'",
+                s
+            )))
+        })?;
+
+        // Only sha256 is supported at the moment
+        if algorithm.to_lowercase() != "sha256" {
+            return Err(RegistryError::InternalServerError(Some(format!(
+                "Unsupported digest algorithm '{}'",
+                algorithm
+            ))));
+        }
+
+        // Check that hash is a valid sha256 hash (64 bytes representation)
+        if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(RegistryError::InternalServerError(Some(format!(
+                "Invalid sha256 hash '{}'",
+                hash
+            ))));
+        }
+
+        Ok(Digest::Sha256(hash.to_string()))
     }
 }
 
@@ -78,7 +85,7 @@ impl<'de> Deserialize<'de> for Digest {
             where
                 E: Error,
             {
-                Digest::from_str(value).map_err(Error::custom)
+                Digest::try_from(value).map_err(Error::custom)
             }
         }
 
