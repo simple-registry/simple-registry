@@ -96,14 +96,14 @@ pub struct StorageConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub enum StorageBackendConfig {
     #[serde(rename = "fs")]
-    FS(StorageFSConfig),
+    FS(Box<StorageFSConfig>),
     #[serde(rename = "s3")]
-    S3(StorageS3Config),
+    S3(Box<StorageS3Config>),
 }
 
 impl Default for StorageBackendConfig {
     fn default() -> Self {
-        StorageBackendConfig::FS(StorageFSConfig::default())
+        StorageBackendConfig::FS(Box::default())
     }
 }
 
