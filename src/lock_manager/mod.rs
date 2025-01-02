@@ -3,7 +3,7 @@ use crate::lock_manager::memory::{
     InMemoryReadLockGuard, InMemoryWriteLockGuard, MemoryLockManager,
 };
 use crate::lock_manager::redis::{RedisLockGuard, RedisLockManager};
-use tracing::error;
+use tracing::{error, instrument};
 
 mod memory;
 mod redis;
@@ -37,6 +37,7 @@ impl LockManager {
         Ok(LockManager::Redis(redis_lock))
     }
 
+    #[instrument(skip(self))]
     pub async fn read_lock(&self, lock_key: String) -> Result<ReadGuard, RegistryError> {
         match self {
             LockManager::Redis(lock) => lock.read_lock(lock_key).await.map(ReadGuard::Redis),
@@ -44,6 +45,7 @@ impl LockManager {
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn write_lock(&self, lock_key: String) -> Result<WriteGuard, RegistryError> {
         match self {
             LockManager::Redis(lock) => lock.write_lock(lock_key).await.map(WriteGuard::Redis),
