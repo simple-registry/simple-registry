@@ -39,6 +39,7 @@ pub struct S3StorageEngine {
     multipart_copy_threshold: u64,
     multipart_copy_chunk_size: u64,
     multipart_copy_jobs: usize,
+    multipart_min_part_size: u64,
 }
 
 impl Debug for S3StorageEngine {
@@ -83,6 +84,7 @@ impl S3StorageEngine {
             multipart_copy_threshold: config.multipart_copy_threshold.as_bytes(),
             multipart_copy_chunk_size: config.multipart_copy_chunk_size.as_bytes(),
             multipart_copy_jobs: config.multipart_copy_jobs,
+            multipart_min_part_size: config.multipart_min_part_size.as_bytes(),
         })
     }
 
@@ -972,7 +974,7 @@ impl StorageEngine for S3StorageEngine {
         // If the chunk is still too small, store it again and return.
         // If there is no subsequent calls to this method, the chunk will be loaded back and stored
         // as last part in the complete_upload() method.
-        if chunk.len() < 5 * 1024 * 1024 {
+        if (chunk.len() as u64) < self.multipart_min_part_size {
             self.store_staged_chunk(name, uuid, chunk, uploaded_size)
                 .await?;
             return Ok(());

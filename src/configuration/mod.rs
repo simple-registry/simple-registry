@@ -127,6 +127,8 @@ pub struct StorageS3Config {
     pub multipart_copy_chunk_size: DataSize,
     #[serde(default = "StorageS3Config::default_multipart_copy_jobs")]
     pub multipart_copy_jobs: usize,
+    #[serde(default = "StorageS3Config::default_multipart_min_part_size")]
+    pub multipart_min_part_size: DataSize,
 }
 
 impl StorageS3Config {
@@ -139,6 +141,10 @@ impl StorageS3Config {
 
     fn default_multipart_copy_jobs() -> usize {
         4
+    }
+
+    fn default_multipart_min_part_size() -> DataSize {
+        DataSize::WithUnit(5, "MB".to_string())
     }
 }
 

@@ -76,6 +76,7 @@ Multiple storage backends are supported: filesystem or s3-baked.
 - `bucket` (string): The bucket for the S3 server
 - `region` (string): The region for the S3 server
 - `key_prefix` (optional, string): The key prefix for all s3 keys
+- `multipart_min_part_size` (uint64 | string): The minimum part size for multipart copy in bytes (default: 5MB)
 - `multipart_copy_threshold` (uint64 | string): The threshold for multipart copy in bytes (default: 5GB)
 - `multipart_copy_chunk_size` (uint64 | string): The chunk size for multipart copy in bytes (default: 100MB)
 - `multipart_copy_jobs` (usize): The max number of concurrent multipart copy jobs (default: 4)
