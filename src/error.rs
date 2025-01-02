@@ -1,12 +1,16 @@
-use crate::RegistryResponseBody;
+use crate::registry::RegistryResponseBody;
+use aws_sdk_s3::config::http::HttpResponse;
+use aws_sdk_s3::error::SdkError;
 use http_body_util::Full;
+use hyper::body::Bytes;
 use hyper::{Response, StatusCode};
 use serde::Serialize;
 use serde_json::json;
 use sha2::digest::crypto_common::hazmat;
 use std::cmp::PartialEq;
 use std::fmt::Display;
-use tracing::debug;
+use std::string::FromUtf8Error;
+use tracing::{debug, error};
 
 #[derive(Debug, PartialEq)]
 pub enum RegistryError {
@@ -71,7 +75,7 @@ impl RegistryError {
         });
 
         let body = body.to_string();
-        let body = bytes::Bytes::from(body);
+        let body = Bytes::from(body);
 
         match self {
             RegistryError::Unauthorized(_) => {
@@ -187,6 +191,22 @@ impl From<serde_json::Error> for RegistryError {
     }
 }
 
+impl From<toml::de::Error> for RegistryError {
+    fn from(error: toml::de::Error) -> Self {
+        debug!("TOML error: {:?}", error);
+        RegistryError::InternalServerError(Some(
+            "TOML deserialization error during operations".to_string(),
+        ))
+    }
+}
+
+impl From<FromUtf8Error> for RegistryError {
+    fn from(error: FromUtf8Error) -> Self {
+        debug!("UTF-8 error: {:?}", error);
+        RegistryError::InternalServerError(Some("UTF-8 error during operations".to_string()))
+    }
+}
+
 impl From<cel_interpreter::ParseError> for RegistryError {
     fn from(error: cel_interpreter::ParseError) -> Self {
         debug!("CEL error: {:?}", error);
@@ -198,5 +218,15 @@ impl From<hazmat::DeserializeStateError> for RegistryError {
     fn from(error: hazmat::DeserializeStateError) -> Self {
         debug!("Crypto error: {:?}", error);
         RegistryError::InternalServerError(Some("Crypto error during operations".to_string()))
+    }
+}
+
+impl<T> From<SdkError<T, HttpResponse>> for RegistryError
+where
+    T: std::fmt::Debug,
+{
+    fn from(error: SdkError<T, HttpResponse>) -> Self {
+        error!("Error handling object: {:?}", error);
+        RegistryError::InternalServerError(Some("S3 error during operations".to_string()))
     }
 }

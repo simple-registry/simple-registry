@@ -1,12 +1,11 @@
 use crate::error::RegistryError;
 use crate::oci::Digest;
 use crate::registry::Registry;
-use bytes::Buf;
 use futures_util::StreamExt;
-use http_body_util::BodyExt;
+use http_body_util::BodyDataStream;
 use hyper::body::Incoming;
-use tokio::io::AsyncWriteExt;
-use tracing::{debug, instrument};
+use hyper::Request;
+use tracing::{debug, error, instrument, warn};
 use uuid::Uuid;
 
 pub enum NewUpload {
@@ -42,7 +41,7 @@ impl Registry {
         namespace: &str,
         session_id: Uuid,
         start_offset: Option<u64>,
-        body: Incoming,
+        body: BodyDataStream<Request<Incoming>>,
     ) -> Result<u64, RegistryError> {
         self.validate_namespace(namespace)?;
 
@@ -58,23 +57,17 @@ impl Registry {
             }
         };
 
-        let mut writer = self
-            .storage
-            .build_upload_writer(namespace, &session_id, start_offset)
+        self.upload_body_chunk(namespace, &session_id, body, true)
             .await?;
-
-        let mut body = body.into_data_stream();
-        while let Some(data) = body.next().await {
-            let data = data?;
-            writer.write_all(data.chunk()).await?;
-        }
-
-        writer.flush().await?;
 
         let summary = self
             .storage
             .read_upload_summary(namespace, &session_id)
-            .await?;
+            .await
+            .map_err(|e| {
+                error!("Error reading uploaded file: {:?}", e);
+                e
+            })?;
 
         if summary.size < 1 {
             return Ok(0);
@@ -89,37 +82,71 @@ impl Registry {
         namespace: &str,
         session_id: Uuid,
         digest: Digest,
-        body: Incoming,
+        body: BodyDataStream<Request<Incoming>>,
     ) -> Result<(), RegistryError> {
         self.validate_namespace(namespace)?;
 
-        let uuid = session_id.to_string();
-        let mut writer = self
-            .storage
-            .build_upload_writer(namespace, &uuid, None)
+        let session_id = session_id.to_string();
+
+        self.upload_body_chunk(namespace, &session_id, body, false)
             .await?;
 
-        let mut body = body.into_data_stream();
-        while let Some(data) = body.next().await {
-            let data = data?;
-            writer.write_all(data.chunk()).await?;
-        }
-        writer.flush().await?;
-
-        let summary = self.storage.read_upload_summary(namespace, &uuid).await?;
+        let summary = self
+            .storage
+            .read_upload_summary(namespace, &session_id)
+            .await?;
 
         if summary.digest != digest {
-            debug!(
-                "Digest mismatch: expected {}, got {}",
-                digest, summary.digest
-            );
+            warn!("Expected digest '{}', got '{}'", digest, summary.digest);
             return Err(RegistryError::DigestInvalid);
         }
 
         self.storage
-            .complete_upload(namespace, &uuid, Some(digest.clone()))
+            .complete_upload(namespace, &session_id, Some(digest))
             .await?;
-        self.storage.delete_upload(namespace, &uuid).await
+        self.storage.delete_upload(namespace, &session_id).await
+    }
+
+    async fn upload_body_chunk(
+        &self,
+        namespace: &str,
+        session_id: &str,
+        mut body: BodyDataStream<Request<Incoming>>,
+        mut append: bool,
+    ) -> Result<(), RegistryError> {
+        let mut chunk = Vec::new();
+        while let Some(frame) = body.next().await {
+            let frame = frame.map_err(|e| {
+                error!("Data stream error: {}", e);
+                std::io::Error::new(std::io::ErrorKind::Other, e)
+            })?;
+            chunk.extend_from_slice(&frame);
+
+            let streaming_size = self.streaming_chunk_size as usize;
+
+            while chunk.len() >= streaming_size {
+                debug!("Chunk too large, creating a part: {}", chunk.len());
+                let (current_part, next_part) = chunk.split_at(streaming_size);
+
+                self.storage
+                    .write_upload(namespace, session_id, current_part, append)
+                    .await?;
+
+                if !append {
+                    append = true;
+                }
+                chunk = next_part.to_vec();
+            }
+        }
+
+        if !chunk.is_empty() {
+            debug!("Remaining chunk data, creating a part: {}", chunk.len());
+            self.storage
+                .write_upload(namespace, session_id, &chunk, append)
+                .await?;
+        }
+
+        Ok(())
     }
 
     #[instrument]

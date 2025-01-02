@@ -9,9 +9,9 @@ Goals
 - Easy to operate: online garbage collection, auto-reload of configuration and certificates
 - Cross-platform: should be portable on most mainstream operating systems
 
-> [!WARNING]
-> This project is not battle-tested in production.
-> **USE AT YOUR OWN RISK**
+> [!NOTE]
+> While the registry service itself is both OCI compliant and compatible with Docker,
+> the scrub feature is still experimental.
 
 ## Ecosystem
 
@@ -28,14 +28,10 @@ This feature is particularly useful for tasks like rotating certificates, updati
 However, certain options cannot be changed during runtime:
 - `server.bind_address`
 - `server.port`
-- `server.tls.server_certificate_bundle`
-- `server.tls.server_private_key`
-- `server.tls.client_ca_bundle`
 - `observability.tracing.sampling_rate`
-- distributed locking backend
+- **enabling** or **disabling** TLS
 
-Although the TLS file paths themselves cannot be added, removed, or modified at runtime, the corresponding files are
-automatically reloaded on changes if they are valid.
+TLS files are also automatically reloaded on changes if they are valid.
 
 ### Server parameters (`server`)
 
@@ -43,6 +39,7 @@ automatically reloaded on changes if they are valid.
 - `port` (uint16): The port to bind the server to
 - `query_timeout` (uint64): The timeout for queries in seconds
 - `query_timeout_grace_period` (uint64): The grace period for queries in seconds
+- `streaming_chunk_size` (uint64 | string): The chunk size for streaming in bytes
 
 #### Optional TLS (`server.tls`)
 
@@ -54,22 +51,35 @@ If not provided, the server will run on top of an _insecure_ plaintext socket.
 
 ### Distributed Locking (`locking`)
 
-Distribution locking is used to prevent concurrent operations that could lead to data corruption.
+Distributed locking is used to prevent concurrent operations that could lead to data corruption.
 If no configuration is provided, an in-memory locking mechanism is used, which is not suitable for
 multi-replica deployments.
 
 #### Redis Locking (`locking.redis`)
 
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
-- `prefix` (string): The prefix for the keys in Redis
+- `ttl` (string): The time-to-live for the lock in seconds (e.g., `10s`)
 
 ### Storage (`storage`)
 
-Multiple storage backends are supported, but only the filesystem backend is currently implemented.
+Multiple storage backends are supported: filesystem or s3-baked.
 
 #### Filesystem Storage (`storage.fs`)
 
 - `root_dir` (string): The root directory for the storage.
+
+#### S3 Storage (`storage.s3`)
+
+- `access_key_id` (string): The access key ID for the S3 server
+- `secret_key` (string): The secret access key for the S3 server
+- `endpoint` (string): The endpoint for the S3 server
+- `bucket` (string): The bucket for the S3 server
+- `region` (string): The region for the S3 server
+- `key_prefix` (optional, string): The key prefix for all s3 keys
+- `multipart_min_part_size` (uint64 | string): The minimum part size for multipart copy in bytes (default: 5MB)
+- `multipart_copy_threshold` (uint64 | string): The threshold for multipart copy in bytes (default: 5GB)
+- `multipart_copy_chunk_size` (uint64 | string): The chunk size for multipart copy in bytes (default: 100MB)
+- `multipart_copy_jobs` (usize): The max number of concurrent multipart copy jobs (default: 4)
 
 ### Identity (`identity.<identity-id>`)
 
@@ -131,7 +141,6 @@ The following `request.action` actions are supported:
   - [ ] Unit Testing
   - [ ] Conformance Testing
   - [ ] Publishing
-- [ ] s3 storage engine: implementation
 - [ ] Pull-through cache
 - [ ] Global CEL policies
 - [ ] Tag & Digest auto-delete CEL policies

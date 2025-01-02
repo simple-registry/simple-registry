@@ -1,183 +1,143 @@
 #![forbid(unsafe_code)]
-use arc_swap::ArcSwap;
+use crate::cmd::{Scrub, ScrubOptions, Server};
 use clap::{ArgAction, Command};
-use http_body_util::BodyExt;
-use hyper::body::Incoming;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::tokio::TokioIo;
-use lazy_static::lazy_static;
+use cmd::CommandError;
 use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
-use regex::Regex;
-use registry::Registry;
-use serde::{Deserialize, Serialize};
-use std::convert::Infallible;
-use std::fmt::Debug;
-use std::io;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::{global, KeyValue};
+use opentelemetry_sdk::trace::{BatchConfig, RandomIdGenerator, Sampler, TracerProvider};
+use opentelemetry_sdk::{runtime, Resource};
+use opentelemetry_semantic_conventions::{
+    attribute::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_NAME, SERVICE_VERSION},
+    SCHEMA_URL,
+};
+use opentelemetry_stdout as stdout;
 use std::path::Path;
-use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tokio::net::TcpListener;
-use tokio::pin;
-use tokio_rustls::TlsAcceptor;
-use tracing::{debug, error, info, instrument};
-use uuid::Uuid;
-use x509_parser::prelude::{FromDer, X509Certificate};
+use std::sync::{Arc, RwLock};
+use tracing::{error, info};
+use tracing_opentelemetry::OpenTelemetryLayer;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 
-mod config;
+mod cmd;
+mod configuration;
 mod error;
-mod http;
-mod io_helpers;
 mod lock_manager;
 mod oci;
 mod policy;
 mod registry;
-mod scrub;
 mod storage;
-mod tls;
-mod tracing_helper;
 
-use self::http::request::{parse_authorization_header, parse_query_parameters, parse_range_header};
-use self::http::response::paginated_response;
-use crate::config::Config;
-use crate::error::RegistryError;
-use crate::http::response::RegistryResponseBody;
-use crate::io_helpers::parse_regex;
-use crate::oci::{Digest, Reference, ReferrerList};
-use crate::policy::{ClientAction, ClientIdentity};
-use crate::registry::{BlobData, NewUpload};
-
-lazy_static! {
-    static ref ROUTE_API_VERSION_REGEX: Regex = Regex::new(r"^/v2/?$").unwrap();
-    static ref ROUTE_UPLOADS_REGEX: Regex =
-        Regex::new(r"^/v2/(?P<name>.+)/blobs/uploads/?$").unwrap();
-    static ref ROUTE_UPLOAD_REGEX: Regex =
-        Regex::new(r"^/v2/(?P<name>.+)/blobs/uploads/(?P<uuid>[0-9a-fA-F-]+)$").unwrap();
-    static ref ROUTE_BLOB_REGEX: Regex =
-        Regex::new(r"^/v2/(?P<name>.+)/blobs/(?P<digest>.+)$").unwrap();
-    static ref ROUTE_MANIFEST_REGEX: Regex =
-        Regex::new(r"^/v2/(?P<name>.+)/manifests/(?P<reference>.+)$").unwrap();
-    static ref ROUTE_REFERRERS_REGEX: Regex =
-        Regex::new(r"^/v2/(?P<name>.+)/referrers/(?P<digest>.+)$").unwrap();
-    static ref ROUTE_LIST_TAGS_REGEX: Regex = Regex::new(r"^/v2/(?P<name>.+)/tags/list$").unwrap();
-    static ref ROUTE_CATALOG_REGEX: Regex = Regex::new(r"^/v2/_catalog$").unwrap();
-
-    //
-    static ref CONFIG_PATH: ArcSwap<String> = ArcSwap::new(Arc::new(DEFAULT_CONFIG_PATH.to_string()));
-    static ref CONFIG: ArcSwap<Config> = ArcSwap::new(Arc::new(Config::default()));
-    static ref TLS_ACCEPTOR: ArcSwap<Option<TlsAcceptor>> = ArcSwap::new(Arc::new(None));
-    static ref REGISTRY: ArcSwap<Registry> = ArcSwap::new(Arc::new(Registry::default()));
-}
+use crate::configuration::Configuration;
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
 
-#[derive(Debug, Deserialize)]
-pub struct NewUploadParameters {
-    pub name: String,
+fn get_config_path_from_matches(matches: &clap::ArgMatches) -> String {
+    matches
+        .get_one::<String>("config")
+        .cloned()
+        .unwrap_or(DEFAULT_CONFIG_PATH.to_string())
 }
 
-#[derive(Debug, Deserialize)]
-pub struct UploadParameters {
-    pub name: String,
-    pub uuid: Uuid,
+pub fn set_tracing(config: &Configuration) {
+    let _ = TracerProvider::builder()
+        .with_simple_exporter(stdout::SpanExporter::default())
+        .build();
+
+    let resource = Resource::from_schema_url(
+        [
+            KeyValue::new(SERVICE_NAME, env!("CARGO_PKG_NAME")),
+            KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+            KeyValue::new(DEPLOYMENT_ENVIRONMENT_NAME, "develop"),
+        ],
+        SCHEMA_URL,
+    );
+
+    let subscriber = tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(tracing_subscriber::fmt::layer());
+
+    if let Some(observability_config) = &config.observability {
+        if let Some(tracing_config) = &observability_config.tracing {
+            let provider = opentelemetry_otlp::new_pipeline()
+                .tracing()
+                .with_trace_config(
+                    opentelemetry_sdk::trace::Config::default()
+                        .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+                            tracing_config.sampling_rate,
+                        ))))
+                        .with_id_generator(RandomIdGenerator::default())
+                        .with_resource(resource),
+                )
+                .with_batch_config(BatchConfig::default())
+                .with_exporter(opentelemetry_otlp::new_exporter().tonic())
+                .install_batch(runtime::Tokio)
+                .unwrap();
+
+            let tracer = provider.tracer("tracing-otel-subscriber");
+            global::set_tracer_provider(provider);
+
+            subscriber.with(OpenTelemetryLayer::new(tracer)).init();
+
+            info!(
+                "Enabled tracing with sampling rate: {}",
+                tracing_config.sampling_rate
+            );
+
+            return;
+        };
+    };
+
+    subscriber.init();
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ManifestParameters {
-    pub name: String,
-    pub reference: Reference,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReferrerParameters {
-    pub name: String,
-    pub digest: Digest,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TagsParameters {
-    pub name: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BlobParameters {
-    pub name: String,
-    pub digest: Digest,
-}
-
-pub fn reload_config() -> Result<(), io::Error> {
-    let config_path = CONFIG_PATH.load();
-    let config = Config::load(config_path.as_str())?;
-
-    let registry = Registry::try_from_config(&config).map_err(|e| {
-        error!("Failed to create registry: {}", e);
-        io::Error::new(io::ErrorKind::Other, "Failed to create registry")
-    })?;
-
-    REGISTRY.store(Arc::new(registry));
-    CONFIG.store(Arc::new(config));
-
-    Ok(())
-}
-
-pub fn reload_tls() -> Result<(), io::Error> {
-    let config_path = CONFIG_PATH.load();
-    let config = Config::load(config_path.as_str())?;
-
-    TLS_ACCEPTOR.store(Arc::new(config.build_tls_acceptor()?));
-
-    Ok(())
-}
-
-pub fn get_registry(
-    identity: ClientIdentity,
-    action: ClientAction,
-) -> Result<Arc<Registry>, RegistryError> {
-    let registry = REGISTRY.load().clone();
-    identity.can_do(&registry, action)?;
-
-    Ok(registry)
-}
-
-pub fn set_watcher_path(watcher: &mut RecommendedWatcher, path: &str) -> io::Result<()> {
-    watcher
-        .watch(Path::new(path), RecursiveMode::Recursive)
-        .map_err(|err| {
-            error!("Failed to watch configuration file: {}", err);
-            io::Error::new(io::ErrorKind::Other, err)
-        })?;
+pub fn set_watcher_path(watcher: &mut RecommendedWatcher, path: &str) -> Result<(), CommandError> {
+    watcher.watch(Path::new(path), RecursiveMode::Recursive)?;
 
     info!("Watching for changes to {}", path);
     Ok(())
 }
 
-fn config_watcher_event_handler(event: Result<Event, notify::Error>) {
-    let Ok(event) = event else {
-        return;
+pub fn set_tls_watcher_paths(
+    watcher: &mut RecommendedWatcher,
+    config: &Configuration,
+    paths: Arc<RwLock<Vec<String>>>,
+) -> Result<(), CommandError> {
+    let mut paths = match paths.write() {
+        Ok(paths) => paths,
+        Err(err) => {
+            error!("Failed to acquire write lock on TLS watched paths: {}", err);
+            return Err(CommandError::ConfigurationError(
+                "Failed to acquire write lock on TLS watched paths".to_string(),
+            ));
+        }
     };
 
-    if event.kind.is_modify() {
-        if let Err(err) = reload_config() {
-            error!("Failed to reload configuration: {}", err);
+    for path in paths.iter() {
+        watcher.watch(Path::new(path), RecursiveMode::Recursive)?;
+
+        info!("Watching for changes to {}", path);
+    }
+
+    paths.clear();
+    if let Some(tls) = config.server.tls.as_ref() {
+        set_watcher_path(watcher, tls.server_certificate_bundle.as_str())?;
+        paths.push(tls.server_certificate_bundle.clone());
+
+        set_watcher_path(watcher, tls.server_private_key.as_str())?;
+        paths.push(tls.server_private_key.clone());
+
+        if let Some(client_ca_bundle) = tls.client_ca_bundle.as_ref() {
+            set_watcher_path(watcher, client_ca_bundle.as_str())?;
+            paths.push(client_ca_bundle.clone());
         }
     }
-}
 
-fn tls_watcher_event_handler(event: Result<Event, notify::Error>) {
-    let Ok(event) = event else {
-        return;
-    };
-
-    if event.kind.is_modify() {
-        if let Err(err) = reload_tls() {
-            error!("Failed to reload configuration: {}", err);
-        }
-    }
+    Ok(())
 }
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() -> Result<(), CommandError> {
     let matches = Command::new("origin")
         .about("An OCI-compliant container registry")
         .version(env!("CARGO_PKG_VERSION"))
@@ -186,7 +146,6 @@ async fn main() -> io::Result<()> {
         .subcommand(
             Command::new("scrub")
                 .about("Check the registry storage engine for inconsistencies and fix them")
-                .version(env!("CARGO_PKG_VERSION"))
                 .arg(
                     clap::Arg::new("config")
                         .short('c')
@@ -205,7 +164,6 @@ async fn main() -> io::Result<()> {
         .subcommand(
             Command::new("serve")
                 .about("Start the registry server")
-                .version(env!("CARGO_PKG_VERSION"))
                 .arg(
                     clap::Arg::new("config")
                         .short('c')
@@ -216,808 +174,59 @@ async fn main() -> io::Result<()> {
         )
         .get_matches();
 
-    let mut config_watcher = recommended_watcher(config_watcher_event_handler).map_err(|err| {
-        error!("Failed to create watcher: {}", err);
-        io::Error::new(io::ErrorKind::Other, err)
-    })?;
-
-    //
     match matches.subcommand() {
-        Some(("scrub", serve_matches)) => {
-            let config_path = serve_matches
-                .get_one::<String>("config")
-                .cloned()
-                .unwrap_or(DEFAULT_CONFIG_PATH.to_string());
-            let auto_fix = serve_matches
-                .get_one::<bool>("auto-fix")
-                .cloned()
-                .unwrap_or(false);
+        Some(("scrub", scrub_matches)) => {
+            let config_path = get_config_path_from_matches(scrub_matches);
+            let config = Configuration::load(&config_path)?;
 
-            CONFIG_PATH.store(Arc::new(config_path.clone()));
-            reload_config()?;
+            set_tracing(&config);
 
-            tracing_helper::setup_tracing();
+            let scrub_options = ScrubOptions::from_matches(scrub_matches);
 
-            scrub::scrub(auto_fix).await
+            let scrub = Scrub::try_from_config(&config, &scrub_options)?;
+            scrub.run().await
         }
-        Some(("serve", serve_matches)) => {
-            let config_path = serve_matches
-                .get_one::<String>("config")
-                .cloned()
-                .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string());
+        Some(("serve", run_matches)) => {
+            let config_path = get_config_path_from_matches(run_matches);
+            let config = Configuration::load(&config_path)?;
 
-            CONFIG_PATH.store(Arc::new(config_path.clone()));
-            reload_config()?;
+            set_tracing(&config);
 
-            tracing_helper::setup_tracing();
+            let tls_watched_paths: Vec<String> = Vec::new();
+            let tls_watched_paths = Arc::new(RwLock::new(tls_watched_paths));
+
+            let server = Arc::new(Server::try_from_config(&config)?);
+
+            let server_watcher = server.clone();
+            let config_watcher_path = config_path.clone();
+            let mut config_watcher = recommended_watcher(move |event: notify::Result<Event>| {
+                let server = server_watcher.clone();
+                let config_path = config_watcher_path.clone();
+                let Ok(event) = event else {
+                    return;
+                };
+
+                if event.kind.is_modify() {
+                    let config = match Configuration::load(config_path) {
+                        Ok(config) => config,
+                        Err(err) => {
+                            error!("Failed to reload configuration: {}", err);
+                            return;
+                        }
+                    };
+
+                    if let Err(err) = server.notify_config_change(&config) {
+                        error!("Failed to notify server of configuration change: {}", err);
+                    } else {
+                        info!("Server notified of configuration change");
+                    }
+                }
+            })?;
             set_watcher_path(&mut config_watcher, config_path.as_str())?;
+            set_tls_watcher_paths(&mut config_watcher, &config, tls_watched_paths)?;
 
-            serve().await
+            server.run().await
         }
         _ => unreachable!(),
     }
-}
-
-async fn serve() -> io::Result<()> {
-    reload_tls()?;
-
-    let mut tls_watcher = recommended_watcher(tls_watcher_event_handler).map_err(|err| {
-        error!("Failed to create watcher: {}", err);
-        io::Error::new(io::ErrorKind::Other, err)
-    })?;
-
-    if let Some(tls) = &CONFIG.load().server.tls {
-        set_watcher_path(&mut tls_watcher, &tls.server_certificate_bundle)?;
-        set_watcher_path(&mut tls_watcher, &tls.server_private_key)?;
-        if let Some(client_ca) = &tls.client_ca_bundle {
-            set_watcher_path(&mut tls_watcher, client_ca)?;
-        }
-    }
-
-    if TLS_ACCEPTOR.load().is_some() {
-        serve_tls().await
-    } else {
-        serve_insecure().await
-    }
-}
-
-async fn serve_tls() -> io::Result<()> {
-    let binding_addr = CONFIG.load().get_binding_address()?;
-    let listener = TcpListener::bind(binding_addr).await?;
-    info!("Listening on {} over TLS", binding_addr);
-
-    loop {
-        let (tcp, remote_address) = listener.accept().await?;
-
-        let Some(tls_acceptor) = TLS_ACCEPTOR.load().as_ref().clone() else {
-            continue;
-        };
-
-        if let Ok(tls) = tls_acceptor.accept(tcp).await {
-            let (_, session) = tls.get_ref();
-            let identity = session
-                .peer_certificates()
-                .and_then(|certs| certs.first())
-                .and_then(|cert| match X509Certificate::from_der(cert.as_ref()).ok() {
-                    Some((_, cert)) => ClientIdentity::from_cert(&cert).ok(),
-                    None => None,
-                });
-
-            debug!("Client Identity from certificate: {:?}", identity);
-
-            debug!("Accepted connection from {:?}", remote_address);
-            let io = TokioIo::new(tls);
-
-            serve_request(io, identity.unwrap_or_default());
-        }
-    }
-}
-
-async fn serve_insecure() -> io::Result<()> {
-    let binding_addr = CONFIG.load().get_binding_address()?;
-    let listener = TcpListener::bind(binding_addr).await?;
-    info!("Listening on {} (non-TLS)", binding_addr);
-
-    loop {
-        debug!("Waiting for incoming connection");
-        let (tcp, remote_address) = listener.accept().await?;
-
-        debug!("Accepted connection from {:?}", remote_address);
-        let io = TokioIo::new(tcp);
-
-        serve_request(io, ClientIdentity::new());
-    }
-}
-
-#[instrument]
-fn serve_request<S>(io: TokioIo<S>, identity: ClientIdentity)
-where
-    S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
-{
-    tokio::task::spawn(async move {
-        let identity = identity.clone();
-
-        let conn = http1::Builder::new().serve_connection(
-            io,
-            service_fn(move |request| handle_request(request, identity.clone())),
-        );
-        pin!(conn);
-
-        for (iter, sleep_duration) in CONFIG.load().get_timeouts().iter().enumerate() {
-            debug!("iter = {} sleep_duration = {:?}", iter, sleep_duration);
-            tokio::select! {
-                res = conn.as_mut() => {
-                    // Polling the connection returned a result.
-                    // In this case print either the successful or error result for the connection
-                    // and break out of the loop.
-                    match res {
-                        Ok(()) => debug!("after polling conn, no error"),
-                        Err(e) =>  debug!("error serving connection: {:?}", e),
-                    };
-                    break;
-                }
-                _ = tokio::time::sleep(*sleep_duration) => {
-                    // tokio::time::sleep returned a result.
-                    // Call graceful_shutdown on the connection and continue the loop.
-                    debug!("iter = {} got timeout_interval, calling conn.graceful_shutdown", iter);
-                    conn.as_mut().graceful_shutdown();
-                }
-            }
-        }
-    });
-}
-
-#[instrument(skip(request, identity))]
-async fn handle_request(
-    request: Request<Incoming>,
-    identity: ClientIdentity,
-) -> Result<Response<RegistryResponseBody>, Infallible> {
-    let start_time = std::time::Instant::now();
-    let method = request.method().clone();
-    let path = request.uri().path().to_string();
-    let error_level;
-
-    let response = match router(request, identity).await {
-        Ok(res) => {
-            error_level = false;
-            Ok::<Response<RegistryResponseBody>, Infallible>(res)
-        }
-        Err(e) => {
-            error_level = true;
-            Ok(e.to_response_with_span_id(tracing::Span::current().id()))
-        }
-    };
-
-    let elapsed = start_time.elapsed();
-    let status = response
-        .as_ref()
-        .map(|r| r.status().to_string())
-        .unwrap_or("(UNKNOWN STATUS)".to_string());
-
-    let span_id = tracing::Span::current()
-        .id()
-        .as_ref()
-        .map(|id| format!(" {:x}", id.into_u64()))
-        .unwrap_or_default();
-
-    if error_level {
-        error!("{} {:?} {} {}{}", status, elapsed, method, path, span_id);
-    } else {
-        info!("{} {:?} {} {}{}", status, elapsed, method, path, span_id);
-    }
-
-    response
-}
-
-#[instrument(skip(request))]
-async fn router(
-    request: Request<Incoming>,
-    mut identity: ClientIdentity,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let method = request.method().clone();
-    let path = request.uri().path().to_string();
-
-    let basic_auth_credentials = request
-        .headers()
-        .get("Authorization")
-        .and_then(parse_authorization_header);
-
-    debug!("Authorization: {:?}", basic_auth_credentials);
-
-    if let Some((username, password)) = basic_auth_credentials {
-        identity.set_credentials(username, password);
-    }
-
-    if ROUTE_API_VERSION_REGEX.is_match(&path) {
-        if method == Method::GET {
-            info!("API version check: {}", path);
-            return handle_get_api_version(identity).await;
-        }
-        return Err(RegistryError::Unsupported);
-    } else if let Some(parameters) = parse_regex::<NewUploadParameters>(&path, &ROUTE_UPLOADS_REGEX)
-    {
-        if method == Method::POST {
-            info!("Start upload: {}", path);
-            return handle_start_upload(request, identity, parameters).await;
-        }
-        return Err(RegistryError::Unsupported);
-    } else if let Some(parameters) = parse_regex::<UploadParameters>(&path, &ROUTE_UPLOAD_REGEX) {
-        if method == Method::GET {
-            info!("Get upload progress: {}", path);
-            return handle_get_upload_progress(identity, parameters).await;
-        }
-        if method == Method::PATCH {
-            info!("Patch upload: {}", path);
-            return handle_patch_upload(request, identity, parameters).await;
-        }
-        if method == Method::PUT {
-            info!("Put upload: {}", path);
-            return handle_put_upload(request, identity, parameters).await;
-        }
-        if method == Method::DELETE {
-            info!("Delete upload: {}", path);
-            return handle_delete_upload(identity, parameters).await;
-        }
-        return Err(RegistryError::Unsupported);
-    } else if let Some(parameters) = parse_regex::<BlobParameters>(&path, &ROUTE_BLOB_REGEX) {
-        if method == Method::GET {
-            info!("Get blob: {}", path);
-            return handle_get_blob(request, identity, parameters).await;
-        }
-        if method == Method::HEAD {
-            info!("Head blob: {}", path);
-            return handle_head_blob(identity, parameters).await;
-        }
-        if method == Method::DELETE {
-            info!("Delete blob: {}", path);
-            return handle_delete_blob(identity, parameters).await;
-        }
-        return Err(RegistryError::Unsupported);
-    } else if let Some(parameters) = parse_regex::<ManifestParameters>(&path, &ROUTE_MANIFEST_REGEX)
-    {
-        if method == Method::GET {
-            info!("Get manifest: {}", path);
-            return handle_get_manifest(identity, parameters).await;
-        }
-        if method == Method::HEAD {
-            info!("Head manifest: {}", path);
-            return handle_head_manifest(identity, parameters).await;
-        }
-        if method == Method::PUT {
-            info!("Put manifest: {}", path);
-            return handle_put_manifest(request, identity, parameters).await;
-        }
-        if method == Method::DELETE {
-            info!("Delete manifest: {}", path);
-            return handle_delete_manifest(identity, parameters).await;
-        }
-        return Err(RegistryError::Unsupported);
-    } else if let Some(parameters) =
-        parse_regex::<ReferrerParameters>(&path, &ROUTE_REFERRERS_REGEX)
-    {
-        if method == Method::GET {
-            info!("Get referrers: {}", path);
-            return handle_get_referrers(request, identity, parameters).await;
-        }
-    } else if ROUTE_CATALOG_REGEX.is_match(&path) {
-        if method == Method::GET {
-            info!("List catalog: {}", path);
-            return handle_list_catalog(request, identity).await;
-        }
-    } else if let Some(parameters) = parse_regex::<TagsParameters>(&path, &ROUTE_LIST_TAGS_REGEX) {
-        if method == Method::GET {
-            info!("List tags: {}", path);
-            return handle_list_tags(request, identity, parameters).await;
-        }
-        return Err(RegistryError::Unsupported);
-    }
-
-    Err(RegistryError::NotFound)
-}
-
-#[instrument]
-async fn handle_get_api_version(
-    identity: ClientIdentity,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let _ = get_registry(identity, ClientAction::GetApiVersion)?;
-
-    let res = Response::builder()
-        .status(StatusCode::OK)
-        .header("Docker-Distribution-API-Version", "registry/2.0")
-        .body(RegistryResponseBody::empty())?;
-
-    Ok(res)
-}
-
-#[instrument]
-async fn handle_get_manifest(
-    identity: ClientIdentity,
-    parameters: ManifestParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(
-        identity,
-        ClientAction::GetManifest(parameters.name.clone(), parameters.reference.clone()),
-    )?;
-
-    let manifest = registry
-        .get_manifest(&parameters.name, parameters.reference)
-        .await?;
-
-    let res = if let Some(content_type) = manifest.media_type {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", content_type)
-            .header("Docker-Content-Digest", manifest.digest.to_string())
-            .body(RegistryResponseBody::fixed(manifest.content))?
-    } else {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Docker-Content-Digest", manifest.digest.to_string())
-            .body(RegistryResponseBody::fixed(manifest.content))?
-    };
-
-    Ok(res)
-}
-
-#[instrument]
-async fn handle_head_manifest(
-    identity: ClientIdentity,
-    parameters: ManifestParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(
-        identity,
-        ClientAction::GetManifest(parameters.name.clone(), parameters.reference.clone()),
-    )?;
-
-    let manifest = registry
-        .head_manifest(&parameters.name, parameters.reference)
-        .await?;
-
-    let res = if let Some(media_type) = manifest.media_type {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", media_type)
-            .header("Docker-Content-Digest", manifest.digest.to_string())
-            .header("Content-Length", manifest.size)
-            .body(RegistryResponseBody::empty())?
-    } else {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Docker-Content-Digest", manifest.digest.to_string())
-            .header("Content-Length", manifest.size)
-            .body(RegistryResponseBody::empty())?
-    };
-
-    Ok(res)
-}
-
-#[instrument(skip(request))]
-async fn handle_get_blob(
-    request: Request<Incoming>,
-    identity: ClientIdentity,
-    parameters: BlobParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(
-        identity,
-        ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()),
-    )?;
-
-    let range = request
-        .headers()
-        .get("range")
-        .map(parse_range_header)
-        .transpose()?;
-
-    let res = match registry
-        .get_blob(&parameters.name, &parameters.digest, range)
-        .await?
-    {
-        BlobData::RangedReader(reader, (start, end), total_length) => {
-            let length = end - start + 1;
-            let stream = reader.take(length);
-            let range = format!("bytes {}-{}/{}", start, end, total_length);
-
-            Response::builder()
-                .status(StatusCode::PARTIAL_CONTENT)
-                .header("Docker-Content-Digest", parameters.digest.to_string())
-                .header("Accept-Ranges", "bytes")
-                .header("Content-Length", length.to_string())
-                .header("Content-Range", range)
-                .body(RegistryResponseBody::streaming(stream))?
-        }
-        BlobData::Reader(stream, total_length) => Response::builder()
-            .status(StatusCode::OK)
-            .header("Docker-Content-Digest", parameters.digest.to_string())
-            .header("Accept-Ranges", "bytes")
-            .header("Content-Length", total_length.to_string())
-            .body(RegistryResponseBody::streaming(stream))?,
-        BlobData::Empty => Response::builder()
-            .status(StatusCode::OK)
-            .header("Accept-Ranges", "bytes")
-            .header("Content-Length", "0")
-            .body(RegistryResponseBody::empty())?,
-    };
-
-    Ok(res)
-}
-
-#[instrument]
-async fn handle_head_blob(
-    identity: ClientIdentity,
-    parameters: BlobParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(
-        identity,
-        ClientAction::GetBlob(parameters.name.clone(), parameters.digest.clone()),
-    )?;
-
-    let blob = registry
-        .head_blob(&parameters.name, parameters.digest)
-        .await?;
-
-    let res = Response::builder()
-        .status(StatusCode::OK)
-        .header("Docker-Content-Digest", blob.digest.to_string())
-        .header("Content-Length", blob.size.to_string())
-        .body(RegistryResponseBody::empty())?;
-
-    Ok(res)
-}
-
-#[instrument(skip(request))]
-async fn handle_start_upload(
-    request: Request<Incoming>,
-    identity: ClientIdentity,
-    parameters: NewUploadParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::PutBlob(parameters.name.clone()))?;
-
-    #[derive(Deserialize, Default)]
-    struct UploadQuery {
-        digest: Option<String>,
-    }
-
-    let query: UploadQuery = parse_query_parameters(request.uri().query())?;
-    let digest = query.digest.map(|s| Digest::from_str(&s)).transpose()?;
-
-    let res = match registry.start_upload(&parameters.name, digest).await? {
-        NewUpload::ExistingBlob(digest) => Response::builder()
-            .status(StatusCode::CREATED)
-            .header(
-                "Location",
-                format!("/v2/{}/blobs/{}", parameters.name, digest),
-            )
-            .header("Docker-Content-Digest", digest.to_string())
-            .body(RegistryResponseBody::empty())?,
-        NewUpload::Session(location, session_uuid) => Response::builder()
-            .status(StatusCode::ACCEPTED)
-            .header("Location", location)
-            .header("Range", "0-0")
-            .header("Docker-Upload-UUID", session_uuid.to_string())
-            .body(RegistryResponseBody::empty())?,
-    };
-
-    Ok(res)
-}
-
-#[instrument(skip(request))]
-async fn handle_patch_upload(
-    request: Request<Incoming>,
-    identity: ClientIdentity,
-    parameters: UploadParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::PutBlob(parameters.name.clone()))?;
-
-    let range = request
-        .headers()
-        .get("content-range")
-        .map(parse_range_header)
-        .transpose()?;
-
-    let start_offset = range.map(|(start, _)| start);
-
-    let body = request.into_body();
-    let location = format!("/v2/{}/blobs/uploads/{}", &parameters.name, parameters.uuid);
-
-    let range_max = registry
-        .patch_upload(&parameters.name, parameters.uuid, start_offset, body)
-        .await?;
-    let range_max = format!("0-{}", range_max);
-
-    let res = Response::builder()
-        .status(StatusCode::ACCEPTED)
-        .header("Location", location)
-        .header("Range", range_max)
-        .header("Content-Length", "0")
-        .header("Docker-Upload-UUID", parameters.uuid.to_string())
-        .body(RegistryResponseBody::empty())?;
-
-    Ok(res)
-}
-
-#[instrument(skip(request))]
-async fn handle_put_upload(
-    request: Request<Incoming>,
-    identity: ClientIdentity,
-    parameters: UploadParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::PutBlob(parameters.name.clone()))?;
-
-    #[derive(Deserialize, Default)]
-    struct CompleteUploadQuery {
-        digest: String,
-    }
-
-    let query: CompleteUploadQuery = parse_query_parameters(request.uri().query())?;
-    let digest = Digest::from_str(&query.digest)?;
-
-    let body = request.into_body();
-    registry
-        .complete_upload(&parameters.name, parameters.uuid, digest.clone(), body)
-        .await?;
-
-    let location = format!("/v2/{}/blobs/{}", &parameters.name, digest);
-
-    let res = Response::builder()
-        .status(StatusCode::CREATED)
-        .header("Location", location)
-        .header("Docker-Content-Digest", digest.to_string())
-        .body(RegistryResponseBody::empty())?;
-
-    Ok(res)
-}
-
-#[instrument]
-async fn handle_delete_upload(
-    identity: ClientIdentity,
-    parameters: UploadParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::PutBlob(parameters.name.clone()))?;
-
-    registry
-        .delete_upload(&parameters.name, parameters.uuid)
-        .await?;
-
-    let res = Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(RegistryResponseBody::empty())?;
-
-    Ok(res)
-}
-
-#[instrument]
-async fn handle_get_upload_progress(
-    identity: ClientIdentity,
-    parameters: UploadParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::PutBlob(parameters.name.clone()))?;
-
-    let location = format!("/v2/{}/blobs/uploads/{}", parameters.name, parameters.uuid);
-
-    let range_max = registry
-        .get_upload_range_max(&parameters.name, parameters.uuid)
-        .await?;
-    let range_max = format!("0-{}", range_max);
-
-    let res = Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .header("Location", location)
-        .header("Range", range_max)
-        .header("Docker-Upload-UUID", parameters.uuid.to_string())
-        .body(RegistryResponseBody::empty())?;
-
-    Ok(res)
-}
-
-#[instrument]
-async fn handle_delete_blob(
-    identity: ClientIdentity,
-    parameters: BlobParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(
-        identity,
-        ClientAction::DeleteBlob(parameters.name.clone(), parameters.digest.clone()),
-    )?;
-
-    registry
-        .delete_blob(&parameters.name, parameters.digest)
-        .await?;
-
-    let res = Response::builder()
-        .status(StatusCode::ACCEPTED)
-        .body(RegistryResponseBody::empty())?;
-
-    Ok(res)
-}
-
-#[instrument(skip(request))]
-async fn handle_put_manifest(
-    request: Request<Incoming>,
-    identity: ClientIdentity,
-    parameters: ManifestParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(
-        identity,
-        ClientAction::PutManifest(parameters.name.clone(), parameters.reference.clone()),
-    )?;
-
-    let content_type = request
-        .headers()
-        .get("Content-Type")
-        .map(|h| h.to_str())
-        .transpose()
-        .map_err(|_| {
-            RegistryError::ManifestInvalid(Some(
-                "Unable to parse provided Content-Type header".to_string(),
-            ))
-        })?
-        .ok_or(RegistryError::ManifestInvalid(Some(
-            "No Content-Type header provided".to_string(),
-        )))?
-        .to_string();
-
-    let request_body = request.into_body().collect().await.map_err(|_| {
-        RegistryError::ManifestInvalid(Some(
-            "Unable to retrieve manifest from client query".to_string(),
-        ))
-    })?;
-    let body = request_body.to_bytes();
-
-    let manifest = registry
-        .put_manifest(
-            &parameters.name,
-            parameters.reference.clone(),
-            content_type,
-            &body,
-        )
-        .await?;
-    let location = format!("/v2/{}/manifests/{}", parameters.name, parameters.reference);
-
-    let res = match manifest.subject {
-        Some(subject) => Response::builder()
-            .status(StatusCode::CREATED)
-            .header("Location", location)
-            .header("Docker-Content-Digest", manifest.digest.to_string())
-            .header("OCI-Subject", subject.to_string())
-            .body(RegistryResponseBody::empty())?,
-        None => Response::builder()
-            .status(StatusCode::CREATED)
-            .header("Location", location)
-            .header("Docker-Content-Digest", manifest.digest.to_string())
-            .body(RegistryResponseBody::empty())?,
-    };
-
-    Ok(res)
-}
-
-#[instrument]
-async fn handle_delete_manifest(
-    identity: ClientIdentity,
-    parameters: ManifestParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(
-        identity,
-        ClientAction::DeleteManifest(parameters.name.clone(), parameters.reference.clone()),
-    )?;
-
-    registry
-        .delete_manifest(&parameters.name, parameters.reference)
-        .await?;
-
-    let res = Response::builder()
-        .status(StatusCode::ACCEPTED)
-        .body(RegistryResponseBody::empty())?;
-
-    Ok(res)
-}
-
-#[instrument(skip(request))]
-async fn handle_get_referrers(
-    request: Request<Incoming>,
-    identity: ClientIdentity,
-    parameters: ReferrerParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(
-        identity,
-        ClientAction::GetReferrers(parameters.name.clone(), parameters.digest.clone()),
-    )?;
-
-    #[derive(Deserialize, Default)]
-    #[serde(rename_all = "camelCase")]
-    struct GetReferrersQuery {
-        artifact_type: Option<String>,
-    }
-
-    let query: GetReferrersQuery = parse_query_parameters(request.uri().query())?;
-
-    let manifests = registry
-        .get_referrers(
-            &parameters.name,
-            parameters.digest,
-            query.artifact_type.clone(),
-        )
-        .await?;
-
-    let referrer_list = ReferrerList {
-        manifests,
-        ..ReferrerList::default()
-    };
-    let referrer_list = serde_json::to_string(&referrer_list)?.into_bytes();
-
-    let res = match query.artifact_type {
-        Some(_) => Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/vnd.oci.image.index.v1+json")
-            .header("OCI-Filters-Applied", "artifactType")
-            .body(RegistryResponseBody::fixed(referrer_list))?,
-        None => Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/vnd.oci.image.index.v1+json")
-            .body(RegistryResponseBody::fixed(referrer_list))?,
-    };
-
-    Ok(res)
-}
-
-#[instrument(skip(request))]
-async fn handle_list_catalog(
-    request: Request<Incoming>,
-    identity: ClientIdentity,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::ListCatalog)?;
-
-    #[derive(Debug, Deserialize, Default)]
-    struct CatalogQuery {
-        n: Option<u32>,
-        last: Option<String>,
-    }
-
-    #[derive(Serialize, Debug)]
-    struct CatalogResponse {
-        repositories: Vec<String>,
-    }
-
-    let query: CatalogQuery = parse_query_parameters(request.uri().query())?;
-
-    let (repositories, link) = registry.list_catalog(query.n, query.last).await?;
-
-    let catalog = CatalogResponse { repositories };
-    let catalog = serde_json::to_string(&catalog)?;
-
-    paginated_response(catalog, link)
-}
-
-#[instrument(skip(request))]
-async fn handle_list_tags(
-    request: Request<Incoming>,
-    identity: ClientIdentity,
-    parameters: TagsParameters,
-) -> Result<Response<RegistryResponseBody>, RegistryError> {
-    let registry = get_registry(identity, ClientAction::ListTags(parameters.name.clone()))?;
-
-    #[derive(Deserialize, Debug, Default)]
-    struct TagsQuery {
-        n: Option<u32>,
-        last: Option<String>,
-    }
-
-    #[derive(Serialize, Debug)]
-    struct TagsResponse {
-        name: String,
-        tags: Vec<String>,
-    }
-
-    let query: TagsQuery = parse_query_parameters(request.uri().query())?;
-
-    let (tags, link) = registry
-        .list_tags(&parameters.name, query.n, query.last)
-        .await?;
-
-    let tag_list = TagsResponse {
-        name: parameters.name.to_string(),
-        tags,
-    };
-    let tag_list = serde_json::to_string(&tag_list)?;
-
-    paginated_response(tag_list, link)
 }

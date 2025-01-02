@@ -8,7 +8,11 @@ pub struct TreeManager {
 
 impl TreeManager {
     pub fn blobs_root_dir(&self) -> String {
-        format!("{}/v2/blobs", self.root_dir)
+        if self.root_dir.is_empty() {
+            "v2/blobs".to_string()
+        } else {
+            format!("{}/v2/blobs", self.root_dir)
+        }
     }
 
     pub fn blob_container_dir(&self, digest: &Digest) -> String {
@@ -30,7 +34,11 @@ impl TreeManager {
     }
 
     pub fn repository_dir(&self) -> String {
-        format!("{}/v2/repositories", self.root_dir)
+        if self.root_dir.is_empty() {
+            "v2/repositories".to_string()
+        } else {
+            format!("{}/v2/repositories", self.root_dir)
+        }
     }
 
     pub fn uploads_root_dir(&self, namespace: &str) -> String {
@@ -43,6 +51,10 @@ impl TreeManager {
 
     pub fn upload_path(&self, name: &str, uuid: &str) -> String {
         format!("{}/data", self.upload_container_path(name, uuid))
+    }
+
+    pub fn upload_staged_container_path(&self, name: &str, uuid: &str, offset: u64) -> String {
+        format!("{}/{}/staged/{}", self.uploads_root_dir(name), uuid, offset)
     }
 
     pub fn upload_hash_context_container_path(

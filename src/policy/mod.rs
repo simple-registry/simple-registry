@@ -1,7 +1,7 @@
 use cel::{CELIdentity, CELIdentityCertificate, CELRequest};
 use cel_interpreter::{Context, Program, Value};
 use std::fmt::Debug;
-use tracing::{debug, error, instrument};
+use tracing::{debug, error, info, instrument};
 use x509_parser::prelude::X509Certificate;
 
 mod cel;
@@ -22,7 +22,7 @@ impl Debug for ClientIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let credentials = self
             .credentials
-            .clone()
+            .as_ref()
             .map(|(username, _)| username.clone());
         f.debug_struct("ClientIdentity")
             .field("cert_organizations", &self.cert_organizations.len())
@@ -180,14 +180,14 @@ impl ClientIdentity {
                     return Ok(());
                 }
                 Value::Bool(false) if default_allow => {
-                    error!("Policy matched, denying access");
+                    info!("Policy matched, denying access");
                     return Err(RegistryError::Unauthorized(Some(
                         "Access denied (by policy)".to_string(),
                     )));
                 }
                 Value::Bool(_) => {} // Not validated, continue checking
                 _ => {
-                    error!("Policy returned invalid value, denying access");
+                    info!("Policy returned invalid value, denying access");
                     return Err(RegistryError::Unauthorized(Some(
                         "Access denied (by policy)".to_string(),
                     )));

@@ -2,12 +2,12 @@ use crate::error::RegistryError;
 use crate::oci::Digest;
 use crate::registry::{LinkReference, Registry};
 use crate::storage::StorageEngineReader;
-use tokio::io::{AsyncRead, AsyncSeek};
+use tokio::io::AsyncRead;
 use tracing::{instrument, warn};
 
 pub enum BlobData<R>
 where
-    R: AsyncRead + AsyncSeek + Send + Unpin,
+    R: AsyncRead + Send + Unpin,
 {
     Empty,
     Reader(R, u64),

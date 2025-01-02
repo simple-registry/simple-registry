@@ -10,17 +10,18 @@ mod blob;
 mod content_discovery;
 mod link_reference;
 mod manifest;
+mod response;
 mod upload;
 
 pub use blob::BlobData;
 pub use link_reference::LinkReference;
 pub use manifest::parse_manifest_digests;
+pub use response::RegistryResponseBody;
 pub use upload::NewUpload;
 
-use crate::config::Config;
+use crate::configuration::Configuration;
 use crate::error::RegistryError;
-use crate::lock_manager::LockManager;
-use crate::storage::{FileSystemStorageEngine, StorageEngine};
+use crate::storage::StorageEngine;
 
 lazy_static! {
     static ref NAMESPACE_RE: Regex =
@@ -28,6 +29,7 @@ lazy_static! {
 }
 
 pub struct Registry {
+    pub streaming_chunk_size: u64,
     pub storage: Box<dyn StorageEngine>,
     pub credentials: HashMap<String, (String, String)>,
     pub repositories: HashSet<String>,
@@ -52,8 +54,9 @@ impl Debug for Registry {
 
 impl Registry {
     #[instrument(skip(config))]
-    pub fn try_from_config(config: &Config) -> Result<Self, RegistryError> {
+    pub fn try_from_config(config: &Configuration) -> Result<Self, RegistryError> {
         let res = Self {
+            streaming_chunk_size: config.server.streaming_chunk_size.as_bytes(),
             storage: config.build_storage_engine()?,
             credentials: config.build_credentials(),
             repositories: config.build_repositories_list(),
@@ -126,19 +129,5 @@ impl Registry {
     #[instrument]
     pub fn get_repository_policies(&self, namespace: &str) -> Option<&Vec<Program>> {
         self.repository_policies.get(namespace)
-    }
-}
-
-impl Default for Registry {
-    fn default() -> Self {
-        let storage_engine =
-            FileSystemStorageEngine::new("./registry".to_string(), LockManager::new_in_memory());
-        Self {
-            storage: Box::new(storage_engine),
-            credentials: Default::default(),
-            repositories: Default::default(),
-            repository_default_allow: Default::default(),
-            repository_policies: Default::default(),
-        }
     }
 }

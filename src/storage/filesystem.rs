@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use std::collections::HashSet;
 use std::fmt;
@@ -9,58 +8,18 @@ use std::io::{ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, File};
-use tokio::io::AsyncSeekExt;
-use tracing::{debug, instrument, warn};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tracing::{debug, error, instrument, warn};
 
 use crate::error::RegistryError;
 use crate::lock_manager::LockManager;
 use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::LinkReference;
-use crate::storage::filesystem::upload_writer::DiskUploadWriter;
 use crate::storage::tree_manager::TreeManager;
 use crate::storage::{
-    BlobReferenceIndex, StorageEngine, StorageEngineReader, StorageEngineWriter, UploadSummary,
+    deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobReferenceIndex,
+    StorageEngine, StorageEngineReader, UploadSummary,
 };
-
-mod upload_writer;
-
-#[instrument]
-pub async fn save_hash_state(
-    tree_manager: &TreeManager,
-    sha256: &Sha256,
-    name: &str,
-    uuid: &str,
-    algorithm: &str,
-    offset: u64,
-) -> Result<(), RegistryError> {
-    let path = tree_manager.upload_hash_context_path(name, uuid, algorithm, offset);
-
-    let state = sha256.serialize();
-    let state = state.as_slice().to_vec();
-
-    fs::write(&path, state).await?;
-    Ok(())
-}
-
-#[instrument]
-pub async fn load_hash_state(
-    tree_manager: &TreeManager,
-    name: &str,
-    uuid: &str,
-    algorithm: &str,
-    offset: u64,
-) -> Result<Sha256, RegistryError> {
-    let path = tree_manager.upload_hash_context_path(name, uuid, algorithm, offset);
-    let state = fs::read(&path).await?;
-
-    let state = state.as_slice().try_into().map_err(|_| {
-        RegistryError::InternalServerError(Some("Unable to resume hash state".to_string()))
-    })?;
-    let state = Sha256::deserialize(state)?;
-    let hasher = Sha256::from(state);
-
-    Ok(hasher)
-}
 
 #[derive(Clone)]
 pub struct FileSystemStorageEngine {
@@ -91,9 +50,10 @@ impl FileSystemStorageEngine {
         }
     }
 
-    #[instrument(skip(repositories))]
-    async fn collect_repositories(&self, base_path: &Path, repositories: &mut HashSet<String>) {
+    #[instrument]
+    async fn collect_repositories(&self, base_path: &Path) -> Vec<String> {
         let mut path_stack: Vec<PathBuf> = vec![base_path.to_path_buf()];
+        let mut repositories = Vec::new();
 
         while let Some(current_path) = path_stack.pop() {
             if let Ok(mut entries) = fs::read_dir(&current_path).await {
@@ -111,7 +71,7 @@ impl FileSystemStorageEngine {
                                 {
                                     if let Some(name) = name.to_str() {
                                         debug!("Found repository: {}", name);
-                                        repositories.insert(name.to_string());
+                                        repositories.push(name.to_string());
                                     }
                                 }
                             } else {
@@ -123,6 +83,9 @@ impl FileSystemStorageEngine {
                 }
             }
         }
+
+        repositories.sort();
+        repositories
     }
 
     #[instrument]
@@ -229,62 +192,142 @@ impl FileSystemStorageEngine {
         Ok(is_referenced)
     }
 
-    #[instrument]
-    pub async fn get_all_tags(&self, name: &str) -> Result<Vec<String>, RegistryError> {
-        let path = self.tree.manifest_tags_dir(name);
-        debug!("Listing tags in path: {}", path);
-        let mut tags = self.collect_directory_entries(&path).await?;
-        tags.sort();
+    pub fn paginate<T>(
+        &self,
+        items: Vec<T>,
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> (Vec<T>, Option<String>)
+    where
+        T: Clone + ToString,
+    {
+        let start = match continuation_token {
+            Some(continuation_token) => {
+                // search for the index of element lexicographically immediately after the continuation token
+                items
+                    .iter()
+                    .position(|r| r.to_string() > continuation_token)
+                    .unwrap_or(items.len())
+            }
+            None => 0,
+        };
 
-        Ok(tags)
+        let end = (start + n as usize).min(items.len());
+
+        let items = items[start..end].to_vec();
+        if end < items.len() {
+            let next = items[end].clone();
+            (items, Some(next.to_string()))
+        } else {
+            (items, None)
+        }
     }
 }
 
 #[async_trait]
 impl StorageEngine for FileSystemStorageEngine {
     #[instrument(skip(self))]
-    async fn list_namespaces(&self) -> Result<Box<dyn Iterator<Item = String>>, RegistryError> {
+    async fn list_namespaces(
+        &self,
+        n: u32,
+        last: Option<String>,
+    ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         let base_path = self.tree.repository_dir();
         let base_path = Path::new(&base_path);
-        let mut repositories = HashSet::new();
-        self.collect_repositories(base_path, &mut repositories)
-            .await;
-        Ok(Box::new(repositories.into_iter()))
+
+        let repositories = self.collect_repositories(base_path).await;
+
+        Ok(self.paginate(repositories, n, last))
+    }
+
+    #[instrument(skip(self))]
+    async fn list_tags(
+        &self,
+        namespace: &str,
+        n: u32,
+        last: Option<String>,
+    ) -> Result<(Vec<String>, Option<String>), RegistryError> {
+        let path = self.tree.manifest_tags_dir(namespace);
+        debug!("Listing tags in path: {}", path);
+        let mut tags = self.collect_directory_entries(&path).await?;
+        tags.sort();
+
+        Ok(self.paginate(tags, n, last))
+    }
+
+    #[instrument(skip(self))]
+    async fn list_referrers(
+        &self,
+        namespace: &str,
+        digest: &Digest,
+        artifact_type: Option<String>,
+    ) -> Result<Vec<Descriptor>, RegistryError> {
+        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
+        let path = self.tree.manifest_referrers_dir(namespace, digest);
+        let all_manifest = self.collect_directory_entries(&path).await?;
+        let mut referrers = Vec::new();
+
+        for manifest_digest in all_manifest {
+            let manifest_digest = Digest::try_from(manifest_digest.as_str())?;
+            let blob_path = self.tree.blob_path(&manifest_digest);
+
+            let manifest = fs::read(&blob_path).await?;
+            let manifest_len = manifest.len();
+            let manifest: Manifest = serde_json::from_slice(&manifest)?;
+
+            let Some(media_type) = manifest.media_type else {
+                continue;
+            };
+
+            if let Some(artifact_type) = artifact_type.as_ref() {
+                if let Some(manifest_artifact_type) = manifest.artifact_type.as_ref() {
+                    if manifest_artifact_type != artifact_type {
+                        continue;
+                    }
+                } else if let Some(manifest_config) = manifest.config {
+                    if &manifest_config.media_type != artifact_type {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+
+            referrers.push(Descriptor {
+                media_type,
+                digest: manifest_digest.to_string(),
+                size: manifest_len as u64,
+                annotations: manifest.annotations,
+                artifact_type: manifest.artifact_type,
+            });
+        }
+
+        Ok(referrers)
     }
 
     #[instrument(skip(self))]
     async fn list_uploads(
         &self,
         namespace: &str,
-    ) -> Result<
-        Box<dyn Iterator<Item = (String, Option<Sha256>, Option<DateTime<Utc>>)>>,
-        RegistryError,
-    > {
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<String>, Option<String>), RegistryError> {
         let path = self.tree.uploads_root_dir(namespace);
-        let mut all_uploads = self.collect_directory_entries(&path).await?;
-        all_uploads.sort();
 
         let mut uploads = Vec::new();
-        for upload in all_uploads {
-            let hash = load_hash_state(&self.tree, namespace, &upload, "sha256", 0)
-                .await
-                .ok();
-
-            let date = self.tree.upload_start_date_path(namespace, &upload);
-            let date = fs::read_to_string(&date)
-                .await
-                .ok()
-                .and_then(|date| DateTime::parse_from_rfc3339(&date).ok())
-                .map(|d| d.with_timezone(&Utc));
-
-            uploads.push((upload, hash, date));
+        for upload in self.collect_directory_entries(&path).await? {
+            uploads.push(upload);
         }
 
-        Ok(Box::new(uploads.into_iter()))
+        Ok(self.paginate(uploads, n, continuation_token))
     }
 
     #[instrument(skip(self))]
-    async fn list_blobs(&self) -> Result<Box<dyn Iterator<Item = Digest>>, RegistryError> {
+    async fn list_blobs(
+        &self,
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<Digest>, Option<String>), RegistryError> {
         let path = PathBuf::new()
             .join(self.tree.blobs_root_dir())
             .join("sha256")
@@ -304,19 +347,19 @@ impl StorageEngine for FileSystemStorageEngine {
             let all_digests = self.collect_directory_entries(&blob_path).await?;
 
             for digest in all_digests {
-                let digest = format!("sha256:{}", digest);
-                let digest = Digest::from_str(&digest)?;
-                digests.push(digest);
+                digests.push(Digest::Sha256(digest));
             }
         }
 
-        Ok(Box::new(digests.into_iter()))
+        Ok(self.paginate(digests, n, continuation_token))
     }
 
     async fn list_revisions(
         &self,
         namespace: &str,
-    ) -> Result<Box<dyn Iterator<Item = Digest>>, RegistryError> {
+        n: u32,
+        continuation_token: Option<String>,
+    ) -> Result<(Vec<Digest>, Option<String>), RegistryError> {
         let path = self
             .tree
             .manifest_revisions_link_root_dir(namespace, "sha256"); // HACK: hardcoded sha256
@@ -325,73 +368,10 @@ impl StorageEngine for FileSystemStorageEngine {
         let mut revisions = Vec::new();
 
         for revision in all_revisions {
-            let revision = format!("{}:{}", "sha256", revision);
-            let revision = Digest::from_str(&revision)?;
-            revisions.push(revision);
+            revisions.push(Digest::Sha256(revision));
         }
 
-        Ok(Box::new(revisions.into_iter()))
-    }
-
-    #[instrument(skip(self))]
-    async fn list_tags(
-        &self,
-        name: &str,
-    ) -> Result<Box<dyn Iterator<Item = String> + Send + Sync>, RegistryError> {
-        let tags = self.get_all_tags(name).await?;
-
-        Ok(Box::new(tags.into_iter()))
-    }
-
-    #[instrument(skip(self))]
-    async fn list_referrers(
-        &self,
-        name: &str,
-        digest: &Digest,
-        artifact_type: Option<String>,
-    ) -> Result<Box<dyn Iterator<Item = Descriptor>>, RegistryError> {
-        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
-        let path = self.tree.manifest_referrers_dir(name, digest);
-        let all_manifest = self.collect_directory_entries(&path).await?;
-        let mut referrers = Vec::new();
-
-        // TODO: instead of having the digest in the filename, we could have it in file content!
-
-        for manifest_digest in all_manifest {
-            let manifest_digest = Digest::from_str(&manifest_digest)?;
-            let blob_path = self.tree.blob_path(&manifest_digest);
-
-            let raw_manifest = fs::read(&blob_path).await?;
-            let manifest: Manifest = serde_json::from_slice(&raw_manifest)?;
-
-            let Some(media_type) = manifest.media_type else {
-                continue;
-            };
-
-            if let Some(artifact_type) = artifact_type.clone() {
-                if let Some(manifest_artifact_type) = manifest.artifact_type.clone() {
-                    if manifest_artifact_type != artifact_type {
-                        continue;
-                    }
-                } else if let Some(manifest_config) = manifest.config {
-                    if manifest_config.media_type != artifact_type {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
-
-            referrers.push(Descriptor {
-                media_type,
-                digest: manifest_digest.to_string(),
-                size: raw_manifest.len() as u64,
-                annotations: manifest.annotations,
-                artifact_type: manifest.artifact_type,
-            });
-        }
-
-        Ok(Box::new(referrers.into_iter()))
+        Ok(self.paginate(revisions, n, continuation_token))
     }
 
     #[instrument(skip(self))]
@@ -417,28 +397,71 @@ impl StorageEngine for FileSystemStorageEngine {
             .upload_hash_context_container_path(name, uuid, "sha256");
         fs::create_dir_all(&container_dir).await?;
 
-        let hasher = Sha256::new();
-        save_hash_state(&self.tree, &hasher, name, uuid, "sha256", 0).await?;
+        let path = self.tree.upload_hash_context_path(name, uuid, "sha256", 0);
+        let state = serialize_hash_empty_state().await?;
+        fs::write(&path, state).await?;
 
         Ok(uuid.to_string())
     }
 
-    #[instrument(skip(self))]
-    async fn build_upload_writer(
+    #[instrument(skip(self, source))]
+    async fn write_upload(
         &self,
         name: &str,
         uuid: &str,
-        start_offset: Option<u64>,
-    ) -> Result<Box<dyn StorageEngineWriter>, RegistryError> {
-        Ok(Box::new(
-            DiskUploadWriter::new(
-                self.tree.clone(),
-                name,
-                uuid.to_string(),
-                start_offset.unwrap_or(0),
-            )
-            .await?,
-        ))
+        source: &[u8],
+        append: bool,
+    ) -> Result<(), RegistryError> {
+        let start_offset = if append {
+            let summary = self.read_upload_summary(name, uuid).await?;
+            summary.size
+        } else {
+            0
+        };
+
+        let file_path = self.tree.upload_path(name, uuid);
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .append(false)
+            .write(true)
+            .open(&file_path)
+            .await
+            .map_err(|e| {
+                error!("Error opening upload file {:}: {}", file_path, e);
+                if e.kind() == ErrorKind::NotFound {
+                    RegistryError::BlobUploadUnknown
+                } else {
+                    RegistryError::InternalServerError(Some(
+                        "Error opening upload file".to_string(),
+                    ))
+                }
+            })?;
+
+        file.seek(SeekFrom::Start(start_offset)).await?;
+
+        let path = self
+            .tree
+            .upload_hash_context_path(name, uuid, "sha256", start_offset);
+        let state = fs::read(&path).await?;
+        let mut hasher = deserialize_hash_state(state).await?;
+
+        file.seek(SeekFrom::Start(start_offset)).await?;
+
+        let mut total_bytes_written = 0u64;
+
+        file.write_all(source).await?;
+        hasher.update(source);
+        total_bytes_written += source.len() as u64;
+
+        let offset = start_offset + total_bytes_written;
+        let path = self
+            .tree
+            .upload_hash_context_path(name, uuid, "sha256", offset);
+        let state = serialize_hash_state(&hasher).await?;
+        fs::write(&path, &state).await?;
+
+        Ok(())
     }
 
     #[instrument(skip(self))]
@@ -453,11 +476,28 @@ impl StorageEngine for FileSystemStorageEngine {
             .await?
             .ok_or(RegistryError::BlobUnknown)?;
 
-        let hasher = load_hash_state(&self.tree, name, uuid, "sha256", size).await?;
+        let path = self
+            .tree
+            .upload_hash_context_path(name, uuid, "sha256", size);
+        let state = fs::read(&path).await?;
+
+        let hasher = deserialize_hash_state(state).await?;
         let digest = hasher.finalize();
         let digest = Digest::Sha256(hex::encode(digest));
 
-        Ok(UploadSummary { digest, size })
+        let date = self.tree.upload_start_date_path(name, uuid);
+        let start_date = fs::read_to_string(&date)
+            .await
+            .ok()
+            .and_then(|date| DateTime::parse_from_rfc3339(&date).ok())
+            .unwrap_or_default() // Fallbacks to epoch
+            .with_timezone(&Utc);
+
+        Ok(UploadSummary {
+            digest,
+            size,
+            start_date,
+        })
     }
 
     #[instrument(skip(self))]
@@ -475,7 +515,11 @@ impl StorageEngine for FileSystemStorageEngine {
         let digest = match digest {
             Some(digest) => digest,
             None => {
-                let hasher = load_hash_state(&self.tree, name, uuid, "sha256", size).await?;
+                let path = self
+                    .tree
+                    .upload_hash_context_path(name, uuid, "sha256", size);
+                let state = fs::read(&path).await?;
+                let hasher = deserialize_hash_state(state).await?;
                 let digest = hasher.finalize();
                 Digest::Sha256(hex::encode(digest))
             }
@@ -617,7 +661,7 @@ impl StorageEngine for FileSystemStorageEngine {
         let link = fs::read_to_string(path).await?;
         debug!("Link content: {}", link);
 
-        Digest::from_str(&link)
+        Ok(Digest::try_from(link.as_str())?)
     }
 
     #[instrument(skip(self))]
@@ -633,8 +677,8 @@ impl StorageEngine for FileSystemStorageEngine {
         );
 
         match self.read_link(namespace, reference).await.ok() {
-            Some(existing_digest) if existing_digest == digest.clone() => return Ok(()),
-            Some(existing_digest) if existing_digest != digest.clone() => {
+            Some(existing_digest) if &existing_digest == digest => return Ok(()),
+            Some(existing_digest) if &existing_digest != digest => {
                 // NOTE: no locks here, the delete_link will take care of it
                 self.delete_link(namespace, reference).await?;
             }
