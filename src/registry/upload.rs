@@ -1,6 +1,5 @@
-use crate::error::RegistryError;
 use crate::oci::Digest;
-use crate::registry::Registry;
+use crate::registry::{Error, Registry};
 use futures_util::StreamExt;
 use http_body_util::BodyDataStream;
 use hyper::body::Incoming;
@@ -8,7 +7,7 @@ use hyper::Request;
 use tracing::{debug, error, instrument, warn};
 use uuid::Uuid;
 
-pub enum NewUpload {
+pub enum StartUploadResponse {
     ExistingBlob(Digest),
     Session(String, String),
 }
@@ -19,20 +18,22 @@ impl Registry {
         &self,
         namespace: &str,
         digest: Option<Digest>,
-    ) -> Result<NewUpload, RegistryError> {
+    ) -> Result<StartUploadResponse, Error> {
         self.validate_namespace(namespace)?;
 
         if let Some(digest) = digest {
-            if self.storage.get_blob_size(&digest).await.is_ok() {
-                return Ok(NewUpload::ExistingBlob(digest));
+            if self.storage_engine.get_blob_size(&digest).await.is_ok() {
+                return Ok(StartUploadResponse::ExistingBlob(digest));
             }
         }
 
         let session_uuid = Uuid::new_v4().to_string();
-        self.storage.create_upload(namespace, &session_uuid).await?;
+        self.storage_engine
+            .create_upload(namespace, &session_uuid)
+            .await?;
 
-        let location = format!("/v2/{}/blobs/uploads/{}", namespace, session_uuid);
-        Ok(NewUpload::Session(location, session_uuid))
+        let location = format!("/v2/{namespace}/blobs/uploads/{session_uuid}");
+        Ok(StartUploadResponse::Session(location, session_uuid))
     }
 
     #[instrument(skip(body))]
@@ -42,18 +43,18 @@ impl Registry {
         session_id: Uuid,
         start_offset: Option<u64>,
         body: BodyDataStream<Request<Incoming>>,
-    ) -> Result<u64, RegistryError> {
+    ) -> Result<u64, Error> {
         self.validate_namespace(namespace)?;
 
         let session_id = session_id.to_string();
         if let Some(start_offset) = start_offset {
             let summary = self
-                .storage
+                .storage_engine
                 .read_upload_summary(namespace, &session_id)
                 .await?;
 
             if start_offset != summary.size {
-                return Err(RegistryError::RangeNotSatisfiable);
+                return Err(Error::RangeNotSatisfiable);
             }
         };
 
@@ -61,7 +62,7 @@ impl Registry {
             .await?;
 
         let summary = self
-            .storage
+            .storage_engine
             .read_upload_summary(namespace, &session_id)
             .await
             .map_err(|e| {
@@ -83,7 +84,7 @@ impl Registry {
         session_id: Uuid,
         digest: Digest,
         body: BodyDataStream<Request<Incoming>>,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<(), Error> {
         self.validate_namespace(namespace)?;
 
         let session_id = session_id.to_string();
@@ -92,19 +93,21 @@ impl Registry {
             .await?;
 
         let summary = self
-            .storage
+            .storage_engine
             .read_upload_summary(namespace, &session_id)
             .await?;
 
         if summary.digest != digest {
             warn!("Expected digest '{}', got '{}'", digest, summary.digest);
-            return Err(RegistryError::DigestInvalid);
+            return Err(Error::DigestInvalid);
         }
 
-        self.storage
+        self.storage_engine
             .complete_upload(namespace, &session_id, Some(digest))
             .await?;
-        self.storage.delete_upload(namespace, &session_id).await
+        self.storage_engine
+            .delete_upload(namespace, &session_id)
+            .await
     }
 
     async fn upload_body_chunk(
@@ -113,7 +116,7 @@ impl Registry {
         session_id: &str,
         mut body: BodyDataStream<Request<Incoming>>,
         mut append: bool,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<(), Error> {
         let mut chunk = Vec::new();
         while let Some(frame) = body.next().await {
             let frame = frame.map_err(|e| {
@@ -122,13 +125,11 @@ impl Registry {
             })?;
             chunk.extend_from_slice(&frame);
 
-            let streaming_size = self.streaming_chunk_size as usize;
-
-            while chunk.len() >= streaming_size {
+            while chunk.len() >= self.streaming_chunk_size {
                 debug!("Chunk too large, creating a part: {}", chunk.len());
-                let (current_part, next_part) = chunk.split_at(streaming_size);
+                let (current_part, next_part) = chunk.split_at(self.streaming_chunk_size);
 
-                self.storage
+                self.storage_engine
                     .write_upload(namespace, session_id, current_part, append)
                     .await?;
 
@@ -141,7 +142,7 @@ impl Registry {
 
         if !chunk.is_empty() {
             debug!("Remaining chunk data, creating a part: {}", chunk.len());
-            self.storage
+            self.storage_engine
                 .write_upload(namespace, session_id, &chunk, append)
                 .await?;
         }
@@ -150,15 +151,11 @@ impl Registry {
     }
 
     #[instrument]
-    pub async fn delete_upload(
-        &self,
-        namespace: &str,
-        session_id: Uuid,
-    ) -> Result<(), RegistryError> {
+    pub async fn delete_upload(&self, namespace: &str, session_id: Uuid) -> Result<(), Error> {
         self.validate_namespace(namespace)?;
 
         let uuid = session_id.to_string();
-        self.storage.delete_upload(namespace, &uuid).await
+        self.storage_engine.delete_upload(namespace, &uuid).await
     }
 
     #[instrument]
@@ -166,11 +163,14 @@ impl Registry {
         &self,
         namespace: &str,
         session_id: Uuid,
-    ) -> Result<u64, RegistryError> {
+    ) -> Result<u64, Error> {
         self.validate_namespace(namespace)?;
 
         let uuid = session_id.to_string();
-        let summary = self.storage.read_upload_summary(namespace, &uuid).await?;
+        let summary = self
+            .storage_engine
+            .read_upload_summary(namespace, &uuid)
+            .await?;
 
         if summary.size < 1 {
             return Ok(0);

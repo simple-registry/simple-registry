@@ -13,11 +13,23 @@ Goals
 > While the registry service itself is both OCI compliant and compatible with Docker,
 > the scrub feature is still experimental.
 
-## Ecosystem
+## Usage
 
-### Kubernetes Operator
+```
+Usage: origin [-c <config>] <command> [<args>]
 
-- TODO: Operator (separate project)
+An OCI-compliant and docker-compatible registry service
+
+Options:
+  -c, --config      the path to the configuration file, defaults to
+                    `config.toml`
+  --help, help      display usage information
+
+Commands:
+  scrub             Check the storage backend for inconsistencies
+  server            Run the registry listeners
+
+```
 
 ## Configuration
 
@@ -68,6 +80,12 @@ Multiple storage backends are supported: filesystem or s3-baked.
 
 - `root_dir` (string): The root directory for the storage.
 
+> [!NOTE]
+> Last access time of manifest links is used for the cleanup policy engine to determine
+> the last pull time.
+> Please ensure that your host filesystem hasn't access time disabled, otherwise policies using
+> last pull time as condition may not behave as expected.
+
 #### S3 Storage (`storage.s3`)
 
 - `access_key_id` (string): The access key ID for the S3 server
@@ -87,29 +105,43 @@ Multiple storage backends are supported: filesystem or s3-baked.
 - `username` (string): The username for the identity.
 - `password` (string): The argon2 hashed password for the identity.
 
-### Repository (`repository`)
+### Repository (`repository."<namespace>"`)
 
 This section is repeated for each repository.
 
-- `namespace` (string): The namespace for the repository.
-- `policy_default_allow` (bool): If true, the default policy is to allow access. If false, the default policy is to deny access.
-- `policies` (list of string): A list of CEL policies that must be satisfied for the identity to access the repository.
+#### Access Control Policy (`repository."<namespace>".access_policy`)
+
+- `default_allow` (bool): If true, the default policy is to allow access. If false, the default policy is to deny access.
+- `rules` (list of string): A list of CEL policies that must be satisfied for the identity to access the repository.
+
+```toml
+[repository."my-registry".access_policy]
+default_allow = true
+rules = [
+  "identity.username == 'admin'",
+  "identity.certificate.organizations.contains('admin')"
+]
+```
+
+Rules are evaluated in the specified order.
+First rule conflicting default will apply.
 
 ### Tracing (`observability.tracing`)
 
 If not provided, tracing is disabled.
 
+- `endpoint` (string): The endpoint for the tracing service
 - `sampling_rate` (f64): Sampling rate for tracing
 
-## CEL Policies
+## Access Control policies CEL rules
 
-Policies are expressed with CEL, the "Common Expression Language".
+Access Control rules are expressed with CEL, the "Common Expression Language".
 They are evaluated in the specified order.
 
-If `policy_default_allow` is set to `true`, the default policy is to allow access,
+If `default_allow` is set to `true`, the default policy is to allow access,
 and the first policy that evaluates to `true` will **deny** access.
 
-If `policy_default_allow` is set to `false`, the default policy is to deny access,
+If `default_allow` is set to `false`, the default policy is to deny access,
 and the first policy that evaluates to `true` will **allow** access.
 
 ### Variables
@@ -125,7 +157,8 @@ and the first policy that evaluates to `true` will **allow** access.
 
 The following `request.action` actions are supported:
 - `get-api-version`: Get the API version
-- `put-blob`: Upload a blob
+- `start-upload`, `update-upload`, `complete-upload`, `get-upload`: Upload a blob
+- `cancel-upload`: Delete a pending upload
 - `get-blob`: Download a blob
 - `delete-blob`: Delete a blob
 - `put-manifest`: Upload a manifest
@@ -137,12 +170,7 @@ The following `request.action` actions are supported:
 
 ## Roadmap
 
-- [ ] CI
-  - [ ] Unit Testing
-  - [ ] Conformance Testing
-  - [ ] Publishing
 - [ ] Pull-through cache
-- [ ] Global CEL policies
 - [ ] Tag & Digest auto-delete CEL policies
 - [ ] Kubernetes Operator (new project)
   - [ ] Kubernetes locking backend (?)

@@ -1,5 +1,5 @@
-use crate::error::RegistryError;
 use crate::oci::digest::Digest;
+use crate::registry::Error;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::de::Visitor;
@@ -18,9 +18,9 @@ pub enum Reference {
 }
 
 impl Reference {
-    pub fn from_str(s: &str) -> Result<Self, RegistryError> {
+    pub fn from_str(s: &str) -> Result<Self, Error> {
         if s.is_empty() {
-            return Err(RegistryError::ManifestBlobUnknown);
+            return Err(Error::ManifestBlobUnknown);
         }
 
         if s.contains(':') {
@@ -28,7 +28,7 @@ impl Reference {
         } else if TAG_REGEX.is_match(s) {
             Ok(Reference::Tag(s.to_string()))
         } else {
-            Err(RegistryError::ManifestBlobUnknown)
+            Err(Error::ManifestBlobUnknown)
         }
     }
 }
@@ -36,8 +36,8 @@ impl Reference {
 impl Display for Reference {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Reference::Tag(s) => write!(f, "{}", s),
-            Reference::Digest(d) => write!(f, "{}", d),
+            Reference::Tag(s) => write!(f, "{s}"),
+            Reference::Digest(d) => write!(f, "{d}"),
         }
     }
 }

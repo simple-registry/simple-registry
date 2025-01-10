@@ -1,22 +1,25 @@
-mod filesystem;
-mod reference;
-mod s3;
-mod tree_manager;
+mod backend;
+mod entity_link;
+mod entity_path_builder;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest as Sha256Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use tokio::io::AsyncRead;
 
-pub use filesystem::FileSystemStorageEngine;
-pub use reference::BlobReferenceIndex;
-pub use s3::S3StorageEngine;
-
-use crate::error::RegistryError;
+use crate::configuration;
+use crate::configuration::StorageConfig;
+use crate::lock_manager::LockManager;
 use crate::oci::{Descriptor, Digest};
-use crate::registry::LinkReference;
+use crate::registry::Error;
+
+use crate::storage::backend::{filesystem, s3};
+pub use entity_link::EntityLink;
 
 pub struct UploadSummary {
     pub digest: Digest,
@@ -24,52 +27,81 @@ pub struct UploadSummary {
     pub start_date: DateTime<Utc>,
 }
 
-pub trait StorageEngineReader: AsyncRead + Unpin + Send {}
-impl<T> StorageEngineReader for T where T: AsyncRead + Unpin + Send {}
+pub fn build_storage_engine(
+    storage_config: StorageConfig,
+    lock_manager: LockManager,
+) -> Result<Box<dyn GenericStorageEngine>, configuration::Error> {
+    if storage_config.fs.is_some() && storage_config.s3.is_some() {
+        return Err(configuration::Error::StorageBackend(
+            "Multiple storage backends are configured".to_string(),
+        ));
+    }
+
+    if let Some(fs_config) = storage_config.fs {
+        Ok(Box::new(filesystem::StorageEngine::new(
+            fs_config,
+            lock_manager,
+        )))
+    } else if let Some(s3_config) = storage_config.s3 {
+        Ok(Box::new(s3::StorageEngine::new(s3_config, lock_manager)))
+    } else {
+        Err(configuration::Error::StorageBackend(
+            "No storage backend is configured".to_string(),
+        ))
+    }
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct BlobEntityLinkIndex {
+    pub namespace: HashMap<String, HashSet<EntityLink>>,
+}
+
+pub trait Reader: AsyncRead + Unpin + Send {}
+impl<T> Reader for T where T: AsyncRead + Unpin + Send {}
 
 #[async_trait]
-pub trait StorageEngine: Send + Sync {
+pub trait GenericStorageEngine: Send + Sync {
     async fn list_namespaces(
         &self,
-        n: u32,
+        n: u16,
         last: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), RegistryError>;
+    ) -> Result<(Vec<String>, Option<String>), Error>;
 
     async fn list_tags(
         &self,
         namespace: &str,
-        n: u32,
+        n: u16,
         last: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), RegistryError>;
+    ) -> Result<(Vec<String>, Option<String>), Error>;
 
     async fn list_referrers(
         &self,
         namespace: &str,
         digest: &Digest,
         artifact_type: Option<String>,
-    ) -> Result<Vec<Descriptor>, RegistryError>;
+    ) -> Result<Vec<Descriptor>, Error>;
 
     async fn list_uploads(
         &self,
         namespace: &str,
-        n: u32,
+        n: u16,
         continuation_token: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), RegistryError>;
+    ) -> Result<(Vec<String>, Option<String>), Error>;
 
     async fn list_blobs(
         &self,
-        n: u32,
+        n: u16,
         continuation_token: Option<String>,
-    ) -> Result<(Vec<Digest>, Option<String>), RegistryError>;
+    ) -> Result<(Vec<Digest>, Option<String>), Error>;
 
     async fn list_revisions(
         &self,
         namespace: &str,
-        n: u32,
+        n: u16,
         continuation_token: Option<String>,
-    ) -> Result<(Vec<Digest>, Option<String>), RegistryError>;
+    ) -> Result<(Vec<Digest>, Option<String>), Error>;
 
-    async fn create_upload(&self, namespace: &str, uuid: &str) -> Result<String, RegistryError>;
+    async fn create_upload(&self, namespace: &str, uuid: &str) -> Result<String, Error>;
 
     async fn write_upload(
         &self,
@@ -77,60 +109,54 @@ pub trait StorageEngine: Send + Sync {
         uuid: &str,
         source: &[u8],
         append: bool,
-    ) -> Result<(), RegistryError>;
+    ) -> Result<(), Error>;
 
     async fn read_upload_summary(
         &self,
         namespace: &str,
         uuid: &str,
-    ) -> Result<UploadSummary, RegistryError>;
+    ) -> Result<UploadSummary, Error>;
 
     async fn complete_upload(
         &self,
         namespace: &str,
         uuid: &str,
         digest: Option<Digest>,
-    ) -> Result<Digest, RegistryError>;
+    ) -> Result<Digest, Error>;
 
-    async fn delete_upload(&self, namespace: &str, uuid: &str) -> Result<(), RegistryError>;
+    async fn delete_upload(&self, namespace: &str, uuid: &str) -> Result<(), Error>;
 
-    async fn create_blob(&self, content: &[u8]) -> Result<Digest, RegistryError>;
+    async fn create_blob(&self, content: &[u8]) -> Result<Digest, Error>;
 
-    async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, RegistryError>;
+    async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error>;
 
-    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobReferenceIndex, RegistryError>;
+    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error>;
 
-    async fn get_blob_size(&self, digest: &Digest) -> Result<u64, RegistryError>;
+    async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error>;
 
     async fn build_blob_reader(
         &self,
         digest: &Digest,
         start_offset: Option<u64>,
-    ) -> Result<Box<dyn StorageEngineReader>, RegistryError>;
+    ) -> Result<Box<dyn Reader>, Error>;
 
-    async fn delete_blob(&self, digest: &Digest) -> Result<(), RegistryError>;
+    async fn delete_blob(&self, digest: &Digest) -> Result<(), Error>;
 
-    async fn read_link(
-        &self,
-        namespace: &str,
-        reference: &LinkReference,
-    ) -> Result<Digest, RegistryError>;
+    async fn update_last_pulled(&self, name: &str, reference: &EntityLink) -> Result<(), Error>;
+
+    async fn read_link(&self, namespace: &str, reference: &EntityLink) -> Result<Digest, Error>;
 
     async fn create_link(
         &self,
         namespace: &str,
-        reference: &LinkReference,
+        reference: &EntityLink,
         digest: &Digest,
-    ) -> Result<(), RegistryError>;
+    ) -> Result<(), Error>;
 
-    async fn delete_link(
-        &self,
-        namespace: &str,
-        reference: &LinkReference,
-    ) -> Result<(), RegistryError>;
+    async fn delete_link(&self, namespace: &str, reference: &EntityLink) -> Result<(), Error>;
 }
 
-impl Debug for (dyn StorageEngine + 'static) {
+impl Debug for (dyn GenericStorageEngine + 'static) {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("StorageEngine").finish()
     }
@@ -138,20 +164,21 @@ impl Debug for (dyn StorageEngine + 'static) {
 
 // Hash helpers
 
-pub async fn serialize_hash_state(sha256: &Sha256) -> Result<Vec<u8>, RegistryError> {
+pub async fn serialize_hash_state(sha256: &Sha256) -> Result<Vec<u8>, Error> {
     let state = sha256.serialize();
     Ok(state.as_slice().to_vec())
 }
 
-pub async fn serialize_hash_empty_state() -> Result<Vec<u8>, RegistryError> {
+pub async fn serialize_hash_empty_state() -> Result<Vec<u8>, Error> {
     let state = Sha256::new();
     serialize_hash_state(&state).await
 }
 
-pub async fn deserialize_hash_state(state: Vec<u8>) -> Result<Sha256, RegistryError> {
-    let state = state.as_slice().try_into().map_err(|_| {
-        RegistryError::InternalServerError(Some("Unable to resume hash state".to_string()))
-    })?;
+pub async fn deserialize_hash_state(state: Vec<u8>) -> Result<Sha256, Error> {
+    let state = state
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::Internal(Some("Unable to resume hash state".to_string())))?;
     let state = Sha256::deserialize(state)?;
     let hasher = Sha256::from(state);
 

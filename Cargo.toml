@@ -3,46 +3,45 @@ name = "origin"
 version = "0.1.0"
 edition = "2021"
 
-# Enable full optimizations in release mode
 [profile.release]
 opt-level = 3
 lto = "fat"
 
 [dependencies]
 arc-swap = "1.7.1"
+argh = "0.1.13"
 argon2 = "0.5.3"
-async-trait = "0.1.83"
-aws-sdk-s3 = "1.59.0"
+async-trait = "0.1.84"
+aws-sdk-s3 = "1.68.0"
 base64 = "0.22.1"
-cel-interpreter = "0.8.1"
-chrono = "0.4.38"
-clap = "4.5.20"
+cel-interpreter = "0.9.0"
+chrono = "0.4.39"
 futures-util = { version = "0.3.31", default-features = false }
 hex = "0.4.3"
 http-body-util = "0.1.2"
-hyper = { version = "1.5.0" , features = ["full"]}
-hyper-util = { version = "0.1.9", features = ["tokio"] }
+hyper = { version = "1.5.2" , features = ["full"]}
+hyper-util = { version = "0.1.10", features = ["tokio"] }
 lazy_static = "1.5.0"
-notify = "6.1.1"
-opentelemetry = "0.26.0"
-opentelemetry-otlp = "0.26.0"
-opentelemetry_sdk = { version = "0.26.0", features = ["rt-tokio"] }
-opentelemetry-semantic-conventions = { version = "0.26.0", features = ["semconv_experimental"] }
-opentelemetry-stdout = "0.26.0"
-redis = { version = "0.27.5", features = ["tokio-comp"] }
-regex = "1.11.0"
-rustls = { version = "0.23.15", features = ["aws-lc-rs"] }
-rustls-pki-types = "1.10.0"
-serde = { version = "1.0.211", features = ["derive"] }
-serde_json = "1.0.132"
+notify = "7.0.0"
+opentelemetry = "0.27.1"
+opentelemetry-otlp = "0.27.0"
+opentelemetry_sdk = { version = "0.27.1", features = ["rt-tokio"] }
+opentelemetry-semantic-conventions = { version = "0.27.0", features = ["semconv_experimental"] }
+opentelemetry-stdout = "0.27.0"
+redis = { version = "0.27.6", features = ["tokio-comp"] }
+regex = "1.11.1"
+rustls = { version = "0.23.20", features = ["aws-lc-rs"] }
+rustls-pki-types = "1.10.1"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.134"
 serde_urlencoded = "0.7.1"
 sha2 = "0.11.0-pre.4"
-tokio = { version = "1.41.0", features = ["full"] }
-tokio-rustls = "0.26.0"
-tokio-util = "0.7.12"
+tokio = { version = "1.42.0", features = ["full"] }
+tokio-rustls = "0.26.1"
+tokio-util = "0.7.13"
 toml = "0.8.19"
-tracing = "0.1.40"
+tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-tracing-opentelemetry = "0.27.0"
+tracing-opentelemetry = "0.28.0"
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
 x509-parser = "0.16.0"

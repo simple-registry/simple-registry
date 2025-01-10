@@ -1,8 +1,8 @@
 use regex::Captures;
 use serde::de;
-use serde::de::{DeserializeOwned, DeserializeSeed, IntoDeserializer, MapAccess, Visitor};
+use serde::de::{DeserializeOwned, DeserializeSeed, Error, IntoDeserializer, MapAccess, Visitor};
 
-pub fn deserialize_params<T: DeserializeOwned>(content: &str, regex: &regex::Regex) -> Option<T> {
+pub fn deserialize<T: DeserializeOwned>(content: &str, regex: &regex::Regex) -> Option<T> {
     regex.captures(content).and_then(|captures| {
         let deserializer = CapturesDeserializer {
             captures: &captures,
@@ -86,9 +86,8 @@ impl<'de> MapAccess<'de> for CapturesMapAccess<'_> {
         if let Some(value) = self.captures.name(key) {
             seed.deserialize(value.as_str().into_deserializer())
         } else {
-            Err(de::Error::custom(format!(
-                "Missing capture group for field '{}'",
-                key
+            Err(Error::custom(format!(
+                "Missing capture group for field '{key}'"
             )))
         }
     }

@@ -3,12 +3,12 @@ use serde::{Deserialize, Deserializer};
 
 #[derive(Clone, Debug)]
 pub enum DataSize {
-    WithUnit(u64, String),
-    WithoutUnit(u64),
+    WithUnit(usize, String),
+    WithoutUnit(usize),
 }
 
 impl DataSize {
-    pub fn as_bytes(&self) -> u64 {
+    pub fn to_usize(&self) -> usize {
         match self {
             Self::WithUnit(size, unit) => match unit.as_str() {
                 "K" | "KB" => size * 1000,
@@ -22,6 +22,10 @@ impl DataSize {
             Self::WithoutUnit(size) => *size,
         }
     }
+
+    pub fn to_u64(&self) -> u64 {
+        self.to_usize() as u64
+    }
 }
 
 // StorageSize is serialized as a string with an optional unit (e.g. "10MB") or as a raw number.
@@ -31,30 +35,29 @@ impl<'de> Deserialize<'de> for DataSize {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        let parsed = match s.parse::<u64>() {
-            Ok(size) => Self::WithoutUnit(size),
-            Err(_) => {
-                let size = s
-                    .trim_end_matches(|c: char| c.is_alphabetic())
-                    .parse::<u64>()
-                    .unwrap_or_default();
-                let unit = s
-                    .trim_start_matches(|c: char| c.is_numeric())
-                    .to_uppercase();
+        let parsed = if let Ok(size) = s.parse::<usize>() {
+            Self::WithoutUnit(size)
+        } else {
+            let size = s
+                .trim_end_matches(|c: char| c.is_alphabetic())
+                .parse::<usize>()
+                .unwrap_or_default();
+            let unit = s
+                .trim_start_matches(|c: char| c.is_numeric())
+                .to_uppercase();
 
-                if unit.is_empty() {
-                    Self::WithoutUnit(size)
-                } else {
-                    if ![
-                        "K", "KB", "M", "MB", "G", "GB", "KI", "KIB", "MI", "MIB", "GI", "GIB",
-                    ]
-                    .contains(&unit.as_str())
-                    {
-                        return Err(D::Error::custom(format!("Invalid unit: {}", unit)));
-                    }
-
-                    Self::WithUnit(size, unit)
+            if unit.is_empty() {
+                Self::WithoutUnit(size)
+            } else {
+                if ![
+                    "K", "KB", "M", "MB", "G", "GB", "KI", "KIB", "MI", "MIB", "GI", "GIB",
+                ]
+                .contains(&unit.as_str())
+                {
+                    return Err(Error::custom(format!("Invalid unit: {unit}")));
                 }
+
+                Self::WithUnit(size, unit)
             }
         };
 

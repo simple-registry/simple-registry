@@ -3,23 +3,23 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 #[derive(Debug, Default, Clone)]
-pub struct MemoryLockManager {
+pub struct LockManager {
     locks: Arc<AsyncMutex<HashMap<String, Weak<RwLock<()>>>>>,
 }
 
-impl MemoryLockManager {
+impl LockManager {
     pub fn new() -> Self {
         Self {
             locks: Arc::new(AsyncMutex::new(HashMap::new())),
         }
     }
 
-    pub async fn read_lock(&self, key: String) -> InMemoryReadLockGuard {
+    pub async fn read_lock(&self, key: String) -> ReadLockGuard {
         let lock = self.get_lock_for_key(&key).await;
         lock.read_owned().await
     }
 
-    pub async fn write_lock(&self, key: String) -> InMemoryWriteLockGuard {
+    pub async fn write_lock(&self, key: String) -> WriteLockGuard {
         let lock = self.get_lock_for_key(&key).await;
         lock.write_owned().await
     }
@@ -29,9 +29,8 @@ impl MemoryLockManager {
         if let Some(weak_lock) = locks.get(key) {
             if let Some(lock) = weak_lock.upgrade() {
                 return lock;
-            } else {
-                locks.remove(key);
             }
+            locks.remove(key);
         }
         let lock = Arc::new(RwLock::new(()));
         locks.insert(key.to_string(), Arc::downgrade(&lock));
@@ -39,5 +38,5 @@ impl MemoryLockManager {
     }
 }
 
-pub type InMemoryReadLockGuard = tokio::sync::OwnedRwLockReadGuard<()>;
-pub type InMemoryWriteLockGuard = tokio::sync::OwnedRwLockWriteGuard<()>;
+pub type ReadLockGuard = tokio::sync::OwnedRwLockReadGuard<()>;
+pub type WriteLockGuard = tokio::sync::OwnedRwLockWriteGuard<()>;

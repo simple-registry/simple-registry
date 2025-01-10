@@ -1,17 +1,21 @@
 use crate::oci::Digest;
-use crate::registry::LinkReference;
+use crate::storage::entity_link::EntityLink;
 
 #[derive(Debug)]
-pub struct TreeManager {
-    pub root_dir: String,
+pub struct EntityPathBuilder {
+    pub prefix: String,
 }
 
-impl TreeManager {
+impl EntityPathBuilder {
+    pub fn new(prefix: String) -> Self {
+        Self { prefix }
+    }
+
     pub fn blobs_root_dir(&self) -> String {
-        if self.root_dir.is_empty() {
+        if self.prefix.is_empty() {
             "v2/blobs".to_string()
         } else {
-            format!("{}/v2/blobs", self.root_dir)
+            format!("{}/v2/blobs", self.prefix)
         }
     }
 
@@ -34,10 +38,10 @@ impl TreeManager {
     }
 
     pub fn repository_dir(&self) -> String {
-        if self.root_dir.is_empty() {
+        if self.prefix.is_empty() {
             "v2/repositories".to_string()
         } else {
-            format!("{}/v2/repositories", self.root_dir)
+            format!("{}/v2/repositories", self.prefix)
         }
     }
 
@@ -212,34 +216,32 @@ impl TreeManager {
         format!("{}/link", self.manifest_tag_link_parent_dir(namespace, tag))
     }
 
-    pub fn get_link_path(&self, reference: &LinkReference, name: &str) -> String {
+    pub fn get_link_path(&self, reference: &EntityLink, name: &str) -> String {
         match reference {
-            LinkReference::Tag(tag) => self.manifest_tag_link_path(name, tag),
-            LinkReference::Digest(digest) => self.manifest_revisions_link_path(name, digest),
-            LinkReference::Layer(digest) => self.manifest_layer_link_path(name, digest),
-            LinkReference::Config(digest) => self.manifest_config_link_path(name, digest),
-            LinkReference::Referrer(subject, referrer) => {
+            EntityLink::Tag(tag) => self.manifest_tag_link_path(name, tag),
+            EntityLink::Digest(digest) => self.manifest_revisions_link_path(name, digest),
+            EntityLink::Layer(digest) => self.manifest_layer_link_path(name, digest),
+            EntityLink::Config(digest) => self.manifest_config_link_path(name, digest),
+            EntityLink::Referrer(subject, referrer) => {
                 self.manifest_referrer_link_path(name, subject, referrer)
             }
         }
     }
 
-    pub fn get_link_parent_path(&self, reference: &LinkReference, name: &str) -> String {
+    pub fn get_link_parent_path(&self, reference: &EntityLink, name: &str) -> String {
         match reference {
-            LinkReference::Tag(tag) => self.manifest_tag_link_parent_dir(name, tag),
+            EntityLink::Tag(tag) => self.manifest_tag_link_parent_dir(name, tag),
             _ => self.get_link_container_path(reference, name),
         }
     }
 
-    pub fn get_link_container_path(&self, reference: &LinkReference, name: &str) -> String {
+    pub fn get_link_container_path(&self, reference: &EntityLink, name: &str) -> String {
         match reference {
-            LinkReference::Tag(tag) => self.manifest_tag_link_container_dir(name, tag),
-            LinkReference::Digest(digest) => {
-                self.manifest_revisions_link_container_dir(name, digest)
-            }
-            LinkReference::Layer(digest) => self.manifest_layer_link_container_dir(name, digest),
-            LinkReference::Config(digest) => self.manifest_config_link_container_dir(name, digest),
-            LinkReference::Referrer(subject, referrer) => {
+            EntityLink::Tag(tag) => self.manifest_tag_link_container_dir(name, tag),
+            EntityLink::Digest(digest) => self.manifest_revisions_link_container_dir(name, digest),
+            EntityLink::Layer(digest) => self.manifest_layer_link_container_dir(name, digest),
+            EntityLink::Config(digest) => self.manifest_config_link_container_dir(name, digest),
+            EntityLink::Referrer(subject, referrer) => {
                 self.manifest_referrer_link_container_dir(name, subject, referrer)
             }
         }
