@@ -1,6 +1,7 @@
 [server]
 bind_address = "0.0.0.0"
 port = 8000
+streaming_chunk_size = "5MiB"
 
 [server.tls]
 server_certificate_bundle = "tls.d/server-ca-bundle.pem"
@@ -8,7 +9,7 @@ server_private_key = "tls.d/server-private-key.pem"
 client_ca_bundle   = "tls.d/client-ca-bundle.pem"
 
 #[locking.redis]
-#url = "redis://localhost:6379/0"
+#url = "redis://localhost:6379"
 #ttl = 5
 
 [storage.fs]
@@ -20,21 +21,25 @@ root_dir = "./data-origin"
 #endpoint = "https://<s3-compatible-endpoint>"
 #bucket = "<bucket>"
 #region = "<zone/region>"
+#multipart_copy_threshold = "5GiB"
+#multipart_copy_chunk_size = "100MiB"
+#multipart_copy_jobs = 10
 
 [observability.tracing]
+endpoint = "http://127.0.0.1:4317"
 sampling_rate = 1.0
 
 [identity.phil]
 username = "philippe"
 password = "$argon2id$v=19$m=16,t=2,p=1$MTIzNDU2Nzg$lurg6dYCXXrJP3zaFwu35w" # test
 
-[[repository]]
-namespace = "nginx"
-policy_default_allow = true
+[repository."nginx"]
 
-[[repository]]
-namespace = "test"
-policy_default_allow = false
+[repository."nginx".access_policy]
+default_allow = true
+
+[repository."test".access_policy]
+default_allow = false
 policies = [
     'identity.username in ["philippe"]',
     '"philippe" in identity.certificate.common_names',
