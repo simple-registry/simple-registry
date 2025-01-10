@@ -126,6 +126,24 @@ rules = [
 Rules are evaluated in the specified order.
 First rule conflicting default will apply.
 
+#### Retention Policy (`repository."<namespace>".retention_policy`)
+
+> [!NOTE]
+> This feature is currently in active development and is not yet working as intended.
+
+- `rules` (list of string): A list of CEL policies that must be satisfied to _keep_ an image in the registry.
+
+```toml
+[repository."my-registry".access_policy]
+rules = [
+  'image.tag != "latest"',
+  'image.pushed_at < now() - 15d',
+  'image.last_pulled_at < now() - 15d',
+  'isMostRecentlyPulled(image, 10)',
+  'isMostRecentlyPushed(image, 10)',
+]
+```
+
 ### Tracing (`observability.tracing`)
 
 If not provided, tracing is disabled.
@@ -167,6 +185,19 @@ The following `request.action` actions are supported:
 - `get-referrers`: Get the referrers of a manifest
 - `list-catalog`: List the catalog
 - `list-tags`: List the tags
+
+## Retention policies CEL rules
+
+### Variables
+
+- `image.tag`: The tag of the image, when evaluating a Tag (can be unspecified)
+- `image.pushed_at`: The time the manifest was pushed at
+- `image.last_pulled_at`: The time the manifest was last pulled (can be unspecified) 
+
+In addition to those variables, some helper functions are available:
+- `matches(<regex-pattern>, image.tag): Matches a string against a string
+- `now()`: Returns the current time
+- `isMostRecentlyPulled(image`
 
 ## Roadmap
 

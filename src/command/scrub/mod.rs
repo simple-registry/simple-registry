@@ -36,7 +36,7 @@ pub struct Options {
     pub check_blobs: Option<bool>,
     #[argh(switch, short = 'p')]
     /// enforce retention policies
-    pub enforce_retention_policies: Option<bool>
+    pub enforce_retention_policies: Option<bool>,
 }
 
 #[derive(Hash, Eq, PartialEq)]

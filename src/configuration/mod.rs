@@ -145,6 +145,8 @@ pub struct IdentityConfig {
 pub struct RepositoryConfig {
     #[serde(default)]
     pub access_policy: RepositoryAccessPolicyConfig,
+    #[serde(default)]
+    pub retention_policy: RepositoryRetentionPolicyConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -152,6 +154,11 @@ pub struct RepositoryAccessPolicyConfig {
     #[serde(default)]
     pub default_allow: bool,
     #[serde(default)]
+    pub rules: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct RepositoryRetentionPolicyConfig {
     pub rules: Vec<String>,
 }
 
