@@ -64,3 +64,55 @@ impl<'de> Deserialize<'de> for DataSize {
         Ok(parsed)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_data_size_deserialization() {
+        for unit in &[
+            "K", "KB", "M", "MB", "G", "GB", "KI", "KIB", "MI", "MIB", "GI", "GIB",
+        ] {
+            let size: DataSize = serde_json::from_str(&format!(r#""10{}""#, unit)).unwrap();
+            let DataSize::WithUnit(quantity, u) = size else {
+                panic!("Expected DataSize::WithUnit, got {:?}", size);
+            };
+            assert_eq!(quantity, 10);
+            assert_eq!(u, unit.to_string());
+        }
+    }
+
+    #[test]
+    fn test_data_size_deserialization_without_unit() {
+        let size: DataSize = serde_json::from_str(r#""10""#).unwrap();
+        let DataSize::WithoutUnit(quantity) = size else {
+            panic!("Expected DataSize::WithoutUnit, got {:?}", size);
+        };
+        assert_eq!(quantity, 10);
+    }
+
+    #[test]
+    fn test_data_size_to_usize() {
+        let size = DataSize::WithUnit(10, "KB".to_string());
+        assert_eq!(size.to_usize(), 10 * 1000);
+
+        let size = DataSize::WithUnit(10, "MB".to_string());
+        assert_eq!(size.to_usize(), 10 * 1000 * 1000);
+
+        let size = DataSize::WithUnit(10, "GB".to_string());
+        assert_eq!(size.to_usize(), 10 * 1000 * 1000 * 1000);
+
+        let size = DataSize::WithUnit(10, "KIB".to_string());
+        assert_eq!(size.to_usize(), 10 * 1024);
+
+        let size = DataSize::WithUnit(10, "MIB".to_string());
+        assert_eq!(size.to_usize(), 10 * 1024 * 1024);
+
+        let size = DataSize::WithUnit(10, "GIB".to_string());
+        assert_eq!(size.to_usize(), 10 * 1024 * 1024 * 1024);
+
+        let size = DataSize::WithoutUnit(10);
+        assert_eq!(size.to_usize(), 10);
+    }
+}

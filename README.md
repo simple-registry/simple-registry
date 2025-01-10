@@ -172,6 +172,8 @@ The following `request.action` actions are supported:
 
 - [ ] Pull-through cache
 - [ ] Tag & Digest auto-delete CEL policies
+  - [x] Last pull time persistence
+  - [ ] Policies in Scrub
 - [ ] Kubernetes Operator (new project)
   - [ ] Kubernetes locking backend (?)
 - [ ] OpenMetrics exporter

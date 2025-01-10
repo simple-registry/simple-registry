@@ -97,3 +97,55 @@ impl Serialize for Digest {
         serializer.serialize_str(&self.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::convert::TryInto;
+
+    #[test]
+    fn test_digest_try_from() {
+        let digest: Digest =
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .try_into()
+                .unwrap();
+
+        assert_eq!(digest.algorithm(), "sha256");
+        assert_eq!(
+            digest.hash(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(digest.hash_prefix(), "01");
+    }
+
+    #[test]
+    fn test_digest_try_from_invalid() {
+        let digest: Result<Digest, registry::Error> = "sha256:invalid".try_into();
+        assert!(digest.is_err());
+    }
+
+    #[test]
+    fn test_digest_display() {
+        let digest: Digest = Digest::Sha256(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        );
+        assert_eq!(
+            digest.to_string(),
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn test_digest_deserialize() {
+        let digest: Digest = serde_json::from_str(
+            r#""sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef""#,
+        )
+        .unwrap();
+        assert_eq!(
+            digest,
+            Digest::Sha256(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()
+            )
+        );
+    }
+}

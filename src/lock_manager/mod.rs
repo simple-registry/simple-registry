@@ -79,3 +79,44 @@ impl LockManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::configuration::LockingConfig;
+
+    #[tokio::test]
+    async fn test_lock_manager_in_memory() {
+        let config = LockingConfig { redis: None };
+
+        let lock_manager = LockManager::new(config).unwrap();
+        let lock_key = "test".to_string();
+
+        let read_guard = lock_manager.read_lock(lock_key.clone()).await.unwrap();
+        drop(read_guard);
+
+        let write_guard = lock_manager.write_lock(lock_key.clone()).await.unwrap();
+        drop(write_guard);
+    }
+
+    /*#[tokio::test]
+    async fn test_lock_manager_redis() {
+        let config = LockingConfig {
+            redis: Some(configuration::RedisLockingConfig {
+                url: "redis://127.0.0.1:6379".to_string(),
+                ttl: 10,
+            }),
+        };
+
+        let lock_manager = LockManager::new(config).unwrap();
+        let lock_key = "test".to_string();
+
+        let read_guard = lock_manager.read_lock(lock_key.clone()).await.unwrap();
+        drop(read_guard);
+
+        let write_guard = lock_manager.write_lock(lock_key.clone()).await.unwrap();
+        drop(write_guard);
+    }*/
+
+    // TODO: improve the lock manager interface to allow for more accurate testing
+}
