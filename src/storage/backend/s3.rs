@@ -584,7 +584,7 @@ impl StorageEngine {
             .metadata
             .unwrap_or_default()
             .get(PUSHED_AT_METADATA_KEY)
-            .map(|s| s.clone())
+            .cloned()
             .unwrap_or(Utc::now().to_rfc3339());
 
         self.s3_client
@@ -1207,8 +1207,7 @@ impl GenericStorageEngine for StorageEngine {
         reference: &EntityLink,
     ) -> Result<ReferenceInfo, Error> {
         let key = match reference {
-            EntityLink::Tag(_) => self.tree.get_link_path(reference, name),
-            EntityLink::Digest(_) => self.tree.get_link_path(reference, name),
+            EntityLink::Tag(_) | EntityLink::Digest(_) => self.tree.get_link_path(reference, name),
             _ => return Err(Error::NotFound),
         };
 

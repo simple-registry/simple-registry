@@ -604,8 +604,7 @@ impl GenericStorageEngine for StorageEngine {
         reference: &EntityLink,
     ) -> Result<ReferenceInfo, Error> {
         let key = match reference {
-            EntityLink::Tag(_) => self.tree.get_link_path(reference, name),
-            EntityLink::Digest(_) => self.tree.get_link_path(reference, name),
+            EntityLink::Tag(_) | EntityLink::Digest(_) => self.tree.get_link_path(reference, name),
             _ => return Err(Error::NotFound),
         };
 
