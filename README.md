@@ -128,9 +128,6 @@ First rule conflicting default will apply.
 
 #### Retention Policy (`repository."<namespace>".retention_policy`)
 
-> [!NOTE]
-> This feature is currently in active development and is not yet working as intended.
-
 - `rules` (list of string): A list of CEL policies that must be satisfied to _keep_ an image in the registry.
 
 ```toml
@@ -202,9 +199,6 @@ In addition to those variables, some helper functions are available:
 ## Roadmap
 
 - [ ] Pull-through cache
-- [ ] Tag & Digest auto-delete CEL policies
-  - [x] Last pull time persistence
-  - [ ] Policies in Scrub
 - [ ] Kubernetes Operator (new project)
   - [ ] Kubernetes locking backend (?)
 - [ ] OpenMetrics exporter
