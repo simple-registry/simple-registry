@@ -134,8 +134,8 @@ First rule conflicting default will apply.
 [repository."my-registry".access_policy]
 rules = [
   'image.tag != "latest"',
-  'image.pushed_at < now() - 15d',
-  'image.last_pulled_at < now() - 15d',
+  'image.pushed_at < now() - days(15)',
+  'image.last_pulled_at < now() - days(15)',
   'isMostRecentlyPulled(image, 10)',
   'isMostRecentlyPushed(image, 10)',
 ]
@@ -192,9 +192,10 @@ The following `request.action` actions are supported:
 - `image.last_pulled_at`: The time the manifest was last pulled (can be unspecified) 
 
 In addition to those variables, some helper functions are available:
-- `matches(<regex-pattern>, image.tag): Matches a string against a string
-- `now()`: Returns the current time
-- `isMostRecentlyPulled(image`
+- `now()`: Returns the current time in seconds since epoch (1st of January 1970).
+- `days(d)`: Returns the number of seconds in `d` days.
+- `matches(<regex-pattern>, image.tag)`: Matches a string against a string.
+- `isMostRecentlyPulled(image)`
 
 ## Roadmap
 

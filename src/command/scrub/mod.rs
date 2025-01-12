@@ -221,6 +221,14 @@ impl Command {
             return false;
         };
 
+        context.add_function("now", || {
+            Utc::now().timestamp()
+        });
+
+        context.add_function("days", |d: i64| {
+            d * 86400
+        });
+
         for policy in policies {
             let evaluation_result = match policy.execute(&context) {
                 Ok(e) => e,
