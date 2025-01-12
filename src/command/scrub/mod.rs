@@ -1,8 +1,10 @@
 use crate::command;
-use crate::oci::Digest;
+use crate::oci::{Digest, Reference};
+use crate::policy::ManifestImage;
 use crate::registry::{parse_manifest_digests, Registry};
 use crate::storage::EntityLink;
 use argh::FromArgs;
+use cel_interpreter::{Context, Program, Value};
 use chrono::{Duration, Utc};
 use std::collections::HashSet;
 use std::process::exit;
@@ -110,7 +112,10 @@ impl Command {
             };
 
             for namespace in namespaces {
-                // check self.enabled_checks contains ScrubCheck::Uploads
+                if self.enabled_checks.contains(&ScrubCheck::Retention) {
+                    let _ = self.enforce_retention(&namespace).await;
+                }
+
                 if self.enabled_checks.contains(&ScrubCheck::Uploads) {
                     // Step 1: check upload directories
                     // - for incomplete uploads (threshold from config file)
@@ -144,6 +149,106 @@ impl Command {
         }
 
         Ok(())
+    }
+
+    async fn enforce_retention(&self, namespace: &str) -> Result<(), command::Error> {
+        info!("'{}': Enforcing retention policy", namespace);
+
+        let mut marker = None;
+        let mut all_tags = Vec::new();
+        loop {
+            let (tags, next_marker) = self
+                .registry
+                .storage_engine
+                .list_tags(namespace, 1000, marker)
+                .await?;
+            all_tags.extend(tags);
+            if next_marker.is_none() {
+                break;
+            }
+            marker = next_marker;
+        }
+
+        for tag in &all_tags {
+            self.check_tag_retention(namespace, tag).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn check_tag_retention(&self, namespace: &str, tag: &str) -> Result<(), command::Error> {
+        debug!("'{}': Checking tag '{}' for retention", namespace, tag);
+
+        let Some((_, found_repository)) = self
+            .registry
+            .repositories
+            .iter()
+            .find(|(repository, _)| namespace.starts_with(*repository))
+        else {
+            warn!("Unable to find repository for namespace: {}", namespace);
+            return Ok(());
+        };
+
+        let reference = EntityLink::Tag(tag.to_string());
+        let info = self
+            .registry
+            .storage_engine
+            .read_reference_info(namespace, &reference)
+            .await?;
+
+        let manifest = ManifestImage {
+            tag: Some(tag.to_string()),
+            pushed_at: info.created_at.timestamp(),
+            last_pulled_at: info.accessed_at.timestamp(),
+        };
+
+        if !Self::check_retention_policy(&found_repository.retention_rules, &manifest) {
+            info!("Available for cleanup: {}:{}", namespace, tag);
+            if !self.dry_mode {
+                let reference = Reference::Tag(tag.to_string());
+                let _ = self.registry.delete_manifest(namespace, reference).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn check_retention_policy(policies: &[Program], manifest: &ManifestImage) -> bool {
+        let mut context = Context::default();
+        debug!("Policy context (image) : {:?}", manifest);
+        if let Err(e) = context.add_variable("image", manifest) {
+            error!("Failed to add image to policy context: {}", e);
+            return false;
+        };
+
+        for policy in policies {
+            let evaluation_result = match policy.execute(&context) {
+                Ok(e) => e,
+                Err(e) => {
+                    error!("Policy execution failed: {}", e);
+                    return true;
+                }
+            };
+
+            debug!(
+                "CEL program '{:?}' evaluates to {:?}",
+                policy, evaluation_result
+            );
+            match evaluation_result {
+                Value::Bool(true) => {
+                    debug!("Retention policy matched");
+                    return true;
+                }
+                Value::Bool(false) => { // Not validated, continue checking
+                }
+                _ => {
+                    debug!("Not eligible for cleanup");
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     async fn scrub_uploads(&self, namespace: &str) -> Result<(), command::Error> {
