@@ -31,6 +31,9 @@ use crate::storage::{
     GenericStorageEngine, Reader, UploadSummary,
 };
 
+const PUSHED_AT_METADATA_KEY: &str = "pushed";
+const LAST_PULLED_AT_METADATA_KEY: &str = "last-pulled";
+
 #[derive(Clone)]
 pub struct StorageEngine {
     s3_client: S3Client,
@@ -176,6 +179,7 @@ impl StorageEngine {
             .put_object()
             .bucket(&self.bucket)
             .key(key)
+            .metadata(PUSHED_AT_METADATA_KEY, Utc::now().to_rfc3339())
             .body(ByteStream::from(data))
             .send()
             .await?;
@@ -574,13 +578,23 @@ impl StorageEngine {
 
     #[instrument(skip(self))]
     async fn update_last_pulled_metadata(&self, key: &str) -> Result<(), Error> {
+        let res = self.head_object(key).await?;
+
+        let pushed_at = res
+            .metadata
+            .unwrap_or_default()
+            .get(PUSHED_AT_METADATA_KEY)
+            .map(|s| s.clone())
+            .unwrap_or(Utc::now().to_rfc3339());
+
         self.s3_client
             .copy_object()
             .bucket(&self.bucket)
             .key(key)
             .copy_source(format!("{}/{}", self.bucket, key))
             .metadata_directive(MetadataDirective::Replace)
-            .metadata("last-pulled", Utc::now().to_rfc3339())
+            .metadata(PUSHED_AT_METADATA_KEY, pushed_at)
+            .metadata(LAST_PULLED_AT_METADATA_KEY, Utc::now().to_rfc3339())
             .send()
             .await?;
 
