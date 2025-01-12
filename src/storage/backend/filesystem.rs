@@ -1,3 +1,13 @@
+use crate::configuration::StorageFSConfig;
+use crate::lock_manager::LockManager;
+use crate::oci::{Descriptor, Digest, Manifest};
+use crate::registry::Error;
+use crate::storage::entity_link::EntityLink;
+use crate::storage::entity_path_builder::EntityPathBuilder;
+use crate::storage::{
+    deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobEntityLinkIndex,
+    GenericStorageEngine, Reader, UploadSummary,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sha2::{Digest as ShaDigestTrait, Sha256};
@@ -11,38 +21,28 @@ use tokio::fs::{self, File};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::{debug, error, instrument, warn};
 
-use crate::error::RegistryError;
-use crate::lock_manager::LockManager;
-use crate::oci::{Descriptor, Digest, Manifest};
-use crate::registry::LinkReference;
-use crate::storage::tree_manager::TreeManager;
-use crate::storage::{
-    deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobReferenceIndex,
-    StorageEngine, StorageEngineReader, UploadSummary,
-};
-
 #[derive(Clone)]
-pub struct FileSystemStorageEngine {
+pub struct StorageEngine {
     lock_manager: LockManager,
-    pub tree: Arc<TreeManager>,
+    pub tree: Arc<EntityPathBuilder>,
 }
 
-impl Debug for FileSystemStorageEngine {
+impl Debug for StorageEngine {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileSystemStorageEngine").finish()
     }
 }
 
-impl FileSystemStorageEngine {
-    pub fn new(root_dir: String, lock_manager: LockManager) -> Self {
+impl StorageEngine {
+    pub fn new(fs_config: StorageFSConfig, lock_manager: LockManager) -> Self {
         Self {
-            tree: Arc::new(TreeManager { root_dir }),
+            tree: Arc::new(EntityPathBuilder::new(fs_config.root_dir)),
             lock_manager,
         }
     }
 
     #[instrument]
-    pub async fn get_file_size(&self, path: &str) -> Result<Option<u64>, RegistryError> {
+    pub async fn get_file_size(&self, path: &str) -> Result<Option<u64>, Error> {
         match fs::metadata(&path).await {
             Ok(metadata) => Ok(Some(metadata.len())),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
@@ -89,10 +89,7 @@ impl FileSystemStorageEngine {
     }
 
     #[instrument]
-    pub async fn collect_directory_entries(
-        &self,
-        path: &str,
-    ) -> Result<Vec<String>, RegistryError> {
+    pub async fn collect_directory_entries(&self, path: &str) -> Result<Vec<String>, Error> {
         let mut entries = Vec::new();
         let mut read_dir = match fs::read_dir(&path).await {
             Ok(rd) => rd,
@@ -110,9 +107,9 @@ impl FileSystemStorageEngine {
     }
 
     #[instrument]
-    pub async fn delete_empty_parent_dirs(&self, path: &str) -> Result<(), RegistryError> {
+    pub async fn delete_empty_parent_dirs(&self, path: &str) -> Result<(), Error> {
         let path = PathBuf::from(path);
-        let root_dir = Path::new(&self.tree.root_dir);
+        let root_dir = Path::new(&self.tree.prefix);
 
         let _ = fs::remove_dir_all(&path).await;
 
@@ -144,9 +141,9 @@ impl FileSystemStorageEngine {
         namespace: &str,
         digest: &Digest,
         operation: O,
-    ) -> Result<bool, RegistryError>
+    ) -> Result<bool, Error>
     where
-        O: FnOnce(&mut HashSet<LinkReference>),
+        O: FnOnce(&mut HashSet<EntityLink>),
     {
         debug!("Ensuring container directory for digest: {}", digest);
         let path = self.tree.blob_container_dir(digest);
@@ -156,8 +153,8 @@ impl FileSystemStorageEngine {
         let path = self.tree.blob_index_path(digest);
 
         let mut reference_index = match fs::read_to_string(&path).await {
-            Ok(content) => serde_json::from_str::<BlobReferenceIndex>(&content),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(BlobReferenceIndex::default()),
+            Ok(content) => serde_json::from_str::<BlobEntityLinkIndex>(&content),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(BlobEntityLinkIndex::default()),
             Err(e) => return Err(e.into()),
         }?;
 
@@ -173,7 +170,7 @@ impl FileSystemStorageEngine {
         let Some(index) = index else {
             // Not supposed to happen as we just inserted it
             warn!("Unable to reliably create reference index for {}", digest);
-            return Err(RegistryError::NameUnknown);
+            return Err(Error::NameUnknown);
         };
 
         operation(index);
@@ -193,9 +190,8 @@ impl FileSystemStorageEngine {
     }
 
     pub fn paginate<T>(
-        &self,
-        items: Vec<T>,
-        n: u32,
+        items: &[T],
+        n: u16,
         continuation_token: Option<String>,
     ) -> (Vec<T>, Option<String>)
     where
@@ -216,8 +212,8 @@ impl FileSystemStorageEngine {
 
         let items = items[start..end].to_vec();
         if end < items.len() {
-            let next = items[end].clone();
-            (items, Some(next.to_string()))
+            let next = items[end].to_string();
+            (items, Some(next))
         } else {
             (items, None)
         }
@@ -225,34 +221,34 @@ impl FileSystemStorageEngine {
 }
 
 #[async_trait]
-impl StorageEngine for FileSystemStorageEngine {
+impl GenericStorageEngine for StorageEngine {
     #[instrument(skip(self))]
     async fn list_namespaces(
         &self,
-        n: u32,
+        n: u16,
         last: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), RegistryError> {
+    ) -> Result<(Vec<String>, Option<String>), Error> {
         let base_path = self.tree.repository_dir();
         let base_path = Path::new(&base_path);
 
         let repositories = self.collect_repositories(base_path).await;
 
-        Ok(self.paginate(repositories, n, last))
+        Ok(Self::paginate(&repositories, n, last))
     }
 
     #[instrument(skip(self))]
     async fn list_tags(
         &self,
         namespace: &str,
-        n: u32,
+        n: u16,
         last: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), RegistryError> {
+    ) -> Result<(Vec<String>, Option<String>), Error> {
         let path = self.tree.manifest_tags_dir(namespace);
         debug!("Listing tags in path: {}", path);
         let mut tags = self.collect_directory_entries(&path).await?;
         tags.sort();
 
-        Ok(self.paginate(tags, n, last))
+        Ok(Self::paginate(&tags, n, last))
     }
 
     #[instrument(skip(self))]
@@ -261,7 +257,7 @@ impl StorageEngine for FileSystemStorageEngine {
         namespace: &str,
         digest: &Digest,
         artifact_type: Option<String>,
-    ) -> Result<Vec<Descriptor>, RegistryError> {
+    ) -> Result<Vec<Descriptor>, Error> {
         let _guard = self.lock_manager.read_lock(digest.to_string()).await;
         let path = self.tree.manifest_referrers_dir(namespace, digest);
         let all_manifest = self.collect_directory_entries(&path).await?;
@@ -309,9 +305,9 @@ impl StorageEngine for FileSystemStorageEngine {
     async fn list_uploads(
         &self,
         namespace: &str,
-        n: u32,
+        n: u16,
         continuation_token: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), RegistryError> {
+    ) -> Result<(Vec<String>, Option<String>), Error> {
         let path = self.tree.uploads_root_dir(namespace);
 
         let mut uploads = Vec::new();
@@ -319,15 +315,15 @@ impl StorageEngine for FileSystemStorageEngine {
             uploads.push(upload);
         }
 
-        Ok(self.paginate(uploads, n, continuation_token))
+        Ok(Self::paginate(&uploads, n, continuation_token))
     }
 
     #[instrument(skip(self))]
     async fn list_blobs(
         &self,
-        n: u32,
+        n: u16,
         continuation_token: Option<String>,
-    ) -> Result<(Vec<Digest>, Option<String>), RegistryError> {
+    ) -> Result<(Vec<Digest>, Option<String>), Error> {
         let path = PathBuf::new()
             .join(self.tree.blobs_root_dir())
             .join("sha256")
@@ -351,15 +347,15 @@ impl StorageEngine for FileSystemStorageEngine {
             }
         }
 
-        Ok(self.paginate(digests, n, continuation_token))
+        Ok(Self::paginate(&digests, n, continuation_token))
     }
 
     async fn list_revisions(
         &self,
         namespace: &str,
-        n: u32,
+        n: u16,
         continuation_token: Option<String>,
-    ) -> Result<(Vec<Digest>, Option<String>), RegistryError> {
+    ) -> Result<(Vec<Digest>, Option<String>), Error> {
         let path = self
             .tree
             .manifest_revisions_link_root_dir(namespace, "sha256"); // HACK: hardcoded sha256
@@ -371,11 +367,11 @@ impl StorageEngine for FileSystemStorageEngine {
             revisions.push(Digest::Sha256(revision));
         }
 
-        Ok(self.paginate(revisions, n, continuation_token))
+        Ok(Self::paginate(&revisions, n, continuation_token))
     }
 
     #[instrument(skip(self))]
-    async fn create_upload(&self, name: &str, uuid: &str) -> Result<String, RegistryError> {
+    async fn create_upload(&self, name: &str, uuid: &str) -> Result<String, Error> {
         let _guard = self
             .lock_manager
             .write_lock("dir-management".to_string())
@@ -411,7 +407,7 @@ impl StorageEngine for FileSystemStorageEngine {
         uuid: &str,
         source: &[u8],
         append: bool,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<(), Error> {
         let start_offset = if append {
             let summary = self.read_upload_summary(name, uuid).await?;
             summary.size
@@ -430,11 +426,9 @@ impl StorageEngine for FileSystemStorageEngine {
             .map_err(|e| {
                 error!("Error opening upload file {:}: {}", file_path, e);
                 if e.kind() == ErrorKind::NotFound {
-                    RegistryError::BlobUploadUnknown
+                    Error::BlobUploadUnknown
                 } else {
-                    RegistryError::InternalServerError(Some(
-                        "Error opening upload file".to_string(),
-                    ))
+                    Error::Internal(Some("Error opening upload file".to_string()))
                 }
             })?;
 
@@ -465,16 +459,12 @@ impl StorageEngine for FileSystemStorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn read_upload_summary(
-        &self,
-        name: &str,
-        uuid: &str,
-    ) -> Result<UploadSummary, RegistryError> {
+    async fn read_upload_summary(&self, name: &str, uuid: &str) -> Result<UploadSummary, Error> {
         let file_path = self.tree.upload_path(name, uuid);
         let size = self
             .get_file_size(&file_path)
             .await?
-            .ok_or(RegistryError::BlobUnknown)?;
+            .ok_or(Error::BlobUnknown)?;
 
         let path = self
             .tree
@@ -506,23 +496,22 @@ impl StorageEngine for FileSystemStorageEngine {
         name: &str,
         uuid: &str,
         digest: Option<Digest>,
-    ) -> Result<Digest, RegistryError> {
+    ) -> Result<Digest, Error> {
         let upload_path = self.tree.upload_path(name, uuid);
         let Some(size) = self.get_file_size(&upload_path).await? else {
-            return Err(RegistryError::BlobUnknown);
+            return Err(Error::BlobUnknown);
         };
 
-        let digest = match digest {
-            Some(digest) => digest,
-            None => {
-                let path = self
-                    .tree
-                    .upload_hash_context_path(name, uuid, "sha256", size);
-                let state = fs::read(&path).await?;
-                let hasher = deserialize_hash_state(state).await?;
-                let digest = hasher.finalize();
-                Digest::Sha256(hex::encode(digest))
-            }
+        let digest = if let Some(digest) = digest {
+            digest
+        } else {
+            let path = self
+                .tree
+                .upload_hash_context_path(name, uuid, "sha256", size);
+            let state = fs::read(&path).await?;
+            let hasher = deserialize_hash_state(state).await?;
+            let digest = hasher.finalize();
+            Digest::Sha256(hex::encode(digest))
         };
 
         let _guard = self.lock_manager.write_lock(digest.to_string()).await;
@@ -548,7 +537,7 @@ impl StorageEngine for FileSystemStorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn delete_upload(&self, name: &str, uuid: &str) -> Result<(), RegistryError> {
+    async fn delete_upload(&self, name: &str, uuid: &str) -> Result<(), Error> {
         let _guard = self
             .lock_manager
             .write_lock("dir-management".to_string())
@@ -561,7 +550,7 @@ impl StorageEngine for FileSystemStorageEngine {
     }
 
     #[instrument(skip(self, content))]
-    async fn create_blob(&self, content: &[u8]) -> Result<Digest, RegistryError> {
+    async fn create_blob(&self, content: &[u8]) -> Result<Digest, Error> {
         let mut hasher = Sha256::new();
         hasher.update(content);
         let digest = hasher.finalize();
@@ -584,14 +573,14 @@ impl StorageEngine for FileSystemStorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, RegistryError> {
+    async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error> {
         let _guard = self.lock_manager.read_lock(digest.to_string()).await;
         let path = self.tree.blob_path(digest);
         Ok(fs::read(path).await?)
     }
 
     #[instrument(skip(self))]
-    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobReferenceIndex, RegistryError> {
+    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
         let _guard = self.lock_manager.read_lock(digest.to_string()).await;
         let path = self.tree.blob_index_path(digest);
         let content = fs::read_to_string(&path).await?;
@@ -601,12 +590,10 @@ impl StorageEngine for FileSystemStorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn get_blob_size(&self, digest: &Digest) -> Result<u64, RegistryError> {
+    async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
         let _guard = self.lock_manager.read_lock(digest.to_string()).await;
         let path = self.tree.blob_path(digest);
-        self.get_file_size(&path)
-            .await?
-            .ok_or(RegistryError::BlobUnknown)
+        self.get_file_size(&path).await?.ok_or(Error::BlobUnknown)
     }
 
     #[instrument(skip(self))]
@@ -614,13 +601,13 @@ impl StorageEngine for FileSystemStorageEngine {
         &self,
         digest: &Digest,
         start_offset: Option<u64>,
-    ) -> Result<Box<dyn StorageEngineReader>, RegistryError> {
+    ) -> Result<Box<dyn Reader>, Error> {
         let _guard = self.lock_manager.read_lock(digest.to_string()).await;
 
         let path = self.tree.blob_path(digest);
         let mut file = match File::open(&path).await {
             Ok(file) => file,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Err(RegistryError::BlobUnknown),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Err(Error::BlobUnknown),
             Err(e) => return Err(e.into()),
         };
 
@@ -632,7 +619,7 @@ impl StorageEngine for FileSystemStorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn delete_blob(&self, digest: &Digest) -> Result<(), RegistryError> {
+    async fn delete_blob(&self, digest: &Digest) -> Result<(), Error> {
         let _guard = self.lock_manager.write_lock(digest.to_string()).await;
         let _guard = self
             .lock_manager
@@ -646,11 +633,31 @@ impl StorageEngine for FileSystemStorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn read_link(
-        &self,
-        name: &str,
-        reference: &LinkReference,
-    ) -> Result<Digest, RegistryError> {
+    async fn update_last_pulled(&self, name: &str, reference: &EntityLink) -> Result<(), Error> {
+        match reference {
+            EntityLink::Tag(_) => {
+                let path = self.tree.get_link_path(reference, name);
+                let _ = fs::metadata(&path).await?;
+
+                let digest = self.read_link(name, reference).await?;
+                let link = EntityLink::Digest(digest);
+                let path = self.tree.get_link_path(&link, name);
+                let _ = fs::metadata(&path).await?;
+            }
+            EntityLink::Digest(_) => {
+                let path = self.tree.get_link_path(reference, name);
+                let _ = fs::metadata(&path).await?;
+            }
+            _ => {
+                return Ok(()); // No-op
+            }
+        };
+
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn read_link(&self, name: &str, reference: &EntityLink) -> Result<Digest, Error> {
         debug!(
             "Reading link for namespace: {}, reference: {:?}",
             name, reference
@@ -668,9 +675,9 @@ impl StorageEngine for FileSystemStorageEngine {
     async fn create_link(
         &self,
         namespace: &str,
-        reference: &LinkReference,
+        reference: &EntityLink,
         digest: &Digest,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<(), Error> {
         debug!(
             "Creating link for namespace: {}, reference: {:?}",
             namespace, reference
@@ -711,18 +718,14 @@ impl StorageEngine for FileSystemStorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn delete_link(
-        &self,
-        namespace: &str,
-        reference: &LinkReference,
-    ) -> Result<(), RegistryError> {
+    async fn delete_link(&self, namespace: &str, reference: &EntityLink) -> Result<(), Error> {
         debug!(
             "Deleting link for namespace: {}, reference: {:?}",
             namespace, reference
         );
         let digest = match self.read_link(namespace, reference).await {
             Ok(digest) => digest,
-            Err(RegistryError::NameUnknown) => return Ok(()),
+            Err(Error::NameUnknown) => return Ok(()),
             Err(e) => return Err(e),
         };
 

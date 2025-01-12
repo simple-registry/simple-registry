@@ -1,0 +1,14 @@
+export OCI_ROOT_URL="http://127.0.0.1:8000"
+export OCI_NAMESPACE="conformance/test"
+export OCI_CROSSMOUNT_NAMESPACE="conformance/cross-mount-test"
+
+# Which workflows to run
+export OCI_TEST_PULL=1
+export OCI_TEST_PUSH=1
+export OCI_TEST_CONTENT_DISCOVERY=1
+export OCI_TEST_CONTENT_MANAGEMENT=1
+
+# Extra settings
+export OCI_HIDE_SKIPPED_WORKFLOWS=0
+export OCI_DEBUG=0
+export OCI_DELETE_MANIFEST_BEFORE_BLOBS=0 # defaults to OCI_DELETE_MANIFEST_BEFORE_BLOBS=1 if not set

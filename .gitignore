@@ -1,5 +1,11 @@
-/conformance
 /target
 tls.d/*.pem
 tls.d/*.srl
 tls.d/*.csr
+/.*env
+/.idea
+/data-origin
+/config.toml
+
+# TO be reworked
+/test.sh

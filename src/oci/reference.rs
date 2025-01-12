@@ -1,5 +1,5 @@
-use crate::error::RegistryError;
 use crate::oci::digest::Digest;
+use crate::registry::Error;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::de::Visitor;
@@ -18,9 +18,9 @@ pub enum Reference {
 }
 
 impl Reference {
-    pub fn from_str(s: &str) -> Result<Self, RegistryError> {
+    pub fn from_str(s: &str) -> Result<Self, Error> {
         if s.is_empty() {
-            return Err(RegistryError::ManifestBlobUnknown);
+            return Err(Error::ManifestBlobUnknown);
         }
 
         if s.contains(':') {
@@ -28,7 +28,7 @@ impl Reference {
         } else if TAG_REGEX.is_match(s) {
             Ok(Reference::Tag(s.to_string()))
         } else {
-            Err(RegistryError::ManifestBlobUnknown)
+            Err(Error::ManifestBlobUnknown)
         }
     }
 }
@@ -36,8 +36,8 @@ impl Reference {
 impl Display for Reference {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Reference::Tag(s) => write!(f, "{}", s),
-            Reference::Digest(d) => write!(f, "{}", d),
+            Reference::Tag(s) => write!(f, "{s}"),
+            Reference::Digest(d) => write!(f, "{d}"),
         }
     }
 }
@@ -65,5 +65,63 @@ impl<'de> Deserialize<'de> for Reference {
         }
 
         deserializer.deserialize_str(ReferenceVisitor)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_reference_from_str() {
+        let tag_str = "latest";
+        let digest_str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        let Some(Reference::Tag(tag)) = Reference::from_str(tag_str).ok() else {
+            panic!("Failed to parse tag");
+        };
+        assert_eq!(tag, tag_str);
+
+        let Some(Reference::Digest(digest)) = Reference::from_str(digest_str).ok() else {
+            panic!("Failed to parse digest");
+        };
+        assert_eq!(digest.algorithm(), "sha256");
+        assert_eq!(
+            digest.hash(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn test_reference_display() {
+        let tag = "latest";
+        let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        assert_eq!(Reference::Tag(tag.to_string()).to_string(), tag);
+        assert_eq!(
+            Reference::Digest(digest.try_into().unwrap()).to_string(),
+            digest
+        );
+    }
+
+    #[test]
+    fn test_reference_deserialize() {
+        let tag_str = r#""latest""#;
+        let digest_str =
+            r#""sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef""#;
+
+        let Some(Reference::Tag(tag)) = serde_json::from_str(tag_str).ok() else {
+            panic!("Failed to parse tag");
+        };
+        assert_eq!(tag, "latest");
+
+        let Some(Reference::Digest(digest)) = serde_json::from_str(digest_str).ok() else {
+            panic!("Failed to parse digest");
+        };
+        assert_eq!(digest.algorithm(), "sha256");
+        assert_eq!(
+            digest.hash(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
     }
 }

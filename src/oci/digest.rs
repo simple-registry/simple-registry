@@ -1,9 +1,8 @@
+use crate::registry;
 use serde::de::{Error, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
-
-use crate::error::RegistryError;
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum Digest {
@@ -31,29 +30,26 @@ impl Digest {
 }
 
 impl TryFrom<&str> for Digest {
-    type Error = RegistryError;
+    type Error = registry::Error;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         let (algorithm, hash) = s.split_once(':').ok_or_else(|| {
-            RegistryError::InternalServerError(Some(format!(
-                "Digest must be in the format 'algorithm:hash', got '{}'",
-                s
+            registry::Error::Internal(Some(format!(
+                "Digest must be in the format 'algorithm:hash', got '{s}'"
             )))
         })?;
 
         // Only sha256 is supported at the moment
         if algorithm.to_lowercase() != "sha256" {
-            return Err(RegistryError::InternalServerError(Some(format!(
-                "Unsupported digest algorithm '{}'",
-                algorithm
+            return Err(registry::Error::Internal(Some(format!(
+                "Unsupported digest algorithm '{algorithm}'"
             ))));
         }
 
         // Check that hash is a valid sha256 hash (64 bytes representation)
         if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(RegistryError::InternalServerError(Some(format!(
-                "Invalid sha256 hash '{}'",
-                hash
+            return Err(registry::Error::Internal(Some(format!(
+                "Invalid sha256 hash '{hash}'"
             ))));
         }
 
@@ -99,5 +95,57 @@ impl Serialize for Digest {
         S: serde::Serializer,
     {
         serializer.serialize_str(&self.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::convert::TryInto;
+
+    #[test]
+    fn test_digest_try_from() {
+        let digest: Digest =
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .try_into()
+                .unwrap();
+
+        assert_eq!(digest.algorithm(), "sha256");
+        assert_eq!(
+            digest.hash(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(digest.hash_prefix(), "01");
+    }
+
+    #[test]
+    fn test_digest_try_from_invalid() {
+        let digest: Result<Digest, registry::Error> = "sha256:invalid".try_into();
+        assert!(digest.is_err());
+    }
+
+    #[test]
+    fn test_digest_display() {
+        let digest: Digest = Digest::Sha256(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        );
+        assert_eq!(
+            digest.to_string(),
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn test_digest_deserialize() {
+        let digest: Digest = serde_json::from_str(
+            r#""sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef""#,
+        )
+        .unwrap();
+        assert_eq!(
+            digest,
+            Digest::Sha256(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()
+            )
+        );
     }
 }

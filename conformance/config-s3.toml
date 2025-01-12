@@ -1,0 +1,17 @@
+[server]
+bind_address = "0.0.0.0"
+port = 8000
+streaming_chunk_size = "5MiB"
+
+[storage.s3]
+access_key_id = "root"
+secret_key = "roottoor"
+endpoint = "http://127.0.0.1:9000"
+bucket = "registry"
+region = "region"
+multipart_copy_threshold = "5GiB"
+multipart_copy_chunk_size = "100MiB"
+multipart_copy_jobs = 10
+
+[repository."conformance".access_policy]
+default_allow = true

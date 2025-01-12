@@ -1,104 +1,130 @@
-use crate::cmd::error::CommandError;
-use crate::configuration::Configuration;
+use crate::command;
 use crate::oci::Digest;
-use crate::registry::{parse_manifest_digests, LinkReference, Registry};
+use crate::registry::{parse_manifest_digests, Registry};
+use crate::storage::EntityLink;
+use argh::FromArgs;
 use chrono::{Duration, Utc};
+use std::collections::HashSet;
 use std::process::exit;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-pub struct ScrubOptions {
+#[derive(FromArgs, PartialEq, Debug)]
+#[argh(
+    subcommand,
+    name = "scrub",
+    description = "Check the storage backend for inconsistencies"
+)]
+pub struct Options {
+    #[argh(switch, short = 'd')]
+    /// only report issues, no changes will be made to the storage
     pub dry_mode: Option<bool>,
-    pub upload_timeout: Option<Duration>,
+    #[argh(option, short = 't')]
+    /// the maximum duration an upload can be in progress before it is considered obsolete in seconds
+    pub upload_timeout: Option<u32>, // TODO: use something more human friendly
+    #[argh(switch, short = 'u')]
+    /// check for obsolete uploads
     pub check_uploads: Option<bool>,
+    #[argh(switch, short = 'g')]
+    /// check for orphan blobs
     pub check_tags: Option<bool>,
+    #[argh(switch, short = 'r')]
+    /// check for revision inconsistencies
     pub check_revisions: Option<bool>,
+    #[argh(switch, short = 'b')]
+    /// check for blob inconsistencies
     pub check_blobs: Option<bool>,
+    #[argh(switch, short = 'p')]
+    /// enforce retention policies
+    pub enforce_retention_policies: Option<bool>,
 }
 
-impl ScrubOptions {
-    pub fn from_matches(matches: &clap::ArgMatches) -> Self {
-        let upload_timeout = matches
-            .get_one::<u32>("upload-timeout")
-            .cloned()
-            .map(|t| t as i64);
-        let upload_timeout = upload_timeout.map(Duration::hours);
-
-        Self {
-            dry_mode: matches.get_one::<bool>("dry-run").cloned(),
-            upload_timeout,
-            check_uploads: matches.get_one::<bool>("check-uploads").map(|_| true),
-            check_tags: matches.get_one::<bool>("check-tags").map(|_| true),
-            check_revisions: matches.get_one::<bool>("check-revisions").map(|_| true),
-            check_blobs: matches.get_one::<bool>("check-blobs").map(|_| true),
-        }
-    }
+#[derive(Hash, Eq, PartialEq)]
+enum ScrubCheck {
+    Uploads,
+    Tags,
+    Revisions,
+    Blobs,
+    Retention,
 }
 
-pub struct Scrub {
+pub struct Command {
     registry: Arc<Registry>,
     dry_mode: bool,
     upload_timeout: Duration,
-    check_uploads: bool,
-    check_tags: bool,
-    check_revisions: bool,
-    check_blobs: bool,
+    enabled_checks: HashSet<ScrubCheck>,
 }
 
-impl Scrub {
-    pub fn try_from_config(
-        config: &Configuration,
-        flags: &ScrubOptions,
-    ) -> Result<Self, CommandError> {
-        let registry = Arc::new(Registry::try_from_config(config)?);
+impl Command {
+    pub fn new(options: &Options, registry: Registry) -> Self {
+        let registry = Arc::new(registry);
 
-        let dry_mode = flags.dry_mode.unwrap_or(false);
-        let upload_timeout = flags.upload_timeout.unwrap_or(Duration::days(1));
-        let check_uploads = flags.check_uploads.unwrap_or(true);
-        let check_tags = flags.check_tags.unwrap_or(true);
-        let check_revisions = flags.check_revisions.unwrap_or(true);
-        let check_blobs = flags.check_blobs.unwrap_or(true);
+        let dry_mode = options.dry_mode.unwrap_or(true);
+        let mut enabled_checks = HashSet::new();
 
-        Ok(Self {
+        if options.check_uploads.unwrap_or(true) {
+            enabled_checks.insert(ScrubCheck::Uploads);
+        }
+
+        if options.check_tags.unwrap_or(true) {
+            enabled_checks.insert(ScrubCheck::Tags);
+        }
+
+        if options.check_revisions.unwrap_or(true) {
+            enabled_checks.insert(ScrubCheck::Revisions);
+        }
+
+        if options.check_blobs.unwrap_or(true) {
+            enabled_checks.insert(ScrubCheck::Blobs);
+        }
+
+        if options.enforce_retention_policies.unwrap_or(true) {
+            enabled_checks.insert(ScrubCheck::Retention);
+        }
+
+        Self {
             registry,
             dry_mode,
-            upload_timeout,
-            check_uploads,
-            check_tags,
-            check_revisions,
-            check_blobs,
-        })
+            upload_timeout: options
+                .upload_timeout
+                .map_or(Duration::days(1), |s| Duration::seconds(s.into())),
+            enabled_checks,
+        }
     }
 
-    pub async fn run(&self) -> Result<(), CommandError> {
+    pub async fn run(&self) -> Result<(), command::Error> {
         if self.dry_mode {
             info!("Dry-run mode: no changes will be made to the storage");
         }
 
         let mut marker = None;
         loop {
-            let Ok((namespaces, next_marker)) =
-                self.registry.storage.list_namespaces(100, marker).await
+            let Ok((namespaces, next_marker)) = self
+                .registry
+                .storage_engine
+                .list_namespaces(100, marker)
+                .await
             else {
                 error!("Failed to read catalog");
                 exit(1);
             };
 
             for namespace in namespaces {
-                if self.check_uploads {
+                // check self.enabled_checks contains ScrubCheck::Uploads
+                if self.enabled_checks.contains(&ScrubCheck::Uploads) {
                     // Step 1: check upload directories
                     // - for incomplete uploads (threshold from config file)
                     // - delete corrupted upload directories (here we are incompatible with docker "distribution")
                     let _ = self.scrub_uploads(&namespace).await;
                 }
 
-                if self.check_tags {
+                if self.enabled_checks.contains(&ScrubCheck::Tags) {
                     // Step 2: for each manifest tags "_manifests/tags/<tag-name>/current/link", ensure the
                     // revision exists: "_manifests/revisions/sha256/<hash>/link"
                     let _ = self.scrub_tags(&namespace).await;
                 }
 
-                if self.check_revisions {
+                if self.enabled_checks.contains(&ScrubCheck::Revisions) {
                     // Step 3: for each revision "_manifests/revisions/sha256/<hash>/link", read the manifest,
                     // and ensure related links exists
                     let _ = self.scrub_revisions(&namespace).await;
@@ -112,7 +138,7 @@ impl Scrub {
             marker = next_marker;
         }
 
-        if self.check_blobs {
+        if self.enabled_checks.contains(&ScrubCheck::Blobs) {
             // Step 4: blob garbage collection
             let _ = self.cleanup_orphan_blobs().await;
         }
@@ -120,14 +146,14 @@ impl Scrub {
         Ok(())
     }
 
-    async fn scrub_uploads(&self, namespace: &str) -> Result<(), CommandError> {
+    async fn scrub_uploads(&self, namespace: &str) -> Result<(), command::Error> {
         info!("'{}': Checking for obsolete uploads", namespace);
 
         let mut marker = None;
         loop {
             let (uploads, next_marker) = self
                 .registry
-                .storage
+                .storage_engine
                 .list_uploads(namespace, 100, marker)
                 .await?;
 
@@ -146,10 +172,10 @@ impl Scrub {
         Ok(())
     }
 
-    async fn check_upload(&self, namespace: &str, uuid: &str) -> Result<(), CommandError> {
+    async fn check_upload(&self, namespace: &str, uuid: &str) -> Result<(), command::Error> {
         let summary = self
             .registry
-            .storage
+            .storage_engine
             .read_upload_summary(namespace, uuid)
             .await?;
 
@@ -162,7 +188,12 @@ impl Scrub {
 
         warn!("'{}': upload '{}' is obsolete", namespace, uuid);
         if !self.dry_mode {
-            if let Err(err) = self.registry.storage.delete_upload(namespace, uuid).await {
+            if let Err(err) = self
+                .registry
+                .storage_engine
+                .delete_upload(namespace, uuid)
+                .await
+            {
                 error!("Failed to delete upload '{}': {}", uuid, err);
             }
         }
@@ -170,14 +201,14 @@ impl Scrub {
         Ok(())
     }
 
-    async fn scrub_tags(&self, namespace: &str) -> Result<(), CommandError> {
+    async fn scrub_tags(&self, namespace: &str) -> Result<(), command::Error> {
         info!("'{}': Checking tags/revision inconsistencies", namespace);
 
         let mut marker = None;
         loop {
             let (tags, next_marker) = self
                 .registry
-                .storage
+                .storage_engine
                 .list_tags(namespace, 100, marker)
                 .await?;
 
@@ -196,18 +227,18 @@ impl Scrub {
         Ok(())
     }
 
-    async fn check_tag(&self, namespace: &str, tag: &str) -> Result<(), CommandError> {
+    async fn check_tag(&self, namespace: &str, tag: &str) -> Result<(), command::Error> {
         debug!(
             "Checking {}:{} for revision inconsistencies",
             namespace, tag
         );
         let digest = self
             .registry
-            .storage
-            .read_link(namespace, &LinkReference::Tag(tag.to_string()))
+            .storage_engine
+            .read_link(namespace, &EntityLink::Tag(tag.to_string()))
             .await?;
 
-        let link_reference = LinkReference::Digest(digest.clone());
+        let link_reference = EntityLink::Digest(digest.clone());
         if let Err(e) = self.ensure_link(namespace, &link_reference, &digest).await {
             warn!("Failed to ensure link: {}", e);
         }
@@ -215,7 +246,7 @@ impl Scrub {
         Ok(())
     }
 
-    async fn scrub_revisions(&self, namespace: &str) -> Result<(), CommandError> {
+    async fn scrub_revisions(&self, namespace: &str) -> Result<(), command::Error> {
         info!("'{}': Checking for revision inconsistencies", namespace);
 
         let mut marker = None;
@@ -223,12 +254,12 @@ impl Scrub {
         loop {
             let (revisions, next_marker) = self
                 .registry
-                .storage
+                .storage_engine
                 .list_revisions(namespace, 0, marker)
                 .await?;
 
             for revision in revisions {
-                let content = self.registry.storage.read_blob(&revision).await?;
+                let content = self.registry.storage_engine.read_blob(&revision).await?;
                 let manifest = parse_manifest_digests(&content, None)?;
 
                 self.check_layers(namespace, &revision, &manifest.layers)
@@ -254,7 +285,7 @@ impl Scrub {
         namespace: &str,
         revision: &Digest,
         config: Option<Digest>,
-    ) -> Result<(), CommandError> {
+    ) -> Result<(), command::Error> {
         let Some(config_digest) = config else {
             return Ok(());
         };
@@ -264,7 +295,7 @@ impl Scrub {
             namespace, revision, config_digest
         );
 
-        let link_reference = LinkReference::Config(config_digest.clone());
+        let link_reference = EntityLink::Config(config_digest.clone());
         self.ensure_link(namespace, &link_reference, &config_digest)
             .await?;
 
@@ -276,7 +307,7 @@ impl Scrub {
         namespace: &str,
         revision: &Digest,
         subject_digest: Option<Digest>,
-    ) -> Result<(), CommandError> {
+    ) -> Result<(), command::Error> {
         let Some(subject_digest) = subject_digest else {
             return Ok(());
         };
@@ -285,7 +316,7 @@ impl Scrub {
             "Checking {}@{} subject link: {}",
             namespace, revision, subject_digest
         );
-        let link_reference = LinkReference::Referrer(subject_digest.clone(), revision.clone());
+        let link_reference = EntityLink::Referrer(subject_digest.clone(), revision.clone());
         self.ensure_link(namespace, &link_reference, revision)
             .await?;
 
@@ -297,14 +328,14 @@ impl Scrub {
         namespace: &str,
         revision: &Digest,
         layers: &Vec<Digest>,
-    ) -> Result<(), CommandError> {
+    ) -> Result<(), command::Error> {
         for layer_digest in layers {
             debug!(
                 "Checking {}@{} layer link: {}",
                 namespace, revision, layer_digest
             );
 
-            let link_reference = LinkReference::Layer(layer_digest.clone());
+            let link_reference = EntityLink::Layer(layer_digest.clone());
             self.ensure_link(namespace, &link_reference, layer_digest)
                 .await?;
         }
@@ -315,37 +346,44 @@ impl Scrub {
     async fn ensure_link(
         &self,
         namespace: &str,
-        link_reference: &LinkReference,
+        link_reference: &EntityLink,
         digest: &Digest,
-    ) -> Result<(), CommandError> {
+    ) -> Result<(), command::Error> {
         let blob_digest = self
             .registry
-            .storage
+            .storage_engine
             .read_link(namespace, link_reference)
             .await
             .ok();
 
-        if blob_digest != Some(digest.clone()) {
-            warn!(
-                "Invalid revision: expected '{:?}', found '{:?}'",
-                digest, blob_digest
-            );
-            if !self.dry_mode {
-                self.registry
-                    .storage
-                    .create_link(namespace, link_reference, digest)
-                    .await?;
+        if let Some(link_digest) = blob_digest {
+            if &link_digest == digest {
+                debug!("Link {:?} -> {:?} is valid", link_reference, digest);
+                return Ok(());
             }
         }
+
+        warn!(
+            "Missing or invalid link: {:?} -> {:?}",
+            link_reference, digest
+        );
+        if !self.dry_mode {
+            self.registry
+                .storage_engine
+                .create_link(namespace, link_reference, digest)
+                .await?;
+        }
+
         Ok(())
     }
 
-    async fn cleanup_orphan_blobs(&self) -> Result<(), CommandError> {
+    async fn cleanup_orphan_blobs(&self) -> Result<(), command::Error> {
         info!("Checking for orphan blobs");
 
         let mut marker = None;
         loop {
-            let Ok((blobs, next_marker)) = self.registry.storage.list_blobs(100, marker).await
+            let Ok((blobs, next_marker)) =
+                self.registry.storage_engine.list_blobs(100, marker).await
             else {
                 error!("Failed to list blobs");
                 exit(1);
@@ -364,14 +402,14 @@ impl Scrub {
         Ok(())
     }
 
-    async fn check_blob(&self, blob: &Digest) -> Result<(), CommandError> {
-        let mut blob_index = self.registry.storage.read_blob_index(blob).await?;
+    async fn check_blob(&self, blob: &Digest) -> Result<(), command::Error> {
+        let mut blob_index = self.registry.storage_engine.read_blob_index(blob).await?;
 
         for (namespace, references) in blob_index.namespace.clone() {
             for link_reference in references {
                 if self
                     .registry
-                    .storage
+                    .storage_engine
                     .read_link(&namespace, &link_reference)
                     .await
                     .is_err()
@@ -399,7 +437,7 @@ impl Scrub {
         if blob_index.namespace.is_empty() {
             warn!("Orphan blob: {}", blob);
             if !self.dry_mode {
-                if let Err(err) = self.registry.storage.delete_blob(blob).await {
+                if let Err(err) = self.registry.storage_engine.delete_blob(blob).await {
                     error!("Failed to delete blob: {}", err);
                 }
             }
