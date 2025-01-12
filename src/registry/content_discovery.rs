@@ -31,10 +31,7 @@ impl Registry {
     ) -> Result<(Vec<String>, Option<String>), Error> {
         let n = n.unwrap_or(100);
 
-        let (namespaces, next_last) = self
-            .storage_engine
-            .list_revisions("test/nginx", n, last)
-            .await?;
+        let (namespaces, next_last) = self.storage_engine.list_namespaces(n, last).await?;
         let link = next_last.map(|next_last| format!("/v2/_catalog?n={n}&last={next_last}"));
 
         let namespaces = namespaces

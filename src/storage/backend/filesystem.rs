@@ -231,7 +231,8 @@ impl GenericStorageEngine for StorageEngine {
         let base_path = self.tree.repository_dir();
         let base_path = Path::new(&base_path);
 
-        let repositories = self.collect_repositories(base_path).await;
+        let mut repositories = self.collect_repositories(base_path).await;
+        repositories.dedup();
 
         Ok(Self::paginate(&repositories, n, last))
     }
