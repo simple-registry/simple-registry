@@ -28,7 +28,7 @@ use crate::storage::entity_link::EntityLink;
 use crate::storage::entity_path_builder::EntityPathBuilder;
 use crate::storage::{
     deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobEntityLinkIndex,
-    GenericStorageEngine, Reader, UploadSummary,
+    GenericStorageEngine, Reader, ReferenceInfo, UploadSummary,
 };
 
 const PUSHED_AT_METADATA_KEY: &str = "pushed";
@@ -1198,6 +1198,38 @@ impl GenericStorageEngine for StorageEngine {
 
         let content_length = self.get_object_size(&path).await?;
         Ok(content_length)
+    }
+
+    #[instrument(skip(self))]
+    async fn read_reference_info(
+        &self,
+        name: &str,
+        reference: &EntityLink,
+    ) -> Result<ReferenceInfo, Error> {
+        let key = match reference {
+            EntityLink::Tag(_) => self.tree.get_link_path(reference, name),
+            EntityLink::Digest(_) => self.tree.get_link_path(reference, name),
+            _ => return Err(Error::NotFound),
+        };
+
+        let res = self.head_object(&key).await?;
+
+        let metadata = res.metadata.unwrap_or_default();
+
+        let created_at = metadata
+            .get(PUSHED_AT_METADATA_KEY)
+            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+            .unwrap_or_default();
+
+        let accessed_at = metadata
+            .get(LAST_PULLED_AT_METADATA_KEY)
+            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+            .unwrap_or_default();
+
+        Ok(ReferenceInfo {
+            created_at,
+            accessed_at,
+        })
     }
 
     #[instrument(skip(self))]

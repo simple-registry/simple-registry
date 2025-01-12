@@ -6,7 +6,7 @@ use crate::storage::entity_link::EntityLink;
 use crate::storage::entity_path_builder::EntityPathBuilder;
 use crate::storage::{
     deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobEntityLinkIndex,
-    GenericStorageEngine, Reader, UploadSummary,
+    GenericStorageEngine, Reader, ReferenceInfo, UploadSummary,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -595,6 +595,32 @@ impl GenericStorageEngine for StorageEngine {
         let _guard = self.lock_manager.read_lock(digest.to_string()).await;
         let path = self.tree.blob_path(digest);
         self.get_file_size(&path).await?.ok_or(Error::BlobUnknown)
+    }
+
+    #[instrument(skip(self))]
+    async fn read_reference_info(
+        &self,
+        name: &str,
+        reference: &EntityLink,
+    ) -> Result<ReferenceInfo, Error> {
+        let key = match reference {
+            EntityLink::Tag(_) => self.tree.get_link_path(reference, name),
+            EntityLink::Digest(_) => self.tree.get_link_path(reference, name),
+            _ => return Err(Error::NotFound),
+        };
+
+        let metadata = fs::metadata(&key).await?;
+
+        let created_at = metadata.created()?;
+        let created_at = DateTime::<Utc>::from(created_at).with_timezone(&Utc);
+
+        let accessed_at = metadata.accessed()?;
+        let accessed_at = DateTime::<Utc>::from(accessed_at).with_timezone(&Utc);
+
+        Ok(ReferenceInfo {
+            created_at,
+            accessed_at,
+        })
     }
 
     #[instrument(skip(self))]
