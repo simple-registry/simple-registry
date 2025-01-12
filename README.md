@@ -136,8 +136,8 @@ rules = [
   'image.tag != "latest"',
   'image.pushed_at < now() - days(15)',
   'image.last_pulled_at < now() - days(15)',
-  'isMostRecentlyPulled(image, 10)',
-  'isMostRecentlyPushed(image, 10)',
+  'isMostRecentlyPulled(10)',
+  'isMostRecentlyPushed(10)',
 ]
 ```
 
@@ -194,8 +194,9 @@ The following `request.action` actions are supported:
 In addition to those variables, some helper functions are available:
 - `now()`: Returns the current time in seconds since epoch (1st of January 1970).
 - `days(d)`: Returns the number of seconds in `d` days.
-- `matches(<regex-pattern>, image.tag)`: Matches a string against a string.
-- `isMostRecentlyPulled(image)`
+- `matches("<regex-pattern>", image.tag)`: Matches a string against a string. The regex pattern is compiled on each call.
+- `isMostRecentlyPulled(k)`: Check if image is among the top last pulled `k`. 
+- `isMostRecentlyPushed(k)`: Check if image is among the top last pushed `k`.
 
 ## Roadmap
 
