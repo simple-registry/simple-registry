@@ -10,7 +10,7 @@ use crate::lock_manager::LockManager;
 use crate::registry::Registry;
 use crate::storage::build_storage_engine;
 use argh::FromArgs;
-use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
+use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
@@ -95,13 +95,16 @@ fn set_fs_watcher(
     config_path: &str,
     tls_config: Option<ServerTlsConfig>,
     server: &Arc<server::Command>,
-) -> Result<(), command::Error> {
+) -> Result<RecommendedWatcher, command::Error> {
+    info!("Setting up file system watcher for configuration file");
     let server_watcher = server.clone();
     let config_watcher_path = config_path.to_string();
     let mut config_watcher = recommended_watcher(move |event: notify::Result<Event>| {
+        info!("Configuration file changed");
         let server = server_watcher.clone();
         let config_path = config_watcher_path.clone();
         let Ok(event) = event else {
+            error!("Failed to watch configuration file: {:?}", event);
             return;
         };
 
@@ -152,7 +155,7 @@ fn set_fs_watcher(
         }
     }
 
-    Ok(())
+    Ok(config_watcher)
 }
 
 fn build_registry(
@@ -220,7 +223,7 @@ async fn main() -> Result<(), command::Error> {
                 registry,
             )?);
 
-            set_fs_watcher(&arguments.config, config.server.tls, &server)?;
+            let _watcher = set_fs_watcher(&arguments.config, config.server.tls, &server)?;
             server.run().await
         }
     }
