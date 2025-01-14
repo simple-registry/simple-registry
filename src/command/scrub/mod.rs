@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 #[derive(FromArgs, PartialEq, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 #[argh(
     subcommand,
     name = "scrub",
@@ -22,25 +23,25 @@ use tracing::{debug, error, info, warn};
 pub struct Options {
     #[argh(switch, short = 'd')]
     /// only report issues, no changes will be made to the storage
-    pub dry_mode: Option<bool>,
+    pub dry_mode: bool,
     #[argh(option, short = 't')]
     /// the maximum duration an upload can be in progress before it is considered obsolete in seconds
     pub upload_timeout: Option<u32>, // TODO: use something more human friendly
     #[argh(switch, short = 'u')]
     /// check for obsolete uploads
-    pub check_uploads: Option<bool>,
+    pub check_uploads: bool,
     #[argh(switch, short = 'g')]
     /// check for orphan blobs
-    pub check_tags: Option<bool>,
+    pub check_tags: bool,
     #[argh(switch, short = 'r')]
     /// check for revision inconsistencies
-    pub check_revisions: Option<bool>,
+    pub check_revisions: bool,
     #[argh(switch, short = 'b')]
     /// check for blob inconsistencies
-    pub check_blobs: Option<bool>,
+    pub check_blobs: bool,
     #[argh(switch, short = 'p')]
     /// enforce retention policies
-    pub enforce_retention_policies: Option<bool>,
+    pub enforce_retention_policies: bool,
 }
 
 #[derive(Hash, Eq, PartialEq)]
@@ -63,26 +64,26 @@ impl Command {
     pub fn new(options: &Options, registry: Registry) -> Self {
         let registry = Arc::new(registry);
 
-        let dry_mode = options.dry_mode.unwrap_or(true);
+        let dry_mode = options.dry_mode;
         let mut enabled_checks = HashSet::new();
 
-        if options.check_uploads.unwrap_or(true) {
+        if options.check_uploads {
             enabled_checks.insert(ScrubCheck::Uploads);
         }
 
-        if options.check_tags.unwrap_or(true) {
+        if options.check_tags {
             enabled_checks.insert(ScrubCheck::Tags);
         }
 
-        if options.check_revisions.unwrap_or(true) {
+        if options.check_revisions {
             enabled_checks.insert(ScrubCheck::Revisions);
         }
 
-        if options.check_blobs.unwrap_or(true) {
+        if options.check_blobs {
             enabled_checks.insert(ScrubCheck::Blobs);
         }
 
-        if options.enforce_retention_policies.unwrap_or(true) {
+        if options.enforce_retention_policies {
             enabled_checks.insert(ScrubCheck::Retention);
         }
 
