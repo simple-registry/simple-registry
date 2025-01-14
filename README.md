@@ -107,7 +107,28 @@ Multiple storage backends are supported: filesystem or s3-baked.
 
 ### Repository (`repository."<namespace>"`)
 
-This section is repeated for each repository.
+### Pull-through cache (`repository."<namespace>".upstream`)
+
+When a non-empty list of upstreams is defined, the registry will act as a pull-through cache for the specified
+repositories. In this case, write operations are disabled for the namespace.
+
+Example:
+
+```toml
+[[repository."library".upstream]]
+url = "docker.io/library"
+client_certificate = "/path/to/client.crt"
+client_private_key = "/path/to/client.key"
+
+[[repository."library".upstream]]
+url = "https://registry-1.docker.io"
+username = "username"
+password = "password"
+
+[[repository."library".upstream]]
+url = "https://index.docker.io/library"
+# anonymous access
+```
 
 #### Access Control Policy (`repository."<namespace>".access_policy`)
 
@@ -202,7 +223,5 @@ In addition to those variables, some helper functions are available:
 
 ## Roadmap
 
-- [ ] Pull-through cache
 - [ ] Kubernetes Operator (new project)
-  - [ ] Kubernetes locking backend (?)
 - [ ] OpenMetrics exporter
