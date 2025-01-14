@@ -4,7 +4,7 @@ tls.d/*.srl
 tls.d/*.csr
 /.*env
 /.idea
-/data-origin
+/data-simple-registry
 /config.toml
 
 # TO be reworked

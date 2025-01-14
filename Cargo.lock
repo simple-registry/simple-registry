@@ -2126,49 +2126,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "origin"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "argh",
- "argon2",
- "async-trait",
- "aws-sdk-s3",
- "base64 0.22.1",
- "cel-interpreter",
- "chrono",
- "futures-util",
- "hex",
- "http-body-util",
- "hyper 1.5.2",
- "hyper-util",
- "lazy_static",
- "notify",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry-semantic-conventions",
- "opentelemetry-stdout",
- "opentelemetry_sdk",
- "redis",
- "regex",
- "rustls 0.23.20",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha2 0.11.0-pre.4",
- "tokio",
- "tokio-rustls 0.26.1",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "uuid",
- "x509-parser",
-]
-
-[[package]]
 name = "outref"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2863,6 +2820,49 @@ checksum = "74233d3b3b2f6d4b006dc19dee745e73e2a6bfb6f93607cd3b02bd5b00797d7c"
 dependencies = [
  "digest 0.10.7",
  "rand_core",
+]
+
+[[package]]
+name = "simple-registry"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "argh",
+ "argon2",
+ "async-trait",
+ "aws-sdk-s3",
+ "base64 0.22.1",
+ "cel-interpreter",
+ "chrono",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper 1.5.2",
+ "hyper-util",
+ "lazy_static",
+ "notify",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry-semantic-conventions",
+ "opentelemetry-stdout",
+ "opentelemetry_sdk",
+ "redis",
+ "regex",
+ "rustls 0.23.20",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2 0.11.0-pre.4",
+ "tokio",
+ "tokio-rustls 0.26.1",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "uuid",
+ "x509-parser",
 ]
 
 [[package]]

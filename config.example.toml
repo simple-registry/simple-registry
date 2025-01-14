@@ -13,7 +13,7 @@ client_ca_bundle   = "tls.d/client-ca-bundle.pem"
 #ttl = 5
 
 [storage.fs]
-root_dir = "./data-origin"
+root_dir = "./data-simple-registry"
 
 #[storage.s3]
 #access_key_id = "<key-id>"

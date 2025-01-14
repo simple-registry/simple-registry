@@ -1,4 +1,4 @@
-# Origin
+# Simple-Registry
 
 A fully OCI-compliant container registry that performs reasonably well with classic Docker tooling.
 
@@ -16,7 +16,7 @@ Goals
 ## Usage
 
 ```
-Usage: origin [-c <config>] <command> [<args>]
+Usage: simple-registry [-c <config>] <command> [<args>]
 
 An OCI-compliant and docker-compatible registry service
 
