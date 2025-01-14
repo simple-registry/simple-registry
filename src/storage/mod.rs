@@ -56,6 +56,7 @@ pub struct BlobEntityLinkIndex {
     pub namespace: HashMap<String, HashSet<EntityLink>>,
 }
 
+#[derive(Clone)]
 pub struct ReferenceInfo {
     pub created_at: DateTime<Utc>,
     pub accessed_at: DateTime<Utc>,

@@ -1,15 +1,17 @@
+mod retention_policy;
+
 use crate::command;
 use crate::oci::{Digest, Reference};
 use crate::policy::ManifestImage;
 use crate::registry::{parse_manifest_digests, Registry};
-use crate::storage::EntityLink;
+use crate::storage::{EntityLink, ReferenceInfo};
 use argh::FromArgs;
-use cel_interpreter::{Context, Program, Value};
 use chrono::{Duration, Utc};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::exit;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
+use crate::command::scrub::retention_policy::manifest_should_be_purged;
 
 #[derive(FromArgs, PartialEq, Debug)]
 #[argh(
@@ -155,108 +157,78 @@ impl Command {
         info!("'{}': Enforcing retention policy", namespace);
 
         let mut marker = None;
-        let mut all_tags = Vec::new();
+        let mut tag_names = Vec::new();
         loop {
             let (tags, next_marker) = self
                 .registry
                 .storage_engine
                 .list_tags(namespace, 1000, marker)
                 .await?;
-            all_tags.extend(tags);
+            tag_names.extend(tags);
             if next_marker.is_none() {
                 break;
             }
             marker = next_marker;
         }
 
-        for tag in &all_tags {
-            self.check_tag_retention(namespace, tag).await?;
+
+        let mut tags = HashMap::new();
+        for tag in &tag_names {
+            let info = self.registry.storage_engine.read_reference_info(
+                namespace,
+                &EntityLink::Tag(tag.to_string()),
+            ).await?;
+            tags.insert(tag.to_string(), info);
         }
+
+        self.check_tag_retention(namespace, tags).await?;
 
         Ok(())
     }
 
-    async fn check_tag_retention(&self, namespace: &str, tag: &str) -> Result<(), command::Error> {
-        debug!("'{}': Checking tag '{}' for retention", namespace, tag);
+    async fn check_tag_retention(&self, namespace: &str, mut tags: HashMap<String, ReferenceInfo>) -> Result<(), command::Error> {
+        let tags: Vec<(String, ReferenceInfo)> = tags.drain().collect();
 
-        let Some((_, found_repository)) = self
-            .registry
-            .repositories
-            .iter()
-            .find(|(repository, _)| namespace.starts_with(*repository))
-        else {
-            warn!("Unable to find repository for namespace: {}", namespace);
-            return Ok(());
-        };
+        let mut last_pushed = tags.clone();
+        last_pushed.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
+        let mut last_pushed = last_pushed.iter().map(|(tag, _)| tag.clone()).collect::<Vec<String>>();
 
-        let reference = EntityLink::Tag(tag.to_string());
-        let info = self
-            .registry
-            .storage_engine
-            .read_reference_info(namespace, &reference)
-            .await?;
+        let mut last_pulled = tags.clone();
+        last_pulled.sort_by(|a, b| b.1.accessed_at.cmp(&a.1.accessed_at));
+        let mut last_pulled = last_pulled.iter().map(|(tag, _)| tag.clone()).collect::<Vec<String>>();
 
-        let manifest = ManifestImage {
-            tag: Some(tag.to_string()),
-            pushed_at: info.created_at.timestamp(),
-            last_pulled_at: info.accessed_at.timestamp(),
-        };
+        for (tag, info) in &tags {
+            debug!("'{}': Checking tag '{}' for retention", namespace, tag);
 
-        if !Self::check_retention_policy(&found_repository.retention_rules, &manifest) {
-            info!("Available for cleanup: {}:{}", namespace, tag);
-            if !self.dry_mode {
-                let reference = Reference::Tag(tag.to_string());
-                let _ = self.registry.delete_manifest(namespace, reference).await;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn check_retention_policy(policies: &[Program], manifest: &ManifestImage) -> bool {
-        let mut context = Context::default();
-        debug!("Policy context (image) : {:?}", manifest);
-        if let Err(e) = context.add_variable("image", manifest) {
-            error!("Failed to add image to policy context: {}", e);
-            return false;
-        };
-
-        context.add_function("now", || {
-            Utc::now().timestamp()
-        });
-
-        context.add_function("days", |d: i64| {
-            d * 86400
-        });
-
-        for policy in policies {
-            let evaluation_result = match policy.execute(&context) {
-                Ok(e) => e,
-                Err(e) => {
-                    error!("Policy execution failed: {}", e);
-                    return true;
-                }
+            let Some((_, found_repository)) = self
+                .registry
+                .repositories
+                .iter()
+                .find(|(repository, _)| namespace.starts_with(*repository))
+            else {
+                warn!("Unable to find repository for namespace: {}", namespace);
+                return Ok(());
             };
 
-            debug!(
-                "CEL program '{:?}' evaluates to {:?}",
-                policy, evaluation_result
-            );
-            match evaluation_result {
-                Value::Bool(true) => {
-                    debug!("Retention policy matched");
-                    return true;
-                }
-                Value::Bool(false) => { // Not validated, continue checking
-                }
-                _ => {
-                    debug!("Not eligible for cleanup");
-                    return true;
+            let manifest = ManifestImage {
+                tag: Some(tag.to_string()),
+                pushed_at: info.created_at.timestamp(),
+                last_pulled_at: info.accessed_at.timestamp(),
+            };
+
+            if manifest_should_be_purged(&found_repository.retention_rules, manifest, &last_pushed, &last_pulled)? {
+                info!("Available for cleanup: {}:{}", namespace, tag);
+                if !self.dry_mode {
+                    let reference = Reference::Tag(tag.to_string());
+                    let _ = self.registry.delete_manifest(namespace, reference).await;
+
+                    last_pushed.retain(|t| t != tag);
+                    last_pulled.retain(|t| t != tag);
                 }
             }
         }
 
-        false
+        Ok(())
     }
 
     async fn scrub_uploads(&self, namespace: &str) -> Result<(), command::Error> {

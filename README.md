@@ -136,10 +136,12 @@ rules = [
   'image.tag != "latest"',
   'image.pushed_at < now() - days(15)',
   'image.last_pulled_at < now() - days(15)',
-  'isMostRecentlyPulled(10)',
-  'isMostRecentlyPushed(10)',
+  'top(image.tag, last_pulled, 10)', # image.tag is among top 10 last pulled
+  'top(image.tag, last_pushed, 10)', # image.tag is among top 10 last pushed
 ]
 ```
+
+Currently, this policy is enforced by the `scrub` command, which can be run as a cron job.
 
 ### Tracing (`observability.tracing`)
 
@@ -189,14 +191,15 @@ The following `request.action` actions are supported:
 
 - `image.tag`: The tag of the image, when evaluating a Tag (can be unspecified)
 - `image.pushed_at`: The time the manifest was pushed at
-- `image.last_pulled_at`: The time the manifest was last pulled (can be unspecified) 
+- `image.last_pulled_at`: The time the manifest was last pulled (can be unspecified)
+- `last_pushed`: A list of the last pushed tags ordered by reverse push time (most recent first)
+- `last_pulled`: A list of the last pulled tags ordered by reverse pull time (most recent first)
 
 In addition to those variables, some helper functions are available:
 - `now()`: Returns the current time in seconds since epoch (1st of January 1970).
 - `days(d)`: Returns the number of seconds in `d` days.
 - `matches("<regex-pattern>", image.tag)`: Matches a string against a string. The regex pattern is compiled on each call.
-- `isMostRecentlyPulled(k)`: Check if image is among the top last pulled `k`. 
-- `isMostRecentlyPushed(k)`: Check if image is among the top last pushed `k`.
+- `top(s, collection, k)`: Check if `s` is among the top `k` elements of `collection`.
 
 ## Roadmap
 
