@@ -1,6 +1,7 @@
 mod retention_policy;
 
 use crate::command;
+use crate::command::scrub::retention_policy::manifest_should_be_purged;
 use crate::oci::{Digest, Reference};
 use crate::policy::ManifestImage;
 use crate::registry::{parse_manifest_digests, Registry};
@@ -11,7 +12,6 @@ use std::collections::{HashMap, HashSet};
 use std::process::exit;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
-use crate::command::scrub::retention_policy::manifest_should_be_purged;
 
 #[derive(FromArgs, PartialEq, Debug)]
 #[argh(
@@ -171,13 +171,13 @@ impl Command {
             marker = next_marker;
         }
 
-
         let mut tags = HashMap::new();
         for tag in &tag_names {
-            let info = self.registry.storage_engine.read_reference_info(
-                namespace,
-                &EntityLink::Tag(tag.to_string()),
-            ).await?;
+            let info = self
+                .registry
+                .storage_engine
+                .read_reference_info(namespace, &EntityLink::Tag(tag.to_string()))
+                .await?;
             tags.insert(tag.to_string(), info);
         }
 
@@ -186,16 +186,26 @@ impl Command {
         Ok(())
     }
 
-    async fn check_tag_retention(&self, namespace: &str, mut tags: HashMap<String, ReferenceInfo>) -> Result<(), command::Error> {
+    async fn check_tag_retention(
+        &self,
+        namespace: &str,
+        mut tags: HashMap<String, ReferenceInfo>,
+    ) -> Result<(), command::Error> {
         let tags: Vec<(String, ReferenceInfo)> = tags.drain().collect();
 
         let mut last_pushed = tags.clone();
         last_pushed.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
-        let mut last_pushed = last_pushed.iter().map(|(tag, _)| tag.clone()).collect::<Vec<String>>();
+        let mut last_pushed = last_pushed
+            .iter()
+            .map(|(tag, _)| tag.clone())
+            .collect::<Vec<String>>();
 
         let mut last_pulled = tags.clone();
         last_pulled.sort_by(|a, b| b.1.accessed_at.cmp(&a.1.accessed_at));
-        let mut last_pulled = last_pulled.iter().map(|(tag, _)| tag.clone()).collect::<Vec<String>>();
+        let mut last_pulled = last_pulled
+            .iter()
+            .map(|(tag, _)| tag.clone())
+            .collect::<Vec<String>>();
 
         for (tag, info) in &tags {
             debug!("'{}': Checking tag '{}' for retention", namespace, tag);
@@ -216,7 +226,12 @@ impl Command {
                 last_pulled_at: info.accessed_at.timestamp(),
             };
 
-            if manifest_should_be_purged(&found_repository.retention_rules, manifest, &last_pushed, &last_pulled)? {
+            if manifest_should_be_purged(
+                &found_repository.retention_rules,
+                &manifest,
+                &last_pushed,
+                &last_pulled,
+            )? {
                 info!("Available for cleanup: {}:{}", namespace, tag);
                 if !self.dry_mode {
                     let reference = Reference::Tag(tag.to_string());

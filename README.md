@@ -81,7 +81,7 @@ Multiple storage backends are supported: filesystem or s3-baked.
 - `root_dir` (string): The root directory for the storage.
 
 > [!NOTE]
-> Last access time of manifest links is used for the cleanup policy engine to determine
+> Last access time of manifest links is used for the retention policy engine to determine
 > the last pull time.
 > Please ensure that your host filesystem hasn't access time disabled, otherwise policies using
 > last pull time as condition may not behave as expected.
@@ -198,7 +198,6 @@ The following `request.action` actions are supported:
 In addition to those variables, some helper functions are available:
 - `now()`: Returns the current time in seconds since epoch (1st of January 1970).
 - `days(d)`: Returns the number of seconds in `d` days.
-- `matches("<regex-pattern>", image.tag)`: Matches a string against a string. The regex pattern is compiled on each call.
 - `top(s, collection, k)`: Check if `s` is among the top `k` elements of `collection`.
 
 ## Roadmap
