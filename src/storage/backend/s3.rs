@@ -28,8 +28,11 @@ use crate::storage::entity_link::EntityLink;
 use crate::storage::entity_path_builder::EntityPathBuilder;
 use crate::storage::{
     deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobEntityLinkIndex,
-    GenericStorageEngine, Reader, UploadSummary,
+    GenericStorageEngine, Reader, ReferenceInfo, UploadSummary,
 };
+
+const PUSHED_AT_METADATA_KEY: &str = "pushed";
+const LAST_PULLED_AT_METADATA_KEY: &str = "last-pulled";
 
 #[derive(Clone)]
 pub struct StorageEngine {
@@ -176,6 +179,7 @@ impl StorageEngine {
             .put_object()
             .bucket(&self.bucket)
             .key(key)
+            .metadata(PUSHED_AT_METADATA_KEY, Utc::now().to_rfc3339())
             .body(ByteStream::from(data))
             .send()
             .await?;
@@ -574,13 +578,23 @@ impl StorageEngine {
 
     #[instrument(skip(self))]
     async fn update_last_pulled_metadata(&self, key: &str) -> Result<(), Error> {
+        let res = self.head_object(key).await?;
+
+        let pushed_at = res
+            .metadata
+            .unwrap_or_default()
+            .get(PUSHED_AT_METADATA_KEY)
+            .cloned()
+            .unwrap_or(Utc::now().to_rfc3339());
+
         self.s3_client
             .copy_object()
             .bucket(&self.bucket)
             .key(key)
             .copy_source(format!("{}/{}", self.bucket, key))
             .metadata_directive(MetadataDirective::Replace)
-            .metadata("last-pulled", Utc::now().to_rfc3339())
+            .metadata(PUSHED_AT_METADATA_KEY, pushed_at)
+            .metadata(LAST_PULLED_AT_METADATA_KEY, Utc::now().to_rfc3339())
             .send()
             .await?;
 
@@ -1184,6 +1198,37 @@ impl GenericStorageEngine for StorageEngine {
 
         let content_length = self.get_object_size(&path).await?;
         Ok(content_length)
+    }
+
+    #[instrument(skip(self))]
+    async fn read_reference_info(
+        &self,
+        name: &str,
+        reference: &EntityLink,
+    ) -> Result<ReferenceInfo, Error> {
+        let key = match reference {
+            EntityLink::Tag(_) | EntityLink::Digest(_) => self.tree.get_link_path(reference, name),
+            _ => return Err(Error::NotFound),
+        };
+
+        let res = self.head_object(&key).await?;
+
+        let metadata = res.metadata.unwrap_or_default();
+
+        let created_at = metadata
+            .get(PUSHED_AT_METADATA_KEY)
+            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+            .unwrap_or_default();
+
+        let accessed_at = metadata
+            .get(LAST_PULLED_AT_METADATA_KEY)
+            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+            .unwrap_or_default();
+
+        Ok(ReferenceInfo {
+            created_at,
+            accessed_at,
+        })
     }
 
     #[instrument(skip(self))]

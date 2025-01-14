@@ -1,4 +1,4 @@
-# Origin
+# Simple-Registry
 
 A fully OCI-compliant container registry that performs reasonably well with classic Docker tooling.
 
@@ -16,7 +16,7 @@ Goals
 ## Usage
 
 ```
-Usage: origin [-c <config>] <command> [<args>]
+Usage: simple-registry [-c <config>] <command> [<args>]
 
 An OCI-compliant and docker-compatible registry service
 
@@ -81,7 +81,7 @@ Multiple storage backends are supported: filesystem or s3-baked.
 - `root_dir` (string): The root directory for the storage.
 
 > [!NOTE]
-> Last access time of manifest links is used for the cleanup policy engine to determine
+> Last access time of manifest links is used for the retention policy engine to determine
 > the last pull time.
 > Please ensure that your host filesystem hasn't access time disabled, otherwise policies using
 > last pull time as condition may not behave as expected.
@@ -128,21 +128,20 @@ First rule conflicting default will apply.
 
 #### Retention Policy (`repository."<namespace>".retention_policy`)
 
-> [!NOTE]
-> This feature is currently in active development and is not yet working as intended.
-
 - `rules` (list of string): A list of CEL policies that must be satisfied to _keep_ an image in the registry.
 
 ```toml
 [repository."my-registry".access_policy]
 rules = [
   'image.tag != "latest"',
-  'image.pushed_at < now() - 15d',
-  'image.last_pulled_at < now() - 15d',
-  'isMostRecentlyPulled(image, 10)',
-  'isMostRecentlyPushed(image, 10)',
+  'image.pushed_at < now() - days(15)',
+  'image.last_pulled_at < now() - days(15)',
+  'top(image.tag, last_pulled, 10)', # image.tag is among top 10 last pulled
+  'top(image.tag, last_pushed, 10)', # image.tag is among top 10 last pushed
 ]
 ```
+
+Currently, this policy is enforced by the `scrub` command, which can be run as a cron job.
 
 ### Tracing (`observability.tracing`)
 
@@ -192,19 +191,18 @@ The following `request.action` actions are supported:
 
 - `image.tag`: The tag of the image, when evaluating a Tag (can be unspecified)
 - `image.pushed_at`: The time the manifest was pushed at
-- `image.last_pulled_at`: The time the manifest was last pulled (can be unspecified) 
+- `image.last_pulled_at`: The time the manifest was last pulled (can be unspecified)
+- `last_pushed`: A list of the last pushed tags ordered by reverse push time (most recent first)
+- `last_pulled`: A list of the last pulled tags ordered by reverse pull time (most recent first)
 
 In addition to those variables, some helper functions are available:
-- `matches(<regex-pattern>, image.tag): Matches a string against a string
-- `now()`: Returns the current time
-- `isMostRecentlyPulled(image`
+- `now()`: Returns the current time in seconds since epoch (1st of January 1970).
+- `days(d)`: Returns the number of seconds in `d` days.
+- `top(s, collection, k)`: Check if `s` is among the top `k` elements of `collection`.
 
 ## Roadmap
 
 - [ ] Pull-through cache
-- [ ] Tag & Digest auto-delete CEL policies
-  - [x] Last pull time persistence
-  - [ ] Policies in Scrub
 - [ ] Kubernetes Operator (new project)
   - [ ] Kubernetes locking backend (?)
 - [ ] OpenMetrics exporter

@@ -1,15 +1,20 @@
+mod retention_policy;
+
 use crate::command;
-use crate::oci::Digest;
+use crate::command::scrub::retention_policy::manifest_should_be_purged;
+use crate::oci::{Digest, Reference};
+use crate::policy::ManifestImage;
 use crate::registry::{parse_manifest_digests, Registry};
-use crate::storage::EntityLink;
+use crate::storage::{EntityLink, ReferenceInfo};
 use argh::FromArgs;
 use chrono::{Duration, Utc};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::exit;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 #[derive(FromArgs, PartialEq, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 #[argh(
     subcommand,
     name = "scrub",
@@ -18,25 +23,25 @@ use tracing::{debug, error, info, warn};
 pub struct Options {
     #[argh(switch, short = 'd')]
     /// only report issues, no changes will be made to the storage
-    pub dry_mode: Option<bool>,
+    pub dry_mode: bool,
     #[argh(option, short = 't')]
     /// the maximum duration an upload can be in progress before it is considered obsolete in seconds
     pub upload_timeout: Option<u32>, // TODO: use something more human friendly
     #[argh(switch, short = 'u')]
     /// check for obsolete uploads
-    pub check_uploads: Option<bool>,
+    pub check_uploads: bool,
     #[argh(switch, short = 'g')]
     /// check for orphan blobs
-    pub check_tags: Option<bool>,
+    pub check_tags: bool,
     #[argh(switch, short = 'r')]
     /// check for revision inconsistencies
-    pub check_revisions: Option<bool>,
+    pub check_revisions: bool,
     #[argh(switch, short = 'b')]
     /// check for blob inconsistencies
-    pub check_blobs: Option<bool>,
+    pub check_blobs: bool,
     #[argh(switch, short = 'p')]
     /// enforce retention policies
-    pub enforce_retention_policies: Option<bool>,
+    pub enforce_retention_policies: bool,
 }
 
 #[derive(Hash, Eq, PartialEq)]
@@ -59,26 +64,26 @@ impl Command {
     pub fn new(options: &Options, registry: Registry) -> Self {
         let registry = Arc::new(registry);
 
-        let dry_mode = options.dry_mode.unwrap_or(true);
+        let dry_mode = options.dry_mode;
         let mut enabled_checks = HashSet::new();
 
-        if options.check_uploads.unwrap_or(true) {
+        if options.check_uploads {
             enabled_checks.insert(ScrubCheck::Uploads);
         }
 
-        if options.check_tags.unwrap_or(true) {
+        if options.check_tags {
             enabled_checks.insert(ScrubCheck::Tags);
         }
 
-        if options.check_revisions.unwrap_or(true) {
+        if options.check_revisions {
             enabled_checks.insert(ScrubCheck::Revisions);
         }
 
-        if options.check_blobs.unwrap_or(true) {
+        if options.check_blobs {
             enabled_checks.insert(ScrubCheck::Blobs);
         }
 
-        if options.enforce_retention_policies.unwrap_or(true) {
+        if options.enforce_retention_policies {
             enabled_checks.insert(ScrubCheck::Retention);
         }
 
@@ -110,7 +115,10 @@ impl Command {
             };
 
             for namespace in namespaces {
-                // check self.enabled_checks contains ScrubCheck::Uploads
+                if self.enabled_checks.contains(&ScrubCheck::Retention) {
+                    let _ = self.enforce_retention(&namespace).await;
+                }
+
                 if self.enabled_checks.contains(&ScrubCheck::Uploads) {
                     // Step 1: check upload directories
                     // - for incomplete uploads (threshold from config file)
@@ -141,6 +149,99 @@ impl Command {
         if self.enabled_checks.contains(&ScrubCheck::Blobs) {
             // Step 4: blob garbage collection
             let _ = self.cleanup_orphan_blobs().await;
+        }
+
+        Ok(())
+    }
+
+    async fn enforce_retention(&self, namespace: &str) -> Result<(), command::Error> {
+        info!("'{}': Enforcing retention policy", namespace);
+
+        let mut marker = None;
+        let mut tag_names = Vec::new();
+        loop {
+            let (tags, next_marker) = self
+                .registry
+                .storage_engine
+                .list_tags(namespace, 1000, marker)
+                .await?;
+            tag_names.extend(tags);
+            if next_marker.is_none() {
+                break;
+            }
+            marker = next_marker;
+        }
+
+        let mut tags = HashMap::new();
+        for tag in &tag_names {
+            let info = self
+                .registry
+                .storage_engine
+                .read_reference_info(namespace, &EntityLink::Tag(tag.to_string()))
+                .await?;
+            tags.insert(tag.to_string(), info);
+        }
+
+        self.check_tag_retention(namespace, tags).await?;
+
+        Ok(())
+    }
+
+    async fn check_tag_retention(
+        &self,
+        namespace: &str,
+        mut tags: HashMap<String, ReferenceInfo>,
+    ) -> Result<(), command::Error> {
+        let tags: Vec<(String, ReferenceInfo)> = tags.drain().collect();
+
+        let mut last_pushed = tags.clone();
+        last_pushed.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
+        let mut last_pushed = last_pushed
+            .iter()
+            .map(|(tag, _)| tag.clone())
+            .collect::<Vec<String>>();
+
+        let mut last_pulled = tags.clone();
+        last_pulled.sort_by(|a, b| b.1.accessed_at.cmp(&a.1.accessed_at));
+        let mut last_pulled = last_pulled
+            .iter()
+            .map(|(tag, _)| tag.clone())
+            .collect::<Vec<String>>();
+
+        for (tag, info) in &tags {
+            debug!("'{}': Checking tag '{}' for retention", namespace, tag);
+
+            let Some((_, found_repository)) = self
+                .registry
+                .repositories
+                .iter()
+                .find(|(repository, _)| namespace.starts_with(*repository))
+            else {
+                warn!("Unable to find repository for namespace: {}", namespace);
+                return Ok(());
+            };
+
+            let manifest = ManifestImage {
+                tag: Some(tag.to_string()),
+                pushed_at: info.created_at.timestamp(),
+                last_pulled_at: info.accessed_at.timestamp(),
+            };
+
+            if manifest_should_be_purged(
+                &found_repository.retention_rules,
+                &manifest,
+                &last_pushed,
+                &last_pulled,
+            )? {
+                info!("Available for cleanup: {}:{}", namespace, tag);
+                if !self.dry_mode {
+                    let reference = Reference::Tag(tag.to_string());
+                    let _ = self.registry.delete_manifest(namespace, reference).await;
+
+                    last_pushed.retain(|t| t != tag);
+                    last_pulled.retain(|t| t != tag);
+                }
+            }
         }
 
         Ok(())

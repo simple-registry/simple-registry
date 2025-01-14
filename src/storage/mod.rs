@@ -56,6 +56,12 @@ pub struct BlobEntityLinkIndex {
     pub namespace: HashMap<String, HashSet<EntityLink>>,
 }
 
+#[derive(Clone)]
+pub struct ReferenceInfo {
+    pub created_at: DateTime<Utc>,
+    pub accessed_at: DateTime<Utc>,
+}
+
 pub trait Reader: AsyncRead + Unpin + Send {}
 impl<T> Reader for T where T: AsyncRead + Unpin + Send {}
 
@@ -133,6 +139,12 @@ pub trait GenericStorageEngine: Send + Sync {
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error>;
 
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error>;
+
+    async fn read_reference_info(
+        &self,
+        name: &str,
+        reference: &EntityLink,
+    ) -> Result<ReferenceInfo, Error>;
 
     async fn build_blob_reader(
         &self,

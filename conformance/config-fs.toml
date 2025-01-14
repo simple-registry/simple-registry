@@ -4,7 +4,7 @@ port = 8000
 streaming_chunk_size = "5MiB"
 
 [storage.fs]
-root_dir = "./data-origin"
+root_dir = "./data-simple-registry"
 
 [repository."conformance".access_policy]
 default_allow = true
