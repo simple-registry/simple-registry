@@ -80,7 +80,15 @@ impl Registry {
         namespace: &str,
         reference: Reference,
     ) -> Result<HeadManifestResponse, Error> {
-        self.validate_namespace(namespace)?;
+        let (_, found_repository) = self.validate_namespace(namespace)?;
+
+        if found_repository.is_pull_through() {
+            for upstream in &found_repository.upstream {
+                debug!("Pull through repository: {:?}", upstream.url);
+            }
+
+            return Err(Error::ManifestUnknown);
+        }
 
         let link = reference.into();
         let digest = self.storage_engine.read_link(namespace, &link).await?;
@@ -116,7 +124,15 @@ impl Registry {
         namespace: &str,
         reference: Reference,
     ) -> Result<GetManifestResponse, Error> {
-        self.validate_namespace(namespace)?;
+        let (_, found_repository) = self.validate_namespace(namespace)?;
+
+        if found_repository.is_pull_through() {
+            for upstream in &found_repository.upstream {
+                debug!("Pull through repository: {:?}", upstream.url);
+            }
+
+            return Err(Error::ManifestUnknown);
+        }
 
         let link = reference.into();
         let digest = self.storage_engine.read_link(namespace, &link).await?;

@@ -2,7 +2,7 @@ use crate::oci::Digest;
 use crate::registry::{Error, Registry};
 use crate::storage::{EntityLink, Reader};
 use tokio::io::AsyncRead;
-use tracing::{instrument, warn};
+use tracing::{debug, instrument, warn};
 
 pub enum GetBlobResponse<R>
 where
@@ -25,7 +25,15 @@ impl Registry {
         namespace: &str,
         digest: Digest,
     ) -> Result<HeadBlobResponse, Error> {
-        self.validate_namespace(namespace)?;
+        let (_, found_repository) = self.validate_namespace(namespace)?;
+
+        if found_repository.is_pull_through() {
+            for upstream in &found_repository.upstream {
+                debug!("Pull through repository: {:?}", upstream.url);
+            }
+
+            return Err(Error::ManifestUnknown);
+        }
 
         let size = self.storage_engine.get_blob_size(&digest).await?;
 
@@ -39,7 +47,15 @@ impl Registry {
         digest: &Digest,
         range: Option<(u64, u64)>,
     ) -> Result<GetBlobResponse<impl Reader>, Error> {
-        self.validate_namespace(namespace)?;
+        let (_, found_repository) = self.validate_namespace(namespace)?;
+
+        if found_repository.is_pull_through() {
+            for upstream in &found_repository.upstream {
+                debug!("Pull through repository: {:?}", upstream.url);
+            }
+
+            return Err(Error::ManifestUnknown);
+        }
 
         let total_length = self.storage_engine.get_blob_size(digest).await?;
 

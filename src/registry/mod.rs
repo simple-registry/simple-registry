@@ -41,7 +41,7 @@ impl Registry {
     ) -> Result<Self, configuration::Error> {
         let mut repositories = HashMap::new();
         for (namespace, repository_config) in repositories_config {
-            let res = Repository::new(&repository_config)?;
+            let res = Repository::new(repository_config)?;
             repositories.insert(namespace, res);
         }
 
@@ -54,10 +54,17 @@ impl Registry {
         Ok(res)
     }
 
+    // TODO: check usage (called twice for most requests)
+    pub fn find_repository(&self, namespace: &str) -> Option<(&String, &Repository)> {
+        self.repositories
+            .iter()
+            .find(|(repository, _)| namespace.starts_with(*repository))
+    }
+
     #[instrument]
-    pub fn validate_namespace(&self, namespace: &str) -> Result<(), Error> {
+    pub fn validate_namespace(&self, namespace: &str) -> Result<(&String, &Repository), Error> {
         if NAMESPACE_RE.is_match(namespace) {
-            Ok(())
+            self.find_repository(namespace).ok_or(Error::NameUnknown)
         } else {
             Err(Error::NameInvalid)
         }

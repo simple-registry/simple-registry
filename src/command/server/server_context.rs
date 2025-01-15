@@ -50,9 +50,7 @@ impl ServerContext {
 
         let (repository_name, found_repository) = self
             .registry
-            .repositories
-            .iter()
-            .find(|(repository, _)| namespace.starts_with(*repository))
+            .find_repository(namespace)
             .ok_or_else(Self::deny)?;
 
         debug!(
@@ -61,9 +59,17 @@ impl ServerContext {
         );
 
         if found_repository.access_default_allow {
-            self.check_deny_policies(&request, &identity, &found_repository.access_rules)
+            self.check_deny_policies(&request, &identity, &found_repository.access_rules)?;
         } else {
-            self.check_allow_policies(&request, &identity, &found_repository.access_rules)
+            self.check_allow_policies(&request, &identity, &found_repository.access_rules)?;
+        }
+
+        if found_repository.is_pull_through() && request.is_write() {
+            Err(Error::Unauthorized(Some(
+                "Write operations not supported on pull-through cache namespaces".to_string(),
+            )))
+        } else {
+            Ok(())
         }
     }
 

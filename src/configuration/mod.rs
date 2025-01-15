@@ -144,9 +144,22 @@ pub struct IdentityConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct RepositoryConfig {
     #[serde(default)]
+    pub upstream: Vec<RepositoryPullThroughConfig>,
+    #[serde(default)]
     pub access_policy: RepositoryAccessPolicyConfig,
     #[serde(default)]
     pub retention_policy: RepositoryRetentionPolicyConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RepositoryPullThroughConfig {
+    pub url: String,
+    // TODO:
+    // pub client_certificate: Option<String>,
+    // pub client_private_key: Option<String>,
+    // TODO:
+    // pub username: Option<String>,
+    // pub password: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
