@@ -109,24 +109,38 @@ Multiple storage backends are supported: filesystem or s3-baked.
 
 ### Pull-through cache (`repository."<namespace>".upstream`)
 
+- `url` (string): The URL of the upstream registry
+- `max_redirect` (u8): The maximum number of redirects to follow (default: 5)
+- `server_ca_bundle` (optional string): The path to the server CA bundle
+- `client_certificate` (optional string): The path to the client certificate for mTLS
+- `client_private_key` (optional string): The path to the client private key for mTLS (mandatory if client_certificate is provided)
+- `username` (optional string): The username for the upstream registry
+- `password` (optional string): The password for the upstream registry (mandatory if username is provided)
+
 When a non-empty list of upstreams is defined, the registry will act as a pull-through cache for the specified
-repositories. In this case, write operations are disabled for the namespace.
+repositories.
+
+When pull-through cache is enabled:
+- write operations are disabled for the namespace.
+- read operations are forwarded to the first upstream repository
+- if the first upstream repository is not available, the registry will try the next one in the list
 
 Example:
 
 ```toml
 [[repository."library".upstream]]
-url = "docker.io/library"
+url = "https://docker.io/v2/library"
 client_certificate = "/path/to/client.crt"
 client_private_key = "/path/to/client.key"
 
 [[repository."library".upstream]]
-url = "https://registry-1.docker.io"
+url = "https://registry-1.docker.io/v2/library"
 username = "username"
 password = "password"
 
 [[repository."library".upstream]]
-url = "https://index.docker.io/library"
+url = "https://index.docker.io/v2/library"
+# server_ca_bundle = "/path/to/ca.crt" # specify authorized server CAs
 # anonymous access
 ```
 

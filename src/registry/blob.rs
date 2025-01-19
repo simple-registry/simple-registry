@@ -1,8 +1,14 @@
 use crate::oci::Digest;
 use crate::registry::{Error, Registry};
 use crate::storage::{EntityLink, Reader};
+use futures_util::TryStreamExt;
+use http_body_util::BodyExt;
+use hyper::header::CONTENT_LENGTH;
+use hyper::Method;
+use tokio::io;
 use tokio::io::AsyncRead;
-use tracing::{debug, instrument, warn};
+use tokio_util::io::StreamReader;
+use tracing::{instrument, warn};
 
 pub enum GetBlobResponse<R>
 where
@@ -22,17 +28,26 @@ impl Registry {
     #[instrument]
     pub async fn head_blob(
         &self,
+        accepted_mime_types: &[String],
         namespace: &str,
         digest: Digest,
     ) -> Result<HeadBlobResponse, Error> {
-        let (_, found_repository) = self.validate_namespace(namespace)?;
+        let (repository_name, repository) = self.validate_namespace(namespace)?;
 
-        if found_repository.is_pull_through() {
-            for upstream in &found_repository.upstream {
-                debug!("Pull through repository: {:?}", upstream.url);
-            }
+        if repository.is_pull_through() {
+            let res = repository
+                .query_upstream_blob(
+                    &Method::HEAD,
+                    accepted_mime_types,
+                    repository_name,
+                    namespace,
+                    &digest,
+                )
+                .await?;
 
-            return Err(Error::ManifestUnknown);
+            let digest = Self::parse_header(&res, "docker-content-digest")?;
+            let size = Self::parse_header(&res, CONTENT_LENGTH)?;
+            return Ok(HeadBlobResponse { digest, size });
         }
 
         let size = self.storage_engine.get_blob_size(&digest).await?;
@@ -43,18 +58,37 @@ impl Registry {
     #[instrument]
     pub async fn get_blob(
         &self,
+        accepted_mime_types: &[String],
         namespace: &str,
         digest: &Digest,
         range: Option<(u64, u64)>,
     ) -> Result<GetBlobResponse<impl Reader>, Error> {
-        let (_, found_repository) = self.validate_namespace(namespace)?;
+        let (repository_name, repository) = self.validate_namespace(namespace)?;
 
-        if found_repository.is_pull_through() {
-            for upstream in &found_repository.upstream {
-                debug!("Pull through repository: {:?}", upstream.url);
+        if repository.is_pull_through() {
+            if range.is_some() {
+                warn!("Range requests are not supported for pull-through repositories");
+                return Err(Error::RangeNotSatisfiable);
             }
 
-            return Err(Error::ManifestUnknown);
+            let res = repository
+                .query_upstream_blob(
+                    &Method::GET,
+                    accepted_mime_types,
+                    repository_name,
+                    namespace,
+                    digest,
+                )
+                .await?;
+
+            let total_length = Self::parse_header(&res, CONTENT_LENGTH)?;
+
+            let stream = res
+                .into_data_stream()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+            let reader: Box<dyn Reader> = Box::new(StreamReader::new(stream));
+
+            return Ok(GetBlobResponse::Reader(reader, total_length));
         }
 
         let total_length = self.storage_engine.get_blob_size(digest).await?;

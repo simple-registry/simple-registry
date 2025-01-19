@@ -144,7 +144,7 @@ pub struct IdentityConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct RepositoryConfig {
     #[serde(default)]
-    pub upstream: Vec<RepositoryPullThroughConfig>,
+    pub upstream: Vec<RepositoryUpstreamConfig>,
     #[serde(default)]
     pub access_policy: RepositoryAccessPolicyConfig,
     #[serde(default)]
@@ -152,14 +152,21 @@ pub struct RepositoryConfig {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct RepositoryPullThroughConfig {
+pub struct RepositoryUpstreamConfig {
     pub url: String,
-    // TODO:
-    // pub client_certificate: Option<String>,
-    // pub client_private_key: Option<String>,
-    // TODO:
-    // pub username: Option<String>,
-    // pub password: Option<String>,
+    #[serde(default = "RepositoryUpstreamConfig::default_max_redirect")]
+    pub max_redirect: u8,
+    pub server_ca_bundle: Option<String>,
+    pub client_certificate: Option<String>,
+    pub client_private_key: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+impl RepositoryUpstreamConfig {
+    fn default_max_redirect() -> u8 {
+        5
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

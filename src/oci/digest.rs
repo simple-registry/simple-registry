@@ -3,6 +3,7 @@ use serde::de::{Error, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum Digest {
@@ -26,6 +27,14 @@ impl Digest {
         match self {
             Digest::Sha256(s) => &s[0..2],
         }
+    }
+}
+
+impl FromStr for Digest {
+    type Err = registry::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.try_into()
     }
 }
 

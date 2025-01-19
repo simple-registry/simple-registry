@@ -1,9 +1,12 @@
-use tokio::io::AsyncReadExt;
-use tracing::{debug, error, instrument, warn};
-
 use crate::oci::{Digest, Manifest, Reference};
 use crate::registry::{Error, Registry};
 use crate::storage::EntityLink;
+use futures_util::StreamExt;
+use http_body_util::BodyExt;
+use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use hyper::Method;
+use tokio::io::AsyncReadExt;
+use tracing::{debug, error, instrument, warn};
 
 pub struct GetManifestResponse {
     pub media_type: Option<String>,
@@ -77,17 +80,32 @@ impl Registry {
     #[instrument]
     pub async fn head_manifest(
         &self,
+        accepted_mime_types: &[String],
         namespace: &str,
         reference: Reference,
     ) -> Result<HeadManifestResponse, Error> {
-        let (_, found_repository) = self.validate_namespace(namespace)?;
+        let (repository_name, repository) = self.validate_namespace(namespace)?;
 
-        if found_repository.is_pull_through() {
-            for upstream in &found_repository.upstream {
-                debug!("Pull through repository: {:?}", upstream.url);
-            }
+        if repository.is_pull_through() {
+            let res = repository
+                .query_upstream_manifest(
+                    &Method::HEAD,
+                    accepted_mime_types,
+                    repository_name,
+                    namespace,
+                    &reference,
+                )
+                .await?;
 
-            return Err(Error::ManifestUnknown);
+            let media_type = Self::get_header(&res, CONTENT_TYPE);
+            let digest = Self::parse_header(&res, "docker-content-digest")?;
+            let size = Self::parse_header(&res, CONTENT_LENGTH)?;
+
+            return Ok(HeadManifestResponse {
+                media_type,
+                digest,
+                size,
+            });
         }
 
         let link = reference.into();
@@ -121,17 +139,41 @@ impl Registry {
     #[instrument]
     pub async fn get_manifest(
         &self,
+        accepted_mime_types: &[String],
         namespace: &str,
         reference: Reference,
     ) -> Result<GetManifestResponse, Error> {
-        let (_, found_repository) = self.validate_namespace(namespace)?;
+        let (repository_name, repository) = self.validate_namespace(namespace)?;
 
-        if found_repository.is_pull_through() {
-            for upstream in &found_repository.upstream {
-                debug!("Pull through repository: {:?}", upstream.url);
+        if repository.is_pull_through() {
+            let res = repository
+                .query_upstream_manifest(
+                    &Method::GET,
+                    accepted_mime_types,
+                    repository_name,
+                    namespace,
+                    &reference,
+                )
+                .await?;
+
+            let media_type = Self::get_header(&res, CONTENT_TYPE);
+            let digest = Self::parse_header(&res, "docker-content-digest")?;
+
+            let mut content = Vec::new();
+            let mut body = res.into_data_stream();
+            while let Some(frame) = body.next().await {
+                let frame = frame.map_err(|e| {
+                    error!("Data stream error: {}", e);
+                    std::io::Error::new(std::io::ErrorKind::Other, e)
+                })?;
+                content.extend_from_slice(&frame);
             }
 
-            return Err(Error::ManifestUnknown);
+            return Ok(GetManifestResponse {
+                media_type,
+                digest,
+                content,
+            });
         }
 
         let link = reference.into();

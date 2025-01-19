@@ -4,7 +4,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
-use hyper::header::HeaderValue;
+use hyper::header::{HeaderValue, ACCEPT};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -378,14 +378,25 @@ async fn router(
                     ClientRequest::get_blob(&parameters.name, &parameters.digest),
                     identity,
                 )?;
-                handlers::handle_get_blob(&context.registry, request, parameters).await
+
+                let accepted_mime_types = get_accepted_content_type(&request);
+                handlers::handle_get_blob(
+                    &context.registry,
+                    request,
+                    &accepted_mime_types,
+                    parameters,
+                )
+                .await
             }
             Method::HEAD => {
                 context.validate_request(
                     ClientRequest::get_blob(&parameters.name, &parameters.digest),
                     identity,
                 )?;
-                handlers::handle_head_blob(&context.registry, parameters).await
+
+                let accepted_mime_types = get_accepted_content_type(&request);
+                handlers::handle_head_blob(&context.registry, &accepted_mime_types, parameters)
+                    .await
             }
             Method::DELETE => {
                 context.validate_request(
@@ -404,14 +415,20 @@ async fn router(
                     ClientRequest::get_manifest(&parameters.name, &parameters.reference),
                     identity,
                 )?;
-                handlers::handle_get_manifest(&context.registry, parameters).await
+
+                let accepted_mime_types = get_accepted_content_type(&request);
+                handlers::handle_get_manifest(&context.registry, &accepted_mime_types, parameters)
+                    .await
             }
             Method::HEAD => {
                 context.validate_request(
                     ClientRequest::get_manifest(&parameters.name, &parameters.reference),
                     identity,
                 )?;
-                handlers::handle_head_manifest(&context.registry, parameters).await
+
+                let accepted_mime_types = get_accepted_content_type(&request);
+                handlers::handle_head_manifest(&context.registry, &accepted_mime_types, parameters)
+                    .await
             }
             Method::PUT => {
                 context.validate_request(
@@ -463,6 +480,16 @@ async fn router(
     }
 }
 
+fn get_accepted_content_type<T>(request: &Request<T>) -> Vec<String> {
+    request
+        .headers()
+        .get_all(ACCEPT)
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+}
+
 pub fn parse_authorization_header(header: &HeaderValue) -> Option<(String, String)> {
     let Ok(header_str) = header.to_str() else {
         debug!("Error parsing Authorization header as string");
@@ -497,4 +524,57 @@ pub fn parse_authorization_header(header: &HeaderValue) -> Option<(String, Strin
     }
 
     Some((parts[0].to_string(), parts[1].to_string()))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use hyper::HeaderMap;
+
+    #[test]
+    fn test_get_accepted_content_type() {
+        let mut headers = HeaderMap::new();
+        headers.append(ACCEPT, HeaderValue::from_static("application/json"));
+        headers.append(ACCEPT, HeaderValue::from_static("application/xml"));
+        headers.append(ACCEPT, HeaderValue::from_static("text/plain"));
+
+        let mut request = Request::builder();
+        for (key, value) in headers.iter() {
+            request = request.header(key, value);
+        }
+        let request = request.body(Body::empty()).unwrap();
+
+        let result = get_accepted_content_type(&request);
+        assert_eq!(
+            result,
+            vec!["application/json", "application/xml", "text/plain"]
+        );
+    }
+
+    #[test]
+    fn test_parse_authorization_header() {
+        let header = HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA==");
+        let result = parse_authorization_header(&header);
+        assert_eq!(result, Some(("user".to_string(), "password".to_string())));
+
+        let header = HeaderValue::from_static("Bearer dXNlcjpwYXNzd29yZA==");
+        let result = parse_authorization_header(&header);
+        assert_eq!(result, None);
+
+        let header = HeaderValue::from_static("Basic dXNlcjpw YXNzd29yZA=");
+        let result = parse_authorization_header(&header);
+        assert_eq!(result, None);
+
+        let header = HeaderValue::from_static("Basic dXNlcjpwY%%%%XNzd29yZA");
+        let result = parse_authorization_header(&header);
+        assert_eq!(result, None);
+
+        let header = HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA===");
+        let result = parse_authorization_header(&header);
+        assert_eq!(result, None);
+
+        let header = HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA==");
+        let result = parse_authorization_header(&header);
+        assert_eq!(result, Some(("user".to_string(), "password".to_string())));
+    }
 }
