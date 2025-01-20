@@ -45,6 +45,10 @@ However, certain options cannot be changed during runtime:
 
 TLS files are also automatically reloaded on changes if they are valid.
 
+### Global configuration
+
+- `max_concurrent_requests` (usize): The maximum number of concurrent requests the server can handle (default: 50)
+
 ### Server parameters (`server`)
 
 - `bind_address` (string) :The address to bind the server to

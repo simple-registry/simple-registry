@@ -21,6 +21,8 @@ lazy_static! {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Configuration {
+    #[serde(default = "Configuration::default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
     pub server: ServerConfig,
     #[serde(default)]
     pub locking: LockingConfig,
@@ -32,6 +34,12 @@ pub struct Configuration {
     pub repository: HashMap<String, RepositoryConfig>, // hashmap of namespace <-> repository_config
     #[serde(default)]
     pub observability: Option<ObservabilityConfig>,
+}
+
+impl Configuration {
+    fn default_max_concurrent_requests() -> usize {
+        50
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
