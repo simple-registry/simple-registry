@@ -491,39 +491,15 @@ fn get_accepted_content_type<T>(request: &Request<T>) -> Vec<String> {
 }
 
 pub fn parse_authorization_header(header: &HeaderValue) -> Option<(String, String)> {
-    let Ok(header_str) = header.to_str() else {
-        debug!("Error parsing Authorization header as string");
-        return None;
-    };
+    let value = header
+        .to_str()
+        .ok()
+        .and_then(|value| value.strip_prefix("Basic "))
+        .and_then(|value| BASE64_STANDARD.decode(value).ok())
+        .and_then(|value| String::from_utf8(value).ok())?;
 
-    let parts: Vec<&str> = header_str.split_whitespace().collect();
-    if parts.len() != 2 {
-        debug!("Invalid Authorization header format: {}", header_str);
-        return None;
-    }
-
-    if parts[0] != "Basic" {
-        debug!("Invalid Authorization header type: {}", parts[0]);
-        return None;
-    }
-
-    let Ok(auth_details) = BASE64_STANDARD.decode(parts[1]) else {
-        debug!("Error decoding Authorization header");
-        return None;
-    };
-
-    let Ok(auth_str) = String::from_utf8(auth_details) else {
-        debug!("Error parsing Authorization header as UTF8 string");
-        return None;
-    };
-
-    let parts: Vec<&str> = auth_str.splitn(2, ':').collect();
-    if parts.len() != 2 {
-        warn!("Invalid Authorization header format: {}", auth_str);
-        return None;
-    }
-
-    Some((parts[0].to_string(), parts[1].to_string()))
+    let (username, password) = value.split_once(':')?;
+    Some((username.to_string(), password.to_string()))
 }
 
 #[cfg(test)]
