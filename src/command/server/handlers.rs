@@ -398,7 +398,12 @@ pub async fn handle_put_manifest(
     let location = format!("/v2/{}/manifests/{}", parameters.name, parameters.reference);
 
     let manifest = registry
-        .put_manifest(&parameters.name, parameters.reference, content_type, &body)
+        .put_manifest(
+            &parameters.name,
+            parameters.reference,
+            Some(&content_type),
+            &body,
+        )
         .await?;
 
     let res = match manifest.subject {

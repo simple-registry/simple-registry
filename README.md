@@ -51,7 +51,7 @@ TLS files are also automatically reloaded on changes if they are valid.
 - `port` (uint16): The port to bind the server to
 - `query_timeout` (uint64): The timeout for queries in seconds
 - `query_timeout_grace_period` (uint64): The grace period for queries in seconds
-- `streaming_chunk_size` (uint64 | string): The chunk size for streaming in bytes
+- `streaming_chunk_size` (uint64 | string): The chunk size for streaming in bytes (both downloading and pull-through blob caching)
 
 #### Optional TLS (`server.tls`)
 

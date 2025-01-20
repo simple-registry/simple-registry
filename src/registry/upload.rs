@@ -114,7 +114,7 @@ impl Registry {
         &self,
         namespace: &str,
         session_id: &str,
-        mut body: BodyDataStream<Request<Incoming>>,
+        mut body: BodyDataStream<Request<Incoming>>, // TODO: is there a mean to share this logic with the pull through channel?
         mut append: bool,
     ) -> Result<(), Error> {
         let mut chunk = Vec::new();

@@ -1,4 +1,5 @@
 use crate::oci::Digest;
+use crate::registry::notifying_reader::NotifyingReader;
 use crate::registry::{Error, Registry};
 use crate::storage::{EntityLink, Reader};
 use futures_util::TryStreamExt;
@@ -8,7 +9,8 @@ use hyper::Method;
 use tokio::io;
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
-use tracing::{instrument, warn};
+use tracing::{debug, instrument, warn};
+use uuid::Uuid;
 
 pub enum GetBlobResponse<R>
 where
@@ -71,6 +73,19 @@ impl Registry {
                 return Err(Error::RangeNotSatisfiable);
             }
 
+            match self.get_local_blob(digest, range).await {
+                Ok(local_blob) => {
+                    debug!("Returning blob from local store: {:?}", digest);
+                    return Ok(local_blob);
+                }
+                Err(e) => {
+                    debug!(
+                        "Failed to get blob from local store, pulling from upstream {:?}: {:?}",
+                        digest, e
+                    );
+                }
+            }
+
             let res = repository
                 .query_upstream_blob(
                     &Method::GET,
@@ -86,11 +101,72 @@ impl Registry {
             let stream = res
                 .into_data_stream()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
-            let reader: Box<dyn Reader> = Box::new(StreamReader::new(stream));
+            let reader = StreamReader::new(stream);
 
+            let (stream_reader, mut receiver) =
+                NotifyingReader::new(reader, self.streaming_chunk_size);
+
+            let chunk_size = self.streaming_chunk_size;
+            let digest = Some(digest.clone());
+            let namespace = namespace.to_string();
+            let storage_engine = self.storage_engine.clone();
+            tokio::spawn(async move {
+                let mut append = false;
+                let session_id = Uuid::new_v4().to_string();
+                let mut buffer = Vec::with_capacity(chunk_size);
+
+                storage_engine
+                    .create_upload(&namespace, &session_id)
+                    .await?;
+                while let Some(chunk) = receiver.recv().await {
+                    buffer.extend_from_slice(&chunk);
+                    if buffer.len() >= chunk_size {
+                        let (current_part, next_part) = buffer.split_at(chunk_size);
+                        debug!("Uploading chunk {:?} (len = {:?})", digest, buffer.len());
+                        storage_engine
+                            .write_upload(&namespace, &session_id, current_part, append)
+                            .await?;
+
+                        buffer = next_part.to_vec();
+                        if !append {
+                            append = true;
+                        }
+                    }
+                }
+                if !buffer.is_empty() {
+                    debug!(
+                        "Uploading final chunk {:?} (len = {:?})",
+                        digest,
+                        buffer.len()
+                    );
+                    storage_engine
+                        .write_upload(&namespace, &session_id, &buffer, append)
+                        .await?;
+                }
+
+                if let Err(e) = storage_engine
+                    .complete_upload(&namespace, &session_id, digest)
+                    .await
+                {
+                    debug!("Failed to complete upload: {:?}", e);
+                    return Err(e);
+                }
+
+                Ok::<(), Error>(())
+            });
+
+            let reader: Box<dyn Reader> = Box::new(stream_reader);
             return Ok(GetBlobResponse::Reader(reader, total_length));
         }
 
+        self.get_local_blob(digest, range).await
+    }
+
+    async fn get_local_blob(
+        &self,
+        digest: &Digest,
+        range: Option<(u64, u64)>,
+    ) -> Result<GetBlobResponse<Box<dyn Reader>>, Error> {
         let total_length = self.storage_engine.get_blob_size(digest).await?;
 
         let start = if let Some((start, _)) = range {

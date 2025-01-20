@@ -6,12 +6,14 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::str::FromStr;
+use std::sync::Arc;
 use tracing::instrument;
 
 mod blob;
 mod content_discovery;
 mod error;
 mod manifest;
+mod notifying_reader;
 mod repository;
 mod repository_upstream;
 mod upload;
@@ -33,7 +35,7 @@ lazy_static! {
 #[derive(Debug)]
 pub struct Registry {
     pub streaming_chunk_size: usize,
-    pub storage_engine: Box<dyn GenericStorageEngine>,
+    pub storage_engine: Arc<Box<dyn GenericStorageEngine>>,
     pub repositories: HashMap<String, Repository>,
 }
 
@@ -52,7 +54,7 @@ impl Registry {
 
         let res = Self {
             streaming_chunk_size,
-            storage_engine,
+            storage_engine: Arc::new(storage_engine),
             repositories,
         };
 
