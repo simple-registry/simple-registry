@@ -136,7 +136,7 @@ impl TlsListener {
                 let stream = TokioIo::new(tls);
                 let context = self.context.load();
 
-                serve_request(stream, context.clone(), identity).await;
+                tokio::spawn(serve_request(stream, context.clone(), identity));
             }
         }
     }

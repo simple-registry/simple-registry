@@ -40,7 +40,11 @@ impl InsecureListener {
             let stream = TokioIo::new(tcp);
             let context = self.context.load();
 
-            serve_request(stream, context.clone(), ClientIdentity::default()).await;
+            tokio::spawn(serve_request(
+                stream,
+                context.clone(),
+                ClientIdentity::default(),
+            ));
         }
     }
 }
