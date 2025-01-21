@@ -243,3 +243,8 @@ In addition to those variables, some helper functions are available:
 
 - [ ] Kubernetes Operator (new project)
 - [ ] OpenMetrics exporter
+
+## References
+
+- [OCI Distribution Specification](https://github.com/opencontainers/distribution-spec/blob/main/spec.md)
+- [Docker Registry HTTP API V2](https://github.com/openshift/docker-distribution/blob/master/docs/spec/api.md)
