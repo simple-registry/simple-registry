@@ -18,6 +18,7 @@ mod repository;
 mod repository_upstream;
 mod upload;
 
+use crate::cache::Cache;
 use crate::configuration;
 use crate::configuration::RepositoryConfig;
 use crate::registry::repository::Repository;
@@ -45,10 +46,11 @@ impl Registry {
         repositories_config: HashMap<String, RepositoryConfig>,
         streaming_chunk_size: usize,
         storage_engine: Box<dyn GenericStorageEngine>,
+        token_cache: Arc<dyn Cache>,
     ) -> Result<Self, configuration::Error> {
         let mut repositories = HashMap::new();
         for (namespace, repository_config) in repositories_config {
-            let res = Repository::new(repository_config)?;
+            let res = Repository::new(repository_config, &token_cache)?;
             repositories.insert(namespace, res);
         }
 

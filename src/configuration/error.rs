@@ -7,6 +7,7 @@ use tracing::debug;
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
+    Redis(redis::RedisError),
     StorageBackend(String),
     MissingExpectedTLSSection(String),
     ConfigurationFileFormat(String),
@@ -22,6 +23,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Io(err) => write!(f, "IO error: {err}"),
+            Error::Redis(err) => write!(f, "Redis error: {err}"),
             Error::StorageBackend(err) => {
                 write!(f, "Storage backend error: {err}")
             }
@@ -58,6 +60,12 @@ impl fmt::Display for Error {
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Error::Io(err)
+    }
+}
+
+impl From<redis::RedisError> for Error {
+    fn from(err: redis::RedisError) -> Self {
+        Error::Redis(err)
     }
 }
 

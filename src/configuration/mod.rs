@@ -27,6 +27,8 @@ pub struct Configuration {
     #[serde(default)]
     pub locking: LockingConfig,
     #[serde(default)]
+    pub cache: CacheConfig,
+    #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
     pub identity: HashMap<String, IdentityConfig>, // hashmap of identity_id <-> identity_config (username, password)
@@ -55,17 +57,6 @@ pub struct ServerConfig {
     pub streaming_chunk_size: DataSize,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct LockingConfig {
-    pub redis: Option<RedisLockingConfig>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct RedisLockingConfig {
-    pub url: String,
-    pub ttl: usize,
-}
-
 impl ServerConfig {
     fn default_query_timeout() -> u64 {
         3600
@@ -78,6 +69,27 @@ impl ServerConfig {
     fn default_streaming_chunk_size() -> DataSize {
         DataSize::WithUnit(50, "MiB".to_string())
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct LockingConfig {
+    pub redis: Option<RedisLockingConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RedisLockingConfig {
+    pub url: String,
+    pub ttl: usize,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CacheConfig {
+    pub redis: Option<RedisCacheConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RedisCacheConfig {
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

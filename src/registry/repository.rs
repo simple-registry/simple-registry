@@ -1,3 +1,4 @@
+use crate::cache::Cache;
 use crate::configuration::{Error, RepositoryConfig, RepositoryUpstreamConfig};
 use crate::oci::{Digest, Reference};
 use crate::registry;
@@ -5,6 +6,7 @@ use crate::registry::repository_upstream::RepositoryUpstream;
 use cel_interpreter::Program;
 use hyper::body::Incoming;
 use hyper::{Method, Response};
+use std::sync::Arc;
 use tracing::error;
 
 #[derive(Debug)]
@@ -17,10 +19,10 @@ pub struct Repository {
 }
 
 impl Repository {
-    pub fn new(config: RepositoryConfig) -> Result<Self, Error> {
+    pub fn new(config: RepositoryConfig, token_cache: &Arc<dyn Cache>) -> Result<Self, Error> {
         let access_rules = Self::compile_program_vec(&config.access_policy.rules)?;
 
-        let upstream = Self::build_upstreams(config.upstream)?;
+        let upstream = Self::build_upstreams(config.upstream, token_cache)?;
         let retention_rules = Self::compile_program_vec(&config.retention_policy.rules)?;
 
         Ok(Self {
@@ -33,11 +35,15 @@ impl Repository {
 
     fn build_upstreams(
         upstreams_config: Vec<RepositoryUpstreamConfig>,
+        token_cache: &Arc<dyn Cache>,
     ) -> Result<Vec<RepositoryUpstream>, Error> {
         let mut upstreams = Vec::new();
 
         for upstream_config in upstreams_config {
-            upstreams.push(RepositoryUpstream::new(upstream_config)?);
+            upstreams.push(RepositoryUpstream::new(
+                upstream_config,
+                token_cache.clone(),
+            )?);
         }
 
         Ok(upstreams)
@@ -53,7 +59,10 @@ impl Repository {
     ) -> Result<Response<Incoming>, registry::Error> {
         for upstream in &self.upstream {
             let location = upstream.get_blob_path(repository_name, namespace, digest);
-            match upstream.query(method, accepted_mime_types, &location).await {
+            match upstream
+                .query(namespace, method, accepted_mime_types, &location)
+                .await
+            {
                 Ok(response) => {
                     return Ok(response);
                 }
@@ -77,7 +86,10 @@ impl Repository {
     ) -> Result<Response<Incoming>, registry::Error> {
         for upstream in &self.upstream {
             let location = upstream.get_manifest_path(repository_name, namespace, reference);
-            match upstream.query(method, accepted_mime_types, &location).await {
+            match upstream
+                .query(namespace, method, accepted_mime_types, &location)
+                .await
+            {
                 Ok(response) => {
                     return Ok(response);
                 }

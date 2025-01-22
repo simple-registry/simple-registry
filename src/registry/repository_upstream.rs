@@ -1,3 +1,4 @@
+use crate::cache::Cache;
 use crate::configuration::{Error, RepositoryUpstreamConfig};
 use crate::oci::{Digest, Reference};
 use crate::registry;
@@ -8,7 +9,7 @@ use http_body_util::{BodyExt, Empty};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{HeaderValue, ACCEPT, AUTHORIZATION, LOCATION, WWW_AUTHENTICATE};
 use hyper::http::request;
-use hyper::{HeaderMap, Method, Response};
+use hyper::{HeaderMap, Method, Response, StatusCode};
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
@@ -19,6 +20,7 @@ use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 lazy_static! {
@@ -28,17 +30,25 @@ lazy_static! {
 
 #[derive(Debug)]
 pub struct RepositoryUpstream {
+    token_cache: Arc<dyn Cache>,
     pub url: String,
     pub max_redirect: u8,
     pub client: Client<HttpsConnector<HttpConnector>, Empty<Bytes>>,
-    pub basic_auth_header: Option<HeaderValue>,
+    pub basic_auth_header: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TokenSpec {
     token: Option<String>,
     access_token: Option<String>,
-    // TODO: expires_in: Option<u64>, // For use in cache as TTL
+    #[serde(default = "TokenSpec::default_expires_in")]
+    expires_in: u64,
+}
+
+impl TokenSpec {
+    fn default_expires_in() -> u64 {
+        3600
+    }
 }
 
 enum AuthenticationScheme {
@@ -47,7 +57,10 @@ enum AuthenticationScheme {
 }
 
 impl RepositoryUpstream {
-    pub fn new(config: RepositoryUpstreamConfig) -> Result<Self, Error> {
+    pub fn new(
+        config: RepositoryUpstreamConfig,
+        token_cache: Arc<dyn Cache>,
+    ) -> Result<Self, Error> {
         let client = Self::build_http_client(
             config.server_ca_bundle,
             config.client_certificate,
@@ -55,6 +68,7 @@ impl RepositoryUpstream {
         )?;
 
         let mut upstream = Self {
+            token_cache,
             url: config.url,
             max_redirect: config.max_redirect,
             client,
@@ -63,7 +77,7 @@ impl RepositoryUpstream {
 
         match (config.username, config.password) {
             (Some(username), Some(password)) => {
-                upstream.set_basic_auth(&username, &password)?;
+                upstream.set_basic_auth(&username, &password);
             }
             (Some(_), None) | (None, Some(_)) => {
                 warn!("Username and password must be both provided");
@@ -74,15 +88,13 @@ impl RepositoryUpstream {
         Ok(upstream)
     }
 
-    fn set_basic_auth(&mut self, username: &str, password: &str) -> Result<(), Error> {
+    fn set_basic_auth(&mut self, username: &str, password: &str) {
         let header = format!(
             "Basic {}",
             BASE64_STANDARD.encode(format!("{username}:{password}"))
         );
 
-        self.basic_auth_header = Some(HeaderValue::from_str(&header)?);
-
-        Ok(())
+        self.basic_auth_header = Some(header);
     }
 
     fn build_http_client(
@@ -159,11 +171,39 @@ impl RepositoryUpstream {
         }
     }
 
+    fn get_basic_auth_header(&self) -> Result<(String, u64), registry::Error> {
+        if let Some(ref header) = self.basic_auth_header {
+            return Ok((header.clone(), 60));
+        }
+
+        debug!("Basic authentication required by upstream");
+        Err(registry::Error::Internal(Some(
+            "Authentication required by upstream".to_string(),
+        )))
+    }
+
+    async fn get_authentication_scheme(
+        &self,
+        www_authenticate_header: &HeaderValue,
+    ) -> Result<(String, u64), registry::Error> {
+        let www_authenticate_header = www_authenticate_header.to_str().map_err(|e| {
+            debug!("Failed to parse WWW-Authenticate header: {:?}", e);
+            registry::Error::Internal(Some("Failed to parse WWW-Authenticate header".to_string()))
+        })?;
+
+        match Self::parse_www_authenticate_header(www_authenticate_header)? {
+            AuthenticationScheme::Bearer(realm, parameters) => {
+                self.query_bearer_token(&realm, &parameters).await
+            }
+            AuthenticationScheme::Basic => self.get_basic_auth_header(),
+        }
+    }
+
     async fn query_bearer_token(
         &self,
         realm: &str,
         parameters: &HashMap<String, String>,
-    ) -> Result<HeaderValue, registry::Error> {
+    ) -> Result<(String, u64), registry::Error> {
         let parameters = parameters
             .iter()
             .map(|(key, value)| format!("{key}={value}"))
@@ -193,7 +233,7 @@ impl RepositoryUpstream {
             }
         };
 
-        // TODO: this pattern is present in multiple places accross the codebase, consider refactoring,
+        // TODO: this pattern is present in multiple places across the codebase, consider refactoring,
         // and using a more efficient implementation
         let mut content = Vec::new();
         let mut body = response.into_data_stream();
@@ -217,24 +257,36 @@ impl RepositoryUpstream {
             })?;
 
         let header = format!("Bearer {token}");
-        // TODO: store the token in a cache with the provided TTL
+        Ok((header, token_spec.expires_in))
+    }
 
-        HeaderValue::from_str(&header).map_err(|e| {
+    async fn get_auth_token_from_cache(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<HeaderValue>, registry::Error> {
+        debug!("Checking bearer token in cache for namespace: {namespace:?}");
+        let Ok(Some(token)) = self.token_cache.retrieve_token(namespace).await else {
+            return Ok(None);
+        };
+
+        debug!("Retrieved token from cache for namespace: {namespace:?}");
+        let header = format!("Bearer {token}");
+        Ok(Some(HeaderValue::from_str(&header).map_err(|e| {
             debug!("Failed to build bearer token: {:?}", e);
             registry::Error::Internal(Some(
                 "Failed to build bearer token for upstream".to_string(),
             ))
-        })
+        })?))
     }
 
     pub async fn query(
         &self,
+        namespace: &str,
         method: &Method,
         accepted_mime_types: &[String],
         location: &str,
     ) -> Result<Response<Incoming>, registry::Error> {
         let mut headers = HeaderMap::new();
-
         for mime_type in accepted_mime_types {
             if let Ok(header_value) = HeaderValue::from_str(mime_type) {
                 headers.append(ACCEPT, header_value);
@@ -243,7 +295,7 @@ impl RepositoryUpstream {
 
         // TODO: add an option to NOT wait for Unauthorized response to use a token, either for
         // basic auth or for bearer token
-        let mut authorization_header = None;
+        let mut authorization_header = self.get_auth_token_from_cache(namespace).await?;
 
         let mut location = location.to_string();
         let mut redirect_count = 0;
@@ -296,29 +348,33 @@ impl RepositoryUpstream {
                 }
             }
 
-            if let Some(www_authenticate_header) = response.headers().get(WWW_AUTHENTICATE) {
+            if response.status() == StatusCode::UNAUTHORIZED {
                 if authenticate_count > 0 {
                     debug!("Too many upstream authentication requests");
                     return Err(registry::Error::Internal(Some(
                         "Too many upstream authentication requests".to_string(),
                     )));
                 }
-                let www_authenticate_header = www_authenticate_header.to_str().map_err(|e| {
-                    debug!("Failed to parse WWW-Authenticate header: {:?}", e);
-                    registry::Error::Internal(Some(
-                        "Failed to parse WWW-Authenticate header".to_string(),
-                    ))
-                })?;
 
-                match Self::parse_www_authenticate_header(www_authenticate_header)? {
-                    AuthenticationScheme::Bearer(realm, parameters) => {
-                        authorization_header =
-                            Some(self.query_bearer_token(&realm, &parameters).await?);
-                    }
-                    AuthenticationScheme::Basic => {
-                        authorization_header.clone_from(&self.basic_auth_header);
-                    }
+                let (token, token_ttl) = if let Some(www_authenticate_header) =
+                    response.headers().get(WWW_AUTHENTICATE)
+                {
+                    self.get_authentication_scheme(www_authenticate_header)
+                        .await?
+                } else {
+                    self.get_basic_auth_header()?
                 };
+
+                self.token_cache
+                    .store_token(namespace, &token, token_ttl)
+                    .await?;
+
+                authorization_header = Some(HeaderValue::from_str(&token).map_err(|e| {
+                    debug!("Failed to build bearer token: {:?}", e);
+                    registry::Error::Internal(Some(
+                        "Failed to build bearer token for upstream".to_string(),
+                    ))
+                })?);
 
                 authenticate_count += 1;
                 continue;
