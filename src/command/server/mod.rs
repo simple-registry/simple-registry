@@ -4,7 +4,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
-use hyper::header::HeaderValue;
+use hyper::header::{HeaderValue, ACCEPT};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::pin;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
 
 mod handlers;
@@ -378,14 +378,25 @@ async fn router(
                     ClientRequest::get_blob(&parameters.name, &parameters.digest),
                     identity,
                 )?;
-                handlers::handle_get_blob(&context.registry, request, parameters).await
+
+                let accepted_mime_types = get_accepted_content_type(&request);
+                handlers::handle_get_blob(
+                    &context.registry,
+                    request,
+                    &accepted_mime_types,
+                    parameters,
+                )
+                .await
             }
             Method::HEAD => {
                 context.validate_request(
                     ClientRequest::get_blob(&parameters.name, &parameters.digest),
                     identity,
                 )?;
-                handlers::handle_head_blob(&context.registry, parameters).await
+
+                let accepted_mime_types = get_accepted_content_type(&request);
+                handlers::handle_head_blob(&context.registry, &accepted_mime_types, parameters)
+                    .await
             }
             Method::DELETE => {
                 context.validate_request(
@@ -404,14 +415,20 @@ async fn router(
                     ClientRequest::get_manifest(&parameters.name, &parameters.reference),
                     identity,
                 )?;
-                handlers::handle_get_manifest(&context.registry, parameters).await
+
+                let accepted_mime_types = get_accepted_content_type(&request);
+                handlers::handle_get_manifest(&context.registry, &accepted_mime_types, parameters)
+                    .await
             }
             Method::HEAD => {
                 context.validate_request(
                     ClientRequest::get_manifest(&parameters.name, &parameters.reference),
                     identity,
                 )?;
-                handlers::handle_head_manifest(&context.registry, parameters).await
+
+                let accepted_mime_types = get_accepted_content_type(&request);
+                handlers::handle_head_manifest(&context.registry, &accepted_mime_types, parameters)
+                    .await
             }
             Method::PUT => {
                 context.validate_request(
@@ -463,38 +480,77 @@ async fn router(
     }
 }
 
+fn get_accepted_content_type<T>(request: &Request<T>) -> Vec<String> {
+    request
+        .headers()
+        .get_all(ACCEPT)
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+}
+
 pub fn parse_authorization_header(header: &HeaderValue) -> Option<(String, String)> {
-    let Ok(header_str) = header.to_str() else {
-        debug!("Error parsing Authorization header as string");
-        return None;
-    };
+    let value = header
+        .to_str()
+        .ok()
+        .and_then(|value| value.strip_prefix("Basic "))
+        .and_then(|value| BASE64_STANDARD.decode(value).ok())
+        .and_then(|value| String::from_utf8(value).ok())?;
 
-    let parts: Vec<&str> = header_str.split_whitespace().collect();
-    if parts.len() != 2 {
-        debug!("Invalid Authorization header format: {}", header_str);
-        return None;
+    let (username, password) = value.split_once(':')?;
+    Some((username.to_string(), password.to_string()))
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use hyper::HeaderMap;
+
+    #[test]
+    fn test_get_accepted_content_type() {
+        let mut headers = HeaderMap::new();
+        headers.append(ACCEPT, HeaderValue::from_static("application/json"));
+        headers.append(ACCEPT, HeaderValue::from_static("application/xml"));
+        headers.append(ACCEPT, HeaderValue::from_static("text/plain"));
+
+        let mut request = Request::builder();
+        for (key, value) in headers.iter() {
+            request = request.header(key, value);
+        }
+        let request = request.body(Body::empty()).unwrap();
+
+        let result = get_accepted_content_type(&request);
+        assert_eq!(
+            result,
+            vec!["application/json", "application/xml", "text/plain"]
+        );
     }
 
-    if parts[0] != "Basic" {
-        debug!("Invalid Authorization header type: {}", parts[0]);
-        return None;
+    #[test]
+    fn test_parse_authorization_header() {
+        let header = HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA==");
+        let result = parse_authorization_header(&header);
+        assert_eq!(result, Some(("user".to_string(), "password".to_string())));
+
+        let header = HeaderValue::from_static("Bearer dXNlcjpwYXNzd29yZA==");
+        let result = parse_authorization_header(&header);
+        assert_eq!(result, None);
+
+        let header = HeaderValue::from_static("Basic dXNlcjpw YXNzd29yZA=");
+        let result = parse_authorization_header(&header);
+        assert_eq!(result, None);
+
+        let header = HeaderValue::from_static("Basic dXNlcjpwY%%%%XNzd29yZA");
+        let result = parse_authorization_header(&header);
+        assert_eq!(result, None);
+
+        let header = HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA===");
+        let result = parse_authorization_header(&header);
+        assert_eq!(result, None);
+
+        let header = HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA==");
+        let result = parse_authorization_header(&header);
+        assert_eq!(result, Some(("user".to_string(), "password".to_string())));
     }
-
-    let Ok(auth_details) = BASE64_STANDARD.decode(parts[1]) else {
-        debug!("Error decoding Authorization header");
-        return None;
-    };
-
-    let Ok(auth_str) = String::from_utf8(auth_details) else {
-        debug!("Error parsing Authorization header as UTF8 string");
-        return None;
-    };
-
-    let parts: Vec<&str> = auth_str.splitn(2, ':').collect();
-    if parts.len() != 2 {
-        warn!("Invalid Authorization header format: {}", auth_str);
-        return None;
-    }
-
-    Some((parts[0].to_string(), parts[1].to_string()))
 }

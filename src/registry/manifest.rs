@@ -1,9 +1,12 @@
-use tokio::io::AsyncReadExt;
-use tracing::{debug, error, instrument, warn};
-
 use crate::oci::{Digest, Manifest, Reference};
 use crate::registry::{Error, Registry};
 use crate::storage::EntityLink;
+use futures_util::StreamExt;
+use http_body_util::BodyExt;
+use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use hyper::Method;
+use tokio::io::AsyncReadExt;
+use tracing::{debug, error, instrument, warn};
 
 pub struct GetManifestResponse {
     pub media_type: Option<String>,
@@ -77,11 +80,51 @@ impl Registry {
     #[instrument]
     pub async fn head_manifest(
         &self,
+        accepted_mime_types: &[String],
         namespace: &str,
         reference: Reference,
     ) -> Result<HeadManifestResponse, Error> {
-        self.validate_namespace(namespace)?;
+        let (repository_name, repository) = self.validate_namespace(namespace)?;
 
+        if repository.is_pull_through() {
+            if let Ok(response) = self.head_local_manifest(namespace, reference.clone()).await {
+                return Ok(response);
+            }
+
+            let res = repository
+                .query_upstream_manifest(
+                    &Method::HEAD,
+                    accepted_mime_types,
+                    repository_name,
+                    namespace,
+                    &reference,
+                )
+                .await?;
+
+            let media_type = Self::get_header(&res, CONTENT_TYPE);
+            let digest = Self::parse_header(&res, "docker-content-digest")?;
+            let size = Self::parse_header(&res, CONTENT_LENGTH)?;
+
+            // Store locally before returning
+            let _ = self
+                .get_manifest(accepted_mime_types, namespace, reference.clone())
+                .await?;
+
+            return Ok(HeadManifestResponse {
+                media_type,
+                digest,
+                size,
+            });
+        }
+
+        self.head_local_manifest(namespace, reference).await
+    }
+
+    async fn head_local_manifest(
+        &self,
+        namespace: &str,
+        reference: Reference,
+    ) -> Result<HeadManifestResponse, Error> {
         let link = reference.into();
         let digest = self.storage_engine.read_link(namespace, &link).await?;
         self.storage_engine
@@ -113,11 +156,66 @@ impl Registry {
     #[instrument]
     pub async fn get_manifest(
         &self,
+        accepted_mime_types: &[String],
         namespace: &str,
         reference: Reference,
     ) -> Result<GetManifestResponse, Error> {
-        self.validate_namespace(namespace)?;
+        let (repository_name, repository) = self.validate_namespace(namespace)?;
 
+        if repository.is_pull_through() {
+            if let Ok(response) = self.get_local_manifest(namespace, reference.clone()).await {
+                return Ok(response);
+            }
+
+            let res = repository
+                .query_upstream_manifest(
+                    &Method::GET,
+                    accepted_mime_types,
+                    repository_name,
+                    namespace,
+                    &reference,
+                )
+                .await?;
+
+            let media_type = Self::get_header(&res, CONTENT_TYPE);
+            let digest = Self::parse_header(&res, "docker-content-digest")?;
+
+            let mut content = Vec::new();
+            let mut body = res.into_data_stream();
+            while let Some(frame) = body.next().await {
+                let frame = frame.map_err(|e| {
+                    error!("Data stream error: {}", e);
+                    std::io::Error::new(std::io::ErrorKind::Other, e)
+                })?;
+                content.extend_from_slice(&frame);
+            }
+
+            // NOTE: a side effect of storing the manifest locally at this stage is that blobs indexes
+            // are also created locally even though the blob itself may not yet be available locally.
+            // This behavior is specific to pull-through repositories.
+            self.put_manifest(namespace, reference.clone(), media_type.as_ref(), &content)
+                .await?;
+
+            let link = reference.into();
+            self.storage_engine
+                .update_last_pulled(namespace, &link)
+                .await?;
+
+            return Ok(GetManifestResponse {
+                media_type,
+                digest,
+                content,
+            });
+        }
+
+        self.get_local_manifest(namespace, reference).await
+    }
+
+    async fn get_local_manifest(
+        &self,
+        namespace: &str,
+        reference: Reference,
+    ) -> Result<GetManifestResponse, Error> {
         let link = reference.into();
         let digest = self.storage_engine.read_link(namespace, &link).await?;
         self.storage_engine
@@ -143,12 +241,12 @@ impl Registry {
         &self,
         namespace: &str,
         reference: Reference,
-        content_type: String,
+        content_type: Option<&String>,
         body: &[u8],
     ) -> Result<PutManifestResponse, Error> {
         self.validate_namespace(namespace)?;
 
-        let manifest_digests = parse_manifest_digests(body, Some(&content_type))?;
+        let manifest_digests = parse_manifest_digests(body, content_type)?;
 
         let digest = match reference {
             Reference::Tag(tag) => {

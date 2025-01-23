@@ -20,7 +20,8 @@ futures-util = { version = "0.3.31", default-features = false }
 hex = "0.4.3"
 http-body-util = "0.1.2"
 hyper = { version = "1.5.2" , features = ["full"]}
-hyper-util = { version = "0.1.10", features = ["tokio"] }
+hyper-util = { version = "0.1.10", features = ["tokio", "server-graceful"] }
+hyper-rustls = "0.27.5"
 lazy_static = "1.5.0"
 notify = "7.0.0"
 opentelemetry = "0.27.1"
@@ -31,12 +32,13 @@ opentelemetry-stdout = "0.27.0"
 redis = { version = "0.27.6", features = ["tokio-comp"] }
 regex = "1.11.1"
 rustls = { version = "0.23.20", features = ["aws-lc-rs"] }
+rustls-native-certs = "0.8.1"
 rustls-pki-types = "1.10.1"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.134"
 serde_urlencoded = "0.7.1"
 sha2 = "0.11.0-pre.4"
-tokio = { version = "1.42.0", features = ["full"] }
+tokio = { version = "1.42.0", features = ["full", "tracing"] }
 tokio-rustls = "0.26.1"
 tokio-util = "0.7.13"
 toml = "0.8.19"

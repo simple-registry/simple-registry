@@ -92,10 +92,11 @@ pub async fn handle_get_api_version() -> Result<Response<Body>, Error> {
 #[instrument]
 pub async fn handle_get_manifest(
     registry: &Registry,
+    accepted_mime_types: &[String],
     parameters: ManifestParameters,
 ) -> Result<Response<Body>, Error> {
     let manifest = registry
-        .get_manifest(&parameters.name, parameters.reference)
+        .get_manifest(accepted_mime_types, &parameters.name, parameters.reference)
         .await?;
 
     let res = if let Some(content_type) = manifest.media_type {
@@ -117,10 +118,11 @@ pub async fn handle_get_manifest(
 #[instrument]
 pub async fn handle_head_manifest(
     registry: &Registry,
+    accepted_mime_types: &[String],
     parameters: ManifestParameters,
 ) -> Result<Response<Body>, Error> {
     let manifest = registry
-        .head_manifest(&parameters.name, parameters.reference)
+        .head_manifest(accepted_mime_types, &parameters.name, parameters.reference)
         .await?;
 
     let res = if let Some(media_type) = manifest.media_type {
@@ -145,6 +147,7 @@ pub async fn handle_head_manifest(
 pub async fn handle_get_blob(
     registry: &Registry,
     request: Request<Incoming>,
+    accepted_mime_types: &[String],
     parameters: BlobParameters,
 ) -> Result<Response<Body>, Error> {
     let range = request
@@ -154,7 +157,12 @@ pub async fn handle_get_blob(
         .transpose()?;
 
     let res = match registry
-        .get_blob(&parameters.name, &parameters.digest, range)
+        .get_blob(
+            accepted_mime_types,
+            &parameters.name,
+            &parameters.digest,
+            range,
+        )
         .await?
     {
         GetBlobResponse::RangedReader(reader, (start, end), total_length) => {
@@ -189,10 +197,11 @@ pub async fn handle_get_blob(
 #[instrument]
 pub async fn handle_head_blob(
     registry: &Registry,
+    accepted_mime_types: &[String],
     parameters: BlobParameters,
 ) -> Result<Response<Body>, Error> {
     let blob = registry
-        .head_blob(&parameters.name, parameters.digest)
+        .head_blob(accepted_mime_types, &parameters.name, parameters.digest)
         .await?;
 
     let res = Response::builder()
@@ -389,7 +398,12 @@ pub async fn handle_put_manifest(
     let location = format!("/v2/{}/manifests/{}", parameters.name, parameters.reference);
 
     let manifest = registry
-        .put_manifest(&parameters.name, parameters.reference, content_type, &body)
+        .put_manifest(
+            &parameters.name,
+            parameters.reference,
+            Some(&content_type),
+            &body,
+        )
         .await?;
 
     let res = match manifest.subject {

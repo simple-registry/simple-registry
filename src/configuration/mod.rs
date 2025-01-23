@@ -21,9 +21,13 @@ lazy_static! {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Configuration {
+    #[serde(default = "Configuration::default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
     pub server: ServerConfig,
     #[serde(default)]
     pub locking: LockingConfig,
+    #[serde(default)]
+    pub cache: CacheConfig,
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
@@ -32,6 +36,12 @@ pub struct Configuration {
     pub repository: HashMap<String, RepositoryConfig>, // hashmap of namespace <-> repository_config
     #[serde(default)]
     pub observability: Option<ObservabilityConfig>,
+}
+
+impl Configuration {
+    fn default_max_concurrent_requests() -> usize {
+        50
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -47,17 +57,6 @@ pub struct ServerConfig {
     pub streaming_chunk_size: DataSize,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct LockingConfig {
-    pub redis: Option<RedisLockingConfig>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct RedisLockingConfig {
-    pub url: String,
-    pub ttl: usize,
-}
-
 impl ServerConfig {
     fn default_query_timeout() -> u64 {
         3600
@@ -70,6 +69,27 @@ impl ServerConfig {
     fn default_streaming_chunk_size() -> DataSize {
         DataSize::WithUnit(50, "MiB".to_string())
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct LockingConfig {
+    pub redis: Option<RedisLockingConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RedisLockingConfig {
+    pub url: String,
+    pub ttl: usize,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CacheConfig {
+    pub redis: Option<RedisCacheConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RedisCacheConfig {
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -144,9 +164,29 @@ pub struct IdentityConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct RepositoryConfig {
     #[serde(default)]
+    pub upstream: Vec<RepositoryUpstreamConfig>,
+    #[serde(default)]
     pub access_policy: RepositoryAccessPolicyConfig,
     #[serde(default)]
     pub retention_policy: RepositoryRetentionPolicyConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RepositoryUpstreamConfig {
+    pub url: String,
+    #[serde(default = "RepositoryUpstreamConfig::default_max_redirect")]
+    pub max_redirect: u8,
+    pub server_ca_bundle: Option<String>,
+    pub client_certificate: Option<String>,
+    pub client_private_key: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+impl RepositoryUpstreamConfig {
+    fn default_max_redirect() -> u8 {
+        5
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

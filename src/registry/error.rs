@@ -1,5 +1,6 @@
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::SdkError;
+use redis::RedisError;
 use sha2::digest::crypto_common::hazmat;
 use std::cmp::PartialEq;
 use std::fmt::Display;
@@ -134,5 +135,12 @@ where
     fn from(error: SdkError<T, HttpResponse>) -> Self {
         error!("Error handling object: {:?}", error);
         Error::Internal(Some("S3 error during operations".to_string()))
+    }
+}
+
+impl From<RedisError> for Error {
+    fn from(error: RedisError) -> Self {
+        error!("Error redis operation: {:?}", error);
+        Error::Internal(Some("Cache storage error during operations".to_string()))
     }
 }

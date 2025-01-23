@@ -1,16 +1,24 @@
+use hyper::body::Incoming;
+use hyper::header::AsHeaderName;
+use hyper::Response;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::str::FromStr;
+use std::sync::Arc;
 use tracing::instrument;
 
 mod blob;
 mod content_discovery;
 mod error;
 mod manifest;
+mod notifying_reader;
 mod repository;
+mod repository_upstream;
 mod upload;
 
+use crate::cache::Cache;
 use crate::configuration;
 use crate::configuration::RepositoryConfig;
 use crate::registry::repository::Repository;
@@ -28,7 +36,7 @@ lazy_static! {
 #[derive(Debug)]
 pub struct Registry {
     pub streaming_chunk_size: usize,
-    pub storage_engine: Box<dyn GenericStorageEngine>,
+    pub storage_engine: Arc<Box<dyn GenericStorageEngine>>,
     pub repositories: HashMap<String, Repository>,
 }
 
@@ -38,28 +46,58 @@ impl Registry {
         repositories_config: HashMap<String, RepositoryConfig>,
         streaming_chunk_size: usize,
         storage_engine: Box<dyn GenericStorageEngine>,
+        token_cache: Arc<dyn Cache>,
     ) -> Result<Self, configuration::Error> {
         let mut repositories = HashMap::new();
         for (namespace, repository_config) in repositories_config {
-            let res = Repository::new(&repository_config)?;
+            let res = Repository::new(repository_config, &token_cache)?;
             repositories.insert(namespace, res);
         }
 
         let res = Self {
             streaming_chunk_size,
-            storage_engine,
+            storage_engine: Arc::new(storage_engine),
             repositories,
         };
 
         Ok(res)
     }
 
+    // TODO: check usage (called twice for most requests)
+    pub fn find_repository(&self, namespace: &str) -> Option<(&String, &Repository)> {
+        self.repositories
+            .iter()
+            .find(|(repository, _)| namespace.starts_with(*repository))
+    }
+
     #[instrument]
-    pub fn validate_namespace(&self, namespace: &str) -> Result<(), Error> {
+    pub fn validate_namespace(&self, namespace: &str) -> Result<(&String, &Repository), Error> {
         if NAMESPACE_RE.is_match(namespace) {
-            Ok(())
+            self.find_repository(namespace).ok_or(Error::NameUnknown)
         } else {
             Err(Error::NameInvalid)
         }
+    }
+
+    fn get_header<K>(res: &Response<Incoming>, header: K) -> Option<String>
+    where
+        K: AsHeaderName,
+    {
+        res.headers()
+            .get(header)
+            .and_then(|header| header.to_str().ok())
+            .map(ToString::to_string)
+    }
+
+    fn parse_header<T, K>(res: &Response<Incoming>, header: K) -> Result<T, Error>
+    where
+        T: FromStr,
+        K: AsHeaderName,
+    {
+        res.headers()
+            .get(header)
+            .and_then(|header| header.to_str().ok())
+            .and_then(|header| header.parse().ok())
+            .ok_or(Error::Unsupported)
     }
 }

@@ -1,10 +1,11 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+use crate::cache::build_cache_engine;
 use crate::command::{scrub, server};
 use crate::configuration::{
-    Configuration, Error, LockingConfig, ObservabilityConfig, RepositoryConfig, ServerTlsConfig,
-    StorageConfig,
+    CacheConfig, Configuration, Error, LockingConfig, ObservabilityConfig, RepositoryConfig,
+    ServerTlsConfig, StorageConfig,
 };
 use crate::lock_manager::LockManager;
 use crate::registry::Registry;
@@ -29,6 +30,7 @@ use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 
+mod cache;
 mod command;
 mod configuration;
 mod lock_manager;
@@ -119,6 +121,7 @@ fn set_fs_watcher(
 
             let registry = match build_registry(
                 config.locking,
+                config.cache,
                 config.storage,
                 config.repository,
                 config.server.streaming_chunk_size.to_usize(),
@@ -160,13 +163,20 @@ fn set_fs_watcher(
 
 fn build_registry(
     locking_config: LockingConfig,
+    cache_config: CacheConfig,
     storage_config: StorageConfig,
     repository_config: HashMap<String, RepositoryConfig>,
     streaming_chunk_size: usize,
 ) -> Result<Registry, Error> {
     let lock_manager = LockManager::new(locking_config)?;
+    let token_cache = build_cache_engine(cache_config)?;
     let storage_engine = build_storage_engine(storage_config, lock_manager)?;
-    Registry::new(repository_config, streaming_chunk_size, storage_engine)
+    Registry::new(
+        repository_config,
+        streaming_chunk_size,
+        storage_engine,
+        token_cache,
+    )
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -197,34 +207,41 @@ enum SubCommand {
     Serve(server::Options),
 }
 
-#[tokio::main]
-async fn main() -> Result<(), command::Error> {
+fn main() -> Result<(), command::Error> {
     let arguments: GlobalArguments = argh::from_env();
 
     let config = Configuration::load(&arguments.config)?;
 
-    set_tracing(config.observability)?;
-    let registry = build_registry(
-        config.locking,
-        config.storage,
-        config.repository,
-        config.server.streaming_chunk_size.to_usize(),
-    )?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.max_concurrent_requests)
+        .enable_all()
+        .build()?;
 
-    match arguments.nested {
-        SubCommand::Scrub(scrub_options) => {
-            let scrub = scrub::Command::new(&scrub_options, registry);
-            scrub.run().await
-        }
-        SubCommand::Serve(_) => {
-            let server = Arc::new(server::Command::new(
-                &config.server,
-                &config.identity,
-                registry,
-            )?);
+    runtime.block_on(async move {
+        set_tracing(config.observability)?;
+        let registry = build_registry(
+            config.locking,
+            config.cache,
+            config.storage,
+            config.repository,
+            config.server.streaming_chunk_size.to_usize(),
+        )?;
 
-            let _watcher = set_fs_watcher(&arguments.config, config.server.tls, &server)?;
-            server.run().await
+        match arguments.nested {
+            SubCommand::Scrub(scrub_options) => {
+                let scrub = scrub::Command::new(&scrub_options, registry);
+                scrub.run().await
+            }
+            SubCommand::Serve(_) => {
+                let server = Arc::new(server::Command::new(
+                    &config.server,
+                    &config.identity,
+                    registry,
+                )?);
+
+                let _watcher = set_fs_watcher(&arguments.config, config.server.tls, &server)?;
+                server.run().await
+            }
         }
-    }
+    })
 }

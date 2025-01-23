@@ -45,13 +45,17 @@ However, certain options cannot be changed during runtime:
 
 TLS files are also automatically reloaded on changes if they are valid.
 
+### Global configuration
+
+- `max_concurrent_requests` (usize): The maximum number of concurrent requests the server can handle (default: 50)
+
 ### Server parameters (`server`)
 
 - `bind_address` (string) :The address to bind the server to
 - `port` (uint16): The port to bind the server to
 - `query_timeout` (uint64): The timeout for queries in seconds
 - `query_timeout_grace_period` (uint64): The grace period for queries in seconds
-- `streaming_chunk_size` (uint64 | string): The chunk size for streaming in bytes
+- `streaming_chunk_size` (uint64 | string): The chunk size for streaming in bytes (both downloading and pull-through blob caching)
 
 #### Optional TLS (`server.tls`)
 
@@ -71,6 +75,16 @@ multi-replica deployments.
 
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
 - `ttl` (string): The time-to-live for the lock in seconds (e.g., `10s`)
+
+### Token Cache (`cache`)
+
+Authentication tokens are cached to reduce unnecessary requests to upstream servers when using a pull-through cache
+configuration.
+If no configuration is provided, an in-memory cache is used, which is not suitable for multi-replica deployments.
+
+#### Redis Cache (`cache.redis`)
+
+- `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
 
 ### Storage (`storage`)
 
@@ -107,7 +121,42 @@ Multiple storage backends are supported: filesystem or s3-baked.
 
 ### Repository (`repository."<namespace>"`)
 
-This section is repeated for each repository.
+### Pull-through cache (`repository."<namespace>".upstream`)
+
+- `url` (string): The URL of the upstream registry
+- `max_redirect` (u8): The maximum number of redirects to follow (default: 5)
+- `server_ca_bundle` (optional string): The path to the server CA bundle
+- `client_certificate` (optional string): The path to the client certificate for mTLS
+- `client_private_key` (optional string): The path to the client private key for mTLS (mandatory if client_certificate is provided)
+- `username` (optional string): The username for the upstream registry
+- `password` (optional string): The password for the upstream registry (mandatory if username is provided)
+
+When a non-empty list of upstreams is defined, the registry will act as a pull-through cache for the specified
+repositories.
+
+When pull-through cache is enabled:
+- write operations are disabled for the namespace.
+- read operations are forwarded to the first upstream repository
+- if the first upstream repository is not available, the registry will try the next one in the list
+
+Example:
+
+```toml
+[[repository."library".upstream]]
+url = "https://docker.io/v2/library"
+client_certificate = "/path/to/client.crt"
+client_private_key = "/path/to/client.key"
+
+[[repository."library".upstream]]
+url = "https://registry-1.docker.io/v2/library"
+username = "username"
+password = "password"
+
+[[repository."library".upstream]]
+url = "https://index.docker.io/v2/library"
+# server_ca_bundle = "/path/to/ca.crt" # specify authorized server CAs
+# anonymous access
+```
 
 #### Access Control Policy (`repository."<namespace>".access_policy`)
 
@@ -202,7 +251,10 @@ In addition to those variables, some helper functions are available:
 
 ## Roadmap
 
-- [ ] Pull-through cache
 - [ ] Kubernetes Operator (new project)
-  - [ ] Kubernetes locking backend (?)
 - [ ] OpenMetrics exporter
+
+## References
+
+- [OCI Distribution Specification](https://github.com/opencontainers/distribution-spec/blob/main/spec.md)
+- [Docker Registry HTTP API V2](https://github.com/openshift/docker-distribution/blob/master/docs/spec/api.md)

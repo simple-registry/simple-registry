@@ -1,3 +1,4 @@
+use hyper::header::InvalidHeaderValue;
 use opentelemetry::trace::TraceError;
 use rustls_pki_types::pem;
 use std::{fmt, io};
@@ -6,11 +7,13 @@ use tracing::debug;
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
+    Redis(redis::RedisError),
     StorageBackend(String),
     MissingExpectedTLSSection(String),
     ConfigurationFileFormat(String),
     StreamingChunkSize(String),
     LockManagerInit(String),
+    Http(String),
     Tls(String),
     TracingInit(TraceError),
     CELPolicy(cel_interpreter::ParseError),
@@ -20,6 +23,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Io(err) => write!(f, "IO error: {err}"),
+            Error::Redis(err) => write!(f, "Redis error: {err}"),
             Error::StorageBackend(err) => {
                 write!(f, "Storage backend error: {err}")
             }
@@ -35,6 +39,9 @@ impl fmt::Display for Error {
             }
             Error::LockManagerInit(err) => {
                 write!(f, "Lock manager initialization error: {err}")
+            }
+            Error::Http(err) => {
+                write!(f, "HTTP error: {err}")
             }
             Error::Tls(err) => {
                 write!(f, "TLS error: {err}")
@@ -56,10 +63,22 @@ impl From<io::Error> for Error {
     }
 }
 
+impl From<redis::RedisError> for Error {
+    fn from(err: redis::RedisError) -> Self {
+        Error::Redis(err)
+    }
+}
+
 impl From<toml::de::Error> for Error {
     fn from(error: toml::de::Error) -> Self {
-        debug!("TOML error: {:?}", error);
+        debug!("TOML error: {error:?}");
         Error::ConfigurationFileFormat("TOML deserialization error during operations".to_string())
+    }
+}
+
+impl From<InvalidHeaderValue> for Error {
+    fn from(err: InvalidHeaderValue) -> Self {
+        Error::Http(format!("{err:?}"))
     }
 }
 
