@@ -293,8 +293,6 @@ impl RepositoryUpstream {
             }
         }
 
-        // TODO: add an option to NOT wait for Unauthorized response to use a token, either for
-        // basic auth or for bearer token
         let mut authorization_header = self.get_auth_token_from_cache(namespace).await?;
 
         let mut location = location.to_string();
@@ -359,9 +357,11 @@ impl RepositoryUpstream {
                 let (token, token_ttl) = if let Some(www_authenticate_header) =
                     response.headers().get(WWW_AUTHENTICATE)
                 {
+                    // Either Bearer or Basic authentication is supported
                     self.get_authentication_scheme(www_authenticate_header)
                         .await?
                 } else {
+                    // If no WWW-Authenticate header is present, assume we need to use basic auth.
                     self.get_basic_auth_header()?
                 };
 

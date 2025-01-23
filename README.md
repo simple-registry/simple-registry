@@ -76,6 +76,16 @@ multi-replica deployments.
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
 - `ttl` (string): The time-to-live for the lock in seconds (e.g., `10s`)
 
+### Token Cache (`cache`)
+
+Authentication tokens are cached to reduce unnecessary requests to upstream servers when using a pull-through cache
+configuration.
+If no configuration is provided, an in-memory cache is used, which is not suitable for multi-replica deployments.
+
+#### Redis Cache (`cache.redis`)
+
+- `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
+
 ### Storage (`storage`)
 
 Multiple storage backends are supported: filesystem or s3-baked.
