@@ -8,7 +8,7 @@ server_certificate_bundle = "tls.d/server-ca-bundle.pem"
 server_private_key = "tls.d/server-private-key.pem"
 client_ca_bundle   = "tls.d/client-ca-bundle.pem"
 
-#[locking.redis]
+#[lock_store.redis]
 #url = "redis://localhost:6379"
 #ttl = 5
 

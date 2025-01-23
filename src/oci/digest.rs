@@ -30,6 +30,14 @@ impl Digest {
     }
 }
 
+// NOTE: Implementing Default for Digest is not strictly necessary, but it is useful for global
+// locking in the filesystem
+impl Default for Digest {
+    fn default() -> Self {
+        Digest::Sha256(String::default())
+    }
+}
+
 impl FromStr for Digest {
     type Err = registry::Error;
 

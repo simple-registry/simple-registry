@@ -10,17 +10,19 @@ use std::sync::Arc;
 use tracing::instrument;
 
 mod blob;
+pub mod cache_store;
 mod content_discovery;
 mod error;
+pub mod lock_store;
 mod manifest;
 mod notifying_reader;
 mod repository;
 mod repository_upstream;
 mod upload;
 
-use crate::cache::Cache;
 use crate::configuration;
 use crate::configuration::RepositoryConfig;
+use crate::registry::cache_store::CacheStore;
 use crate::registry::repository::Repository;
 use crate::storage::GenericStorageEngine;
 pub use blob::GetBlobResponse;
@@ -46,7 +48,7 @@ impl Registry {
         repositories_config: HashMap<String, RepositoryConfig>,
         streaming_chunk_size: usize,
         storage_engine: Box<dyn GenericStorageEngine>,
-        token_cache: Arc<dyn Cache>,
+        token_cache: Arc<CacheStore>,
     ) -> Result<Self, configuration::Error> {
         let mut repositories = HashMap::new();
         for (namespace, repository_config) in repositories_config {

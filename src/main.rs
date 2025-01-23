@@ -1,13 +1,13 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-use crate::cache::build_cache_engine;
 use crate::command::{scrub, server};
 use crate::configuration::{
-    CacheConfig, Configuration, Error, LockingConfig, ObservabilityConfig, RepositoryConfig,
+    CacheStoreConfig, Configuration, Error, LockStoreConfig, ObservabilityConfig, RepositoryConfig,
     ServerTlsConfig, StorageConfig,
 };
-use crate::lock_manager::LockManager;
+use crate::registry::cache_store::CacheStore;
+use crate::registry::lock_store::LockStore;
 use crate::registry::Registry;
 use crate::storage::build_storage_engine;
 use argh::FromArgs;
@@ -30,10 +30,8 @@ use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 
-mod cache;
 mod command;
 mod configuration;
-mod lock_manager;
 mod oci;
 mod policy;
 mod registry;
@@ -120,8 +118,8 @@ fn set_fs_watcher(
             };
 
             let registry = match build_registry(
-                config.locking,
-                config.cache,
+                config.lock_store,
+                config.cache_store,
                 config.storage,
                 config.repository,
                 config.server.streaming_chunk_size.to_usize(),
@@ -162,20 +160,20 @@ fn set_fs_watcher(
 }
 
 fn build_registry(
-    locking_config: LockingConfig,
-    cache_config: CacheConfig,
+    locking_config: LockStoreConfig,
+    cache_config: CacheStoreConfig,
     storage_config: StorageConfig,
     repository_config: HashMap<String, RepositoryConfig>,
     streaming_chunk_size: usize,
 ) -> Result<Registry, Error> {
-    let lock_manager = LockManager::new(locking_config)?;
-    let token_cache = build_cache_engine(cache_config)?;
-    let storage_engine = build_storage_engine(storage_config, lock_manager)?;
+    let lock_store = LockStore::new(locking_config)?;
+    let token_cache = CacheStore::new(cache_config)?;
+    let storage_engine = build_storage_engine(storage_config, lock_store)?;
     Registry::new(
         repository_config,
         streaming_chunk_size,
         storage_engine,
-        token_cache,
+        Arc::new(token_cache),
     )
 }
 
@@ -220,8 +218,8 @@ fn main() -> Result<(), command::Error> {
     runtime.block_on(async move {
         set_tracing(config.observability)?;
         let registry = build_registry(
-            config.locking,
-            config.cache,
+            config.lock_store,
+            config.cache_store,
             config.storage,
             config.repository,
             config.server.streaming_chunk_size.to_usize(),

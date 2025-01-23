@@ -25,9 +25,9 @@ pub struct Configuration {
     pub max_concurrent_requests: usize,
     pub server: ServerConfig,
     #[serde(default)]
-    pub locking: LockingConfig,
+    pub lock_store: LockStoreConfig,
     #[serde(default)]
-    pub cache: CacheConfig,
+    pub cache_store: CacheStoreConfig,
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
@@ -72,18 +72,18 @@ impl ServerConfig {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct LockingConfig {
-    pub redis: Option<RedisLockingConfig>,
+pub struct LockStoreConfig {
+    pub redis: Option<RedisLockStoreConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct RedisLockingConfig {
+pub struct RedisLockStoreConfig {
     pub url: String,
     pub ttl: usize,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct CacheConfig {
+pub struct CacheStoreConfig {
     pub redis: Option<RedisCacheConfig>,
 }
 

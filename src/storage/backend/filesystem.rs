@@ -1,6 +1,6 @@
 use crate::configuration::StorageFSConfig;
-use crate::lock_manager::LockManager;
 use crate::oci::{Descriptor, Digest, Manifest};
+use crate::registry::lock_store::LockStore;
 use crate::registry::Error;
 use crate::storage::entity_link::EntityLink;
 use crate::storage::entity_path_builder::EntityPathBuilder;
@@ -23,7 +23,7 @@ use tracing::{debug, error, instrument, warn};
 
 #[derive(Clone)]
 pub struct StorageEngine {
-    lock_manager: LockManager,
+    lock_store: Arc<LockStore>,
     pub tree: Arc<EntityPathBuilder>,
 }
 
@@ -33,11 +33,13 @@ impl Debug for StorageEngine {
     }
 }
 
+const DIR_MANAGEMENT_LOCK_KEY: &str = "dir_management";
+
 impl StorageEngine {
-    pub fn new(fs_config: StorageFSConfig, lock_manager: LockManager) -> Self {
+    pub fn new(fs_config: StorageFSConfig, lock_store: LockStore) -> Self {
         Self {
             tree: Arc::new(EntityPathBuilder::new(fs_config.root_dir)),
-            lock_manager,
+            lock_store: Arc::new(lock_store),
         }
     }
 
@@ -259,7 +261,7 @@ impl GenericStorageEngine for StorageEngine {
         digest: &Digest,
         artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, Error> {
-        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
         let path = self.tree.manifest_referrers_dir(namespace, digest);
         let all_manifest = self.collect_directory_entries(&path).await?;
         let mut referrers = Vec::new();
@@ -276,8 +278,8 @@ impl GenericStorageEngine for StorageEngine {
                 continue;
             };
 
-            if let Some(artifact_type) = artifact_type.as_ref() {
-                if let Some(manifest_artifact_type) = manifest.artifact_type.as_ref() {
+            if let Some(artifact_type) = &artifact_type {
+                if let Some(manifest_artifact_type) = &manifest.artifact_type {
                     if manifest_artifact_type != artifact_type {
                         continue;
                     }
@@ -374,8 +376,8 @@ impl GenericStorageEngine for StorageEngine {
     #[instrument(skip(self))]
     async fn create_upload(&self, name: &str, uuid: &str) -> Result<String, Error> {
         let _guard = self
-            .lock_manager
-            .write_lock("dir-management".to_string())
+            .lock_store
+            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
         let container_dir = self.tree.upload_container_path(name, uuid);
         fs::create_dir_all(&container_dir).await?;
@@ -515,11 +517,11 @@ impl GenericStorageEngine for StorageEngine {
             Digest::Sha256(hex::encode(digest))
         };
 
-        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
 
         let _guard = self
-            .lock_manager
-            .write_lock("dir-management".to_string())
+            .lock_store
+            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
         let blob_root = self.tree.blob_container_dir(&digest);
         fs::create_dir_all(&blob_root).await?;
@@ -540,8 +542,8 @@ impl GenericStorageEngine for StorageEngine {
     #[instrument(skip(self))]
     async fn delete_upload(&self, name: &str, uuid: &str) -> Result<(), Error> {
         let _guard = self
-            .lock_manager
-            .write_lock("dir-management".to_string())
+            .lock_store
+            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
 
         let path = self.tree.upload_container_path(name, uuid);
@@ -557,11 +559,11 @@ impl GenericStorageEngine for StorageEngine {
         let digest = hasher.finalize();
         let digest = Digest::Sha256(hex::encode(digest));
 
-        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
 
         let _guard = self
-            .lock_manager
-            .write_lock("dir-management".to_string())
+            .lock_store
+            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
 
         let blob_root = self.tree.blob_container_dir(&digest);
@@ -575,14 +577,14 @@ impl GenericStorageEngine for StorageEngine {
 
     #[instrument(skip(self))]
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error> {
-        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
         let path = self.tree.blob_path(digest);
         Ok(fs::read(path).await?)
     }
 
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
-        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
         let path = self.tree.blob_index_path(digest);
         let content = fs::read_to_string(&path).await?;
 
@@ -592,7 +594,7 @@ impl GenericStorageEngine for StorageEngine {
 
     #[instrument(skip(self))]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
-        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
         let path = self.tree.blob_path(digest);
         self.get_file_size(&path).await?.ok_or(Error::BlobUnknown)
     }
@@ -628,7 +630,7 @@ impl GenericStorageEngine for StorageEngine {
         digest: &Digest,
         start_offset: Option<u64>,
     ) -> Result<Box<dyn Reader>, Error> {
-        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
 
         let path = self.tree.blob_path(digest);
         let mut file = match File::open(&path).await {
@@ -646,10 +648,10 @@ impl GenericStorageEngine for StorageEngine {
 
     #[instrument(skip(self))]
     async fn delete_blob(&self, digest: &Digest) -> Result<(), Error> {
-        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
         let _guard = self
-            .lock_manager
-            .write_lock("dir-management".to_string())
+            .lock_store
+            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
 
         let path = self.tree.blob_container_dir(digest);
@@ -718,10 +720,10 @@ impl GenericStorageEngine for StorageEngine {
             _ => {}
         }
 
-        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
         let _guard = self
-            .lock_manager
-            .write_lock("dir-management".to_string())
+            .lock_store
+            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
 
         let path = self.tree.get_link_parent_path(reference, namespace);
@@ -763,10 +765,10 @@ impl GenericStorageEngine for StorageEngine {
         let path = self.tree.get_link_container_path(reference, namespace);
         debug!("Deleting link at path: {}", path);
 
-        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
         let _guard = self
-            .lock_manager
-            .write_lock("dir-management".to_string())
+            .lock_store
+            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
 
         let _ = self.delete_empty_parent_dirs(&path).await;

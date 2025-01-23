@@ -14,10 +14,10 @@ use tokio::io::AsyncRead;
 
 use crate::configuration;
 use crate::configuration::StorageConfig;
-use crate::lock_manager::LockManager;
 use crate::oci::{Descriptor, Digest};
 use crate::registry::Error;
 
+use crate::registry::lock_store::LockStore;
 use crate::storage::backend::{filesystem, s3};
 pub use entity_link::EntityLink;
 
@@ -29,7 +29,7 @@ pub struct UploadSummary {
 
 pub fn build_storage_engine(
     storage_config: StorageConfig,
-    lock_manager: LockManager,
+    lock_store: LockStore,
 ) -> Result<Box<dyn GenericStorageEngine>, configuration::Error> {
     if storage_config.fs.is_some() && storage_config.s3.is_some() {
         return Err(configuration::Error::StorageBackend(
@@ -39,11 +39,10 @@ pub fn build_storage_engine(
 
     if let Some(fs_config) = storage_config.fs {
         Ok(Box::new(filesystem::StorageEngine::new(
-            fs_config,
-            lock_manager,
+            fs_config, lock_store,
         )))
     } else if let Some(s3_config) = storage_config.s3 {
-        Ok(Box::new(s3::StorageEngine::new(s3_config, lock_manager)))
+        Ok(Box::new(s3::StorageEngine::new(s3_config, lock_store)))
     } else {
         Err(configuration::Error::StorageBackend(
             "No storage backend is configured".to_string(),

@@ -1,11 +1,11 @@
+use crate::registry::cache_store;
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::SdkError;
-use redis::RedisError;
 use sha2::digest::crypto_common::hazmat;
 use std::cmp::PartialEq;
 use std::fmt::Display;
 use std::string::FromUtf8Error;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -62,6 +62,13 @@ impl Display for Error {
             Error::Internal(Some(s)) => write!(f, "internal server error: {s}"),
             Error::Internal(None) => write!(f, "internal server error"),
         }
+    }
+}
+
+impl From<cache_store::Error> for Error {
+    fn from(error: cache_store::Error) -> Self {
+        warn!("Cache error: {:?}", error);
+        Error::Internal(Some("Cache error during operations".to_string()))
     }
 }
 
@@ -135,12 +142,5 @@ where
     fn from(error: SdkError<T, HttpResponse>) -> Self {
         error!("Error handling object: {:?}", error);
         Error::Internal(Some("S3 error during operations".to_string()))
-    }
-}
-
-impl From<RedisError> for Error {
-    fn from(error: RedisError) -> Self {
-        error!("Error redis operation: {:?}", error);
-        Error::Internal(Some("Cache storage error during operations".to_string()))
     }
 }

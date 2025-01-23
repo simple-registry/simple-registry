@@ -21,8 +21,8 @@ use tokio::sync::Semaphore;
 use tracing::{debug, error, instrument};
 
 use crate::configuration::StorageS3Config;
-use crate::lock_manager::LockManager;
 use crate::oci::{Descriptor, Digest, Manifest};
+use crate::registry::lock_store::LockStore;
 use crate::registry::Error;
 use crate::storage::entity_link::EntityLink;
 use crate::storage::entity_path_builder::EntityPathBuilder;
@@ -39,7 +39,7 @@ pub struct StorageEngine {
     s3_client: S3Client,
     tree: Arc<EntityPathBuilder>,
     bucket: String,
-    lock_manager: LockManager,
+    lock_store: Arc<LockStore>,
     multipart_copy_threshold: u64,
     multipart_copy_chunk_size: u64,
     multipart_copy_jobs: usize,
@@ -53,7 +53,7 @@ impl Debug for StorageEngine {
 }
 
 impl StorageEngine {
-    pub fn new(s3_config: StorageS3Config, lock_manager: LockManager) -> Self {
+    pub fn new(s3_config: StorageS3Config, lock_store: LockStore) -> Self {
         let credentials = Credentials::new(
             s3_config.access_key_id,
             s3_config.secret_key,
@@ -84,7 +84,7 @@ impl StorageEngine {
                 s3_config.key_prefix.unwrap_or_default(),
             )),
             bucket: s3_config.bucket,
-            lock_manager,
+            lock_store: Arc::new(lock_store),
             multipart_copy_threshold: s3_config.multipart_copy_threshold.to_u64(),
             multipart_copy_chunk_size: s3_config.multipart_copy_chunk_size.to_u64(),
             multipart_copy_jobs: s3_config.multipart_copy_jobs,
@@ -328,7 +328,7 @@ impl StorageEngine {
                 .copy_source_range(format!("bytes={}-{}", offset, offset + part_size - 1));
 
             let task = tokio::spawn(async move {
-                let _permit = semaphore.acquire().await.unwrap();
+                let _permit = semaphore.acquire().await.unwrap(); // TODO: fix unwrap()
                 debug!(
                     "Copying part {} ({}-{}) of object '{}' to '{}'",
                     part_number,
@@ -752,8 +752,8 @@ impl GenericStorageEngine for StorageEngine {
                     continue;
                 };
 
-                if let Some(artifact_type) = artifact_type.as_ref() {
-                    if let Some(manifest_artifact_type) = manifest.artifact_type.as_ref() {
+                if let Some(artifact_type) = &artifact_type {
+                    if let Some(manifest_artifact_type) = &manifest.artifact_type {
                         if manifest_artifact_type != artifact_type {
                             continue;
                         }
@@ -1107,9 +1107,7 @@ impl GenericStorageEngine for StorageEngine {
             Digest::Sha256(hex::encode(existing_digest))
         };
 
-        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
-
-        let blob_path = self.tree.blob_path(&digest);
+        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
 
         let parts = parts
             .iter()
@@ -1138,6 +1136,7 @@ impl GenericStorageEngine for StorageEngine {
             .send()
             .await?;
 
+        let blob_path = self.tree.blob_path(&digest);
         self.copy_object(&blob_path, &key).await?;
         self.blob_link_index_update(name, &digest, |_| {}).await?;
 
@@ -1164,7 +1163,7 @@ impl GenericStorageEngine for StorageEngine {
         let digest = hasher.finalize();
         let digest = Digest::Sha256(hex::encode(digest));
 
-        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
 
         let blob_path = self.tree.blob_path(&digest);
         self.put_object(&blob_path, content.to_vec()).await?;
@@ -1174,7 +1173,7 @@ impl GenericStorageEngine for StorageEngine {
 
     #[instrument(skip(self))]
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error> {
-        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
         let path = self.tree.blob_path(digest);
         let blob = self.get_object_body_as_vec(&path, None).await?;
         Ok(blob)
@@ -1182,7 +1181,7 @@ impl GenericStorageEngine for StorageEngine {
 
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
-        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
         let path = self.tree.blob_index_path(digest);
 
         let data = self.get_object_body_as_vec(&path, None).await?;
@@ -1193,7 +1192,7 @@ impl GenericStorageEngine for StorageEngine {
 
     #[instrument(skip(self))]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
-        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
         let path = self.tree.blob_path(digest);
 
         let content_length = self.get_object_size(&path).await?;
@@ -1237,7 +1236,7 @@ impl GenericStorageEngine for StorageEngine {
         digest: &Digest,
         start_offset: Option<u64>,
     ) -> Result<Box<dyn Reader>, Error> {
-        let _guard = self.lock_manager.read_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
 
         let path = self.tree.blob_path(digest);
         let res = self.get_object(&path, start_offset).await?;
@@ -1246,7 +1245,7 @@ impl GenericStorageEngine for StorageEngine {
 
     #[instrument(skip(self))]
     async fn delete_blob(&self, digest: &Digest) -> Result<(), Error> {
-        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
 
         let path = self.tree.blob_container_dir(digest);
         self.delete_object_with_prefix(&path).await
@@ -1300,7 +1299,7 @@ impl GenericStorageEngine for StorageEngine {
             _ => {}
         }
 
-        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
 
         let path = self.tree.get_link_path(reference, namespace);
         self.put_object(&path, digest.to_string().into_bytes())
@@ -1324,7 +1323,7 @@ impl GenericStorageEngine for StorageEngine {
 
         let link_path = self.tree.get_link_path(reference, namespace);
 
-        let _guard = self.lock_manager.write_lock(digest.to_string()).await;
+        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
 
         self.delete_object(&link_path).await?;
 

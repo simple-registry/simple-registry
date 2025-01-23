@@ -1,7 +1,7 @@
-use crate::cache::Cache;
 use crate::configuration::{Error, RepositoryConfig, RepositoryUpstreamConfig};
 use crate::oci::{Digest, Reference};
 use crate::registry;
+use crate::registry::cache_store::CacheStore;
 use crate::registry::repository_upstream::RepositoryUpstream;
 use cel_interpreter::Program;
 use hyper::body::Incoming;
@@ -19,7 +19,7 @@ pub struct Repository {
 }
 
 impl Repository {
-    pub fn new(config: RepositoryConfig, token_cache: &Arc<dyn Cache>) -> Result<Self, Error> {
+    pub fn new(config: RepositoryConfig, token_cache: &Arc<CacheStore>) -> Result<Self, Error> {
         let access_rules = Self::compile_program_vec(&config.access_policy.rules)?;
 
         let upstream = Self::build_upstreams(config.upstream, token_cache)?;
@@ -35,7 +35,7 @@ impl Repository {
 
     fn build_upstreams(
         upstreams_config: Vec<RepositoryUpstreamConfig>,
-        token_cache: &Arc<dyn Cache>,
+        token_cache: &Arc<CacheStore>,
     ) -> Result<Vec<RepositoryUpstream>, Error> {
         let mut upstreams = Vec::new();
 

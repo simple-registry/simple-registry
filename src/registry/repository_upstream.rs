@@ -1,7 +1,7 @@
-use crate::cache::Cache;
 use crate::configuration::{Error, RepositoryUpstreamConfig};
 use crate::oci::{Digest, Reference};
 use crate::registry;
+use crate::registry::cache_store::CacheStore;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use futures_util::StreamExt;
@@ -30,7 +30,7 @@ lazy_static! {
 
 #[derive(Debug)]
 pub struct RepositoryUpstream {
-    token_cache: Arc<dyn Cache>,
+    token_cache: Arc<CacheStore>,
     pub url: String,
     pub max_redirect: u8,
     pub client: Client<HttpsConnector<HttpConnector>, Empty<Bytes>>,
@@ -59,7 +59,7 @@ enum AuthenticationScheme {
 impl RepositoryUpstream {
     pub fn new(
         config: RepositoryUpstreamConfig,
-        token_cache: Arc<dyn Cache>,
+        token_cache: Arc<CacheStore>,
     ) -> Result<Self, Error> {
         let client = Self::build_http_client(
             config.server_ca_bundle,
@@ -172,7 +172,7 @@ impl RepositoryUpstream {
     }
 
     fn get_basic_auth_header(&self) -> Result<(String, u64), registry::Error> {
-        if let Some(ref header) = self.basic_auth_header {
+        if let Some(header) = &self.basic_auth_header {
             return Ok((header.clone(), 60));
         }
 
@@ -265,7 +265,7 @@ impl RepositoryUpstream {
         namespace: &str,
     ) -> Result<Option<HeaderValue>, registry::Error> {
         debug!("Checking bearer token in cache for namespace: {namespace:?}");
-        let Ok(Some(token)) = self.token_cache.retrieve_token(namespace).await else {
+        let Ok(token) = self.token_cache.retrieve(namespace).await else {
             return Ok(None);
         };
 
@@ -366,7 +366,7 @@ impl RepositoryUpstream {
                 };
 
                 self.token_cache
-                    .store_token(namespace, &token, token_ttl)
+                    .store(namespace, &token, token_ttl * 1000)
                     .await?;
 
                 authorization_header = Some(HeaderValue::from_str(&token).map_err(|e| {
