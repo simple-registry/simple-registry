@@ -253,12 +253,9 @@ In addition to those variables, some helper functions are available:
 
 ## Roadmap
 
-- [ ] Log level correctness
-- [ ] Tracing context correctness
-- [ ] Code quality
-  - [ ] Better test coverage
 - [ ] Kubernetes Operator (new project)
 - [ ] OpenMetrics exporter
+- [ ] Health-checks
 
 ## References
 
