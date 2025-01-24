@@ -80,6 +80,8 @@ pub struct LockStoreConfig {
 pub struct RedisLockStoreConfig {
     pub url: String,
     pub ttl: usize,
+    #[serde(default)]
+    pub key_prefix: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -90,6 +92,8 @@ pub struct CacheStoreConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct RedisCacheConfig {
     pub url: String,
+    #[serde(default)]
+    pub key_prefix: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -75,6 +75,7 @@ multi-replica deployments.
 
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
 - `ttl` (string): The time-to-live for the lock in seconds (e.g., `10s`)
+- `key_prefix` (optional string): The key prefix for all lock keys
 
 ### Token Cache (`cache_store`)
 
@@ -85,6 +86,7 @@ If no configuration is provided, an in-memory cache is used, which is not suitab
 #### Redis Cache (`cache_store.redis`)
 
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
+- `key_prefix` (optional string): The key prefix for all cache keys
 
 ### Storage (`storage`)
 
@@ -251,9 +253,6 @@ In addition to those variables, some helper functions are available:
 
 ## Roadmap
 
-- [ ] Redis key prefix
-  - [ ] Locking engine
-  - [ ] Cache engine
 - [ ] Log level correctness
 - [ ] Tracing context correctness
 - [ ] Code quality

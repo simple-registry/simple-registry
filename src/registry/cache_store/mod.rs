@@ -41,7 +41,7 @@ impl CacheStore {
     /// * `Error::StorageError` if the cache store could not be created
     pub fn new(config: CacheStoreConfig) -> Result<Self, Error> {
         let backend = match config.redis {
-            Some(redis_config) => Backend::Redis(RedisBackend::new(&redis_config.url)?),
+            Some(config) => Backend::Redis(RedisBackend::new(&config.url, config.key_prefix)?),
             None => Backend::Memory(MemoryBackend::new()),
         };
         Ok(CacheStore { backend })
@@ -112,6 +112,7 @@ mod test {
         let config = CacheStoreConfig {
             redis: Some(configuration::RedisCacheConfig {
                 url: "redis://localhost:6379".to_string(),
+                key_prefix: "test_new_cache".to_owned(),
             }),
         };
         let cache = CacheStore::new(config).unwrap();

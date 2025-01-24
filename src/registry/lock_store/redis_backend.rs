@@ -11,14 +11,7 @@ use tracing::{debug, error, warn};
 pub struct RedisBackend {
     client: Arc<Client>,
     ttl: usize,
-}
-
-struct RedisRwLockInner {
-    client: Arc<Client>,
-    key: String,
-    refresh_handle: Mutex<Option<JoinHandle<Result<(), Error>>>>,
-    stop_signal: Arc<AtomicBool>,
-    is_writer: bool,
+    key_prefix: String,
 }
 
 const ACQUIRE_READ_LOCK_SCRIPT: &str = r"
@@ -50,9 +43,9 @@ const RELEASE_READ_LOCK_SCRIPT: &str = r"
 ";
 
 impl RedisBackend {
-    pub fn new(redis_url: &str, ttl: usize) -> redis::RedisResult<Self> {
+    pub fn new(redis_url: &str, ttl: usize, key_prefix: String) -> redis::RedisResult<Self> {
         let client = Arc::new(Client::open(redis_url)?);
-        Ok(RedisBackend { client, ttl })
+        Ok(RedisBackend { client, ttl, key_prefix })
     }
 
     pub async fn acquire_read_lock(&self, key: &str) -> Result<RedisLockGuard, Error> {
@@ -90,12 +83,12 @@ impl RedisBackend {
         }
     }
 
-    fn readers_key(key: &str) -> String {
-        format!("{key}:readers")
+    fn readers_key(&self, key: &str) -> String {
+        format!("{}{key}:readers", self.key_prefix)
     }
 
-    fn writer_key(key: &str) -> String {
-        format!("{key}:writer")
+    fn writer_key(&self, key: &str) -> String {
+        format!("{}{key}:writer", self.key_prefix)
     }
 
     async fn try_acquire_lock(
@@ -103,10 +96,16 @@ impl RedisBackend {
         key: &str,
         is_writer: bool,
     ) -> Result<Arc<RedisRwLockInner>, Error> {
+        let lock_key = if is_writer {
+            self.writer_key(key)
+        } else {
+            self.readers_key(key)
+        };
+
         let stop_signal = Arc::new(AtomicBool::new(false));
         let lock = Arc::new(RedisRwLockInner {
             client: self.client.clone(),
-            key: key.to_owned(),
+            lock_key: lock_key.to_owned(),
             refresh_handle: Mutex::new(None),
             stop_signal: stop_signal.clone(),
             is_writer,
@@ -122,21 +121,15 @@ impl RedisBackend {
         // issue: sometimes result is not == 1.
         let result: i32 = script
             .prepare_invoke()
-            .key(Self::writer_key(key))
-            .key(Self::readers_key(key))
+            .key(self.writer_key(key))
+            .key(self.readers_key(key))
             .arg(self.ttl.to_string())
             .invoke_async(&mut conn)
             .await?;
 
         if result == 1 {
-            let refresh_key = if is_writer {
-                Self::writer_key(key)
-            } else {
-                Self::readers_key(key)
-            };
-
             let refresh_handle =
-                Self::start_refresh_task(self.client.clone(), refresh_key, self.ttl, stop_signal);
+                Self::start_refresh_task(self.client.clone(), lock_key, self.ttl, stop_signal);
 
             let Ok(mut refresh_lock) = lock.refresh_handle.lock() else {
                 return Err(Error::BackendError(
@@ -182,6 +175,14 @@ impl RedisBackend {
     }
 }
 
+struct RedisRwLockInner {
+    client: Arc<Client>,
+    lock_key: String,
+    refresh_handle: Mutex<Option<JoinHandle<Result<(), Error>>>>,
+    stop_signal: Arc<AtomicBool>,
+    is_writer: bool,
+}
+
 impl RedisRwLockInner {
     fn release_lock(&self) {
         let Ok(mut lock) = self.refresh_handle.lock() else {
@@ -203,12 +204,10 @@ impl RedisRwLockInner {
         };
 
         if self.is_writer {
-            let write_lock_key = RedisBackend::writer_key(&self.key);
-            let _: redis::RedisResult<()> = redis::cmd("DEL").arg(&write_lock_key).query(&mut conn);
+            let _: redis::RedisResult<()> = redis::cmd("DEL").arg(&self.lock_key).query(&mut conn);
         } else {
-            let read_lock_key = RedisBackend::readers_key(&self.key);
             let _ = redis::Script::new(RELEASE_READ_LOCK_SCRIPT)
-                .key(read_lock_key)
+                .key(&self.lock_key)
                 .invoke::<i32>(&mut conn);
         }
     }
@@ -234,10 +233,11 @@ mod test {
         let config = RedisLockStoreConfig {
             url: "redis://localhost:6379/1".to_owned(),
             ttl: 1,
+            key_prefix: "test_acquire_read_lock".to_owned(),
         };
 
         let redis_backend =
-            RedisBackend::new(&config.url, config.ttl).expect("Failed to create RedisBackend");
+            RedisBackend::new(&config.url, config.ttl, config.key_prefix).expect("Failed to create RedisBackend");
 
         // Check we can acquire multiple read locks
         let lock_1 = redis_backend
@@ -271,10 +271,11 @@ mod test {
         let config = RedisLockStoreConfig {
             url: "redis://localhost:6379/2".to_owned(),
             ttl: 1,
+            key_prefix: "test_acquire_write_lock".to_owned(),
         };
 
         let redis_backend =
-            RedisBackend::new(&config.url, config.ttl).expect("Failed to create RedisBackend");
+            RedisBackend::new(&config.url, config.ttl, config.key_prefix).expect("Failed to create RedisBackend");
 
         // Check we can't acquire read or write locks while a write lock is held
 
