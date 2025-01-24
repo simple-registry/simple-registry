@@ -51,9 +51,11 @@ impl LockStore {
     /// * `Error::BackendError` if the lock store could not be created
     pub fn new(config: LockStoreConfig) -> Result<Self, Error> {
         let backend = match config.redis {
-            Some(config) => {
-                Backend::Redis(RedisBackend::new(&config.url, config.ttl, config.key_prefix)?)
-            }
+            Some(config) => Backend::Redis(RedisBackend::new(
+                &config.url,
+                config.ttl,
+                config.key_prefix,
+            )?),
             None => Backend::Memory(MemoryBackend::new()),
         };
 

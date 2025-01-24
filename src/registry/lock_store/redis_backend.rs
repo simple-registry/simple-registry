@@ -45,7 +45,11 @@ const RELEASE_READ_LOCK_SCRIPT: &str = r"
 impl RedisBackend {
     pub fn new(redis_url: &str, ttl: usize, key_prefix: String) -> redis::RedisResult<Self> {
         let client = Arc::new(Client::open(redis_url)?);
-        Ok(RedisBackend { client, ttl, key_prefix })
+        Ok(RedisBackend {
+            client,
+            ttl,
+            key_prefix,
+        })
     }
 
     pub async fn acquire_read_lock(&self, key: &str) -> Result<RedisLockGuard, Error> {
@@ -105,7 +109,7 @@ impl RedisBackend {
         let stop_signal = Arc::new(AtomicBool::new(false));
         let lock = Arc::new(RedisRwLockInner {
             client: self.client.clone(),
-            lock_key: lock_key.to_owned(),
+            lock_key: lock_key.clone(),
             refresh_handle: Mutex::new(None),
             stop_signal: stop_signal.clone(),
             is_writer,
@@ -236,8 +240,8 @@ mod test {
             key_prefix: "test_acquire_read_lock".to_owned(),
         };
 
-        let redis_backend =
-            RedisBackend::new(&config.url, config.ttl, config.key_prefix).expect("Failed to create RedisBackend");
+        let redis_backend = RedisBackend::new(&config.url, config.ttl, config.key_prefix)
+            .expect("Failed to create RedisBackend");
 
         // Check we can acquire multiple read locks
         let lock_1 = redis_backend
@@ -274,8 +278,8 @@ mod test {
             key_prefix: "test_acquire_write_lock".to_owned(),
         };
 
-        let redis_backend =
-            RedisBackend::new(&config.url, config.ttl, config.key_prefix).expect("Failed to create RedisBackend");
+        let redis_backend = RedisBackend::new(&config.url, config.ttl, config.key_prefix)
+            .expect("Failed to create RedisBackend");
 
         // Check we can't acquire read or write locks while a write lock is held
 

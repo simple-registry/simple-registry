@@ -181,7 +181,8 @@ impl DataPathBuilder {
         format!(
             "{}/{}/{}",
             self.manifest_referrers_dir(name, subject),
-            referrer.algorithm(), referrer.hash()
+            referrer.algorithm(),
+            referrer.hash()
         )
     }
 
@@ -304,122 +305,179 @@ mod test {
     #[test]
     fn test_uploads_root_dir() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.uploads_root_dir("namespace"), "v2/repositories/namespace/_uploads");
+        assert_eq!(
+            builder.uploads_root_dir("namespace"),
+            "v2/repositories/namespace/_uploads"
+        );
     }
 
     #[test]
     fn test_upload_container_path() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.upload_container_path("namespace", "uuid"), "v2/repositories/namespace/_uploads/uuid");
+        assert_eq!(
+            builder.upload_container_path("namespace", "uuid"),
+            "v2/repositories/namespace/_uploads/uuid"
+        );
     }
 
     #[test]
     fn test_upload_path() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.upload_path("namespace", "uuid"), "v2/repositories/namespace/_uploads/uuid/data");
+        assert_eq!(
+            builder.upload_path("namespace", "uuid"),
+            "v2/repositories/namespace/_uploads/uuid/data"
+        );
     }
 
     #[test]
     fn test_upload_staged_container_path() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.upload_staged_container_path("namespace", "uuid", 0), "v2/repositories/namespace/_uploads/uuid/staged/0");
+        assert_eq!(
+            builder.upload_staged_container_path("namespace", "uuid", 0),
+            "v2/repositories/namespace/_uploads/uuid/staged/0"
+        );
     }
 
     #[test]
     fn test_upload_hash_context_container_path() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.upload_hash_context_container_path("namespace", "uuid", "sha256"), "v2/repositories/namespace/_uploads/uuid/hashstates/sha256");
+        assert_eq!(
+            builder.upload_hash_context_container_path("namespace", "uuid", "sha256"),
+            "v2/repositories/namespace/_uploads/uuid/hashstates/sha256"
+        );
     }
 
     #[test]
     fn test_upload_hash_context_path() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.upload_hash_context_path("namespace", "uuid", "sha256", 0), "v2/repositories/namespace/_uploads/uuid/hashstates/sha256/0");
+        assert_eq!(
+            builder.upload_hash_context_path("namespace", "uuid", "sha256", 0),
+            "v2/repositories/namespace/_uploads/uuid/hashstates/sha256/0"
+        );
     }
 
     #[test]
     fn test_upload_start_date_container_dir() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.upload_start_date_container_dir("namespace", "uuid"), "v2/repositories/namespace/_uploads/uuid");
+        assert_eq!(
+            builder.upload_start_date_container_dir("namespace", "uuid"),
+            "v2/repositories/namespace/_uploads/uuid"
+        );
     }
 
     #[test]
     fn test_upload_start_date_path() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.upload_start_date_path("namespace", "uuid"), "v2/repositories/namespace/_uploads/uuid/startedat");
+        assert_eq!(
+            builder.upload_start_date_path("namespace", "uuid"),
+            "v2/repositories/namespace/_uploads/uuid/startedat"
+        );
     }
 
     #[test]
     fn test_manifests_root_dir() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.manifests_root_dir("namespace"), "v2/repositories/namespace/_manifests");
+        assert_eq!(
+            builder.manifests_root_dir("namespace"),
+            "v2/repositories/namespace/_manifests"
+        );
     }
 
     #[test]
     fn test_manifest_revisions_link_root_dir() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.manifest_revisions_link_root_dir("name", "sha256"), "v2/repositories/name/_manifests/revisions/sha256");
+        assert_eq!(
+            builder.manifest_revisions_link_root_dir("name", "sha256"),
+            "v2/repositories/name/_manifests/revisions/sha256"
+        );
     }
 
     #[test]
     fn test_manifest_revisions_link_container_dir() {
         let builder = DataPathBuilder::new("".to_string());
         let digest = Digest::Sha256("1234567890abcdef".to_string());
-        assert_eq!(builder.manifest_revisions_link_container_dir("name", &digest), "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef");
+        assert_eq!(
+            builder.manifest_revisions_link_container_dir("name", &digest),
+            "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef"
+        );
     }
 
     #[test]
     fn test_manifest_revisions_link_path() {
         let builder = DataPathBuilder::new("".to_string());
         let digest = Digest::Sha256("1234567890abcdef".to_string());
-        assert_eq!(builder.manifest_revisions_link_path("name", &digest), "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef/link");
+        assert_eq!(
+            builder.manifest_revisions_link_path("name", &digest),
+            "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef/link"
+        );
     }
 
     #[test]
     fn test_layers_root_dir() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.layers_root_dir("namespace"), "v2/repositories/namespace/_layers");
+        assert_eq!(
+            builder.layers_root_dir("namespace"),
+            "v2/repositories/namespace/_layers"
+        );
     }
 
     #[test]
     fn test_manifest_layer_link_container_dir() {
         let builder = DataPathBuilder::new("".to_string());
         let digest = Digest::Sha256("1234567890abcdef".to_string());
-        assert_eq!(builder.manifest_layer_link_container_dir("name", &digest), "v2/repositories/name/_layers/sha256/1234567890abcdef");
+        assert_eq!(
+            builder.manifest_layer_link_container_dir("name", &digest),
+            "v2/repositories/name/_layers/sha256/1234567890abcdef"
+        );
     }
 
     #[test]
     fn test_manifest_layer_link_path() {
         let builder = DataPathBuilder::new("".to_string());
         let digest = Digest::Sha256("1234567890abcdef".to_string());
-        assert_eq!(builder.manifest_layer_link_path("name", &digest), "v2/repositories/name/_layers/sha256/1234567890abcdef/link");
+        assert_eq!(
+            builder.manifest_layer_link_path("name", &digest),
+            "v2/repositories/name/_layers/sha256/1234567890abcdef/link"
+        );
     }
 
     #[test]
     fn test_config_root_dir() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.config_root_dir("namespace"), "v2/repositories/namespace/_config");
+        assert_eq!(
+            builder.config_root_dir("namespace"),
+            "v2/repositories/namespace/_config"
+        );
     }
 
     #[test]
     fn test_manifest_config_link_container_dir() {
         let builder = DataPathBuilder::new("".to_string());
         let digest = Digest::Sha256("1234567890abcdef".to_string());
-        assert_eq!(builder.manifest_config_link_container_dir("name", &digest), "v2/repositories/name/_config/sha256/1234567890abcdef");
+        assert_eq!(
+            builder.manifest_config_link_container_dir("name", &digest),
+            "v2/repositories/name/_config/sha256/1234567890abcdef"
+        );
     }
 
     #[test]
     fn test_manifest_config_link_path() {
         let builder = DataPathBuilder::new("".to_string());
         let digest = Digest::Sha256("1234567890abcdef".to_string());
-        assert_eq!(builder.manifest_config_link_path("name", &digest), "v2/repositories/name/_config/sha256/1234567890abcdef/link");
+        assert_eq!(
+            builder.manifest_config_link_path("name", &digest),
+            "v2/repositories/name/_config/sha256/1234567890abcdef/link"
+        );
     }
 
     #[test]
     fn test_manifest_referrers_dir() {
         let builder = DataPathBuilder::new("".to_string());
         let subject = Digest::Sha256("1234567890abcdef".to_string());
-        assert_eq!(builder.manifest_referrers_dir("name", &subject), "v2/repositories/name/_manifests/referrers/sha256/1234567890abcdef");
+        assert_eq!(
+            builder.manifest_referrers_dir("name", &subject),
+            "v2/repositories/name/_manifests/referrers/sha256/1234567890abcdef"
+        );
     }
 
     #[test]
@@ -441,63 +499,93 @@ mod test {
     #[test]
     fn test_manifest_tags_dir() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.manifest_tags_dir("namespace"), "v2/repositories/namespace/_manifests/tags");
+        assert_eq!(
+            builder.manifest_tags_dir("namespace"),
+            "v2/repositories/namespace/_manifests/tags"
+        );
     }
 
     #[test]
     fn test_manifest_tag_link_container_dir() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.manifest_tag_link_container_dir("namespace", "tag"), "v2/repositories/namespace/_manifests/tags/tag");
+        assert_eq!(
+            builder.manifest_tag_link_container_dir("namespace", "tag"),
+            "v2/repositories/namespace/_manifests/tags/tag"
+        );
     }
 
     #[test]
     fn test_manifest_tag_link_parent_dir() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.manifest_tag_link_parent_dir("namespace", "tag"), "v2/repositories/namespace/_manifests/tags/tag/current");
+        assert_eq!(
+            builder.manifest_tag_link_parent_dir("namespace", "tag"),
+            "v2/repositories/namespace/_manifests/tags/tag/current"
+        );
     }
 
     #[test]
     fn test_manifest_tag_link_path() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.manifest_tag_link_path("namespace", "tag"), "v2/repositories/namespace/_manifests/tags/tag/current/link");
+        assert_eq!(
+            builder.manifest_tag_link_path("namespace", "tag"),
+            "v2/repositories/namespace/_manifests/tags/tag/current/link"
+        );
     }
 
     #[test]
     fn test_get_link_path() {
         let builder = DataPathBuilder::new("".to_string());
         let digest = Digest::Sha256("1234567890abcdef".to_string());
-        assert_eq!(builder.get_link_path(&DataLink::Digest(digest), "name"), "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef/link");
+        assert_eq!(
+            builder.get_link_path(&DataLink::Digest(digest), "name"),
+            "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef/link"
+        );
     }
 
     #[test]
     fn test_get_link_parent_path() {
         let builder = DataPathBuilder::new("".to_string());
         let digest = Digest::Sha256("1234567890abcdef".to_string());
-        assert_eq!(builder.get_link_parent_path(&DataLink::Digest(digest), "name"), "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef");
+        assert_eq!(
+            builder.get_link_parent_path(&DataLink::Digest(digest), "name"),
+            "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef"
+        );
     }
 
     #[test]
     fn test_get_link_container_path() {
         let builder = DataPathBuilder::new("".to_string());
         let digest = Digest::Sha256("1234567890abcdef".to_string());
-        assert_eq!(builder.get_link_container_path(&DataLink::Digest(digest), "name"), "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef");
+        assert_eq!(
+            builder.get_link_container_path(&DataLink::Digest(digest), "name"),
+            "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef"
+        );
     }
 
     #[test]
     fn test_get_link_path_tag() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.get_link_path(&DataLink::Tag("tag".to_string()), "name"), "v2/repositories/name/_manifests/tags/tag/current/link");
+        assert_eq!(
+            builder.get_link_path(&DataLink::Tag("tag".to_string()), "name"),
+            "v2/repositories/name/_manifests/tags/tag/current/link"
+        );
     }
 
     #[test]
     fn test_get_link_parent_path_tag() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.get_link_parent_path(&DataLink::Tag("tag".to_string()), "name"), "v2/repositories/name/_manifests/tags/tag/current");
+        assert_eq!(
+            builder.get_link_parent_path(&DataLink::Tag("tag".to_string()), "name"),
+            "v2/repositories/name/_manifests/tags/tag/current"
+        );
     }
 
     #[test]
     fn test_get_link_container_path_tag() {
         let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(builder.get_link_container_path(&DataLink::Tag("tag".to_string()), "name"), "v2/repositories/name/_manifests/tags/tag");
+        assert_eq!(
+            builder.get_link_container_path(&DataLink::Tag("tag".to_string()), "name"),
+            "v2/repositories/name/_manifests/tags/tag"
+        );
     }
 }
