@@ -75,7 +75,7 @@ impl From<io::Error> for Error {
 impl From<toml::de::Error> for Error {
     fn from(error: toml::de::Error) -> Self {
         debug!("TOML error: {error:?}");
-        Error::ConfigurationFileFormat("TOML deserialization error during operations".to_string())
+        Error::ConfigurationFileFormat(error.to_string())
     }
 }
 

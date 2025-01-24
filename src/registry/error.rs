@@ -105,3 +105,17 @@ impl From<serde_json::Error> for Error {
         Error::Internal("(De)Serialization error during operations".to_string())
     }
 }
+
+impl From<cel_interpreter::ExecutionError> for Error {
+    fn from(err: cel_interpreter::ExecutionError) -> Self {
+        debug!("CEL error: {:?}", err);
+        Error::Internal("Policy evaluation error".to_string())
+    }
+}
+
+impl From<Box<dyn std::error::Error>> for Error {
+    fn from(error: Box<dyn std::error::Error>) -> Self {
+        debug!("Error: {:?}", error);
+        Error::Internal("Error during operations".to_string())
+    }
+}

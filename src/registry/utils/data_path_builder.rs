@@ -1,5 +1,5 @@
 use crate::oci::Digest;
-use crate::registry::data_store::data_link::DataLink;
+use crate::registry::utils::DataLink;
 
 #[derive(Debug)]
 pub struct DataPathBuilder {

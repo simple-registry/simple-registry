@@ -1,5 +1,3 @@
-mod data_link;
-mod data_path_builder;
 mod error;
 mod fs_backend;
 mod s3_backend;
@@ -21,8 +19,8 @@ use crate::registry::lock_store::LockStore;
 
 use crate::registry::data_store::fs_backend::FSBackend;
 use crate::registry::data_store::s3_backend::S3Backend;
-pub use data_link::DataLink;
 
+use crate::registry::utils::DataLink;
 pub use error::Error;
 
 pub fn build_storage_engine(config: DataStoreConfig, lock_store: LockStore) -> Box<dyn DataStore> {

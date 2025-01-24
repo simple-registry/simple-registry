@@ -22,13 +22,12 @@ use tracing::{debug, error, instrument};
 
 use crate::configuration::StorageS3Config;
 use crate::oci::{Descriptor, Digest, Manifest};
-use crate::registry::data_store::data_link::DataLink;
-use crate::registry::data_store::data_path_builder::DataPathBuilder;
 use crate::registry::data_store::{
     deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobEntityLinkIndex,
     DataStore, Error, Reader, ReferenceInfo,
 };
 use crate::registry::lock_store::LockStore;
+use crate::registry::utils::{DataLink, DataPathBuilder};
 
 const PUSHED_AT_METADATA_KEY: &str = "pushed";
 const LAST_PULLED_AT_METADATA_KEY: &str = "last-pulled";

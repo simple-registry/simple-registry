@@ -1,6 +1,6 @@
 use crate::oci::Digest;
-use crate::registry::data_store::{DataLink, Reader};
-use crate::registry::notifying_reader::NotifyingReader;
+use crate::registry::data_store::Reader;
+use crate::registry::utils::{DataLink, NotifyingReader};
 use crate::registry::{data_store, Error, Registry};
 use futures_util::TryStreamExt;
 use http_body_util::BodyExt;

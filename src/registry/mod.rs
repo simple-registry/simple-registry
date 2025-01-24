@@ -1,3 +1,4 @@
+use chrono::Duration;
 use hyper::body::Incoming;
 use hyper::header::AsHeaderName;
 use hyper::Response;
@@ -16,16 +17,15 @@ pub mod data_store;
 mod error;
 pub mod lock_store;
 mod manifest;
-mod notifying_reader;
-mod repository;
-mod repository_upstream;
+mod scrub;
 mod upload;
+mod utils;
 
 use crate::configuration;
 use crate::configuration::RepositoryConfig;
 use crate::registry::cache_store::CacheStore;
 use crate::registry::data_store::DataStore;
-use crate::registry::repository::Repository;
+use crate::registry::utils::Repository;
 pub use blob::GetBlobResponse;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
@@ -38,9 +38,11 @@ lazy_static! {
 
 #[derive(Debug)]
 pub struct Registry {
-    pub streaming_chunk_size: usize,
-    pub storage_engine: Arc<Box<dyn DataStore>>,
-    pub repositories: HashMap<String, Repository>,
+    streaming_chunk_size: usize,
+    storage_engine: Arc<Box<dyn DataStore>>,
+    repositories: HashMap<String, Repository>,
+    scrub_dry_run: bool,
+    scrub_upload_timeout: Duration,
 }
 
 impl Registry {
@@ -61,9 +63,21 @@ impl Registry {
             streaming_chunk_size,
             storage_engine: Arc::new(storage_engine),
             repositories,
+            scrub_dry_run: true,
+            scrub_upload_timeout: Duration::days(1),
         };
 
         Ok(res)
+    }
+
+    pub fn with_dry_run(mut self, scrub_dry_run: bool) -> Self {
+        self.scrub_dry_run = scrub_dry_run;
+        self
+    }
+
+    pub fn with_upload_timeout(mut self, scrub_upload_timeout: Duration) -> Self {
+        self.scrub_upload_timeout = scrub_upload_timeout;
+        self
     }
 
     // TODO: check usage (called twice for most requests)

@@ -9,7 +9,6 @@ pub enum Error {
     Configuration(configuration::Error),
     Registry(registry::Error),
     DataStore(data_store::Error),
-    CELExecution(cel_interpreter::ExecutionError),
     Std(Box<dyn std::error::Error>),
 }
 
@@ -28,10 +27,6 @@ impl fmt::Display for Error {
             }
             Error::DataStore(err) => {
                 write!(f, "Data store error")?;
-                write!(f, "{err}")
-            }
-            Error::CELExecution(err) => {
-                write!(f, "CEL execution error")?;
                 write!(f, "{err}")
             }
             Error::Std(err) => {
@@ -75,11 +70,5 @@ impl From<data_store::Error> for Error {
 impl From<Box<dyn std::error::Error>> for Error {
     fn from(err: Box<dyn std::error::Error>) -> Self {
         Error::Std(err)
-    }
-}
-
-impl From<cel_interpreter::ExecutionError> for Error {
-    fn from(err: cel_interpreter::ExecutionError) -> Self {
-        Error::CELExecution(err)
     }
 }

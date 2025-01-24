@@ -218,7 +218,11 @@ pub struct TracingConfig {
 impl Configuration {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let config_str = fs::read_to_string(path)?;
-        let config: Self = toml::from_str(&config_str)?;
+
+        let config: Configuration = toml::from_str(&config_str).unwrap_or_else(|e| {
+            println!("Configuration file format error:");
+            panic!("{e}")
+        });
 
         if config.server.streaming_chunk_size.to_usize() < 5 * 1024 * 1024 {
             return Err(Error::StreamingChunkSize(

@@ -1,167 +1,94 @@
-mod retention_policy;
-
-use crate::command;
-use crate::command::scrub::retention_policy::manifest_should_be_purged;
 use crate::oci::{Digest, Reference};
 use crate::policy::ManifestImage;
-use crate::registry::data_store::{DataLink, ReferenceInfo};
-use crate::registry::{parse_manifest_digests, Registry};
-use argh::FromArgs;
-use chrono::{Duration, Utc};
-use std::collections::{HashMap, HashSet};
+use crate::registry::data_store::ReferenceInfo;
+use crate::registry::utils::DataLink;
+use crate::registry::{parse_manifest_digests, Error, Registry};
+use cel_interpreter::{Context, Program, Value};
+use chrono::Utc;
+use std::collections::HashMap;
 use std::process::exit;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-#[derive(FromArgs, PartialEq, Debug)]
-#[allow(clippy::struct_excessive_bools)]
-#[argh(
-    subcommand,
-    name = "scrub",
-    description = "Check the storage backend for inconsistencies"
-)]
-pub struct Options {
-    #[argh(switch, short = 'd')]
-    /// only report issues, no changes will be made to the storage
-    pub dry_mode: bool,
-    #[argh(option, short = 't')]
-    /// the maximum duration an upload can be in progress before it is considered obsolete in seconds
-    pub upload_timeout: Option<u32>, // TODO: use something more human friendly
-    #[argh(switch, short = 'u')]
-    /// check for obsolete uploads
-    pub check_uploads: bool,
-    #[argh(switch, short = 'g')]
-    /// check for orphan blobs
-    pub check_tags: bool,
-    #[argh(switch, short = 'r')]
-    /// check for revision inconsistencies
-    pub check_revisions: bool,
-    #[argh(switch, short = 'b')]
-    /// check for blob inconsistencies
-    pub check_blobs: bool,
-    #[argh(switch, short = 'p')]
-    /// enforce retention policies
-    pub enforce_retention_policies: bool,
-}
+/// Checks if a rule validates and if therefore the specified manifest should be purged
+///
+/// # Arguments
+/// - `rules` - The retention rules to evaluate
+/// - `manifest` - The manifest to evaluate
+/// - `last_pushed` - The list of last pushed tags ordered by push date desc
+/// - `last_pulled` - The list of last pulled tags ordered by pull date desc
+///
+/// # Returns
+/// - `Ok(true)` if the manifest should be purged
+/// - `Ok(false)` if the manifest should be retained
+/// - `Err` if an error occurred during evaluation
+pub fn manifest_should_be_purged(
+    rules: &[Program],
+    manifest: &ManifestImage,
+    last_pushed: &Vec<String>,
+    last_pulled: &Vec<String>,
+) -> Result<bool, Error> {
+    let mut context = Context::default();
+    debug!("Policy context (image) : {:?}", manifest);
 
-#[derive(Hash, Eq, PartialEq)]
-enum ScrubCheck {
-    Uploads,
-    Tags,
-    Revisions,
-    Blobs,
-    Retention,
-}
+    context.add_variable("image", manifest)?;
+    context.add_variable("last_pushed", last_pushed)?;
+    context.add_variable("last_pulled", last_pulled)?;
 
-pub struct Command {
-    registry: Arc<Registry>,
-    dry_mode: bool,
-    upload_timeout: Duration,
-    enabled_checks: HashSet<ScrubCheck>,
-}
+    context.add_function("now", || Utc::now().timestamp());
+    context.add_function("days", |d: i64| d * 86400);
+    context.add_function(
+        "top",
+        |s: Arc<String>, collection: Arc<Vec<Value>>, k: i64| {
+            let mut i = 0;
+            for e in collection.iter() {
+                let Value::String(e) = e else { continue };
 
-impl Command {
-    pub fn new(options: &Options, registry: Registry) -> Self {
-        let registry = Arc::new(registry);
-
-        let dry_mode = options.dry_mode;
-        let mut enabled_checks = HashSet::new();
-
-        if options.check_uploads {
-            enabled_checks.insert(ScrubCheck::Uploads);
-        }
-
-        if options.check_tags {
-            enabled_checks.insert(ScrubCheck::Tags);
-        }
-
-        if options.check_revisions {
-            enabled_checks.insert(ScrubCheck::Revisions);
-        }
-
-        if options.check_blobs {
-            enabled_checks.insert(ScrubCheck::Blobs);
-        }
-
-        if options.enforce_retention_policies {
-            enabled_checks.insert(ScrubCheck::Retention);
-        }
-
-        Self {
-            registry,
-            dry_mode,
-            upload_timeout: options
-                .upload_timeout
-                .map_or(Duration::days(1), |s| Duration::seconds(s.into())),
-            enabled_checks,
-        }
-    }
-
-    pub async fn run(&self) -> Result<(), command::Error> {
-        if self.dry_mode {
-            info!("Dry-run mode: no changes will be made to the storage");
-        }
-
-        let mut marker = None;
-        loop {
-            let Ok((namespaces, next_marker)) = self
-                .registry
-                .storage_engine
-                .list_namespaces(100, marker)
-                .await
-            else {
-                error!("Failed to read catalog");
-                exit(1);
-            };
-
-            for namespace in namespaces {
-                if self.enabled_checks.contains(&ScrubCheck::Retention) {
-                    let _ = self.enforce_retention(&namespace).await;
+                if e.as_str() == s.as_str() {
+                    return true;
                 }
-
-                if self.enabled_checks.contains(&ScrubCheck::Uploads) {
-                    // Step 1: check upload directories
-                    // - for incomplete uploads (threshold from config file)
-                    // - delete corrupted upload directories (here we are incompatible with docker "distribution")
-                    let _ = self.scrub_uploads(&namespace).await;
-                }
-
-                if self.enabled_checks.contains(&ScrubCheck::Tags) {
-                    // Step 2: for each manifest tags "_manifests/tags/<tag-name>/current/link", ensure the
-                    // revision exists: "_manifests/revisions/sha256/<hash>/link"
-                    let _ = self.scrub_tags(&namespace).await;
-                }
-
-                if self.enabled_checks.contains(&ScrubCheck::Revisions) {
-                    // Step 3: for each revision "_manifests/revisions/sha256/<hash>/link", read the manifest,
-                    // and ensure related links exists
-                    let _ = self.scrub_revisions(&namespace).await;
+                i += 1;
+                if i >= k {
+                    break;
                 }
             }
 
-            if next_marker.is_none() {
-                break;
+            false
+        },
+    );
+
+    for policy in rules {
+        let evaluation_result = policy.execute(&context)?;
+
+        debug!(
+            "CEL program '{:?}' evaluates to {:?}",
+            policy, evaluation_result
+        );
+        match evaluation_result {
+            Value::Bool(true) => {
+                debug!("Retention policy matched");
+                return Ok(false);
             }
-
-            marker = next_marker;
+            Value::Bool(false) => { // Not validated, continue checking
+            }
+            _ => {
+                debug!("Not eligible for cleanup");
+                return Ok(false);
+            }
         }
-
-        if self.enabled_checks.contains(&ScrubCheck::Blobs) {
-            // Step 4: blob garbage collection
-            let _ = self.cleanup_orphan_blobs().await;
-        }
-
-        Ok(())
     }
 
-    async fn enforce_retention(&self, namespace: &str) -> Result<(), command::Error> {
+    Ok(!rules.is_empty())
+}
+
+impl Registry {
+    pub async fn enforce_retention(&self, namespace: &str) -> Result<(), Error> {
         info!("'{}': Enforcing retention policy", namespace);
 
         let mut marker = None;
         let mut tag_names = Vec::new();
         loop {
             let (tags, next_marker) = self
-                .registry
                 .storage_engine
                 .list_tags(namespace, 1000, marker)
                 .await?;
@@ -175,7 +102,6 @@ impl Command {
         let mut tags = HashMap::new();
         for tag in &tag_names {
             let info = self
-                .registry
                 .storage_engine
                 .read_reference_info(namespace, &DataLink::Tag(tag.to_string()))
                 .await?;
@@ -191,7 +117,7 @@ impl Command {
         &self,
         namespace: &str,
         mut tags: HashMap<String, ReferenceInfo>,
-    ) -> Result<(), command::Error> {
+    ) -> Result<(), Error> {
         let tags: Vec<(String, ReferenceInfo)> = tags.drain().collect();
 
         let mut last_pushed = tags.clone();
@@ -212,7 +138,6 @@ impl Command {
             debug!("'{}': Checking tag '{}' for retention", namespace, tag);
 
             let Some((_, found_repository)) = self
-                .registry
                 .repositories
                 .iter()
                 .find(|(repository, _)| namespace.starts_with(*repository))
@@ -234,9 +159,9 @@ impl Command {
                 &last_pulled,
             )? {
                 info!("Available for cleanup: {}:{}", namespace, tag);
-                if !self.dry_mode {
+                if !self.scrub_dry_run {
                     let reference = Reference::Tag(tag.to_string());
-                    let _ = self.registry.delete_manifest(namespace, reference).await;
+                    let _ = self.delete_manifest(namespace, reference).await;
 
                     last_pushed.retain(|t| t != tag);
                     last_pulled.retain(|t| t != tag);
@@ -247,13 +172,12 @@ impl Command {
         Ok(())
     }
 
-    async fn scrub_uploads(&self, namespace: &str) -> Result<(), command::Error> {
+    pub(crate) async fn scrub_uploads(&self, namespace: &str) -> Result<(), Error> {
         info!("'{}': Checking for obsolete uploads", namespace);
 
         let mut marker = None;
         loop {
             let (uploads, next_marker) = self
-                .registry
                 .storage_engine
                 .list_uploads(namespace, 100, marker)
                 .await?;
@@ -273,9 +197,8 @@ impl Command {
         Ok(())
     }
 
-    async fn check_upload(&self, namespace: &str, uuid: &str) -> Result<(), command::Error> {
+    async fn check_upload(&self, namespace: &str, uuid: &str) -> Result<(), Error> {
         let (_, _, start_date) = self
-            .registry
             .storage_engine
             .read_upload_summary(namespace, uuid)
             .await?;
@@ -283,18 +206,13 @@ impl Command {
         let now = Utc::now();
         let duration = now.signed_duration_since(start_date);
 
-        if duration <= self.upload_timeout {
+        if duration <= self.scrub_upload_timeout {
             return Ok(());
         }
 
         warn!("'{}': upload '{}' is obsolete", namespace, uuid);
-        if !self.dry_mode {
-            if let Err(err) = self
-                .registry
-                .storage_engine
-                .delete_upload(namespace, uuid)
-                .await
-            {
+        if !self.scrub_dry_run {
+            if let Err(err) = self.storage_engine.delete_upload(namespace, uuid).await {
                 error!("Failed to delete upload '{}': {}", uuid, err);
             }
         }
@@ -302,13 +220,12 @@ impl Command {
         Ok(())
     }
 
-    async fn scrub_tags(&self, namespace: &str) -> Result<(), command::Error> {
+    pub(crate) async fn scrub_tags(&self, namespace: &str) -> Result<(), Error> {
         info!("'{}': Checking tags/revision inconsistencies", namespace);
 
         let mut marker = None;
         loop {
             let (tags, next_marker) = self
-                .registry
                 .storage_engine
                 .list_tags(namespace, 100, marker)
                 .await?;
@@ -328,13 +245,12 @@ impl Command {
         Ok(())
     }
 
-    async fn check_tag(&self, namespace: &str, tag: &str) -> Result<(), command::Error> {
+    async fn check_tag(&self, namespace: &str, tag: &str) -> Result<(), Error> {
         debug!(
             "Checking {}:{} for revision inconsistencies",
             namespace, tag
         );
         let digest = self
-            .registry
             .storage_engine
             .read_link(namespace, &DataLink::Tag(tag.to_string()))
             .await?;
@@ -347,20 +263,19 @@ impl Command {
         Ok(())
     }
 
-    async fn scrub_revisions(&self, namespace: &str) -> Result<(), command::Error> {
+    pub(crate) async fn scrub_revisions(&self, namespace: &str) -> Result<(), Error> {
         info!("'{}': Checking for revision inconsistencies", namespace);
 
         let mut marker = None;
 
         loop {
             let (revisions, next_marker) = self
-                .registry
                 .storage_engine
                 .list_revisions(namespace, 0, marker)
                 .await?;
 
             for revision in revisions {
-                let content = self.registry.storage_engine.read_blob(&revision).await?;
+                let content = self.storage_engine.read_blob(&revision).await?;
                 let manifest = parse_manifest_digests(&content, None)?;
 
                 self.check_layers(namespace, &revision, &manifest.layers)
@@ -386,7 +301,7 @@ impl Command {
         namespace: &str,
         revision: &Digest,
         config: Option<Digest>,
-    ) -> Result<(), command::Error> {
+    ) -> Result<(), Error> {
         let Some(config_digest) = config else {
             return Ok(());
         };
@@ -408,7 +323,7 @@ impl Command {
         namespace: &str,
         revision: &Digest,
         subject_digest: Option<Digest>,
-    ) -> Result<(), command::Error> {
+    ) -> Result<(), Error> {
         let Some(subject_digest) = subject_digest else {
             return Ok(());
         };
@@ -429,7 +344,7 @@ impl Command {
         namespace: &str,
         revision: &Digest,
         layers: &Vec<Digest>,
-    ) -> Result<(), command::Error> {
+    ) -> Result<(), Error> {
         for layer_digest in layers {
             debug!(
                 "Checking {}@{} layer link: {}",
@@ -449,9 +364,8 @@ impl Command {
         namespace: &str,
         link_reference: &DataLink,
         digest: &Digest,
-    ) -> Result<(), command::Error> {
+    ) -> Result<(), Error> {
         let blob_digest = self
-            .registry
             .storage_engine
             .read_link(namespace, link_reference)
             .await
@@ -468,9 +382,8 @@ impl Command {
             "Missing or invalid link: {:?} -> {:?}",
             link_reference, digest
         );
-        if !self.dry_mode {
-            self.registry
-                .storage_engine
+        if !self.scrub_dry_run {
+            self.storage_engine
                 .create_link(namespace, link_reference, digest)
                 .await?;
         }
@@ -478,14 +391,12 @@ impl Command {
         Ok(())
     }
 
-    async fn cleanup_orphan_blobs(&self) -> Result<(), command::Error> {
+    pub(crate) async fn cleanup_orphan_blobs(&self) -> Result<(), Error> {
         info!("Checking for orphan blobs");
 
         let mut marker = None;
         loop {
-            let Ok((blobs, next_marker)) =
-                self.registry.storage_engine.list_blobs(100, marker).await
-            else {
+            let Ok((blobs, next_marker)) = self.storage_engine.list_blobs(100, marker).await else {
                 error!("Failed to list blobs");
                 exit(1);
             };
@@ -503,13 +414,12 @@ impl Command {
         Ok(())
     }
 
-    async fn check_blob(&self, blob: &Digest) -> Result<(), command::Error> {
-        let mut blob_index = self.registry.storage_engine.read_blob_index(blob).await?;
+    async fn check_blob(&self, blob: &Digest) -> Result<(), Error> {
+        let mut blob_index = self.storage_engine.read_blob_index(blob).await?;
 
         for (namespace, references) in blob_index.namespace.clone() {
             for link_reference in references {
                 if self
-                    .registry
                     .storage_engine
                     .read_link(&namespace, &link_reference)
                     .await
@@ -524,7 +434,7 @@ impl Command {
                         "Orphan link: {}@{} -> {:?}",
                         namespace, blob, link_reference
                     );
-                    if !self.dry_mode {
+                    if !self.scrub_dry_run {
                         index.remove(&link_reference);
                     }
                 }
@@ -537,12 +447,137 @@ impl Command {
 
         if blob_index.namespace.is_empty() {
             warn!("Orphan blob: {}", blob);
-            if !self.dry_mode {
-                if let Err(err) = self.registry.storage_engine.delete_blob(blob).await {
+            if !self.scrub_dry_run {
+                if let Err(err) = self.storage_engine.delete_blob(blob).await {
                     error!("Failed to delete blob: {}", err);
                 }
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_retention_policy_no_rules() {
+        let policies = vec![];
+        let manifest = ManifestImage {
+            tag: Some("latest".to_string()),
+            pushed_at: 1710441600,
+            last_pulled_at: 1710441600,
+        };
+        assert!(!manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
+    }
+
+    #[test]
+    fn test_retention_policy_not_purged() {
+        let policies = vec![Program::compile("image.tag == 'latest'").unwrap()];
+        let manifest = ManifestImage {
+            tag: Some("latest".to_string()),
+            pushed_at: 1710441600,
+            last_pulled_at: 1710441600,
+        };
+        assert!(!manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
+    }
+
+    #[test]
+    fn test_retention_policy_purged() {
+        let policies = vec![Program::compile("image.tag == 'latest'").unwrap()];
+        let manifest = ManifestImage {
+            tag: Some("x".to_string()),
+            pushed_at: 1710441600,
+            last_pulled_at: 1710441600,
+        };
+        assert!(manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
+    }
+
+    #[test]
+    fn test_retention_policy_invalid() {
+        let policies = vec![Program::compile("image.tag").unwrap()];
+        let manifest = ManifestImage {
+            tag: None,
+            pushed_at: 1710441600,
+            last_pulled_at: 1710441600,
+        };
+        assert!(!manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
+    }
+
+    #[test]
+    fn test_function_now_days() {
+        let policies = vec![Program::compile("now() + days(15) == now() + 86400 * 15").unwrap()];
+        let manifest = ManifestImage {
+            tag: Some("latest".to_string()),
+            pushed_at: 1710441600,
+            last_pulled_at: 1710441600,
+        };
+
+        assert!(!manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
+    }
+
+    #[test]
+    fn test_function_top_last_pushed() {
+        let policies = vec![Program::compile("top(image.tag, last_pushed, 1)").unwrap()];
+
+        let manifest = ManifestImage {
+            tag: Some("latest".to_string()),
+            pushed_at: 1710441600,
+            last_pulled_at: 1710441600,
+        };
+
+        assert!(!manifest_should_be_purged(
+            &policies,
+            &manifest,
+            &vec!["latest".to_string()],
+            &vec![]
+        )
+        .unwrap());
+
+        let manifest = ManifestImage {
+            tag: Some("x".to_string()),
+            pushed_at: 1710441600,
+            last_pulled_at: 1710441600,
+        };
+        assert!(manifest_should_be_purged(
+            &policies,
+            &manifest,
+            &vec!["latest".to_string()],
+            &vec![]
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn test_function_top_last_pulled() {
+        let policies = vec![Program::compile("top(image.tag, last_pulled, 1)").unwrap()];
+
+        let manifest = ManifestImage {
+            tag: Some("latest".to_string()),
+            pushed_at: 1710441600,
+            last_pulled_at: 1710441600,
+        };
+
+        assert!(!manifest_should_be_purged(
+            &policies,
+            &manifest,
+            &vec![],
+            &vec!["latest".to_string()]
+        )
+        .unwrap());
+
+        let manifest = ManifestImage {
+            tag: Some("x".to_string()),
+            pushed_at: 1710441600,
+            last_pulled_at: 1710441600,
+        };
+        assert!(manifest_should_be_purged(
+            &policies,
+            &manifest,
+            &vec![],
+            &vec!["latest".to_string()]
+        )
+        .unwrap());
     }
 }

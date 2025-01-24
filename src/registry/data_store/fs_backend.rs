@@ -1,12 +1,11 @@
 use crate::configuration::StorageFSConfig;
 use crate::oci::{Descriptor, Digest, Manifest};
-use crate::registry::data_store::data_link::DataLink;
-use crate::registry::data_store::data_path_builder::DataPathBuilder;
 use crate::registry::data_store::{
     deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobEntityLinkIndex,
     DataStore, Error, Reader, ReferenceInfo,
 };
 use crate::registry::lock_store::LockStore;
+use crate::registry::utils::{DataLink, DataPathBuilder};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sha2::{Digest as ShaDigestTrait, Sha256};
