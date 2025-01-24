@@ -4,8 +4,8 @@ use crate::command;
 use crate::command::scrub::retention_policy::manifest_should_be_purged;
 use crate::oci::{Digest, Reference};
 use crate::policy::ManifestImage;
+use crate::registry::data_store::{DataLink, ReferenceInfo};
 use crate::registry::{parse_manifest_digests, Registry};
-use crate::storage::{EntityLink, ReferenceInfo};
 use argh::FromArgs;
 use chrono::{Duration, Utc};
 use std::collections::{HashMap, HashSet};
@@ -177,7 +177,7 @@ impl Command {
             let info = self
                 .registry
                 .storage_engine
-                .read_reference_info(namespace, &EntityLink::Tag(tag.to_string()))
+                .read_reference_info(namespace, &DataLink::Tag(tag.to_string()))
                 .await?;
             tags.insert(tag.to_string(), info);
         }
@@ -274,14 +274,14 @@ impl Command {
     }
 
     async fn check_upload(&self, namespace: &str, uuid: &str) -> Result<(), command::Error> {
-        let summary = self
+        let (_, _, start_date) = self
             .registry
             .storage_engine
             .read_upload_summary(namespace, uuid)
             .await?;
 
         let now = Utc::now();
-        let duration = now.signed_duration_since(summary.start_date);
+        let duration = now.signed_duration_since(start_date);
 
         if duration <= self.upload_timeout {
             return Ok(());
@@ -336,10 +336,10 @@ impl Command {
         let digest = self
             .registry
             .storage_engine
-            .read_link(namespace, &EntityLink::Tag(tag.to_string()))
+            .read_link(namespace, &DataLink::Tag(tag.to_string()))
             .await?;
 
-        let link_reference = EntityLink::Digest(digest.clone());
+        let link_reference = DataLink::Digest(digest.clone());
         if let Err(e) = self.ensure_link(namespace, &link_reference, &digest).await {
             warn!("Failed to ensure link: {}", e);
         }
@@ -396,7 +396,7 @@ impl Command {
             namespace, revision, config_digest
         );
 
-        let link_reference = EntityLink::Config(config_digest.clone());
+        let link_reference = DataLink::Config(config_digest.clone());
         self.ensure_link(namespace, &link_reference, &config_digest)
             .await?;
 
@@ -417,7 +417,7 @@ impl Command {
             "Checking {}@{} subject link: {}",
             namespace, revision, subject_digest
         );
-        let link_reference = EntityLink::Referrer(subject_digest.clone(), revision.clone());
+        let link_reference = DataLink::Referrer(subject_digest.clone(), revision.clone());
         self.ensure_link(namespace, &link_reference, revision)
             .await?;
 
@@ -436,7 +436,7 @@ impl Command {
                 namespace, revision, layer_digest
             );
 
-            let link_reference = EntityLink::Layer(layer_digest.clone());
+            let link_reference = DataLink::Layer(layer_digest.clone());
             self.ensure_link(namespace, &link_reference, layer_digest)
                 .await?;
         }
@@ -447,7 +447,7 @@ impl Command {
     async fn ensure_link(
         &self,
         namespace: &str,
-        link_reference: &EntityLink,
+        link_reference: &DataLink,
         digest: &Digest,
     ) -> Result<(), command::Error> {
         let blob_digest = self

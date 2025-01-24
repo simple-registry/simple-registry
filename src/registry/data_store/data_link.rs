@@ -2,7 +2,7 @@ use crate::oci::{Digest, Reference};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-pub enum EntityLink {
+pub enum DataLink {
     Tag(String),
     Digest(Digest),
     Layer(Digest),
@@ -10,11 +10,11 @@ pub enum EntityLink {
     Referrer(Digest, Digest),
 }
 
-impl From<Reference> for EntityLink {
+impl From<Reference> for DataLink {
     fn from(r: Reference) -> Self {
         match r {
-            Reference::Tag(s) => EntityLink::Tag(s),
-            Reference::Digest(d) => EntityLink::Digest(d),
+            Reference::Tag(s) => DataLink::Tag(s),
+            Reference::Digest(d) => DataLink::Digest(d),
         }
     }
 }

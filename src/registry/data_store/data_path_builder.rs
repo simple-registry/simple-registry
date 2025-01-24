@@ -1,12 +1,12 @@
 use crate::oci::Digest;
-use crate::storage::entity_link::EntityLink;
+use crate::registry::data_store::data_link::DataLink;
 
 #[derive(Debug)]
-pub struct EntityPathBuilder {
+pub struct DataPathBuilder {
     pub prefix: String,
 }
 
-impl EntityPathBuilder {
+impl DataPathBuilder {
     pub fn new(prefix: String) -> Self {
         Self { prefix }
     }
@@ -216,32 +216,32 @@ impl EntityPathBuilder {
         format!("{}/link", self.manifest_tag_link_parent_dir(namespace, tag))
     }
 
-    pub fn get_link_path(&self, reference: &EntityLink, name: &str) -> String {
+    pub fn get_link_path(&self, reference: &DataLink, name: &str) -> String {
         match reference {
-            EntityLink::Tag(tag) => self.manifest_tag_link_path(name, tag),
-            EntityLink::Digest(digest) => self.manifest_revisions_link_path(name, digest),
-            EntityLink::Layer(digest) => self.manifest_layer_link_path(name, digest),
-            EntityLink::Config(digest) => self.manifest_config_link_path(name, digest),
-            EntityLink::Referrer(subject, referrer) => {
+            DataLink::Tag(tag) => self.manifest_tag_link_path(name, tag),
+            DataLink::Digest(digest) => self.manifest_revisions_link_path(name, digest),
+            DataLink::Layer(digest) => self.manifest_layer_link_path(name, digest),
+            DataLink::Config(digest) => self.manifest_config_link_path(name, digest),
+            DataLink::Referrer(subject, referrer) => {
                 self.manifest_referrer_link_path(name, subject, referrer)
             }
         }
     }
 
-    pub fn get_link_parent_path(&self, reference: &EntityLink, name: &str) -> String {
+    pub fn get_link_parent_path(&self, reference: &DataLink, name: &str) -> String {
         match reference {
-            EntityLink::Tag(tag) => self.manifest_tag_link_parent_dir(name, tag),
+            DataLink::Tag(tag) => self.manifest_tag_link_parent_dir(name, tag),
             _ => self.get_link_container_path(reference, name),
         }
     }
 
-    pub fn get_link_container_path(&self, reference: &EntityLink, name: &str) -> String {
+    pub fn get_link_container_path(&self, reference: &DataLink, name: &str) -> String {
         match reference {
-            EntityLink::Tag(tag) => self.manifest_tag_link_container_dir(name, tag),
-            EntityLink::Digest(digest) => self.manifest_revisions_link_container_dir(name, digest),
-            EntityLink::Layer(digest) => self.manifest_layer_link_container_dir(name, digest),
-            EntityLink::Config(digest) => self.manifest_config_link_container_dir(name, digest),
-            EntityLink::Referrer(subject, referrer) => {
+            DataLink::Tag(tag) => self.manifest_tag_link_container_dir(name, tag),
+            DataLink::Digest(digest) => self.manifest_revisions_link_container_dir(name, digest),
+            DataLink::Layer(digest) => self.manifest_layer_link_container_dir(name, digest),
+            DataLink::Config(digest) => self.manifest_config_link_container_dir(name, digest),
+            DataLink::Referrer(subject, referrer) => {
                 self.manifest_referrer_link_container_dir(name, subject, referrer)
             }
         }

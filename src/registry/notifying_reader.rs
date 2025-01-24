@@ -1,4 +1,4 @@
-use crate::storage::Reader;
+use crate::registry::data_store::Reader;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};

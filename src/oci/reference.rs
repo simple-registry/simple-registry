@@ -1,5 +1,5 @@
 use crate::oci::digest::Digest;
-use crate::registry::Error;
+use crate::oci::Error;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::de::Visitor;
@@ -20,7 +20,9 @@ pub enum Reference {
 impl Reference {
     pub fn from_str(s: &str) -> Result<Self, Error> {
         if s.is_empty() {
-            return Err(Error::ManifestBlobUnknown);
+            return Err(Error::InvalidFormat(
+                "Reference cannot be empty".to_string(),
+            ));
         }
 
         if s.contains(':') {
@@ -28,7 +30,7 @@ impl Reference {
         } else if TAG_REGEX.is_match(s) {
             Ok(Reference::Tag(s.to_string()))
         } else {
-            Err(Error::ManifestBlobUnknown)
+            Err(Error::InvalidFormat(format!("Invalid reference: '{s}'",)))
         }
     }
 }

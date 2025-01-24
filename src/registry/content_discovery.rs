@@ -1,5 +1,5 @@
 use crate::oci::{Descriptor, Digest};
-use crate::registry::{Error, Registry};
+use crate::registry::{data_store, Error, Registry};
 use tracing::instrument;
 
 impl Registry {
@@ -18,8 +18,8 @@ impl Registry {
             .await
         {
             Ok(referrers) => Ok(referrers),
-            Err(Error::BlobUnknown) => Ok(Vec::new()),
-            Err(e) => Err(e),
+            Err(data_store::Error::BlobNotFound) => Ok(Vec::new()),
+            Err(e) => Err(e)?,
         }
     }
 

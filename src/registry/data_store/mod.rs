@@ -1,7 +1,10 @@
-mod backend;
-mod entity_link;
-mod entity_path_builder;
+mod data_link;
+mod data_path_builder;
+mod error;
+mod fs_backend;
+mod s3_backend;
 
+use crate::oci::{Descriptor, Digest};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,48 +14,33 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use tokio::io::AsyncRead;
+use tracing::info;
 
-use crate::configuration;
-use crate::configuration::StorageConfig;
-use crate::oci::{Descriptor, Digest};
-use crate::registry::Error;
-
+use crate::configuration::DataStoreConfig;
 use crate::registry::lock_store::LockStore;
-use crate::storage::backend::{filesystem, s3};
-pub use entity_link::EntityLink;
 
-pub struct UploadSummary {
-    pub digest: Digest,
-    pub size: u64,
-    pub start_date: DateTime<Utc>,
-}
+use crate::registry::data_store::fs_backend::FSBackend;
+use crate::registry::data_store::s3_backend::S3Backend;
+pub use data_link::DataLink;
 
-pub fn build_storage_engine(
-    storage_config: StorageConfig,
-    lock_store: LockStore,
-) -> Result<Box<dyn GenericStorageEngine>, configuration::Error> {
-    if storage_config.fs.is_some() && storage_config.s3.is_some() {
-        return Err(configuration::Error::StorageBackend(
-            "Multiple storage backends are configured".to_string(),
-        ));
-    }
+pub use error::Error;
 
-    if let Some(fs_config) = storage_config.fs {
-        Ok(Box::new(filesystem::StorageEngine::new(
-            fs_config, lock_store,
-        )))
-    } else if let Some(s3_config) = storage_config.s3 {
-        Ok(Box::new(s3::StorageEngine::new(s3_config, lock_store)))
-    } else {
-        Err(configuration::Error::StorageBackend(
-            "No storage backend is configured".to_string(),
-        ))
+pub fn build_storage_engine(config: DataStoreConfig, lock_store: LockStore) -> Box<dyn DataStore> {
+    match config {
+        DataStoreConfig::FS(config) => {
+            info!("Using filesystem backend");
+            Box::new(FSBackend::new(config, lock_store))
+        }
+        DataStoreConfig::S3(config) => {
+            info!("Using S3 backend");
+            Box::new(S3Backend::new(config, lock_store))
+        }
     }
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct BlobEntityLinkIndex {
-    pub namespace: HashMap<String, HashSet<EntityLink>>,
+    pub namespace: HashMap<String, HashSet<DataLink>>,
 }
 
 #[derive(Clone)]
@@ -65,7 +53,7 @@ pub trait Reader: AsyncRead + Unpin + Send {}
 impl<T> Reader for T where T: AsyncRead + Unpin + Send {}
 
 #[async_trait]
-pub trait GenericStorageEngine: Send + Sync {
+pub trait DataStore: Send + Sync {
     async fn list_namespaces(
         &self,
         n: u16,
@@ -120,7 +108,7 @@ pub trait GenericStorageEngine: Send + Sync {
         &self,
         namespace: &str,
         uuid: &str,
-    ) -> Result<UploadSummary, Error>;
+    ) -> Result<(Digest, u64, DateTime<Utc>), Error>;
 
     async fn complete_upload(
         &self,
@@ -142,7 +130,7 @@ pub trait GenericStorageEngine: Send + Sync {
     async fn read_reference_info(
         &self,
         name: &str,
-        reference: &EntityLink,
+        reference: &DataLink,
     ) -> Result<ReferenceInfo, Error>;
 
     async fn build_blob_reader(
@@ -153,43 +141,43 @@ pub trait GenericStorageEngine: Send + Sync {
 
     async fn delete_blob(&self, digest: &Digest) -> Result<(), Error>;
 
-    async fn update_last_pulled(&self, name: &str, reference: &EntityLink) -> Result<(), Error>;
+    async fn update_last_pulled(&self, name: &str, reference: &DataLink) -> Result<(), Error>;
 
-    async fn read_link(&self, namespace: &str, reference: &EntityLink) -> Result<Digest, Error>;
+    async fn read_link(&self, namespace: &str, reference: &DataLink) -> Result<Digest, Error>;
 
     async fn create_link(
         &self,
         namespace: &str,
-        reference: &EntityLink,
+        reference: &DataLink,
         digest: &Digest,
     ) -> Result<(), Error>;
 
-    async fn delete_link(&self, namespace: &str, reference: &EntityLink) -> Result<(), Error>;
+    async fn delete_link(&self, namespace: &str, reference: &DataLink) -> Result<(), Error>;
 }
 
-impl Debug for (dyn GenericStorageEngine + 'static) {
+impl Debug for (dyn DataStore + 'static) {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StorageEngine").finish()
+        f.debug_struct("DataStore").finish()
     }
 }
 
 // Hash helpers
 
-pub async fn serialize_hash_state(sha256: &Sha256) -> Result<Vec<u8>, Error> {
+pub fn serialize_hash_state(sha256: &Sha256) -> Vec<u8> {
     let state = sha256.serialize();
-    Ok(state.as_slice().to_vec())
+    state.as_slice().to_vec()
 }
 
-pub async fn serialize_hash_empty_state() -> Result<Vec<u8>, Error> {
+pub fn serialize_hash_empty_state() -> Vec<u8> {
     let state = Sha256::new();
-    serialize_hash_state(&state).await
+    serialize_hash_state(&state)
 }
 
 pub async fn deserialize_hash_state(state: Vec<u8>) -> Result<Sha256, Error> {
     let state = state
         .as_slice()
         .try_into()
-        .map_err(|_| Error::Internal(Some("Unable to resume hash state".to_string())))?;
+        .map_err(|_| Error::HashSerialization("Unable to resume hash state".to_string()))?;
     let state = Sha256::deserialize(state)?;
     let hasher = Sha256::from(state);
 

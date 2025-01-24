@@ -1,13 +1,12 @@
 use crate::configuration::StorageFSConfig;
 use crate::oci::{Descriptor, Digest, Manifest};
-use crate::registry::lock_store::LockStore;
-use crate::registry::Error;
-use crate::storage::entity_link::EntityLink;
-use crate::storage::entity_path_builder::EntityPathBuilder;
-use crate::storage::{
+use crate::registry::data_store::data_link::DataLink;
+use crate::registry::data_store::data_path_builder::DataPathBuilder;
+use crate::registry::data_store::{
     deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobEntityLinkIndex,
-    GenericStorageEngine, Reader, ReferenceInfo, UploadSummary,
+    DataStore, Error, Reader, ReferenceInfo,
 };
+use crate::registry::lock_store::LockStore;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sha2::{Digest as ShaDigestTrait, Sha256};
@@ -19,15 +18,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
-pub struct StorageEngine {
+pub struct FSBackend {
     lock_store: Arc<LockStore>,
-    pub tree: Arc<EntityPathBuilder>,
+    pub tree: Arc<DataPathBuilder>,
 }
 
-impl Debug for StorageEngine {
+impl Debug for FSBackend {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileSystemStorageEngine").finish()
     }
@@ -35,10 +34,10 @@ impl Debug for StorageEngine {
 
 const DIR_MANAGEMENT_LOCK_KEY: &str = "dir_management";
 
-impl StorageEngine {
-    pub fn new(fs_config: StorageFSConfig, lock_store: LockStore) -> Self {
+impl FSBackend {
+    pub fn new(config: StorageFSConfig, lock_store: LockStore) -> Self {
         Self {
-            tree: Arc::new(EntityPathBuilder::new(fs_config.root_dir)),
+            tree: Arc::new(DataPathBuilder::new(config.root_dir)),
             lock_store: Arc::new(lock_store),
         }
     }
@@ -145,7 +144,7 @@ impl StorageEngine {
         operation: O,
     ) -> Result<bool, Error>
     where
-        O: FnOnce(&mut HashSet<EntityLink>),
+        O: FnOnce(&mut HashSet<DataLink>),
     {
         debug!("Ensuring container directory for digest: {}", digest);
         let path = self.tree.blob_container_dir(digest);
@@ -155,30 +154,26 @@ impl StorageEngine {
         let path = self.tree.blob_index_path(digest);
 
         let mut reference_index = match fs::read_to_string(&path).await {
-            Ok(content) => serde_json::from_str::<BlobEntityLinkIndex>(&content),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(BlobEntityLinkIndex::default()),
-            Err(e) => return Err(e.into()),
-        }?;
-
-        debug!("Updating reference count");
-        let mut index = reference_index.namespace.get_mut(namespace);
-        if index.is_none() {
-            reference_index
-                .namespace
-                .insert(namespace.to_string(), HashSet::new());
-            index = reference_index.namespace.get_mut(namespace);
+            Ok(content) => serde_json::from_str::<BlobEntityLinkIndex>(&content)?,
+            Err(e) if e.kind() == ErrorKind::NotFound => BlobEntityLinkIndex::default(),
+            Err(e) => Err(e)?,
         };
 
-        let Some(index) = index else {
-            // Not supposed to happen as we just inserted it
-            warn!("Unable to reliably create reference index for {}", digest);
-            return Err(Error::NameUnknown);
+        debug!("Updating reference index");
+        if let Some(index) = reference_index.namespace.get_mut(namespace) {
+            operation(index);
+            if index.is_empty() {
+                reference_index.namespace.remove(namespace);
+            }
+        } else {
+            let mut index = HashSet::new();
+            operation(&mut index);
+            if !index.is_empty() {
+                reference_index
+                    .namespace
+                    .insert(namespace.to_string(), index);
+            }
         };
-
-        operation(index);
-        if index.is_empty() {
-            reference_index.namespace.remove(namespace);
-        }
 
         let is_referenced = !reference_index.namespace.is_empty();
 
@@ -223,7 +218,7 @@ impl StorageEngine {
 }
 
 #[async_trait]
-impl GenericStorageEngine for StorageEngine {
+impl DataStore for FSBackend {
     #[instrument(skip(self))]
     async fn list_namespaces(
         &self,
@@ -397,7 +392,7 @@ impl GenericStorageEngine for StorageEngine {
         fs::create_dir_all(&container_dir).await?;
 
         let path = self.tree.upload_hash_context_path(name, uuid, "sha256", 0);
-        let state = serialize_hash_empty_state().await?;
+        let state = serialize_hash_empty_state();
         fs::write(&path, state).await?;
 
         Ok(uuid.to_string())
@@ -412,8 +407,8 @@ impl GenericStorageEngine for StorageEngine {
         append: bool,
     ) -> Result<(), Error> {
         let start_offset = if append {
-            let summary = self.read_upload_summary(name, uuid).await?;
-            summary.size
+            let (_, size, _) = self.read_upload_summary(name, uuid).await?;
+            size
         } else {
             0
         };
@@ -428,10 +423,9 @@ impl GenericStorageEngine for StorageEngine {
             .await
             .map_err(|e| {
                 error!("Error opening upload file {:}: {}", file_path, e);
-                if e.kind() == ErrorKind::NotFound {
-                    Error::BlobUploadUnknown
-                } else {
-                    Error::Internal(Some("Error opening upload file".to_string()))
+                match e.kind() {
+                    ErrorKind::NotFound => Error::UploadNotFound,
+                    _ => e.into(),
                 }
             })?;
 
@@ -455,19 +449,23 @@ impl GenericStorageEngine for StorageEngine {
         let path = self
             .tree
             .upload_hash_context_path(name, uuid, "sha256", offset);
-        let state = serialize_hash_state(&hasher).await?;
+        let state = serialize_hash_state(&hasher);
         fs::write(&path, &state).await?;
 
         Ok(())
     }
 
     #[instrument(skip(self))]
-    async fn read_upload_summary(&self, name: &str, uuid: &str) -> Result<UploadSummary, Error> {
+    async fn read_upload_summary(
+        &self,
+        name: &str,
+        uuid: &str,
+    ) -> Result<(Digest, u64, DateTime<Utc>), Error> {
         let file_path = self.tree.upload_path(name, uuid);
         let size = self
             .get_file_size(&file_path)
             .await?
-            .ok_or(Error::BlobUnknown)?;
+            .ok_or(Error::UploadNotFound)?;
 
         let path = self
             .tree
@@ -486,11 +484,7 @@ impl GenericStorageEngine for StorageEngine {
             .unwrap_or_default() // Fallbacks to epoch
             .with_timezone(&Utc);
 
-        Ok(UploadSummary {
-            digest,
-            size,
-            start_date,
-        })
+        Ok((digest, size, start_date))
     }
 
     #[instrument(skip(self))]
@@ -502,7 +496,7 @@ impl GenericStorageEngine for StorageEngine {
     ) -> Result<Digest, Error> {
         let upload_path = self.tree.upload_path(name, uuid);
         let Some(size) = self.get_file_size(&upload_path).await? else {
-            return Err(Error::BlobUnknown);
+            return Err(Error::UploadNotFound);
         };
 
         let digest = if let Some(digest) = digest {
@@ -596,18 +590,18 @@ impl GenericStorageEngine for StorageEngine {
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
         let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
         let path = self.tree.blob_path(digest);
-        self.get_file_size(&path).await?.ok_or(Error::BlobUnknown)
+        self.get_file_size(&path).await?.ok_or(Error::BlobNotFound)
     }
 
     #[instrument(skip(self))]
     async fn read_reference_info(
         &self,
         name: &str,
-        reference: &EntityLink,
+        reference: &DataLink,
     ) -> Result<ReferenceInfo, Error> {
         let key = match reference {
-            EntityLink::Tag(_) | EntityLink::Digest(_) => self.tree.get_link_path(reference, name),
-            _ => return Err(Error::NotFound),
+            DataLink::Tag(_) | DataLink::Digest(_) => self.tree.get_link_path(reference, name),
+            _ => return Err(Error::ReferenceNotFound),
         };
 
         let metadata = fs::metadata(&key).await?;
@@ -635,7 +629,7 @@ impl GenericStorageEngine for StorageEngine {
         let path = self.tree.blob_path(digest);
         let mut file = match File::open(&path).await {
             Ok(file) => file,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Err(Error::BlobUnknown),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Err(Error::BlobNotFound),
             Err(e) => return Err(e.into()),
         };
 
@@ -661,18 +655,18 @@ impl GenericStorageEngine for StorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn update_last_pulled(&self, name: &str, reference: &EntityLink) -> Result<(), Error> {
+    async fn update_last_pulled(&self, name: &str, reference: &DataLink) -> Result<(), Error> {
         match reference {
-            EntityLink::Tag(_) => {
+            DataLink::Tag(_) => {
                 let path = self.tree.get_link_path(reference, name);
                 let _ = fs::metadata(&path).await?;
 
                 let digest = self.read_link(name, reference).await?;
-                let link = EntityLink::Digest(digest);
+                let link = DataLink::Digest(digest);
                 let path = self.tree.get_link_path(&link, name);
                 let _ = fs::metadata(&path).await?;
             }
-            EntityLink::Digest(_) => {
+            DataLink::Digest(_) => {
                 let path = self.tree.get_link_path(reference, name);
                 let _ = fs::metadata(&path).await?;
             }
@@ -685,7 +679,7 @@ impl GenericStorageEngine for StorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn read_link(&self, name: &str, reference: &EntityLink) -> Result<Digest, Error> {
+    async fn read_link(&self, name: &str, reference: &DataLink) -> Result<Digest, Error> {
         debug!(
             "Reading link for namespace: {}, reference: {:?}",
             name, reference
@@ -703,7 +697,7 @@ impl GenericStorageEngine for StorageEngine {
     async fn create_link(
         &self,
         namespace: &str,
-        reference: &EntityLink,
+        reference: &DataLink,
         digest: &Digest,
     ) -> Result<(), Error> {
         debug!(
@@ -746,14 +740,14 @@ impl GenericStorageEngine for StorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn delete_link(&self, namespace: &str, reference: &EntityLink) -> Result<(), Error> {
+    async fn delete_link(&self, namespace: &str, reference: &DataLink) -> Result<(), Error> {
         debug!(
             "Deleting link for namespace: {}, reference: {:?}",
             namespace, reference
         );
         let digest = match self.read_link(namespace, reference).await {
             Ok(digest) => digest,
-            Err(Error::NameUnknown) => return Ok(()),
+            Err(Error::ReferenceNotFound) => return Ok(()),
             Err(e) => return Err(e),
         };
 

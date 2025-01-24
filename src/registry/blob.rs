@@ -1,7 +1,7 @@
 use crate::oci::Digest;
+use crate::registry::data_store::{DataLink, Reader};
 use crate::registry::notifying_reader::NotifyingReader;
-use crate::registry::{Error, Registry};
-use crate::storage::{EntityLink, Reader};
+use crate::registry::{data_store, Error, Registry};
 use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use hyper::header::CONTENT_LENGTH;
@@ -152,7 +152,7 @@ impl Registry {
                     return Err(e);
                 }
 
-                Ok::<(), Error>(())
+                Ok::<(), data_store::Error>(())
             });
 
             let reader: Box<dyn Reader> = Box::new(stream_reader);
@@ -181,8 +181,8 @@ impl Registry {
 
         let reader = match self.storage_engine.build_blob_reader(digest, start).await {
             Ok(reader) => reader,
-            Err(Error::BlobUnknown) => return Ok(GetBlobResponse::Empty),
-            Err(err) => return Err(err),
+            Err(data_store::Error::BlobNotFound) => return Ok(GetBlobResponse::Empty),
+            Err(err) => Err(err)?,
         };
 
         match range {
@@ -199,12 +199,12 @@ impl Registry {
     pub async fn delete_blob(&self, namespace: &str, digest: Digest) -> Result<(), Error> {
         self.validate_namespace(namespace)?;
 
-        let link = EntityLink::Layer(digest.clone());
+        let link = DataLink::Layer(digest.clone());
         if let Err(e) = self.storage_engine.delete_link(namespace, &link).await {
             warn!("Failed to delete layer link: {:?}", e);
         }
 
-        let link = EntityLink::Config(digest);
+        let link = DataLink::Config(digest);
         if let Err(e) = self.storage_engine.delete_link(namespace, &link).await {
             warn!("Failed to delete config link: {:?}", e);
         }

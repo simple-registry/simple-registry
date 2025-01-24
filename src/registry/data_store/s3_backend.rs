@@ -22,22 +22,21 @@ use tracing::{debug, error, instrument};
 
 use crate::configuration::StorageS3Config;
 use crate::oci::{Descriptor, Digest, Manifest};
-use crate::registry::lock_store::LockStore;
-use crate::registry::Error;
-use crate::storage::entity_link::EntityLink;
-use crate::storage::entity_path_builder::EntityPathBuilder;
-use crate::storage::{
+use crate::registry::data_store::data_link::DataLink;
+use crate::registry::data_store::data_path_builder::DataPathBuilder;
+use crate::registry::data_store::{
     deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobEntityLinkIndex,
-    GenericStorageEngine, Reader, ReferenceInfo, UploadSummary,
+    DataStore, Error, Reader, ReferenceInfo,
 };
+use crate::registry::lock_store::LockStore;
 
 const PUSHED_AT_METADATA_KEY: &str = "pushed";
 const LAST_PULLED_AT_METADATA_KEY: &str = "last-pulled";
 
 #[derive(Clone)]
-pub struct StorageEngine {
+pub struct S3Backend {
     s3_client: S3Client,
-    tree: Arc<EntityPathBuilder>,
+    tree: Arc<DataPathBuilder>,
     bucket: String,
     lock_store: Arc<LockStore>,
     multipart_copy_threshold: u64,
@@ -46,17 +45,17 @@ pub struct StorageEngine {
     multipart_min_part_size: u64,
 }
 
-impl Debug for StorageEngine {
+impl Debug for S3Backend {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3StorageEngine").finish()
     }
 }
 
-impl StorageEngine {
-    pub fn new(s3_config: StorageS3Config, lock_store: LockStore) -> Self {
+impl S3Backend {
+    pub fn new(config: StorageS3Config, lock_store: LockStore) -> Self {
         let credentials = Credentials::new(
-            s3_config.access_key_id,
-            s3_config.secret_key,
+            config.access_key_id,
+            config.secret_key,
             None,
             None,
             "custom",
@@ -69,8 +68,8 @@ impl StorageEngine {
 
         let client_config = S3Config::builder()
             .behavior_version(BehaviorVersion::latest())
-            .region(Region::new(s3_config.region))
-            .endpoint_url(s3_config.endpoint)
+            .region(Region::new(config.region))
+            .endpoint_url(config.endpoint)
             .credentials_provider(credentials)
             .timeout_config(timeout)
             .force_path_style(true)
@@ -80,15 +79,13 @@ impl StorageEngine {
 
         Self {
             s3_client,
-            tree: Arc::new(EntityPathBuilder::new(
-                s3_config.key_prefix.unwrap_or_default(),
-            )),
-            bucket: s3_config.bucket,
+            tree: Arc::new(DataPathBuilder::new(config.key_prefix.unwrap_or_default())),
+            bucket: config.bucket,
             lock_store: Arc::new(lock_store),
-            multipart_copy_threshold: s3_config.multipart_copy_threshold.to_u64(),
-            multipart_copy_chunk_size: s3_config.multipart_copy_chunk_size.to_u64(),
-            multipart_copy_jobs: s3_config.multipart_copy_jobs,
-            multipart_min_part_size: s3_config.multipart_min_part_size.to_u64(),
+            multipart_copy_threshold: config.multipart_copy_threshold.to_u64(),
+            multipart_copy_chunk_size: config.multipart_copy_chunk_size.to_u64(),
+            multipart_copy_jobs: config.multipart_copy_jobs,
+            multipart_min_part_size: config.multipart_min_part_size.to_u64(),
         }
     }
 
@@ -105,11 +102,10 @@ impl StorageEngine {
         match res {
             Err(e) => {
                 let service_error = e.into_service_error();
-
                 if service_error.is_not_found() {
-                    Err(Error::NotFound)
+                    Err(Error::ReferenceNotFound)
                 } else {
-                    Err(Error::Internal(Some("Error head object".to_string())))
+                    Err(service_error.into())
                 }
             }
             Ok(res) => Ok(res),
@@ -117,9 +113,9 @@ impl StorageEngine {
     }
 
     async fn get_object_size(&self, key: &str) -> Result<u64, Error> {
-        let content_length = self
-            .head_object(key)
-            .await?
+        let res = self.head_object(key).await?;
+
+        let content_length = res
             .content_length()
             .and_then(|content_length| u64::try_from(content_length).ok())
             .unwrap_or_default();
@@ -139,9 +135,9 @@ impl StorageEngine {
             Err(e) => {
                 let service_error = e.into_service_error();
                 if service_error.is_no_such_key() {
-                    Err(Error::NotFound)
+                    Err(Error::ReferenceNotFound)
                 } else {
-                    Err(Error::Internal(Some("Error get object".to_string())))
+                    Err(service_error.into())
                 }
             }
             Ok(res) => Ok(res),
@@ -154,22 +150,9 @@ impl StorageEngine {
         key: &str,
         offset: Option<u64>,
     ) -> Result<Vec<u8>, Error> {
-        let res = self.get_object(key, offset).await;
+        let res = self.get_object(key, offset).await?;
 
-        let res = match res {
-            Ok(res) => res,
-            Err(Error::NotFound) => return Err(Error::NotFound),
-            Err(e) => {
-                error!("Error getting object: {}", e);
-                return Err(Error::Internal(Some("Error getting object".to_string())));
-            }
-        };
-
-        let body = res.body.collect().await.map_err(|e| {
-            error!("Error reading object body: {}", e);
-            Error::Internal(Some("Error reading object body".to_string()))
-        })?;
-
+        let body = res.body.collect().await?;
         Ok(body.to_vec())
     }
 
@@ -263,7 +246,7 @@ impl StorageEngine {
                 self.delete_object(&key).await?;
                 Ok(data)
             }
-            Err(Error::NotFound) => Ok(Vec::new()),
+            Err(Error::ReferenceNotFound) => Ok(Vec::new()),
             Err(e) => Err(e),
         }
     }
@@ -288,9 +271,9 @@ impl StorageEngine {
 
         let Some(upload_id) = res.upload_id else {
             error!("Error creating multipart upload: upload id not found");
-            return Err(Error::Internal(Some(
+            return Err(Error::StorageBackend(
                 "Error creating multipart upload".to_string(),
-            )));
+            ));
         };
 
         let mut offsets = Vec::new();
@@ -310,7 +293,7 @@ impl StorageEngine {
         for (part_number, (offset, part_size)) in offsets.into_iter().enumerate() {
             let Ok(part_number) = i32::try_from(part_number + 1) else {
                 error!("Error copying parts: too many parts");
-                return Err(Error::Internal(Some("Error copying parts".to_string())));
+                return Err(Error::StorageBackend("Error copying parts".to_string()));
             };
 
             let semaphore = semaphore.clone();
@@ -341,12 +324,12 @@ impl StorageEngine {
                 let res = query.send().await?;
                 let res = res.copy_part_result.ok_or_else(|| {
                     error!("Error copying part: copy part result not found");
-                    Error::Internal(Some("Error copying part".to_string()))
+                    Error::StorageBackend("Error copying part".to_string())
                 })?;
 
                 let e_tag = res.e_tag.ok_or_else(|| {
                     error!("Error copying part: e_tag not found");
-                    Error::Internal(Some("Error copying part".to_string()))
+                    Error::StorageBackend("Error copying part".to_string())
                 })?;
 
                 Ok(CompletedPartBuilder::default()
@@ -360,7 +343,7 @@ impl StorageEngine {
 
         let parts = try_join_all(tasks).await.map_err(|e| {
             error!("Error copying parts: {}", e);
-            Error::Internal(Some("Error copying parts".to_string()))
+            Error::StorageBackend("Error copying parts".to_string())
         })?;
         let parts = parts
             .into_iter()
@@ -413,7 +396,7 @@ impl StorageEngine {
         operation: O,
     ) -> Result<bool, Error>
     where
-        O: FnOnce(&mut HashSet<EntityLink>),
+        O: FnOnce(&mut HashSet<DataLink>),
     {
         let path = self.tree.blob_index_path(digest);
 
@@ -528,9 +511,9 @@ impl StorageEngine {
 
         let Some(upload_id) = res.upload_id else {
             error!("Error creating multipart upload: upload id not found");
-            return Err(Error::Internal(Some(
+            return Err(Error::StorageBackend(
                 "Error creating multipart upload".to_string(),
-            )));
+            ));
         };
 
         Ok(upload_id)
@@ -603,7 +586,7 @@ impl StorageEngine {
 }
 
 #[async_trait]
-impl GenericStorageEngine for StorageEngine {
+impl DataStore for S3Backend {
     #[instrument(skip(self))]
     async fn list_namespaces(
         &self,
@@ -936,7 +919,7 @@ impl GenericStorageEngine for StorageEngine {
         self.put_object(&date_path, date.into_bytes()).await?;
 
         let hash_state_path = self.tree.upload_hash_context_path(name, uuid, "sha256", 0);
-        let state = serialize_hash_empty_state().await?;
+        let state = serialize_hash_empty_state();
         self.put_object(&hash_state_path, state).await?;
 
         Ok(uuid.to_string())
@@ -1001,7 +984,7 @@ impl GenericStorageEngine for StorageEngine {
         // The hash computation must take into account:
         // - completed parts
         // - current staged chunk if any + source: chunk.len()
-        let state = serialize_hash_state(&hasher).await?;
+        let state = serialize_hash_state(&hasher);
         let hash_state_path =
             self.tree
                 .upload_hash_context_path(name, uuid, "sha256", uploaded_size + chunk_len);
@@ -1023,7 +1006,11 @@ impl GenericStorageEngine for StorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn read_upload_summary(&self, name: &str, uuid: &str) -> Result<UploadSummary, Error> {
+    async fn read_upload_summary(
+        &self,
+        name: &str,
+        uuid: &str,
+    ) -> Result<(Digest, u64, DateTime<Utc>), Error> {
         let key = self.tree.upload_path(name, uuid);
 
         let mut size = 0;
@@ -1057,11 +1044,7 @@ impl GenericStorageEngine for StorageEngine {
         let staged_path = self.tree.upload_staged_container_path(name, uuid, size);
         size += self.get_object_size(&staged_path).await.unwrap_or_default();
 
-        Ok(UploadSummary {
-            digest,
-            size,
-            start_date,
-        })
+        Ok((digest, size, start_date))
     }
 
     #[instrument(skip(self))]
@@ -1074,7 +1057,7 @@ impl GenericStorageEngine for StorageEngine {
         let key = self.tree.upload_path(name, uuid);
 
         let Ok(Some(upload_id)) = self.search_multipart_upload_id(&key).await else {
-            return Err(Error::NotFound);
+            return Err(Error::UploadNotFound);
         };
 
         let (mut parts, mut size) = self.search_multipart_upload_parts(&key, &upload_id).await?;
@@ -1203,11 +1186,11 @@ impl GenericStorageEngine for StorageEngine {
     async fn read_reference_info(
         &self,
         name: &str,
-        reference: &EntityLink,
+        reference: &DataLink,
     ) -> Result<ReferenceInfo, Error> {
         let key = match reference {
-            EntityLink::Tag(_) | EntityLink::Digest(_) => self.tree.get_link_path(reference, name),
-            _ => return Err(Error::NotFound),
+            DataLink::Tag(_) | DataLink::Digest(_) => self.tree.get_link_path(reference, name),
+            _ => return Err(Error::ReferenceNotFound),
         };
 
         let res = self.head_object(&key).await?;
@@ -1252,18 +1235,18 @@ impl GenericStorageEngine for StorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn update_last_pulled(&self, name: &str, reference: &EntityLink) -> Result<(), Error> {
+    async fn update_last_pulled(&self, name: &str, reference: &DataLink) -> Result<(), Error> {
         match reference {
-            EntityLink::Tag(_) => {
+            DataLink::Tag(_) => {
                 let key = self.tree.get_link_path(reference, name);
                 self.update_last_pulled_metadata(&key).await?;
 
                 let digest = self.read_link(name, reference).await?;
-                let link = EntityLink::Digest(digest);
+                let link = DataLink::Digest(digest);
                 let key = self.tree.get_link_path(&link, name);
                 self.update_last_pulled_metadata(&key).await?;
             }
-            EntityLink::Digest(_) => {
+            DataLink::Digest(_) => {
                 let key = self.tree.get_link_path(reference, name);
                 self.update_last_pulled_metadata(&key).await?;
             }
@@ -1276,19 +1259,19 @@ impl GenericStorageEngine for StorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn read_link(&self, name: &str, reference: &EntityLink) -> Result<Digest, Error> {
+    async fn read_link(&self, name: &str, reference: &DataLink) -> Result<Digest, Error> {
         let path = self.tree.get_link_path(reference, name);
         let data = self.get_object_body_as_vec(&path, None).await?;
 
         let link = String::from_utf8(data)?;
-        Digest::try_from(link.as_str())
+        Ok(Digest::try_from(link.as_str())?)
     }
 
     #[instrument(skip(self))]
     async fn create_link(
         &self,
         namespace: &str,
-        reference: &EntityLink,
+        reference: &DataLink,
         digest: &Digest,
     ) -> Result<(), Error> {
         match self.read_link(namespace, reference).await.ok() {
@@ -1314,10 +1297,10 @@ impl GenericStorageEngine for StorageEngine {
     }
 
     #[instrument(skip(self))]
-    async fn delete_link(&self, namespace: &str, reference: &EntityLink) -> Result<(), Error> {
+    async fn delete_link(&self, namespace: &str, reference: &DataLink) -> Result<(), Error> {
         let digest = match self.read_link(namespace, reference).await {
             Ok(digest) => digest,
-            Err(Error::NameUnknown) => return Ok(()),
+            Err(Error::ReferenceNotFound) => return Ok(()),
             Err(e) => return Err(e),
         };
 

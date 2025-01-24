@@ -18,16 +18,12 @@ impl ClientIdentity {
             .iter_organization()
             .map(|o| o.as_str().map(String::from))
             .collect::<Result<Vec<String>, _>>()
-            .map_err(|_| {
-                Error::Unauthorized(Some("Unable to parse provided certificate".to_string()))
-            })?;
+            .map_err(|_| Error::Unauthorized("Unable to parse provided certificate".to_string()))?;
         let common_names = subject
             .iter_common_name()
             .map(|o| o.as_str().map(String::from))
             .collect::<Result<Vec<String>, _>>()
-            .map_err(|_| {
-                Error::Unauthorized(Some("Unable to parse provided certificate".to_string()))
-            })?;
+            .map_err(|_| Error::Unauthorized("Unable to parse provided certificate".to_string()))?;
 
         let certificate = CELIdentityCertificate {
             organizations,

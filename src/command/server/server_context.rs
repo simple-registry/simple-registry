@@ -35,7 +35,7 @@ impl ServerContext {
     }
 
     fn deny() -> Error {
-        Error::Unauthorized(Some("Access denied".to_string()))
+        Error::Unauthorized("Access denied".to_string())
     }
 
     #[instrument(skip(self, request))]
@@ -65,9 +65,9 @@ impl ServerContext {
         }
 
         if found_repository.is_pull_through() && request.is_write() {
-            Err(Error::Unauthorized(Some(
+            Err(Error::Unauthorized(
                 "Write operations not supported on pull-through cache namespaces".to_string(),
-            )))
+            ))
         } else {
             Ok(())
         }

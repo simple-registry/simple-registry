@@ -156,18 +156,18 @@ impl RepositoryUpstream {
             }
 
             let realm = parameters.remove("realm").ok_or_else(|| {
-                registry::Error::Internal(Some(
+                registry::Error::Internal(
                     "Missing realm parameter in WWW-Authenticate header".to_string(),
-                ))
+                )
             })?;
 
             Ok(AuthenticationScheme::Bearer(realm, parameters))
         } else if www_authenticate_header.starts_with("Basic ") {
             Ok(AuthenticationScheme::Basic)
         } else {
-            Err(registry::Error::Internal(Some(
+            Err(registry::Error::Internal(
                 "Unsupported authentication scheme in WWW-Authenticate header".to_string(),
-            )))
+            ))
         }
     }
 
@@ -177,9 +177,9 @@ impl RepositoryUpstream {
         }
 
         debug!("Basic authentication required by upstream");
-        Err(registry::Error::Internal(Some(
+        Err(registry::Error::Internal(
             "Authentication required by upstream".to_string(),
-        )))
+        ))
     }
 
     async fn get_authentication_scheme(
@@ -188,7 +188,7 @@ impl RepositoryUpstream {
     ) -> Result<(String, u64), registry::Error> {
         let www_authenticate_header = www_authenticate_header.to_str().map_err(|e| {
             debug!("Failed to parse WWW-Authenticate header: {:?}", e);
-            registry::Error::Internal(Some("Failed to parse WWW-Authenticate header".to_string()))
+            registry::Error::Internal("Failed to parse WWW-Authenticate header".to_string())
         })?;
 
         match Self::parse_www_authenticate_header(www_authenticate_header)? {
@@ -227,9 +227,9 @@ impl RepositoryUpstream {
             Ok(response) => response,
             Err(e) => {
                 error!("Failed to authenticate with upstream: {:?}", e);
-                return Err(registry::Error::Internal(Some(
+                return Err(registry::Error::Internal(
                     "Failed to authenticate with upstream".to_string(),
-                )));
+                ));
             }
         };
 
@@ -251,9 +251,7 @@ impl RepositoryUpstream {
             .token
             .or(token_spec.access_token)
             .ok_or_else(|| {
-                registry::Error::Internal(Some(
-                    "Missing token in authentication response".to_string(),
-                ))
+                registry::Error::Internal("Missing token in authentication response".to_string())
             })?;
 
         let header = format!("Bearer {token}");
@@ -273,9 +271,7 @@ impl RepositoryUpstream {
         let header = format!("Bearer {token}");
         Ok(Some(HeaderValue::from_str(&header).map_err(|e| {
             debug!("Failed to build bearer token: {:?}", e);
-            registry::Error::Internal(Some(
-                "Failed to build bearer token for upstream".to_string(),
-            ))
+            registry::Error::Internal("Failed to build bearer token for upstream".to_string())
         })?))
     }
 
@@ -317,9 +313,9 @@ impl RepositoryUpstream {
                 Ok(res) => res,
                 Err(e) => {
                     error!("Failed to fetch manifest from upstream: {:?}", e);
-                    return Err(registry::Error::Internal(Some(
+                    return Err(registry::Error::Internal(
                         "Failed to fetch manifest from upstream".to_string(),
-                    )));
+                    ));
                 }
             };
 
@@ -329,18 +325,16 @@ impl RepositoryUpstream {
                         .to_str()
                         .map_err(|e| {
                             error!("Failed to parse Location header: {:?}", e);
-                            registry::Error::Internal(Some(
-                                "Failed to parse Location header".to_string(),
-                            ))
+                            registry::Error::Internal("Failed to parse Location header".to_string())
                         })?
                         .to_string();
                     redirect_count += 1;
 
                     if redirect_count >= self.max_redirect {
                         error!("Too many upstream redirections");
-                        return Err(registry::Error::Internal(Some(
+                        return Err(registry::Error::Internal(
                             "Too many upstream redirections".to_string(),
-                        )));
+                        ));
                     }
                     continue;
                 }
@@ -349,9 +343,9 @@ impl RepositoryUpstream {
             if response.status() == StatusCode::UNAUTHORIZED {
                 if authenticate_count > 0 {
                     debug!("Too many upstream authentication requests");
-                    return Err(registry::Error::Internal(Some(
+                    return Err(registry::Error::Internal(
                         "Too many upstream authentication requests".to_string(),
-                    )));
+                    ));
                 }
 
                 let (token, token_ttl) = if let Some(www_authenticate_header) =
@@ -371,9 +365,9 @@ impl RepositoryUpstream {
 
                 authorization_header = Some(HeaderValue::from_str(&token).map_err(|e| {
                     debug!("Failed to build bearer token: {:?}", e);
-                    registry::Error::Internal(Some(
+                    registry::Error::Internal(
                         "Failed to build bearer token for upstream".to_string(),
-                    ))
+                    )
                 })?);
 
                 authenticate_count += 1;
@@ -390,9 +384,9 @@ impl RepositoryUpstream {
                 "Failed to fetch manifest from upstream: {}",
                 response.status()
             );
-            Err(registry::Error::Internal(Some(
+            Err(registry::Error::Internal(
                 "Failed to fetch manifest from upstream".to_string(),
-            )))
+            ))
         }
     }
 

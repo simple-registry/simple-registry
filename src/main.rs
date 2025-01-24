@@ -3,13 +3,13 @@
 
 use crate::command::{scrub, server};
 use crate::configuration::{
-    CacheStoreConfig, Configuration, Error, LockStoreConfig, ObservabilityConfig, RepositoryConfig,
-    ServerTlsConfig, StorageConfig,
+    CacheStoreConfig, Configuration, DataStoreConfig, Error, LockStoreConfig, ObservabilityConfig,
+    RepositoryConfig, ServerTlsConfig,
 };
 use crate::registry::cache_store::CacheStore;
+use crate::registry::data_store::build_storage_engine;
 use crate::registry::lock_store::LockStore;
 use crate::registry::Registry;
-use crate::storage::build_storage_engine;
 use argh::FromArgs;
 use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use opentelemetry::trace::TracerProvider as _;
@@ -35,7 +35,6 @@ mod configuration;
 mod oci;
 mod policy;
 mod registry;
-mod storage;
 
 fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {
     let _ = TracerProvider::builder()
@@ -162,18 +161,19 @@ fn set_fs_watcher(
 fn build_registry(
     locking_config: LockStoreConfig,
     cache_config: CacheStoreConfig,
-    storage_config: StorageConfig,
+    storage_config: DataStoreConfig,
     repository_config: HashMap<String, RepositoryConfig>,
     streaming_chunk_size: usize,
 ) -> Result<Registry, Error> {
     let lock_store = LockStore::new(locking_config)?;
-    let token_cache = CacheStore::new(cache_config)?;
-    let storage_engine = build_storage_engine(storage_config, lock_store)?;
+    let cache_store = CacheStore::new(cache_config)?;
+    let data_store = build_storage_engine(storage_config, lock_store);
+
     Registry::new(
         repository_config,
         streaming_chunk_size,
-        storage_engine,
-        Arc::new(token_cache),
+        data_store,
+        Arc::new(cache_store),
     )
 }
 

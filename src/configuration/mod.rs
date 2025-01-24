@@ -29,7 +29,7 @@ pub struct Configuration {
     #[serde(default)]
     pub cache_store: CacheStoreConfig,
     #[serde(default)]
-    pub storage: StorageConfig,
+    pub storage: DataStoreConfig,
     #[serde(default)]
     pub identity: HashMap<String, IdentityConfig>, // hashmap of identity_id <-> identity_config (username, password)
     #[serde(default)]
@@ -100,17 +100,18 @@ pub struct ServerTlsConfig {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct StorageConfig {
-    pub fs: Option<StorageFSConfig>,
-    pub s3: Option<StorageS3Config>,
+// This is acceptable to have a large enum variant for configuration things.
+#[allow(clippy::large_enum_variant)]
+pub enum DataStoreConfig {
+    #[serde(rename = "fs")]
+    FS(StorageFSConfig),
+    #[serde(rename = "s3")]
+    S3(StorageS3Config),
 }
 
-impl Default for StorageConfig {
+impl Default for DataStoreConfig {
     fn default() -> Self {
-        StorageConfig {
-            fs: Some(StorageFSConfig::default()),
-            s3: None,
-        }
+        DataStoreConfig::FS(StorageFSConfig::default())
     }
 }
 

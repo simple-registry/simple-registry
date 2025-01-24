@@ -379,19 +379,15 @@ pub async fn handle_put_manifest(
         .map(|h| h.to_str())
         .transpose()
         .map_err(|_| {
-            Error::ManifestInvalid(Some(
-                "Unable to parse provided Content-Type header".to_string(),
-            ))
+            Error::ManifestInvalid("Unable to parse provided Content-Type header".to_string())
         })?
-        .ok_or(Error::ManifestInvalid(Some(
+        .ok_or(Error::ManifestInvalid(
             "No Content-Type header provided".to_string(),
-        )))?
+        ))?
         .to_string();
 
     let request_body = request.into_body().collect().await.map_err(|_| {
-        Error::ManifestInvalid(Some(
-            "Unable to retrieve manifest from client query".to_string(),
-        ))
+        Error::ManifestInvalid("Unable to retrieve manifest from client query".to_string())
     })?;
     let body = request_body.to_bytes();
 

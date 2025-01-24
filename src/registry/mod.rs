@@ -12,6 +12,7 @@ use tracing::instrument;
 mod blob;
 pub mod cache_store;
 mod content_discovery;
+pub mod data_store;
 mod error;
 pub mod lock_store;
 mod manifest;
@@ -23,8 +24,8 @@ mod upload;
 use crate::configuration;
 use crate::configuration::RepositoryConfig;
 use crate::registry::cache_store::CacheStore;
+use crate::registry::data_store::DataStore;
 use crate::registry::repository::Repository;
-use crate::storage::GenericStorageEngine;
 pub use blob::GetBlobResponse;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
@@ -38,7 +39,7 @@ lazy_static! {
 #[derive(Debug)]
 pub struct Registry {
     pub streaming_chunk_size: usize,
-    pub storage_engine: Arc<Box<dyn GenericStorageEngine>>,
+    pub storage_engine: Arc<Box<dyn DataStore>>,
     pub repositories: HashMap<String, Repository>,
 }
 
@@ -47,7 +48,7 @@ impl Registry {
     pub fn new(
         repositories_config: HashMap<String, RepositoryConfig>,
         streaming_chunk_size: usize,
-        storage_engine: Box<dyn GenericStorageEngine>,
+        storage_engine: Box<dyn DataStore>,
         token_cache: Arc<CacheStore>,
     ) -> Result<Self, configuration::Error> {
         let mut repositories = HashMap::new();

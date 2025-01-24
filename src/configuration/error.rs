@@ -10,7 +10,6 @@ pub enum Error {
     Cache(cache_store::Error),
     Lock(lock_store::Error),
     Io(io::Error),
-    StorageBackend(String),
     MissingExpectedTLSSection(String),
     ConfigurationFileFormat(String),
     StreamingChunkSize(String),
@@ -25,11 +24,7 @@ impl fmt::Display for Error {
         match self {
             Error::Cache(err) => write!(f, "Cache error: {err}"),
             Error::Lock(err) => write!(f, "Lock error: {err}"),
-
             Error::Io(err) => write!(f, "IO error: {err}"),
-            Error::StorageBackend(err) => {
-                write!(f, "Storage backend error: {err}")
-            }
             Error::MissingExpectedTLSSection(err) => {
                 write!(f, "Missing expected TLS section: {err}")
             }

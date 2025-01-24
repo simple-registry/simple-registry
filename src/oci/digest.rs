@@ -1,6 +1,6 @@
-use crate::registry;
-use serde::de::{Error, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use crate::oci::Error;
+use serde::de::Visitor;
+use serde::{de, Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -39,7 +39,7 @@ impl Default for Digest {
 }
 
 impl FromStr for Digest {
-    type Err = registry::Error;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         s.try_into()
@@ -47,27 +47,27 @@ impl FromStr for Digest {
 }
 
 impl TryFrom<&str> for Digest {
-    type Error = registry::Error;
+    type Error = Error;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         let (algorithm, hash) = s.split_once(':').ok_or_else(|| {
-            registry::Error::Internal(Some(format!(
+            Error::InvalidFormat(format!(
                 "Digest must be in the format 'algorithm:hash', got '{s}'"
-            )))
+            ))
         })?;
 
         // Only sha256 is supported at the moment
         if algorithm.to_lowercase() != "sha256" {
-            return Err(registry::Error::Internal(Some(format!(
+            return Err(Error::InvalidFormat(format!(
                 "Unsupported digest algorithm '{algorithm}'"
-            ))));
+            )));
         }
 
         // Check that hash is a valid sha256 hash (64 bytes representation)
         if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(registry::Error::Internal(Some(format!(
+            return Err(Error::InvalidFormat(format!(
                 "Invalid sha256 hash '{hash}'"
-            ))));
+            )));
         }
 
         Ok(Digest::Sha256(hash.to_string()))
@@ -96,9 +96,9 @@ impl<'de> Deserialize<'de> for Digest {
 
             fn visit_str<E>(self, value: &str) -> Result<Digest, E>
             where
-                E: Error,
+                E: de::Error,
             {
-                Digest::try_from(value).map_err(Error::custom)
+                Digest::try_from(value).map_err(de::Error::custom)
             }
         }
 
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn test_digest_try_from_invalid() {
-        let digest: Result<Digest, registry::Error> = "sha256:invalid".try_into();
+        let digest: Result<Digest, Error> = "sha256:invalid".try_into();
         assert!(digest.is_err());
     }
 
