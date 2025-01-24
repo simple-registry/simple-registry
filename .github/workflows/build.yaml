@@ -25,11 +25,28 @@ jobs:
     - name: Check clippy
       run: cargo clippy -- -D warnings
   rust-test:
+    # We need to a redis backend for the tests
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
     - uses: actions/checkout@v4
     - name: Run tests
       run: |
+        # Ensure redis service is running
+        while ! nc -z localhost 6379; do
+          echo "Waiting for redis to start..."
+          sleep 1;
+        done
+        
         rustup component add llvm-tools
         cargo install grcov
               
