@@ -181,3 +181,17 @@ pub async fn deserialize_hash_state(state: Vec<u8>) -> Result<Sha256, Error> {
 
     Ok(hasher)
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_hash_serialization() {
+        let empty_state = serialize_hash_empty_state();
+        let hasher = deserialize_hash_state(empty_state.clone()).await.unwrap();
+        let state = serialize_hash_state(&hasher);
+
+        assert_eq!(empty_state, state);
+    }
+}
