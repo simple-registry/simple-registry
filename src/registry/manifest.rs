@@ -1,6 +1,6 @@
 use crate::registry::oci_types::{Digest, Manifest, Reference};
 use crate::registry::utils::DataLink;
-use crate::registry::{Error, Registry};
+use crate::registry::{Error, Registry, Repository};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -77,28 +77,21 @@ pub fn parse_manifest_digests(
 }
 
 impl Registry {
-    #[instrument]
+    #[instrument(skip(repository))]
     pub async fn head_manifest(
         &self,
+        repository: &Repository,
         accepted_mime_types: &[String],
         namespace: &str,
         reference: Reference,
     ) -> Result<HeadManifestResponse, Error> {
-        let (repository_name, repository) = self.validate_namespace(namespace)?;
-
         if repository.is_pull_through() {
             if let Ok(response) = self.head_local_manifest(namespace, reference.clone()).await {
                 return Ok(response);
             }
 
             let res = repository
-                .query_upstream_manifest(
-                    &Method::HEAD,
-                    accepted_mime_types,
-                    repository_name,
-                    namespace,
-                    &reference,
-                )
+                .query_upstream_manifest(&Method::HEAD, accepted_mime_types, namespace, &reference)
                 .await?;
 
             let media_type = Self::get_header(&res, CONTENT_TYPE);
@@ -107,7 +100,12 @@ impl Registry {
 
             // Store locally before returning
             let _ = self
-                .get_manifest(accepted_mime_types, namespace, reference.clone())
+                .get_manifest(
+                    repository,
+                    accepted_mime_types,
+                    namespace,
+                    reference.clone(),
+                )
                 .await?;
 
             return Ok(HeadManifestResponse {
@@ -153,28 +151,21 @@ impl Registry {
         })
     }
 
-    #[instrument]
+    #[instrument(skip(repository))]
     pub async fn get_manifest(
         &self,
+        repository: &Repository,
         accepted_mime_types: &[String],
         namespace: &str,
         reference: Reference,
     ) -> Result<GetManifestResponse, Error> {
-        let (repository_name, repository) = self.validate_namespace(namespace)?;
-
         if repository.is_pull_through() {
             if let Ok(response) = self.get_local_manifest(namespace, reference.clone()).await {
                 return Ok(response);
             }
 
             let res = repository
-                .query_upstream_manifest(
-                    &Method::GET,
-                    accepted_mime_types,
-                    repository_name,
-                    namespace,
-                    &reference,
-                )
+                .query_upstream_manifest(&Method::GET, accepted_mime_types, namespace, &reference)
                 .await?;
 
             let media_type = Self::get_header(&res, CONTENT_TYPE);

@@ -19,6 +19,7 @@ pub mod lock_store;
 mod manifest;
 pub mod oci_types;
 pub mod policy_types;
+mod repository;
 mod scrub;
 mod upload;
 mod utils;
@@ -27,7 +28,8 @@ use crate::configuration;
 use crate::configuration::RepositoryConfig;
 use crate::registry::cache_store::CacheStore;
 use crate::registry::data_store::DataStore;
-use crate::registry::utils::Repository;
+pub use repository::Repository;
+
 pub use blob::GetBlobResponse;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
@@ -38,13 +40,18 @@ lazy_static! {
         Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap();
 }
 
-#[derive(Debug)]
 pub struct Registry {
     streaming_chunk_size: usize,
     storage_engine: Arc<Box<dyn DataStore>>,
     repositories: HashMap<String, Repository>,
     scrub_dry_run: bool,
     scrub_upload_timeout: Duration,
+}
+
+impl Debug for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registry").finish()
+    }
 }
 
 impl Registry {
@@ -56,9 +63,9 @@ impl Registry {
         token_cache: Arc<CacheStore>,
     ) -> Result<Self, configuration::Error> {
         let mut repositories = HashMap::new();
-        for (namespace, repository_config) in repositories_config {
-            let res = Repository::new(repository_config, &token_cache)?;
-            repositories.insert(namespace, res);
+        for (repository_name, repository_config) in repositories_config {
+            let res = Repository::new(repository_config, repository_name.clone(), &token_cache)?;
+            repositories.insert(repository_name, res);
         }
 
         let res = Self {
@@ -82,17 +89,14 @@ impl Registry {
         self
     }
 
-    // TODO: check usage (called twice for most requests)
-    pub fn find_repository(&self, namespace: &str) -> Option<(&String, &Repository)> {
-        self.repositories
-            .iter()
-            .find(|(repository, _)| namespace.starts_with(*repository))
-    }
-
     #[instrument]
-    pub fn validate_namespace(&self, namespace: &str) -> Result<(&String, &Repository), Error> {
+    pub fn validate_namespace(&self, namespace: &str) -> Result<&Repository, Error> {
         if NAMESPACE_RE.is_match(namespace) {
-            self.find_repository(namespace).ok_or(Error::NameUnknown)
+            self.repositories
+                .iter()
+                .find(|(repository, _)| namespace.starts_with(*repository))
+                .map(|(_, repository)| repository)
+                .ok_or(Error::NameUnknown)
         } else {
             Err(Error::NameInvalid)
         }

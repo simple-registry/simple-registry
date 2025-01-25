@@ -2,6 +2,8 @@ use crate::configuration::{Error, RepositoryUpstreamConfig};
 use crate::registry;
 use crate::registry::cache_store::CacheStore;
 use crate::registry::oci_types::{Digest, Reference};
+use crate::registry::repository::authentication_scheme::AuthenticationScheme;
+use crate::registry::repository::bearer_token::BearerToken;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use futures_util::StreamExt;
@@ -14,46 +16,19 @@ use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use lazy_static::lazy_static;
 use rustls::RootCertStore;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-lazy_static! {
-    static ref WWW_AUTHENTICATE_HEADER_PARAMETER: regex::Regex =
-        regex::Regex::new(r#"(\w+)="([^"]+)""#).unwrap();
-}
-
-#[derive(Debug)]
 pub struct RepositoryUpstream {
     token_cache: Arc<CacheStore>,
     pub url: String,
     pub max_redirect: u8,
     pub client: Client<HttpsConnector<HttpConnector>, Empty<Bytes>>,
     pub basic_auth_header: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenSpec {
-    token: Option<String>,
-    access_token: Option<String>,
-    #[serde(default = "TokenSpec::default_expires_in")]
-    expires_in: u64,
-}
-
-impl TokenSpec {
-    fn default_expires_in() -> u64 {
-        3600
-    }
-}
-
-enum AuthenticationScheme {
-    Bearer(String, HashMap<String, String>),
-    Basic,
 }
 
 impl RepositoryUpstream {
@@ -140,37 +115,6 @@ impl RepositoryUpstream {
         Ok(Client::builder(TokioExecutor::new()).build(connector))
     }
 
-    fn parse_www_authenticate_header(
-        www_authenticate_header: &str,
-    ) -> Result<AuthenticationScheme, registry::Error> {
-        let header_parameters;
-        if www_authenticate_header.starts_with("Bearer ") {
-            header_parameters = www_authenticate_header.trim_start_matches("Bearer ").trim();
-            let mut parameters = HashMap::new();
-
-            for (_, [key, value]) in WWW_AUTHENTICATE_HEADER_PARAMETER
-                .captures_iter(header_parameters)
-                .map(|c| c.extract())
-            {
-                parameters.insert(key.to_string(), value.to_string());
-            }
-
-            let realm = parameters.remove("realm").ok_or_else(|| {
-                registry::Error::Internal(
-                    "Missing realm parameter in WWW-Authenticate header".to_string(),
-                )
-            })?;
-
-            Ok(AuthenticationScheme::Bearer(realm, parameters))
-        } else if www_authenticate_header.starts_with("Basic ") {
-            Ok(AuthenticationScheme::Basic)
-        } else {
-            Err(registry::Error::Internal(
-                "Unsupported authentication scheme in WWW-Authenticate header".to_string(),
-            ))
-        }
-    }
-
     fn get_basic_auth_header(&self) -> Result<(String, u64), registry::Error> {
         if let Some(header) = &self.basic_auth_header {
             return Ok((header.clone(), 60));
@@ -180,23 +124,6 @@ impl RepositoryUpstream {
         Err(registry::Error::Internal(
             "Authentication required by upstream".to_string(),
         ))
-    }
-
-    async fn get_authentication_scheme(
-        &self,
-        www_authenticate_header: &HeaderValue,
-    ) -> Result<(String, u64), registry::Error> {
-        let www_authenticate_header = www_authenticate_header.to_str().map_err(|e| {
-            debug!("Failed to parse WWW-Authenticate header: {:?}", e);
-            registry::Error::Internal("Failed to parse WWW-Authenticate header".to_string())
-        })?;
-
-        match Self::parse_www_authenticate_header(www_authenticate_header)? {
-            AuthenticationScheme::Bearer(realm, parameters) => {
-                self.query_bearer_token(&realm, &parameters).await
-            }
-            AuthenticationScheme::Basic => self.get_basic_auth_header(),
-        }
     }
 
     async fn query_bearer_token(
@@ -245,17 +172,12 @@ impl RepositoryUpstream {
             content.extend_from_slice(&frame);
         }
 
-        let token_spec: TokenSpec = serde_json::from_slice(&content)?;
+        let token = BearerToken::from_slice(&content)?;
 
-        let token = token_spec
-            .token
-            .or(token_spec.access_token)
-            .ok_or_else(|| {
-                registry::Error::Internal("Missing token in authentication response".to_string())
-            })?;
+        let ttl = token.ttl();
+        let header = format!("Bearer {}", token.token()?);
 
-        let header = format!("Bearer {token}");
-        Ok((header, token_spec.expires_in))
+        Ok((header, ttl))
     }
 
     async fn get_auth_token_from_cache(
@@ -348,20 +270,25 @@ impl RepositoryUpstream {
                     ));
                 }
 
-                let (token, token_ttl) = if let Some(www_authenticate_header) =
-                    response.headers().get(WWW_AUTHENTICATE)
+                let (token, token_ttl) = if let Some(www_authenticate_header) = response
+                    .headers()
+                    .get(WWW_AUTHENTICATE)
+                    .and_then(|header| header.to_str().ok())
                 {
-                    // Either Bearer or Basic authentication is supported
-                    self.get_authentication_scheme(www_authenticate_header)
-                        .await?
+                    match AuthenticationScheme::from_www_authenticate_header(
+                        www_authenticate_header,
+                    )? {
+                        AuthenticationScheme::Bearer(realm, parameters) => {
+                            self.query_bearer_token(&realm, &parameters).await
+                        }
+                        AuthenticationScheme::Basic => self.get_basic_auth_header(),
+                    }
                 } else {
                     // If no WWW-Authenticate header is present, assume we need to use basic auth.
-                    self.get_basic_auth_header()?
-                };
+                    self.get_basic_auth_header()
+                }?;
 
-                self.token_cache
-                    .store(namespace, &token, token_ttl * 1000)
-                    .await?;
+                self.token_cache.store(namespace, &token, token_ttl).await?;
 
                 authorization_header = Some(HeaderValue::from_str(&token).map_err(|e| {
                     debug!("Failed to build bearer token: {:?}", e);
@@ -413,3 +340,6 @@ impl RepositoryUpstream {
         format!("{}/v2/{namespace}/blobs/{digest}", self.url)
     }
 }
+
+#[cfg(test)]
+mod test {}

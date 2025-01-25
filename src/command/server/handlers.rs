@@ -4,7 +4,7 @@ use crate::command::server::{
     UploadParameters, RANGE_RE,
 };
 use crate::registry::oci_types::{Digest, ReferrerList};
-use crate::registry::{Error, GetBlobResponse, Registry, StartUploadResponse};
+use crate::registry::{Error, GetBlobResponse, Registry, Repository, StartUploadResponse};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::header::HeaderValue;
@@ -89,14 +89,20 @@ pub async fn handle_get_api_version() -> Result<Response<Body>, Error> {
     Ok(res)
 }
 
-#[instrument]
+#[instrument(skip(registry, repository))]
 pub async fn handle_get_manifest(
     registry: &Registry,
+    repository: &Repository,
     accepted_mime_types: &[String],
     parameters: ManifestParameters,
 ) -> Result<Response<Body>, Error> {
     let manifest = registry
-        .get_manifest(accepted_mime_types, &parameters.name, parameters.reference)
+        .get_manifest(
+            repository,
+            accepted_mime_types,
+            &parameters.name,
+            parameters.reference,
+        )
         .await?;
 
     let res = if let Some(content_type) = manifest.media_type {
@@ -115,14 +121,20 @@ pub async fn handle_get_manifest(
     Ok(res)
 }
 
-#[instrument]
+#[instrument(skip(registry, repository))]
 pub async fn handle_head_manifest(
     registry: &Registry,
+    repository: &Repository,
     accepted_mime_types: &[String],
     parameters: ManifestParameters,
 ) -> Result<Response<Body>, Error> {
     let manifest = registry
-        .head_manifest(accepted_mime_types, &parameters.name, parameters.reference)
+        .head_manifest(
+            repository,
+            accepted_mime_types,
+            &parameters.name,
+            parameters.reference,
+        )
         .await?;
 
     let res = if let Some(media_type) = manifest.media_type {
@@ -143,9 +155,10 @@ pub async fn handle_head_manifest(
     Ok(res)
 }
 
-#[instrument(skip(request))]
+#[instrument(skip(registry, repository, request))]
 pub async fn handle_get_blob(
     registry: &Registry,
+    repository: &Repository,
     request: Request<Incoming>,
     accepted_mime_types: &[String],
     parameters: BlobParameters,
@@ -158,6 +171,7 @@ pub async fn handle_get_blob(
 
     let res = match registry
         .get_blob(
+            repository,
             accepted_mime_types,
             &parameters.name,
             &parameters.digest,
@@ -194,14 +208,20 @@ pub async fn handle_get_blob(
     Ok(res)
 }
 
-#[instrument]
+#[instrument(skip(registry, repository))]
 pub async fn handle_head_blob(
     registry: &Registry,
+    repository: &Repository,
     accepted_mime_types: &[String],
     parameters: BlobParameters,
 ) -> Result<Response<Body>, Error> {
     let blob = registry
-        .head_blob(accepted_mime_types, &parameters.name, parameters.digest)
+        .head_blob(
+            repository,
+            accepted_mime_types,
+            &parameters.name,
+            parameters.digest,
+        )
         .await?;
 
     let res = Response::builder()

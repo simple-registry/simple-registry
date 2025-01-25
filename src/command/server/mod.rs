@@ -4,7 +4,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{HeaderValue, ACCEPT};
+use hyper::header::{HeaderValue, ACCEPT, AUTHORIZATION};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -315,7 +315,7 @@ async fn router(
 
     let basic_auth_credentials = request
         .headers()
-        .get("Authorization")
+        .get(AUTHORIZATION)
         .and_then(parse_authorization_header);
 
     debug!("Authorization: {:?}", basic_auth_credentials);
@@ -333,7 +333,8 @@ async fn router(
     if ROUTE_API_VERSION_REGEX.is_match(&path) {
         match *request.method() {
             Method::GET => {
-                context.validate_request(ClientRequest::get_api_version(), identity)?;
+                context.validate_request(None, ClientRequest::get_api_version(), identity)?;
+
                 handlers::handle_get_api_version().await
             }
             _ => Err(registry::Error::Unsupported),
@@ -342,8 +343,12 @@ async fn router(
     {
         match *request.method() {
             Method::POST => {
-                context
-                    .validate_request(ClientRequest::start_upload(&parameters.name), identity)?;
+                let repository = context.registry.validate_namespace(&parameters.name)?;
+                context.validate_request(
+                    Some(repository),
+                    ClientRequest::start_upload(&parameters.name),
+                    identity,
+                )?;
                 handlers::handle_start_upload(&context.registry, request, parameters).await
             }
             _ => Err(registry::Error::Unsupported),
@@ -351,22 +356,39 @@ async fn router(
     } else if let Some(parameters) = deserialize::<UploadParameters>(&path, &ROUTE_UPLOAD_REGEX) {
         match *request.method() {
             Method::GET => {
-                context.validate_request(ClientRequest::get_upload(&parameters.name), identity)?;
+                let repository = context.registry.validate_namespace(&parameters.name)?;
+                context.validate_request(
+                    Some(repository),
+                    ClientRequest::get_upload(&parameters.name),
+                    identity,
+                )?;
                 handlers::handle_get_upload_progress(&context.registry, parameters).await
             }
             Method::PATCH => {
-                context
-                    .validate_request(ClientRequest::update_upload(&parameters.name), identity)?;
+                let repository = context.registry.validate_namespace(&parameters.name)?;
+                context.validate_request(
+                    Some(repository),
+                    ClientRequest::update_upload(&parameters.name),
+                    identity,
+                )?;
                 handlers::handle_patch_upload(&context.registry, request, parameters).await
             }
             Method::PUT => {
-                context
-                    .validate_request(ClientRequest::complete_upload(&parameters.name), identity)?;
+                let repository = context.registry.validate_namespace(&parameters.name)?;
+                context.validate_request(
+                    Some(repository),
+                    ClientRequest::complete_upload(&parameters.name),
+                    identity,
+                )?;
                 handlers::handle_put_upload(&context.registry, request, parameters).await
             }
             Method::DELETE => {
-                context
-                    .validate_request(ClientRequest::cancel_upload(&parameters.name), identity)?;
+                let repository = context.registry.validate_namespace(&parameters.name)?;
+                context.validate_request(
+                    Some(repository),
+                    ClientRequest::cancel_upload(&parameters.name),
+                    identity,
+                )?;
                 handlers::handle_delete_upload(&context.registry, parameters).await
             }
             _ => Err(registry::Error::Unsupported),
@@ -374,7 +396,9 @@ async fn router(
     } else if let Some(parameters) = deserialize::<BlobParameters>(&path, &ROUTE_BLOB_REGEX) {
         match *request.method() {
             Method::GET => {
+                let repository = context.registry.validate_namespace(&parameters.name)?;
                 context.validate_request(
+                    Some(repository),
                     ClientRequest::get_blob(&parameters.name, &parameters.digest),
                     identity,
                 )?;
@@ -382,6 +406,7 @@ async fn router(
                 let accepted_mime_types = get_accepted_content_type(&request);
                 handlers::handle_get_blob(
                     &context.registry,
+                    repository,
                     request,
                     &accepted_mime_types,
                     parameters,
@@ -389,17 +414,26 @@ async fn router(
                 .await
             }
             Method::HEAD => {
+                let repository = context.registry.validate_namespace(&parameters.name)?;
                 context.validate_request(
+                    Some(repository),
                     ClientRequest::get_blob(&parameters.name, &parameters.digest),
                     identity,
                 )?;
 
                 let accepted_mime_types = get_accepted_content_type(&request);
-                handlers::handle_head_blob(&context.registry, &accepted_mime_types, parameters)
-                    .await
+                handlers::handle_head_blob(
+                    &context.registry,
+                    repository,
+                    &accepted_mime_types,
+                    parameters,
+                )
+                .await
             }
             Method::DELETE => {
+                let repository = context.registry.validate_namespace(&parameters.name)?;
                 context.validate_request(
+                    Some(repository),
                     ClientRequest::delete_blob(&parameters.name, &parameters.digest),
                     identity,
                 )?;
@@ -411,34 +445,52 @@ async fn router(
     {
         match *request.method() {
             Method::GET => {
+                let repository = context.registry.validate_namespace(&parameters.name)?;
                 context.validate_request(
+                    Some(repository),
                     ClientRequest::get_manifest(&parameters.name, &parameters.reference),
                     identity,
                 )?;
 
                 let accepted_mime_types = get_accepted_content_type(&request);
-                handlers::handle_get_manifest(&context.registry, &accepted_mime_types, parameters)
-                    .await
+                handlers::handle_get_manifest(
+                    &context.registry,
+                    repository,
+                    &accepted_mime_types,
+                    parameters,
+                )
+                .await
             }
             Method::HEAD => {
+                let repository = context.registry.validate_namespace(&parameters.name)?;
                 context.validate_request(
+                    Some(repository),
                     ClientRequest::get_manifest(&parameters.name, &parameters.reference),
                     identity,
                 )?;
 
                 let accepted_mime_types = get_accepted_content_type(&request);
-                handlers::handle_head_manifest(&context.registry, &accepted_mime_types, parameters)
-                    .await
+                handlers::handle_head_manifest(
+                    &context.registry,
+                    repository,
+                    &accepted_mime_types,
+                    parameters,
+                )
+                .await
             }
             Method::PUT => {
+                let repository = context.registry.validate_namespace(&parameters.name)?;
                 context.validate_request(
+                    Some(repository),
                     ClientRequest::put_manifest(&parameters.name, &parameters.reference),
                     identity,
                 )?;
                 handlers::handle_put_manifest(&context.registry, request, parameters).await
             }
             Method::DELETE => {
+                let repository = context.registry.validate_namespace(&parameters.name)?;
                 context.validate_request(
+                    Some(repository),
                     ClientRequest::delete_manifest(&parameters.name, &parameters.reference),
                     identity,
                 )?;
@@ -451,7 +503,9 @@ async fn router(
     {
         match *request.method() {
             Method::GET => {
+                let repository = context.registry.validate_namespace(&parameters.name)?;
                 context.validate_request(
+                    Some(repository),
                     ClientRequest::get_referrers(&parameters.name, &parameters.digest),
                     identity,
                 )?;
@@ -462,7 +516,7 @@ async fn router(
     } else if ROUTE_CATALOG_REGEX.is_match(&path) {
         match *request.method() {
             Method::GET => {
-                context.validate_request(ClientRequest::list_catalog(), identity)?;
+                context.validate_request(None, ClientRequest::list_catalog(), identity)?;
                 handlers::handle_list_catalog(&context.registry, request).await
             }
             _ => Err(registry::Error::Unsupported),
@@ -470,7 +524,12 @@ async fn router(
     } else if let Some(parameters) = deserialize::<TagsParameters>(&path, &ROUTE_LIST_TAGS_REGEX) {
         match *request.method() {
             Method::GET => {
-                context.validate_request(ClientRequest::list_tags(&parameters.name), identity)?;
+                let repository = context.registry.validate_namespace(&parameters.name)?;
+                context.validate_request(
+                    Some(repository),
+                    ClientRequest::list_tags(&parameters.name),
+                    identity,
+                )?;
                 handlers::handle_list_tags(&context.registry, request, parameters).await
             }
             _ => Err(registry::Error::Unsupported),

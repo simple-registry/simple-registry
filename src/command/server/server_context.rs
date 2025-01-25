@@ -1,6 +1,6 @@
 use crate::configuration::IdentityConfig;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
-use crate::registry::{Error, Registry};
+use crate::registry::{Error, Registry, Repository};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use cel_interpreter::{Context, Program, Value};
 use std::collections::HashMap;
@@ -38,9 +38,10 @@ impl ServerContext {
         Error::Unauthorized("Access denied".to_string())
     }
 
-    #[instrument(skip(self, request))]
+    #[instrument(skip(self, repository, request))]
     pub fn validate_request(
         &self,
+        repository: Option<&Repository>,
         request: ClientRequest,
         identity: ClientIdentity,
     ) -> Result<(), Error> {
@@ -48,25 +49,24 @@ impl ServerContext {
             return Ok(());
         };
 
-        let (repository_name, found_repository) = self
-            .registry
-            .find_repository(namespace)
-            .ok_or_else(Self::deny)?;
+        let Some(repository) = repository else {
+            return Ok(());
+        };
 
         debug!(
             "Default allow: {:?} for namespace: {:?} ({:?})",
-            found_repository.access_default_allow, namespace, repository_name
+            repository.access_default_allow, namespace, repository.name
         );
 
-        if found_repository.access_default_allow {
-            self.check_deny_policies(&request, &identity, &found_repository.access_rules)?;
+        if repository.access_default_allow {
+            self.check_deny_policies(&request, &identity, &repository.access_rules)?;
         } else {
-            self.check_allow_policies(&request, &identity, &found_repository.access_rules)?;
+            self.check_allow_policies(&request, &identity, &repository.access_rules)?;
         }
 
-        if found_repository.is_pull_through() && request.is_write() {
+        if repository.is_pull_through() && request.is_write() {
             Err(Error::Unauthorized(
-                "Write operations not supported on pull-through cache namespaces".to_string(),
+                "Write operations is not supported on pull-through cache repositories".to_string(),
             ))
         } else {
             Ok(())

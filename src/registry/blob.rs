@@ -1,7 +1,7 @@
 use crate::registry::data_store::Reader;
 use crate::registry::oci_types::Digest;
 use crate::registry::utils::{DataLink, NotifyingReader};
-use crate::registry::{data_store, Error, Registry};
+use crate::registry::{data_store, Error, Registry, Repository};
 use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use hyper::header::CONTENT_LENGTH;
@@ -27,24 +27,17 @@ pub struct HeadBlobResponse {
 }
 
 impl Registry {
-    #[instrument]
+    #[instrument(skip(repository))]
     pub async fn head_blob(
         &self,
+        repository: &Repository,
         accepted_mime_types: &[String],
         namespace: &str,
         digest: Digest,
     ) -> Result<HeadBlobResponse, Error> {
-        let (repository_name, repository) = self.validate_namespace(namespace)?;
-
         if repository.is_pull_through() {
             let res = repository
-                .query_upstream_blob(
-                    &Method::HEAD,
-                    accepted_mime_types,
-                    repository_name,
-                    namespace,
-                    &digest,
-                )
+                .query_upstream_blob(&Method::HEAD, accepted_mime_types, namespace, &digest)
                 .await?;
 
             let digest = Self::parse_header(&res, "docker-content-digest")?;
@@ -57,16 +50,15 @@ impl Registry {
         Ok(HeadBlobResponse { digest, size })
     }
 
-    #[instrument]
+    #[instrument(skip(repository))]
     pub async fn get_blob(
         &self,
+        repository: &Repository,
         accepted_mime_types: &[String],
         namespace: &str,
         digest: &Digest,
         range: Option<(u64, u64)>,
     ) -> Result<GetBlobResponse<impl Reader>, Error> {
-        let (repository_name, repository) = self.validate_namespace(namespace)?;
-
         if repository.is_pull_through() {
             if range.is_some() {
                 warn!("Range requests are not supported for pull-through repositories");
@@ -87,13 +79,7 @@ impl Registry {
             }
 
             let res = repository
-                .query_upstream_blob(
-                    &Method::GET,
-                    accepted_mime_types,
-                    repository_name,
-                    namespace,
-                    digest,
-                )
+                .query_upstream_blob(&Method::GET, accepted_mime_types, namespace, digest)
                 .await?;
 
             let total_length = Self::parse_header(&res, CONTENT_LENGTH)?;
