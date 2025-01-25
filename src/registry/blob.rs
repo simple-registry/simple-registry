@@ -1,5 +1,5 @@
-use crate::oci::Digest;
 use crate::registry::data_store::Reader;
+use crate::registry::oci_types::Digest;
 use crate::registry::utils::{DataLink, NotifyingReader};
 use crate::registry::{data_store, Error, Registry};
 use futures_util::TryStreamExt;

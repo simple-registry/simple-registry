@@ -32,7 +32,6 @@ use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 
 mod command;
 mod configuration;
-mod oci;
 mod policy;
 mod registry;
 

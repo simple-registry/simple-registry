@@ -21,9 +21,9 @@ use tokio::sync::Semaphore;
 use tracing::{debug, error, instrument};
 
 use crate::configuration::StorageS3Config;
-use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::data_store::{BlobEntityLinkIndex, DataStore, Error, Reader, ReferenceInfo};
 use crate::registry::lock_store::LockStore;
+use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
 use crate::registry::utils::{DataLink, DataPathBuilder};
 
@@ -729,32 +729,17 @@ impl DataStore for S3Backend {
 
                 let manifest = self.get_object_body_as_vec(&blob_path, None).await?;
                 let manifest_len = manifest.len();
-                let manifest = serde_json::from_slice::<Manifest>(&manifest)?;
 
-                let Some(media_type) = manifest.media_type else {
+                let manifest = Manifest::from_slice(&manifest)?;
+                let Some(descriptor) = manifest.into_referrer_descriptor(artifact_type.as_ref())
+                else {
                     continue;
                 };
 
-                if let Some(artifact_type) = &artifact_type {
-                    if let Some(manifest_artifact_type) = &manifest.artifact_type {
-                        if manifest_artifact_type != artifact_type {
-                            continue;
-                        }
-                    } else if let Some(manifest_config) = manifest.config {
-                        if &manifest_config.media_type != artifact_type {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                }
-
                 referrers.push(Descriptor {
-                    media_type,
                     digest: manifest_digest.to_string(),
                     size: manifest_len as u64,
-                    annotations: manifest.annotations,
-                    artifact_type: manifest.artifact_type,
+                    ..descriptor
                 });
             }
 

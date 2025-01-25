@@ -36,8 +36,8 @@ use crate::command::server::response::Body;
 use crate::command::server::server_context::ServerContext;
 use crate::command::server::tls_listener::TlsListener;
 use crate::configuration::{IdentityConfig, ServerConfig};
-use crate::oci::{Digest, Reference};
 use crate::policy::{ClientIdentity, ClientRequest};
+use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::Registry;
 
 lazy_static! {

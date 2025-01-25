@@ -1,4 +1,4 @@
-use crate::oci::Error;
+use crate::registry::oci_types::Error;
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use std::fmt;

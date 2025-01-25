@@ -17,6 +17,7 @@ pub mod data_store;
 mod error;
 pub mod lock_store;
 mod manifest;
+pub mod oci_types;
 mod scrub;
 mod upload;
 mod utils;

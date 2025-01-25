@@ -1,5 +1,5 @@
-use crate::oci;
 use crate::registry::data_store::Error;
+use crate::registry::oci_types;
 use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest, Sha256};
 
@@ -7,7 +7,7 @@ pub trait Sha256Ext {
     fn serialized_empty_state() -> Vec<u8>;
     fn serialize_state(&self) -> Vec<u8>;
     fn deserialize_state(state: &[u8]) -> Result<Sha256, Error>;
-    fn to_digest(self) -> oci::Digest;
+    fn to_digest(self) -> oci_types::Digest;
 }
 
 impl Sha256Ext for Sha256 {
@@ -32,10 +32,10 @@ impl Sha256Ext for Sha256 {
         Ok(hasher)
     }
 
-    fn to_digest(self) -> oci::Digest {
+    fn to_digest(self) -> oci_types::Digest {
         let hash = self.finalize();
         let digest = hex::encode(hash.as_slice());
-        oci::Digest::Sha256(digest)
+        oci_types::Digest::Sha256(digest)
     }
 }
 

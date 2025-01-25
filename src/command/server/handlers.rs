@@ -3,7 +3,7 @@ use crate::command::server::{
     BlobParameters, ManifestParameters, NewUploadParameters, ReferrerParameters, TagsParameters,
     UploadParameters, RANGE_RE,
 };
-use crate::oci::{Digest, ReferrerList};
+use crate::registry::oci_types::{Digest, ReferrerList};
 use crate::registry::{Error, GetBlobResponse, Registry, StartUploadResponse};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;

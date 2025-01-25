@@ -1,7 +1,7 @@
 use crate::configuration::{Error, RepositoryUpstreamConfig};
-use crate::oci::{Digest, Reference};
 use crate::registry;
 use crate::registry::cache_store::CacheStore;
+use crate::registry::oci_types::{Digest, Reference};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use futures_util::StreamExt;

@@ -1,7 +1,7 @@
 use crate::configuration::StorageFSConfig;
-use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::data_store::{BlobEntityLinkIndex, DataStore, Error, Reader, ReferenceInfo};
 use crate::registry::lock_store::LockStore;
+use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
 use crate::registry::utils::{DataLink, DataPathBuilder};
 use async_trait::async_trait;
@@ -40,10 +40,10 @@ impl FSBackend {
     }
 
     #[instrument]
-    pub async fn get_file_size(&self, path: &str) -> Result<Option<u64>, Error> {
+    pub async fn get_file_size(&self, path: &str, not_found_error: Error) -> Result<u64, Error> {
         match fs::metadata(&path).await {
-            Ok(metadata) => Ok(Some(metadata.len())),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Ok(metadata) => Ok(metadata.len()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Err(not_found_error),
             Err(e) => Err(e.into()),
         }
     }
@@ -267,32 +267,16 @@ impl DataStore for FSBackend {
 
             let manifest = fs::read(&blob_path).await?;
             let manifest_len = manifest.len();
-            let manifest: Manifest = serde_json::from_slice(&manifest)?;
 
-            let Some(media_type) = manifest.media_type else {
+            let manifest = Manifest::from_slice(&manifest)?;
+            let Some(descriptor) = manifest.into_referrer_descriptor(artifact_type.as_ref()) else {
                 continue;
             };
 
-            if let Some(artifact_type) = &artifact_type {
-                if let Some(manifest_artifact_type) = &manifest.artifact_type {
-                    if manifest_artifact_type != artifact_type {
-                        continue;
-                    }
-                } else if let Some(manifest_config) = manifest.config {
-                    if &manifest_config.media_type != artifact_type {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
-
             referrers.push(Descriptor {
-                media_type,
                 digest: manifest_digest.to_string(),
                 size: manifest_len as u64,
-                annotations: manifest.annotations,
-                artifact_type: manifest.artifact_type,
+                ..descriptor
             });
         }
 
@@ -461,11 +445,8 @@ impl DataStore for FSBackend {
         name: &str,
         uuid: &str,
     ) -> Result<(Digest, u64, DateTime<Utc>), Error> {
-        let file_path = self.tree.upload_path(name, uuid);
-        let size = self
-            .get_file_size(&file_path)
-            .await?
-            .ok_or(Error::UploadNotFound)?;
+        let path = self.tree.upload_path(name, uuid);
+        let size = self.get_file_size(&path, Error::UploadNotFound).await?;
 
         let path = self
             .tree
@@ -493,10 +474,8 @@ impl DataStore for FSBackend {
         uuid: &str,
         digest: Option<Digest>,
     ) -> Result<Digest, Error> {
-        let upload_path = self.tree.upload_path(name, uuid);
-        let Some(size) = self.get_file_size(&upload_path).await? else {
-            return Err(Error::UploadNotFound);
-        };
+        let path = self.tree.upload_path(name, uuid);
+        let size = self.get_file_size(&path, Error::UploadNotFound).await?;
 
         let digest = if let Some(digest) = digest {
             digest
@@ -521,6 +500,7 @@ impl DataStore for FSBackend {
         let blob_root = self.tree.blob_container_dir(&digest);
         fs::create_dir_all(&blob_root).await?;
 
+        let upload_path = self.tree.upload_path(name, uuid);
         let blob_path = self.tree.blob_path(&digest);
         fs::rename(&upload_path, &blob_path).await?;
 
@@ -593,7 +573,7 @@ impl DataStore for FSBackend {
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
         let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_path(digest);
-        self.get_file_size(&path).await?.ok_or(Error::BlobNotFound)
+        self.get_file_size(&path, Error::BlobNotFound).await
     }
 
     #[instrument(skip(self))]

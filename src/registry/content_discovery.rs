@@ -1,4 +1,4 @@
-use crate::oci::{Descriptor, Digest};
+use crate::registry::oci_types::{Descriptor, Digest};
 use crate::registry::{data_store, Error, Registry};
 use tracing::instrument;
 

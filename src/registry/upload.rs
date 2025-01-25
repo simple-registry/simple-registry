@@ -1,4 +1,4 @@
-use crate::oci::Digest;
+use crate::registry::oci_types::Digest;
 use crate::registry::{Error, Registry};
 use futures_util::StreamExt;
 use http_body_util::BodyDataStream;

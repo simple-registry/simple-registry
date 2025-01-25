@@ -1,4 +1,4 @@
-use crate::oci;
+use crate::registry::oci_types;
 use crate::registry::{cache_store, data_store};
 use std::cmp::PartialEq;
 use std::fmt::Display;
@@ -63,8 +63,8 @@ impl From<cache_store::Error> for Error {
     }
 }
 
-impl From<oci::Error> for Error {
-    fn from(error: oci::Error) -> Self {
+impl From<oci_types::Error> for Error {
+    fn from(error: oci_types::Error) -> Self {
         warn!("OCI error: {:?}", error);
         Error::NameInvalid
     }

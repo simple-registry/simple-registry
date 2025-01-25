@@ -1,4 +1,4 @@
-use crate::oci;
+use crate::registry::oci_types;
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::GetObjectError;
@@ -91,8 +91,8 @@ impl From<ByteStreamError> for Error {
 
 //
 
-impl From<oci::Error> for Error {
-    fn from(e: oci::Error) -> Self {
+impl From<oci_types::Error> for Error {
+    fn from(e: oci_types::Error) -> Self {
         Error::InvalidFormat(e.to_string())
     }
 }

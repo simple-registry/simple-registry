@@ -2,7 +2,7 @@ mod error;
 mod fs_backend;
 mod s3_backend;
 
-use crate::oci::{Descriptor, Digest};
+use crate::registry::oci_types::{Descriptor, Digest};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

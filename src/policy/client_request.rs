@@ -1,4 +1,4 @@
-use crate::oci::{Digest, Reference};
+use crate::registry::oci_types::{Digest, Reference};
 use serde::Serialize;
 
 const GET_API_VERSION: &str = "get-api-version";

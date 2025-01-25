@@ -68,7 +68,9 @@ mod test {
 
         // read data from the async-reader
         let mut reader_data = Vec::new();
-        let _ = tokio::io::copy(&mut notifying_reader, &mut reader_data).await.expect("Failed to read data from async-reader");
+        let _ = tokio::io::copy(&mut notifying_reader, &mut reader_data)
+            .await
+            .expect("Failed to read data from async-reader");
         drop(notifying_reader);
 
         // read data from the receiver

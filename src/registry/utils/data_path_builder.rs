@@ -1,4 +1,4 @@
-use crate::oci::Digest;
+use crate::registry::oci_types::Digest;
 use crate::registry::utils::DataLink;
 
 #[derive(Debug)]
@@ -252,7 +252,7 @@ impl DataPathBuilder {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::oci::Digest;
+    use crate::registry::oci_types::Digest;
 
     #[test]
     fn test_no_prefix() {

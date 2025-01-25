@@ -1,5 +1,5 @@
-use crate::oci::digest::Digest;
-use crate::oci::Error;
+use crate::registry::oci_types::Digest;
+use crate::registry::oci_types::Error;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::de::Visitor;

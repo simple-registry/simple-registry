@@ -1,4 +1,4 @@
-use crate::oci::{Digest, Manifest, Reference};
+use crate::registry::oci_types::{Digest, Manifest, Reference};
 use crate::registry::utils::DataLink;
 use crate::registry::{Error, Registry};
 use futures_util::StreamExt;
