@@ -22,11 +22,9 @@ use tracing::{debug, error, instrument};
 
 use crate::configuration::StorageS3Config;
 use crate::oci::{Descriptor, Digest, Manifest};
-use crate::registry::data_store::{
-    deserialize_hash_state, serialize_hash_empty_state, serialize_hash_state, BlobEntityLinkIndex,
-    DataStore, Error, Reader, ReferenceInfo,
-};
+use crate::registry::data_store::{BlobEntityLinkIndex, DataStore, Error, Reader, ReferenceInfo};
 use crate::registry::lock_store::LockStore;
+use crate::registry::utils::sha256_ext::Sha256Ext;
 use crate::registry::utils::{DataLink, DataPathBuilder};
 
 const PUSHED_AT_METADATA_KEY: &str = "pushed";
@@ -695,7 +693,10 @@ impl DataStore for S3Backend {
         digest: &Digest,
         artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, Error> {
-        let base_prefix = format!("{}/", self.tree.manifest_referrers_dir(namespace, digest));
+        let base_prefix = format!(
+            "{}/sha256/",
+            self.tree.manifest_referrers_dir(namespace, digest)
+        );
         let base_prefix_len = base_prefix.len();
 
         let mut referrers = Vec::new();
@@ -723,7 +724,7 @@ impl DataStore for S3Backend {
                     manifest_digest = manifest_digest.trim_end_matches("/link").to_string();
                 }
 
-                let manifest_digest = Digest::try_from(manifest_digest.as_str())?;
+                let manifest_digest = Digest::Sha256(manifest_digest);
                 let blob_path = self.tree.blob_path(&manifest_digest);
 
                 let manifest = self.get_object_body_as_vec(&blob_path, None).await?;
@@ -918,7 +919,7 @@ impl DataStore for S3Backend {
         self.put_object(&date_path, date.into_bytes()).await?;
 
         let hash_state_path = self.tree.upload_hash_context_path(name, uuid, "sha256", 0);
-        let state = serialize_hash_empty_state();
+        let state = Sha256::serialized_empty_state();
         self.put_object(&hash_state_path, state).await?;
 
         Ok(uuid.to_string())
@@ -969,7 +970,7 @@ impl DataStore for S3Backend {
         let state = self
             .get_object_body_as_vec(&hasher_state_path, None)
             .await?;
-        let mut hasher = deserialize_hash_state(state).await?;
+        let mut hasher = Sha256::deserialize_state(&state)?;
 
         hasher.update(source);
 
@@ -983,7 +984,7 @@ impl DataStore for S3Backend {
         // The hash computation must take into account:
         // - completed parts
         // - current staged chunk if any + source: chunk.len()
-        let state = serialize_hash_state(&hasher);
+        let state = hasher.serialize_state();
         let hash_state_path =
             self.tree
                 .upload_hash_context_path(name, uuid, "sha256", uploaded_size + chunk_len);
@@ -1026,9 +1027,8 @@ impl DataStore for S3Backend {
             .upload_hash_context_path(name, uuid, "sha256", size);
         let state = self.get_object_body_as_vec(&hash_state_path, None).await?;
 
-        let hasher = deserialize_hash_state(state).await?;
-        let digest = hasher.finalize();
-        let digest = Digest::Sha256(hex::encode(digest));
+        let hasher = Sha256::deserialize_state(&state)?;
+        let digest = hasher.to_digest();
 
         let date_path = self.tree.upload_start_date_path(name, uuid);
         let date = self.get_object_body_as_vec(&date_path, None).await?;
@@ -1084,12 +1084,14 @@ impl DataStore for S3Backend {
 
             let state = self.get_object_body_as_vec(&hash_state_path, None).await?;
 
-            let hasher = deserialize_hash_state(state).await?;
-            let existing_digest = hasher.finalize();
-            Digest::Sha256(hex::encode(existing_digest))
+            let hasher = Sha256::deserialize_state(&state)?;
+            hasher.to_digest()
         };
 
-        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
+        let _guard = self
+            .lock_store
+            .acquire_write_lock(&digest.to_string())
+            .await;
 
         let parts = parts
             .iter()
@@ -1142,10 +1144,12 @@ impl DataStore for S3Backend {
     async fn create_blob(&self, content: &[u8]) -> Result<Digest, Error> {
         let mut hasher = Sha256::new();
         hasher.update(content);
-        let digest = hasher.finalize();
-        let digest = Digest::Sha256(hex::encode(digest));
+        let digest = hasher.to_digest();
 
-        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
+        let _guard = self
+            .lock_store
+            .acquire_write_lock(&digest.to_string())
+            .await;
 
         let blob_path = self.tree.blob_path(&digest);
         self.put_object(&blob_path, content.to_vec()).await?;
@@ -1155,7 +1159,7 @@ impl DataStore for S3Backend {
 
     #[instrument(skip(self))]
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error> {
-        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
+        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_path(digest);
         let blob = self.get_object_body_as_vec(&path, None).await?;
         Ok(blob)
@@ -1163,7 +1167,7 @@ impl DataStore for S3Backend {
 
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
-        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
+        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_index_path(digest);
 
         let data = self.get_object_body_as_vec(&path, None).await?;
@@ -1174,7 +1178,7 @@ impl DataStore for S3Backend {
 
     #[instrument(skip(self))]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
-        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
+        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_path(digest);
 
         let content_length = self.get_object_size(&path).await?;
@@ -1218,7 +1222,7 @@ impl DataStore for S3Backend {
         digest: &Digest,
         start_offset: Option<u64>,
     ) -> Result<Box<dyn Reader>, Error> {
-        let _guard = self.lock_store.acquire_read_lock(digest.hash()).await;
+        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
 
         let path = self.tree.blob_path(digest);
         let res = self.get_object(&path, start_offset).await?;
@@ -1227,7 +1231,10 @@ impl DataStore for S3Backend {
 
     #[instrument(skip(self))]
     async fn delete_blob(&self, digest: &Digest) -> Result<(), Error> {
-        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
+        let _guard = self
+            .lock_store
+            .acquire_write_lock(&digest.to_string())
+            .await;
 
         let path = self.tree.blob_container_dir(digest);
         self.delete_object_with_prefix(&path).await
@@ -1281,7 +1288,10 @@ impl DataStore for S3Backend {
             _ => {}
         }
 
-        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
+        let _guard = self
+            .lock_store
+            .acquire_write_lock(&digest.to_string())
+            .await;
 
         let path = self.tree.get_link_path(reference, namespace);
         self.put_object(&path, digest.to_string().into_bytes())
@@ -1305,7 +1315,10 @@ impl DataStore for S3Backend {
 
         let link_path = self.tree.get_link_path(reference, namespace);
 
-        let _guard = self.lock_store.acquire_write_lock(digest.hash()).await;
+        let _guard = self
+            .lock_store
+            .acquire_write_lock(&digest.to_string())
+            .await;
 
         self.delete_object(&link_path).await?;
 

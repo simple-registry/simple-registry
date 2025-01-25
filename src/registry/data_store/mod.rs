@@ -6,8 +6,6 @@ use crate::oci::{Descriptor, Digest};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::digest::crypto_common::hazmat::SerializableState;
-use sha2::{Digest as Sha256Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -156,42 +154,5 @@ pub trait DataStore: Send + Sync {
 impl Debug for (dyn DataStore + 'static) {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("DataStore").finish()
-    }
-}
-
-// Hash helpers
-
-pub fn serialize_hash_state(sha256: &Sha256) -> Vec<u8> {
-    let state = sha256.serialize();
-    state.as_slice().to_vec()
-}
-
-pub fn serialize_hash_empty_state() -> Vec<u8> {
-    let state = Sha256::new();
-    serialize_hash_state(&state)
-}
-
-pub async fn deserialize_hash_state(state: Vec<u8>) -> Result<Sha256, Error> {
-    let state = state
-        .as_slice()
-        .try_into()
-        .map_err(|_| Error::HashSerialization("Unable to resume hash state".to_string()))?;
-    let state = Sha256::deserialize(state)?;
-    let hasher = Sha256::from(state);
-
-    Ok(hasher)
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_hash_serialization() {
-        let empty_state = serialize_hash_empty_state();
-        let hasher = deserialize_hash_state(empty_state.clone()).await.unwrap();
-        let state = serialize_hash_state(&hasher);
-
-        assert_eq!(empty_state, state);
     }
 }

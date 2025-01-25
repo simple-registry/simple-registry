@@ -31,7 +31,7 @@ impl Digest {
 }
 
 // NOTE: Implementing Default for Digest is not strictly necessary, but it is useful for global
-// locking in the filesystem
+// locking in the filesystem. It's a bit of a hack...
 impl Default for Digest {
     fn default() -> Self {
         Digest::Sha256(String::default())
@@ -63,7 +63,14 @@ impl TryFrom<&str> for Digest {
             )));
         }
 
-        // Check that hash is a valid sha256 hash (64 bytes representation)
+        // Check that hash is a valid 64 bytes representation
+        // As per the image specification, the hash must be a lowercase hex string:
+        //
+        // "When the algorithm identifier is sha256, the encoded portion MUST match /[a-f0-9]{64}/.
+        // Note that [A-F] MUST NOT be used here."
+        //
+        // REF:
+        // - https://github.com/opencontainers/image-spec/blob/v1.0.1/descriptor.md#sha-256
         if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(Error::InvalidFormat(format!(
                 "Invalid sha256 hash '{hash}'"
