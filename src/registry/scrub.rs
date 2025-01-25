@@ -1,6 +1,6 @@
-use crate::policy::ManifestImage;
 use crate::registry::data_store::ReferenceInfo;
 use crate::registry::oci_types::{Digest, Reference};
+use crate::registry::policy_types::ManifestImage;
 use crate::registry::utils::DataLink;
 use crate::registry::{parse_manifest_digests, Error, Registry};
 use cel_interpreter::{Context, Program, Value};

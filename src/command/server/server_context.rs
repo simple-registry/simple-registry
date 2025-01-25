@@ -1,5 +1,5 @@
 use crate::configuration::IdentityConfig;
-use crate::policy::{ClientIdentity, ClientRequest};
+use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use cel_interpreter::{Context, Program, Value};

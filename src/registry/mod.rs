@@ -18,6 +18,7 @@ mod error;
 pub mod lock_store;
 mod manifest;
 pub mod oci_types;
+pub mod policy_types;
 mod scrub;
 mod upload;
 mod utils;
