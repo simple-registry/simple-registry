@@ -55,3 +55,28 @@ impl<R: Reader> AsyncRead for NotifyingReader<R> {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_notifying_reader() {
+        let reader = tokio::fs::File::open("Cargo.toml").await.unwrap();
+
+        let (mut notifying_reader, mut receiver) = NotifyingReader::new(reader, 10);
+
+        // read data from the async-reader
+        let mut reader_data = Vec::new();
+        let _ = tokio::io::copy(&mut notifying_reader, &mut reader_data).await.expect("Failed to read data from async-reader");
+        drop(notifying_reader);
+
+        // read data from the receiver
+        let mut channel_data: Vec<u8> = Vec::new();
+        while let Some(chunk) = receiver.recv().await {
+            channel_data.extend(chunk);
+        }
+
+        assert_eq!(reader_data, channel_data);
+    }
+}
