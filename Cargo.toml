@@ -23,13 +23,13 @@ hyper = { version = "1.5.2" , features = ["full"]}
 hyper-util = { version = "0.1.10", features = ["tokio", "server-graceful"] }
 hyper-rustls = "0.27.5"
 lazy_static = "1.5.0"
-notify = "7.0.0"
+notify = "8.0.0"
 opentelemetry = "0.27.1"
 opentelemetry-otlp = "0.27.0"
 opentelemetry_sdk = { version = "0.27.1", features = ["rt-tokio"] }
 opentelemetry-semantic-conventions = { version = "0.27.0", features = ["semconv_experimental"] }
 opentelemetry-stdout = "0.27.0"
-redis = { version = "0.27.6", features = ["tokio-comp"] }
+redis = { version = "0.28.2", features = ["tokio-comp"] }
 regex = "1.11.1"
 rustls = { version = "0.23.20", features = ["aws-lc-rs"] }
 rustls-native-certs = "0.8.1"
