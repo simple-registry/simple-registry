@@ -47,6 +47,7 @@ impl Configuration {
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServerConfig {
     pub bind_address: IpAddr,
+    #[serde(default = "ServerConfig::default_port")]
     pub port: u16,
     #[serde(default = "ServerConfig::default_query_timeout")]
     pub query_timeout: u64,
@@ -58,6 +59,10 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    fn default_port() -> u16 {
+        8000
+    }
+
     fn default_query_timeout() -> u64 {
         3600
     }
@@ -67,7 +72,7 @@ impl ServerConfig {
     }
 
     fn default_streaming_chunk_size() -> DataSize {
-        DataSize::WithUnit(50, "MiB".to_string())
+        DataSize::WithUnit(50, "MIB".to_string())
     }
 }
 
@@ -103,7 +108,7 @@ pub struct ServerTlsConfig {
     pub client_ca_bundle: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 // This is acceptable to have a large enum variant for configuration things.
 #[allow(clippy::large_enum_variant)]
 pub enum DataStoreConfig {
@@ -119,12 +124,12 @@ impl Default for DataStoreConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct StorageFSConfig {
     pub root_dir: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct StorageS3Config {
     pub access_key_id: String,
     pub secret_key: String,
@@ -147,6 +152,7 @@ impl StorageS3Config {
     fn default_multipart_copy_threshold() -> DataSize {
         DataSize::WithUnit(5, "GB".to_string())
     }
+
     fn default_multipart_copy_chunk_size() -> DataSize {
         DataSize::WithUnit(100, "MB".to_string())
     }
@@ -156,7 +162,7 @@ impl StorageS3Config {
     }
 
     fn default_multipart_min_part_size() -> DataSize {
-        DataSize::WithUnit(5, "MB".to_string())
+        DataSize::WithUnit(5, "MIB".to_string())
     }
 }
 
@@ -222,18 +228,68 @@ pub struct TracingConfig {
 impl Configuration {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let config_str = fs::read_to_string(path)?;
+        Self::load_from_str(&config_str)
+    }
 
-        let config: Configuration = toml::from_str(&config_str).unwrap_or_else(|e| {
+    pub fn load_from_str(slice: &str) -> Result<Self, Error> {
+        let config: Configuration = toml::from_str(slice).unwrap_or_else(|e| {
             println!("Configuration file format error:");
             panic!("{e}")
         });
 
-        if config.server.streaming_chunk_size.to_usize() < 5 * 1024 * 1024 {
+        if let DataStoreConfig::S3(storage) = &config.storage {
+            if storage.multipart_min_part_size.to_usize() < 5 * 1024 * 1024 {
+                return Err(Error::StreamingChunkSize(
+                    "Multipart part size must be at least 5MiB".to_string(),
+                ));
+            }
+        };
+
+        let streaming_chunk_size = config.server.streaming_chunk_size.to_usize();
+        if streaming_chunk_size < 5 * 1024 * 1024 {
             return Err(Error::StreamingChunkSize(
                 "Streaming chunk size must be at least 5MiB".to_string(),
             ));
         }
-
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_load_minimal_config() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+
+        assert_eq!(config.max_concurrent_requests, 50);
+        assert_eq!(
+            config.server.bind_address.to_string(),
+            "0.0.0.0".to_string()
+        );
+        assert_eq!(config.server.port, 8000);
+        assert_eq!(config.server.query_timeout, 3600);
+        assert_eq!(config.server.query_timeout_grace_period, 60);
+        assert_eq!(
+            config.server.streaming_chunk_size.to_usize(),
+            50 * 1024 * 1024
+        );
+        assert!(config.lock_store.redis.is_none());
+        assert!(config.cache_store.redis.is_none());
+        assert_eq!(
+            config.storage,
+            DataStoreConfig::FS(StorageFSConfig {
+                root_dir: "".to_string()
+            })
+        );
+        assert!(config.identity.is_empty());
+        assert!(config.repository.is_empty());
+        assert!(config.observability.is_none());
     }
 }

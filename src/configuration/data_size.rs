@@ -1,7 +1,7 @@
 use serde::de::Error;
 use serde::{Deserialize, Deserializer};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DataSize {
     WithUnit(usize, String),
     WithoutUnit(usize),
