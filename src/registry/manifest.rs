@@ -1,6 +1,6 @@
-use crate::oci::{Digest, Manifest, Reference};
-use crate::registry::{Error, Registry};
-use crate::storage::EntityLink;
+use crate::registry::oci_types::{Digest, Manifest, Reference};
+use crate::registry::utils::DataLink;
+use crate::registry::{Error, Registry, Repository};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -37,7 +37,7 @@ pub fn parse_manifest_digests(
 ) -> Result<ParsedManifestDigests, Error> {
     let manifest: Manifest = serde_json::from_slice(body).map_err(|e| {
         debug!("Failed to deserialize manifest: {}", e);
-        Error::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
+        Error::ManifestInvalid("Failed to deserialize manifest".to_string())
     })?;
 
     if content_type.is_some()
@@ -48,9 +48,9 @@ pub fn parse_manifest_digests(
             "Manifest media type mismatch: {:?} (expected) != {:?} (found)",
             content_type, manifest.media_type
         );
-        return Err(Error::ManifestInvalid(Some(
+        return Err(Error::ManifestInvalid(
             "Expected manifest media type mismatch".to_string(),
-        )));
+        ));
     }
 
     let subject = manifest
@@ -77,28 +77,21 @@ pub fn parse_manifest_digests(
 }
 
 impl Registry {
-    #[instrument]
+    #[instrument(skip(repository))]
     pub async fn head_manifest(
         &self,
+        repository: &Repository,
         accepted_mime_types: &[String],
         namespace: &str,
         reference: Reference,
     ) -> Result<HeadManifestResponse, Error> {
-        let (repository_name, repository) = self.validate_namespace(namespace)?;
-
         if repository.is_pull_through() {
             if let Ok(response) = self.head_local_manifest(namespace, reference.clone()).await {
                 return Ok(response);
             }
 
             let res = repository
-                .query_upstream_manifest(
-                    &Method::HEAD,
-                    accepted_mime_types,
-                    repository_name,
-                    namespace,
-                    &reference,
-                )
+                .query_upstream_manifest(&Method::HEAD, accepted_mime_types, namespace, &reference)
                 .await?;
 
             let media_type = Self::get_header(&res, CONTENT_TYPE);
@@ -107,7 +100,12 @@ impl Registry {
 
             // Store locally before returning
             let _ = self
-                .get_manifest(accepted_mime_types, namespace, reference.clone())
+                .get_manifest(
+                    repository,
+                    accepted_mime_types,
+                    namespace,
+                    reference.clone(),
+                )
                 .await?;
 
             return Ok(HeadManifestResponse {
@@ -153,28 +151,21 @@ impl Registry {
         })
     }
 
-    #[instrument]
+    #[instrument(skip(repository))]
     pub async fn get_manifest(
         &self,
+        repository: &Repository,
         accepted_mime_types: &[String],
         namespace: &str,
         reference: Reference,
     ) -> Result<GetManifestResponse, Error> {
-        let (repository_name, repository) = self.validate_namespace(namespace)?;
-
         if repository.is_pull_through() {
             if let Ok(response) = self.get_local_manifest(namespace, reference.clone()).await {
                 return Ok(response);
             }
 
             let res = repository
-                .query_upstream_manifest(
-                    &Method::GET,
-                    accepted_mime_types,
-                    repository_name,
-                    namespace,
-                    &reference,
-                )
+                .query_upstream_manifest(&Method::GET, accepted_mime_types, namespace, &reference)
                 .await?;
 
             let media_type = Self::get_header(&res, CONTENT_TYPE);
@@ -185,7 +176,7 @@ impl Registry {
             while let Some(frame) = body.next().await {
                 let frame = frame.map_err(|e| {
                     error!("Data stream error: {}", e);
-                    std::io::Error::new(std::io::ErrorKind::Other, e)
+                    Error::Internal("Data stream error".to_string())
                 })?;
                 content.extend_from_slice(&frame);
             }
@@ -223,10 +214,9 @@ impl Registry {
             .await?;
 
         let content = self.storage_engine.read_blob(&digest).await?;
-
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|e| {
             debug!("Failed to deserialize manifest: {}", e);
-            Error::ManifestInvalid(Some("Failed to deserialize manifest".to_string()))
+            Error::ManifestInvalid("Failed to deserialize manifest".to_string())
         })?;
 
         Ok(GetManifestResponse {
@@ -252,11 +242,11 @@ impl Registry {
             Reference::Tag(tag) => {
                 let digest = self.storage_engine.create_blob(body).await?;
 
-                let link = EntityLink::Tag(tag);
+                let link = DataLink::Tag(tag);
                 self.storage_engine
                     .create_link(namespace, &link, &digest)
                     .await?;
-                let link = EntityLink::Digest(digest.clone());
+                let link = DataLink::Digest(digest.clone());
                 self.storage_engine
                     .create_link(namespace, &link, &digest)
                     .await?;
@@ -271,11 +261,11 @@ impl Registry {
                         "Provided digest does not match calculated digest: {} != {}",
                         provided_digest, digest
                     );
-                    return Err(Error::ManifestInvalid(Some(
+                    return Err(Error::ManifestInvalid(
                         "Provided digest does not match calculated digest".to_string(),
-                    )));
+                    ));
                 }
-                let link = EntityLink::Digest(digest.clone());
+                let link = DataLink::Digest(digest.clone());
                 self.storage_engine
                     .create_link(namespace, &link, &digest)
                     .await?;
@@ -285,21 +275,21 @@ impl Registry {
         };
 
         if let Some(subject) = &manifest_digests.subject {
-            let link = EntityLink::Referrer(subject.clone(), digest.clone());
+            let link = DataLink::Referrer(subject.clone(), digest.clone());
             self.storage_engine
                 .create_link(namespace, &link, &digest)
                 .await?;
         }
 
         if let Some(config_digest) = manifest_digests.config {
-            let link = EntityLink::Config(config_digest.clone());
+            let link = DataLink::Config(config_digest.clone());
             self.storage_engine
                 .create_link(namespace, &link, &config_digest)
                 .await?;
         }
 
         for layer_digest in manifest_digests.layers {
-            let link = EntityLink::Layer(layer_digest.clone());
+            let link = DataLink::Layer(layer_digest.clone());
             self.storage_engine
                 .create_link(namespace, &link, &layer_digest)
                 .await?;
@@ -321,7 +311,7 @@ impl Registry {
 
         match reference {
             Reference::Tag(tag) => {
-                let link = EntityLink::Tag(tag);
+                let link = DataLink::Tag(tag);
                 self.storage_engine.delete_link(namespace, &link).await?;
             }
             Reference::Digest(digest) => {
@@ -333,7 +323,7 @@ impl Registry {
                         .await?;
 
                     for tag in tags {
-                        let link_reference = EntityLink::Tag(tag);
+                        let link_reference = DataLink::Tag(tag);
                         if self
                             .storage_engine
                             .read_link(namespace, &link_reference)
@@ -346,14 +336,14 @@ impl Registry {
                         }
                     }
 
-                    let link = EntityLink::Digest(digest.clone());
+                    let link = DataLink::Digest(digest.clone());
 
                     let digest = self.storage_engine.read_link(namespace, &link).await?;
                     let content = self.storage_engine.read_blob(&digest).await?;
                     let manifest_digests = parse_manifest_digests(&content, None)?;
 
                     if let Some(subject_digest) = manifest_digests.subject {
-                        let link = EntityLink::Referrer(subject_digest, digest);
+                        let link = DataLink::Referrer(subject_digest, digest);
                         self.storage_engine.delete_link(namespace, &link).await?;
                     }
 

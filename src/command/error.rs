@@ -1,3 +1,4 @@
+use crate::registry::data_store;
 use crate::{configuration, registry};
 use std::{fmt, io};
 
@@ -7,7 +8,7 @@ pub enum Error {
     Watcher(String),
     Configuration(configuration::Error),
     Registry(registry::Error),
-    CELExecution(cel_interpreter::ExecutionError),
+    DataStore(data_store::Error),
     Std(Box<dyn std::error::Error>),
 }
 
@@ -24,8 +25,8 @@ impl fmt::Display for Error {
                 write!(f, "Registry error")?;
                 write!(f, "{err}")
             }
-            Error::CELExecution(err) => {
-                write!(f, "CEL execution error")?;
+            Error::DataStore(err) => {
+                write!(f, "Data store error")?;
                 write!(f, "{err}")
             }
             Error::Std(err) => {
@@ -60,14 +61,14 @@ impl From<registry::Error> for Error {
     }
 }
 
-impl From<Box<dyn std::error::Error>> for Error {
-    fn from(err: Box<dyn std::error::Error>) -> Self {
-        Error::Std(err)
+impl From<data_store::Error> for Error {
+    fn from(err: data_store::Error) -> Self {
+        Error::DataStore(err)
     }
 }
 
-impl From<cel_interpreter::ExecutionError> for Error {
-    fn from(err: cel_interpreter::ExecutionError) -> Self {
-        Error::CELExecution(err)
+impl From<Box<dyn std::error::Error>> for Error {
+    fn from(err: Box<dyn std::error::Error>) -> Self {
+        Error::Std(err)
     }
 }

@@ -65,26 +65,28 @@ If not provided, the server will run on top of an _insecure_ plaintext socket.
 - `server_private_key` (string): The path to the server private key.
 - `client_ca_bundle` (optional string): The path to the client CA bundle for mTLS
 
-### Distributed Locking (`locking`)
+### Lock Store (`lock_store`)
 
 Distributed locking is used to prevent concurrent operations that could lead to data corruption.
 If no configuration is provided, an in-memory locking mechanism is used, which is not suitable for
 multi-replica deployments.
 
-#### Redis Locking (`locking.redis`)
+#### Redis Locking (`lock_store.redis`)
 
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
 - `ttl` (string): The time-to-live for the lock in seconds (e.g., `10s`)
+- `key_prefix` (optional string): The key prefix for all lock keys
 
-### Token Cache (`cache`)
+### Token Cache (`cache_store`)
 
 Authentication tokens are cached to reduce unnecessary requests to upstream servers when using a pull-through cache
 configuration.
 If no configuration is provided, an in-memory cache is used, which is not suitable for multi-replica deployments.
 
-#### Redis Cache (`cache.redis`)
+#### Redis Cache (`cache_store.redis`)
 
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
+- `key_prefix` (optional string): The key prefix for all cache keys
 
 ### Storage (`storage`)
 
@@ -253,6 +255,7 @@ In addition to those variables, some helper functions are available:
 
 - [ ] Kubernetes Operator (new project)
 - [ ] OpenMetrics exporter
+- [ ] Health-checks
 
 ## References
 

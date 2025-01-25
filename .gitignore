@@ -6,6 +6,4 @@ tls.d/*.csr
 /.idea
 /data-simple-registry
 /config.toml
-
-# TO be reworked
-/test.sh
+/conformance/minio-data

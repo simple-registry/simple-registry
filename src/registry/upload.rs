@@ -1,4 +1,4 @@
-use crate::oci::Digest;
+use crate::registry::oci_types::Digest;
 use crate::registry::{Error, Registry};
 use futures_util::StreamExt;
 use http_body_util::BodyDataStream;
@@ -48,12 +48,12 @@ impl Registry {
 
         let session_id = session_id.to_string();
         if let Some(start_offset) = start_offset {
-            let summary = self
+            let (_, size, _) = self
                 .storage_engine
                 .read_upload_summary(namespace, &session_id)
                 .await?;
 
-            if start_offset != summary.size {
+            if start_offset != size {
                 return Err(Error::RangeNotSatisfiable);
             }
         };
@@ -61,7 +61,7 @@ impl Registry {
         self.upload_body_chunk(namespace, &session_id, body, true)
             .await?;
 
-        let summary = self
+        let (_, size, _) = self
             .storage_engine
             .read_upload_summary(namespace, &session_id)
             .await
@@ -70,11 +70,11 @@ impl Registry {
                 e
             })?;
 
-        if summary.size < 1 {
+        if size < 1 {
             return Ok(0);
         }
 
-        Ok(summary.size - 1)
+        Ok(size - 1)
     }
 
     #[instrument(skip(body))]
@@ -92,13 +92,13 @@ impl Registry {
         self.upload_body_chunk(namespace, &session_id, body, false)
             .await?;
 
-        let summary = self
+        let (upload_digest, _, _) = self
             .storage_engine
             .read_upload_summary(namespace, &session_id)
             .await?;
 
-        if summary.digest != digest {
-            warn!("Expected digest '{}', got '{}'", digest, summary.digest);
+        if upload_digest != digest {
+            warn!("Expected digest '{}', got '{}'", digest, upload_digest);
             return Err(Error::DigestInvalid);
         }
 
@@ -107,7 +107,9 @@ impl Registry {
             .await?;
         self.storage_engine
             .delete_upload(namespace, &session_id)
-            .await
+            .await?;
+
+        Ok(())
     }
 
     async fn upload_body_chunk(
@@ -121,7 +123,7 @@ impl Registry {
         while let Some(frame) = body.next().await {
             let frame = frame.map_err(|e| {
                 error!("Data stream error: {}", e);
-                std::io::Error::new(std::io::ErrorKind::Other, e)
+                Error::Internal("Data stream error".to_string())
             })?;
             chunk.extend_from_slice(&frame);
 
@@ -155,7 +157,9 @@ impl Registry {
         self.validate_namespace(namespace)?;
 
         let uuid = session_id.to_string();
-        self.storage_engine.delete_upload(namespace, &uuid).await
+        self.storage_engine.delete_upload(namespace, &uuid).await?;
+
+        Ok(())
     }
 
     #[instrument]
@@ -167,15 +171,15 @@ impl Registry {
         self.validate_namespace(namespace)?;
 
         let uuid = session_id.to_string();
-        let summary = self
+        let (_, size, _) = self
             .storage_engine
             .read_upload_summary(namespace, &uuid)
             .await?;
 
-        if summary.size < 1 {
+        if size < 1 {
             return Ok(0);
         }
 
-        Ok(summary.size - 1)
+        Ok(size - 1)
     }
 }

@@ -1,3 +1,4 @@
+use chrono::Duration;
 use hyper::body::Incoming;
 use hyper::header::AsHeaderName;
 use hyper::Response;
@@ -10,19 +11,25 @@ use std::sync::Arc;
 use tracing::instrument;
 
 mod blob;
+pub mod cache_store;
 mod content_discovery;
+pub mod data_store;
 mod error;
+pub mod lock_store;
 mod manifest;
-mod notifying_reader;
+pub mod oci_types;
+pub mod policy_types;
 mod repository;
-mod repository_upstream;
+mod scrub;
 mod upload;
+mod utils;
 
-use crate::cache::Cache;
 use crate::configuration;
 use crate::configuration::RepositoryConfig;
-use crate::registry::repository::Repository;
-use crate::storage::GenericStorageEngine;
+use crate::registry::cache_store::CacheStore;
+use crate::registry::data_store::DataStore;
+pub use repository::Repository;
+
 pub use blob::GetBlobResponse;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
@@ -33,11 +40,18 @@ lazy_static! {
         Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap();
 }
 
-#[derive(Debug)]
 pub struct Registry {
-    pub streaming_chunk_size: usize,
-    pub storage_engine: Arc<Box<dyn GenericStorageEngine>>,
-    pub repositories: HashMap<String, Repository>,
+    streaming_chunk_size: usize,
+    storage_engine: Arc<Box<dyn DataStore>>,
+    repositories: HashMap<String, Repository>,
+    scrub_dry_run: bool,
+    scrub_upload_timeout: Duration,
+}
+
+impl Debug for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registry").finish()
+    }
 }
 
 impl Registry {
@@ -45,35 +59,44 @@ impl Registry {
     pub fn new(
         repositories_config: HashMap<String, RepositoryConfig>,
         streaming_chunk_size: usize,
-        storage_engine: Box<dyn GenericStorageEngine>,
-        token_cache: Arc<dyn Cache>,
+        storage_engine: Box<dyn DataStore>,
+        token_cache: Arc<CacheStore>,
     ) -> Result<Self, configuration::Error> {
         let mut repositories = HashMap::new();
-        for (namespace, repository_config) in repositories_config {
-            let res = Repository::new(repository_config, &token_cache)?;
-            repositories.insert(namespace, res);
+        for (repository_name, repository_config) in repositories_config {
+            let res = Repository::new(repository_config, repository_name.clone(), &token_cache)?;
+            repositories.insert(repository_name, res);
         }
 
         let res = Self {
             streaming_chunk_size,
             storage_engine: Arc::new(storage_engine),
             repositories,
+            scrub_dry_run: true,
+            scrub_upload_timeout: Duration::days(1),
         };
 
         Ok(res)
     }
 
-    // TODO: check usage (called twice for most requests)
-    pub fn find_repository(&self, namespace: &str) -> Option<(&String, &Repository)> {
-        self.repositories
-            .iter()
-            .find(|(repository, _)| namespace.starts_with(*repository))
+    pub fn with_dry_run(mut self, scrub_dry_run: bool) -> Self {
+        self.scrub_dry_run = scrub_dry_run;
+        self
+    }
+
+    pub fn with_upload_timeout(mut self, scrub_upload_timeout: Duration) -> Self {
+        self.scrub_upload_timeout = scrub_upload_timeout;
+        self
     }
 
     #[instrument]
-    pub fn validate_namespace(&self, namespace: &str) -> Result<(&String, &Repository), Error> {
+    pub fn validate_namespace(&self, namespace: &str) -> Result<&Repository, Error> {
         if NAMESPACE_RE.is_match(namespace) {
-            self.find_repository(namespace).ok_or(Error::NameUnknown)
+            self.repositories
+                .iter()
+                .find(|(repository, _)| namespace.starts_with(*repository))
+                .map(|(_, repository)| repository)
+                .ok_or(Error::NameUnknown)
         } else {
             Err(Error::NameInvalid)
         }
