@@ -45,7 +45,7 @@ pub struct CELIdentityCertificate {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
     use x509_parser::pem::Pem;
     use x509_parser::prelude::FromDer;

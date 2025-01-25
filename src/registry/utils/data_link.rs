@@ -20,7 +20,7 @@ impl From<Reference> for DataLink {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
     use crate::registry::oci_types::Reference;
 

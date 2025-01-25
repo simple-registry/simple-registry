@@ -146,7 +146,7 @@ impl LockStore {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
     use crate::configuration;
     use crate::configuration::LockStoreConfig;
