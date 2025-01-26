@@ -1,4 +1,4 @@
-use crate::registry::data_store::Reader;
+use crate::registry::data_store::{DataStore, Reader};
 use crate::registry::oci_types::Digest;
 use crate::registry::utils::{DataLink, NotifyingReader};
 use crate::registry::{data_store, Error, Registry, Repository};
@@ -26,7 +26,7 @@ pub struct HeadBlobResponse {
     pub size: u64,
 }
 
-impl Registry {
+impl<D: DataStore + 'static> Registry<D> {
     #[instrument(skip(repository))]
     pub async fn head_blob(
         &self,

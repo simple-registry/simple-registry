@@ -3,6 +3,7 @@ use crate::command::server::{
     BlobParameters, ManifestParameters, NewUploadParameters, ReferrerParameters, TagsParameters,
     UploadParameters, RANGE_RE,
 };
+use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, ReferrerList};
 use crate::registry::{Error, GetBlobResponse, Registry, Repository, StartUploadResponse};
 use http_body_util::BodyExt;
@@ -90,8 +91,8 @@ pub async fn handle_get_api_version() -> Result<Response<Body>, Error> {
 }
 
 #[instrument(skip(registry, repository))]
-pub async fn handle_get_manifest(
-    registry: &Registry,
+pub async fn handle_get_manifest<D: DataStore>(
+    registry: &Registry<D>,
     repository: &Repository,
     accepted_mime_types: &[String],
     parameters: ManifestParameters,
@@ -122,8 +123,8 @@ pub async fn handle_get_manifest(
 }
 
 #[instrument(skip(registry, repository))]
-pub async fn handle_head_manifest(
-    registry: &Registry,
+pub async fn handle_head_manifest<D: DataStore>(
+    registry: &Registry<D>,
     repository: &Repository,
     accepted_mime_types: &[String],
     parameters: ManifestParameters,
@@ -156,8 +157,8 @@ pub async fn handle_head_manifest(
 }
 
 #[instrument(skip(registry, repository, request))]
-pub async fn handle_get_blob(
-    registry: &Registry,
+pub async fn handle_get_blob<D: DataStore + 'static>(
+    registry: &Registry<D>,
     repository: &Repository,
     request: Request<Incoming>,
     accepted_mime_types: &[String],
@@ -208,9 +209,8 @@ pub async fn handle_get_blob(
     Ok(res)
 }
 
-#[instrument(skip(registry, repository))]
-pub async fn handle_head_blob(
-    registry: &Registry,
+pub async fn handle_head_blob<D: DataStore + 'static>(
+    registry: &Registry<D>,
     repository: &Repository,
     accepted_mime_types: &[String],
     parameters: BlobParameters,
@@ -234,8 +234,8 @@ pub async fn handle_head_blob(
 }
 
 #[instrument(skip(request))]
-pub async fn handle_start_upload(
-    registry: &Registry,
+pub async fn handle_start_upload<D: DataStore>(
+    registry: &Registry<D>,
     request: Request<Incoming>,
     parameters: NewUploadParameters,
 ) -> Result<Response<Body>, Error> {
@@ -271,8 +271,8 @@ pub async fn handle_start_upload(
 }
 
 #[instrument(skip(request))]
-pub async fn handle_patch_upload(
-    registry: &Registry,
+pub async fn handle_patch_upload<D: DataStore>(
+    registry: &Registry<D>,
     request: Request<Incoming>,
     parameters: UploadParameters,
 ) -> Result<Response<Body>, Error> {
@@ -304,8 +304,8 @@ pub async fn handle_patch_upload(
 }
 
 #[instrument(skip(request))]
-pub async fn handle_put_upload(
-    registry: &Registry,
+pub async fn handle_put_upload<D: DataStore>(
+    registry: &Registry<D>,
     request: Request<Incoming>,
     parameters: UploadParameters,
 ) -> Result<Response<Body>, Error> {
@@ -334,8 +334,8 @@ pub async fn handle_put_upload(
 }
 
 #[instrument]
-pub async fn handle_delete_upload(
-    registry: &Registry,
+pub async fn handle_delete_upload<D: DataStore>(
+    registry: &Registry<D>,
     parameters: UploadParameters,
 ) -> Result<Response<Body>, Error> {
     registry
@@ -350,8 +350,8 @@ pub async fn handle_delete_upload(
 }
 
 #[instrument]
-pub async fn handle_get_upload_progress(
-    registry: &Registry,
+pub async fn handle_get_upload_progress<D: DataStore>(
+    registry: &Registry<D>,
     parameters: UploadParameters,
 ) -> Result<Response<Body>, Error> {
     let location = format!("/v2/{}/blobs/uploads/{}", parameters.name, parameters.uuid);
@@ -372,8 +372,8 @@ pub async fn handle_get_upload_progress(
 }
 
 #[instrument]
-pub async fn handle_delete_blob(
-    registry: &Registry,
+pub async fn handle_delete_blob<D: DataStore + 'static>(
+    registry: &Registry<D>,
     parameters: BlobParameters,
 ) -> Result<Response<Body>, Error> {
     registry
@@ -388,8 +388,8 @@ pub async fn handle_delete_blob(
 }
 
 #[instrument(skip(request))]
-pub async fn handle_put_manifest(
-    registry: &Registry,
+pub async fn handle_put_manifest<D: DataStore>(
+    registry: &Registry<D>,
     request: Request<Incoming>,
     parameters: ManifestParameters,
 ) -> Result<Response<Body>, Error> {
@@ -440,8 +440,8 @@ pub async fn handle_put_manifest(
 }
 
 #[instrument]
-pub async fn handle_delete_manifest(
-    registry: &Registry,
+pub async fn handle_delete_manifest<D: DataStore>(
+    registry: &Registry<D>,
     parameters: ManifestParameters,
 ) -> Result<Response<Body>, Error> {
     registry
@@ -456,8 +456,8 @@ pub async fn handle_delete_manifest(
 }
 
 #[instrument(skip(request))]
-pub async fn handle_get_referrers(
-    registry: &Registry,
+pub async fn handle_get_referrers<D: DataStore>(
+    registry: &Registry<D>,
     request: Request<Incoming>,
     parameters: ReferrerParameters,
 ) -> Result<Response<Body>, Error> {
@@ -497,8 +497,8 @@ pub async fn handle_get_referrers(
 }
 
 #[instrument(skip(request))]
-pub async fn handle_list_catalog(
-    registry: &Registry,
+pub async fn handle_list_catalog<D: DataStore>(
+    registry: &Registry<D>,
     request: Request<Incoming>,
 ) -> Result<Response<Body>, Error> {
     #[derive(Debug, Deserialize, Default)]
@@ -523,8 +523,8 @@ pub async fn handle_list_catalog(
 }
 
 #[instrument(skip(request))]
-pub async fn handle_list_tags(
-    registry: &Registry,
+pub async fn handle_list_tags<D: DataStore>(
+    registry: &Registry<D>,
     request: Request<Incoming>,
     parameters: TagsParameters,
 ) -> Result<Response<Body>, Error> {

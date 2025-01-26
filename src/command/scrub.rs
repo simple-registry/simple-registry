@@ -1,4 +1,5 @@
 use crate::command;
+use crate::registry::data_store::DataStore;
 use crate::registry::Registry;
 use argh::FromArgs;
 use chrono::Duration;
@@ -47,13 +48,13 @@ enum ScrubCheck {
     Retention,
 }
 
-pub struct Command {
-    registry: Arc<Registry>,
+pub struct Command<D> {
+    registry: Arc<Registry<D>>,
     enabled_checks: HashSet<ScrubCheck>,
 }
 
-impl Command {
-    pub fn new(options: &Options, registry: Registry) -> Self {
+impl<D: DataStore> Command<D> {
+    pub fn new(options: &Options, registry: Registry<D>) -> Self {
         let upload_timeout = options
             .upload_timeout
             .map_or(Duration::days(1), |s| Duration::seconds(s.into()));

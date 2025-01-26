@@ -1,3 +1,4 @@
+use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::{Error, Registry};
 use futures_util::StreamExt;
@@ -12,7 +13,7 @@ pub enum StartUploadResponse {
     Session(String, String),
 }
 
-impl Registry {
+impl<D: DataStore> Registry<D> {
     #[instrument]
     pub async fn start_upload(
         &self,

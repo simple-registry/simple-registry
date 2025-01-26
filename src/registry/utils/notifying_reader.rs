@@ -1,4 +1,3 @@
-use crate::registry::data_store::Reader;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -7,12 +6,12 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::error;
 
-pub struct NotifyingReader<R: Reader> {
+pub struct NotifyingReader<R: AsyncRead + Unpin> {
     inner: R,
     sender: Sender<Vec<u8>>,
 }
 
-impl<R: Reader> NotifyingReader<R> {
+impl<R: AsyncRead + Unpin> NotifyingReader<R> {
     pub fn new(inner: R, buffer_size: usize) -> (Self, Receiver<Vec<u8>>) {
         let (sender, receiver) = mpsc::channel::<Vec<u8>>(buffer_size);
         let reader = NotifyingReader { inner, sender };
@@ -21,7 +20,7 @@ impl<R: Reader> NotifyingReader<R> {
     }
 }
 
-impl<R: Reader> AsyncRead for NotifyingReader<R> {
+impl<R: AsyncRead + Unpin> AsyncRead for NotifyingReader<R> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,

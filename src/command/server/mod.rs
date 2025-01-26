@@ -36,6 +36,7 @@ use crate::command::server::response::Body;
 use crate::command::server::server_context::ServerContext;
 use crate::command::server::tls_listener::TlsListener;
 use crate::configuration::{IdentityConfig, ServerConfig};
+use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::Registry;
@@ -91,9 +92,9 @@ pub struct BlobParameters {
     pub digest: Digest,
 }
 
-pub enum ServiceListener {
-    Insecure(InsecureListener),
-    Secure(TlsListener),
+pub enum ServiceListener<D> {
+    Insecure(InsecureListener<D>),
+    Secure(TlsListener<D>),
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -104,16 +105,16 @@ pub enum ServiceListener {
 )]
 pub struct Options {}
 
-pub struct Command {
-    listener: ServiceListener,
+pub struct Command<D> {
+    listener: ServiceListener<D>,
 }
 
-impl Command {
+impl<D: DataStore + 'static> Command<D> {
     pub fn new(
         server_config: &ServerConfig,
         identities: &HashMap<String, IdentityConfig>,
-        registry: Registry,
-    ) -> Result<Command, configuration::Error> {
+        registry: Registry<D>,
+    ) -> Result<Command<D>, configuration::Error> {
         let timeouts = vec![
             Duration::from_secs(server_config.query_timeout),
             Duration::from_secs(server_config.query_timeout_grace_period),
@@ -133,7 +134,7 @@ impl Command {
         &self,
         server_config: ServerConfig,
         identities: &HashMap<String, IdentityConfig>,
-        registry: Registry,
+        registry: Registry<D>,
     ) -> Result<(), configuration::Error> {
         let timeouts = vec![
             Duration::from_secs(server_config.query_timeout),
@@ -161,8 +162,11 @@ impl Command {
     }
 }
 
-async fn serve_request<S>(stream: TokioIo<S>, context: Arc<ServerContext>, identity: ClientIdentity)
-where
+async fn serve_request<D: DataStore + 'static, S>(
+    stream: TokioIo<S>,
+    context: Arc<ServerContext<D>>,
+    identity: ClientIdentity,
+) where
     S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
     let conn = http1::Builder::new().serve_connection(
@@ -195,8 +199,8 @@ where
 }
 
 #[instrument(skip(context, request))]
-async fn handle_request(
-    context: Arc<ServerContext>,
+async fn handle_request<D: DataStore + 'static>(
+    context: Arc<ServerContext<D>>,
     request: Request<Incoming>,
     identity: ClientIdentity,
 ) -> Result<Response<Body>, Infallible> {
@@ -306,8 +310,8 @@ where
 }
 
 #[instrument(skip(context, request))]
-async fn router(
-    context: Arc<ServerContext>,
+async fn router<D: DataStore + 'static>(
+    context: Arc<ServerContext<D>>,
     request: Request<Incoming>,
     mut identity: ClientIdentity,
 ) -> Result<Response<Body>, registry::Error> {

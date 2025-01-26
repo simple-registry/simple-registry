@@ -1,6 +1,6 @@
 # Simple-Registry
 
-A fully OCI-compliant container registry that performs reasonably well with classic Docker tooling.
+A fully OCI-compliant and Docker-compatible container registry.
 
 Goals
 - Resource efficient: Asynchronous, Streaming operations
@@ -8,10 +8,6 @@ Goals
 - Scalable: light footprint
 - Easy to operate: online garbage collection, auto-reload of configuration and certificates
 - Cross-platform: should be portable on most mainstream operating systems
-
-> [!NOTE]
-> While the registry service itself is both OCI compliant and compatible with Docker,
-> the scrub feature is still experimental.
 
 ## Usage
 
@@ -42,6 +38,7 @@ However, certain options cannot be changed during runtime:
 - `server.port`
 - `observability.tracing.sampling_rate`
 - **enabling** or **disabling** TLS
+- Moving from filesystem to S3 storage or vice versa
 
 TLS files are also automatically reloaded on changes if they are valid.
 

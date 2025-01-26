@@ -7,32 +7,14 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use tokio::io::AsyncRead;
-use tracing::info;
 
-use crate::configuration::DataStoreConfig;
-use crate::registry::lock_store::LockStore;
-
-use crate::registry::data_store::fs_backend::FSBackend;
-use crate::registry::data_store::s3_backend::S3Backend;
+pub use fs_backend::FSBackend;
+pub use s3_backend::S3Backend;
 
 use crate::registry::utils::DataLink;
 pub use error::Error;
-
-pub fn build_storage_engine(config: DataStoreConfig, lock_store: LockStore) -> Box<dyn DataStore> {
-    match config {
-        DataStoreConfig::FS(config) => {
-            info!("Using filesystem backend");
-            Box::new(FSBackend::new(config, lock_store))
-        }
-        DataStoreConfig::S3(config) => {
-            info!("Using S3 backend");
-            Box::new(S3Backend::new(config, lock_store))
-        }
-    }
-}
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct BlobEntityLinkIndex {
@@ -149,10 +131,4 @@ pub trait DataStore: Send + Sync {
     ) -> Result<(), Error>;
 
     async fn delete_link(&self, namespace: &str, reference: &DataLink) -> Result<(), Error>;
-}
-
-impl Debug for (dyn DataStore + 'static) {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DataStore").finish()
-    }
 }

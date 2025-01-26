@@ -7,17 +7,17 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{debug, error, info, instrument};
 
-pub struct ServerContext {
+pub struct ServerContext<D> {
     pub credentials: HashMap<String, (String, String)>,
     pub timeouts: Vec<Duration>,
-    pub registry: Registry,
+    pub registry: Registry<D>,
 }
 
-impl ServerContext {
+impl<D> ServerContext<D> {
     pub fn new(
         identities: &HashMap<String, IdentityConfig>,
         timeouts: Vec<Duration>,
-        registry: Registry,
+        registry: Registry<D>,
     ) -> Self {
         let mut credentials = HashMap::new();
         for (identity_id, identity_config) in identities {
