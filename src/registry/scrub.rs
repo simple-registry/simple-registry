@@ -1,4 +1,4 @@
-use crate::registry::data_store::ReferenceInfo;
+use crate::registry::data_store::{DataStore, ReferenceInfo};
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::policy_types::ManifestImage;
 use crate::registry::utils::DataLink;
@@ -81,7 +81,7 @@ pub fn manifest_should_be_purged(
     Ok(!rules.is_empty())
 }
 
-impl Registry {
+impl<D: DataStore> Registry<D> {
     pub async fn enforce_retention(&self, namespace: &str) -> Result<(), Error> {
         info!("'{}': Enforcing retention policy", namespace);
 

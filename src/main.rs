@@ -3,11 +3,11 @@
 
 use crate::command::{scrub, server};
 use crate::configuration::{
-    CacheStoreConfig, Configuration, DataStoreConfig, Error, LockStoreConfig, ObservabilityConfig,
-    RepositoryConfig, ServerTlsConfig,
+    CacheStoreConfig, Configuration, DataStoreConfig, Error, ObservabilityConfig, RepositoryConfig,
+    ServerTlsConfig,
 };
 use crate::registry::cache_store::CacheStore;
-use crate::registry::data_store::build_storage_engine;
+use crate::registry::data_store::{DataStore, FSBackend, S3Backend};
 use crate::registry::lock_store::LockStore;
 use crate::registry::Registry;
 use argh::FromArgs;
@@ -23,6 +23,7 @@ use opentelemetry_semantic_conventions::{
 };
 use opentelemetry_stdout as stdout;
 use std::collections::HashMap;
+use std::mem;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -88,10 +89,11 @@ fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {
     Ok(())
 }
 
-fn set_fs_watcher(
+fn set_fs_watcher<D: DataStore + 'static>(
+    data_store: Arc<D>,
     config_path: &str,
     tls_config: Option<ServerTlsConfig>,
-    server: &Arc<server::Command>,
+    server: &Arc<server::Command<D>>,
 ) -> Result<RecommendedWatcher, command::Error> {
     info!("Setting up file system watcher for configuration file");
     let server_watcher = server.clone();
@@ -115,11 +117,10 @@ fn set_fs_watcher(
             };
 
             let registry = match build_registry(
-                config.lock_store,
                 config.cache_store,
-                config.storage,
                 config.repository,
                 config.server.streaming_chunk_size.to_usize(),
+                data_store.clone(),
             ) {
                 Ok(registry) => registry,
                 Err(err) => {
@@ -156,22 +157,19 @@ fn set_fs_watcher(
     Ok(config_watcher)
 }
 
-fn build_registry(
-    locking_config: LockStoreConfig,
+fn build_registry<D: DataStore>(
     cache_config: CacheStoreConfig,
-    storage_config: DataStoreConfig,
     repository_config: HashMap<String, RepositoryConfig>,
     streaming_chunk_size: usize,
-) -> Result<Registry, Error> {
-    let lock_store = LockStore::new(locking_config)?;
-    let cache_store = CacheStore::new(cache_config)?;
-    let data_store = build_storage_engine(storage_config, lock_store);
+    data_store: Arc<D>,
+) -> Result<Registry<D>, Error> {
+    let cache_store = Arc::new(CacheStore::new(cache_config)?);
 
     Registry::new(
         repository_config,
         streaming_chunk_size,
         data_store,
-        Arc::new(cache_store),
+        cache_store,
     )
 }
 
@@ -206,7 +204,7 @@ enum SubCommand {
 fn main() -> Result<(), command::Error> {
     let arguments: GlobalArguments = argh::from_env();
 
-    let config = Configuration::load(&arguments.config)?;
+    let mut config = Configuration::load(&arguments.config)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.max_concurrent_requests)
@@ -214,30 +212,51 @@ fn main() -> Result<(), command::Error> {
         .build()?;
 
     runtime.block_on(async move {
-        set_tracing(config.observability)?;
-        let registry = build_registry(
-            config.lock_store,
-            config.cache_store,
-            config.storage,
-            config.repository,
-            config.server.streaming_chunk_size.to_usize(),
-        )?;
+        set_tracing(mem::take(&mut config.observability))?;
+        let lock_store = LockStore::new(mem::take(&mut config.lock_store))?;
 
-        match arguments.nested {
-            SubCommand::Scrub(scrub_options) => {
-                let scrub = scrub::Command::new(&scrub_options, registry);
-                scrub.run().await
+        match mem::take(&mut config.storage) {
+            DataStoreConfig::FS(storage_config) => {
+                info!("Using filesystem backend");
+                let data_store = Arc::new(FSBackend::new(storage_config, lock_store));
+                handle_command(config, arguments, data_store).await
             }
-            SubCommand::Serve(_) => {
-                let server = Arc::new(server::Command::new(
-                    &config.server,
-                    &config.identity,
-                    registry,
-                )?);
-
-                let _watcher = set_fs_watcher(&arguments.config, config.server.tls, &server)?;
-                server.run().await
+            DataStoreConfig::S3(storage_config) => {
+                info!("Using S3 backend");
+                let data_store = Arc::new(S3Backend::new(storage_config, lock_store));
+                handle_command(config, arguments, data_store).await
             }
         }
     })
+}
+
+async fn handle_command<D: DataStore + 'static>(
+    config: Configuration,
+    arguments: GlobalArguments,
+    data_store: Arc<D>,
+) -> Result<(), command::Error> {
+    let registry = build_registry(
+        config.cache_store,
+        config.repository,
+        config.server.streaming_chunk_size.to_usize(),
+        data_store.clone(),
+    )?;
+
+    match arguments.nested {
+        SubCommand::Scrub(scrub_options) => {
+            let scrub = scrub::Command::new(&scrub_options, registry);
+            scrub.run().await
+        }
+        SubCommand::Serve(_) => {
+            let server = Arc::new(server::Command::new(
+                &config.server,
+                &config.identity,
+                registry,
+            )?);
+
+            let _watcher =
+                set_fs_watcher(data_store, &arguments.config, config.server.tls, &server)?;
+            server.run().await
+        }
+    }
 }

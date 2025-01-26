@@ -27,9 +27,9 @@ mod utils;
 use crate::configuration;
 use crate::configuration::RepositoryConfig;
 use crate::registry::cache_store::CacheStore;
-use crate::registry::data_store::DataStore;
 pub use repository::Repository;
 
+use crate::registry::data_store::DataStore;
 pub use blob::GetBlobResponse;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
@@ -40,26 +40,26 @@ lazy_static! {
         Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap();
 }
 
-pub struct Registry {
+pub struct Registry<D> {
     streaming_chunk_size: usize,
-    storage_engine: Arc<Box<dyn DataStore>>,
+    storage_engine: Arc<D>,
     repositories: HashMap<String, Repository>,
     scrub_dry_run: bool,
     scrub_upload_timeout: Duration,
 }
 
-impl Debug for Registry {
+impl<D> Debug for Registry<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Registry").finish()
     }
 }
 
-impl Registry {
-    #[instrument]
+impl<D: DataStore> Registry<D> {
+    #[instrument(skip(repositories_config, storage_engine, token_cache))]
     pub fn new(
         repositories_config: HashMap<String, RepositoryConfig>,
         streaming_chunk_size: usize,
-        storage_engine: Box<dyn DataStore>,
+        storage_engine: Arc<D>,
         token_cache: Arc<CacheStore>,
     ) -> Result<Self, configuration::Error> {
         let mut repositories = HashMap::new();
@@ -70,7 +70,7 @@ impl Registry {
 
         let res = Self {
             streaming_chunk_size,
-            storage_engine: Arc::new(storage_engine),
+            storage_engine,
             repositories,
             scrub_dry_run: true,
             scrub_upload_timeout: Duration::days(1),

@@ -1,3 +1,4 @@
+use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, Manifest, Reference};
 use crate::registry::utils::DataLink;
 use crate::registry::{Error, Registry, Repository};
@@ -76,7 +77,7 @@ pub fn parse_manifest_digests(
     })
 }
 
-impl Registry {
+impl<D: DataStore> Registry<D> {
     #[instrument(skip(repository))]
     pub async fn head_manifest(
         &self,

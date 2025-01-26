@@ -1,8 +1,9 @@
+use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Descriptor, Digest};
 use crate::registry::{data_store, Error, Registry};
 use tracing::instrument;
 
-impl Registry {
+impl<D: DataStore> Registry<D> {
     #[instrument]
     pub async fn get_referrers(
         &self,
