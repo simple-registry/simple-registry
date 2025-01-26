@@ -1,0 +1,13 @@
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: simple-registry
+  namespace: simple-registry
+spec:
+  selector:
+    app: simple-registry
+  ports:
+  - protocol: TCP
+    port: 8000
+    targetPort: 8000

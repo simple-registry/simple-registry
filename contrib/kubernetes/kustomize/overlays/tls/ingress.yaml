@@ -1,0 +1,24 @@
+---
+kind: Ingress
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: simple-registry
+  namespace: simple-registry
+  annotations:
+    ingress.cilium.io/tls-passthrough: "enabled"
+    ingress.cilium.io/force-https: "true"
+spec:
+  rules:
+  - host: cr.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: simple-registry
+            port:
+              number: 8000
+  tls:
+  - hosts:
+    - cr.example.com

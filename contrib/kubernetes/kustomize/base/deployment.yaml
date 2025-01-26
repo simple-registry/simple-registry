@@ -1,0 +1,34 @@
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: simple-registry
+  namespace: simple-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simple-registry
+  template:
+    metadata:
+      labels:
+        app: simple-registry
+    spec:
+      containers:
+      - name: simple-registry
+        image: ghcr.io/simple-registry/simple-registry:main
+        args:
+        - server
+        env:
+        - name: RUST_LOG
+          value: info
+        ports:
+        - containerPort: 8000
+        volumeMounts:
+        - name: simple-registry-config
+          mountPath: /config.toml
+          subPath: config.toml
+      volumes:
+      - name: simple-registry-config
+        secret:
+          secretName: simple-registry
