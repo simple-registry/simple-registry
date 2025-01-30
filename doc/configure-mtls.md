@@ -64,17 +64,31 @@ cp client-certificate.pem /etc/docker/certs.d/registry.example.com/client-certif
 cp client-private-key.pem /etc/docker/certs.d/registry.example.com/client-private-key.pem
 ```
 
-Then, you need to configure Docker to use the client certificate and its private key:
+Then, you need to configure Docker to use the client certificate and its private key, modifying the Docker
+configuration file (default location: `/etc/docker/daemon.json`):
 
-```bash
-cat <<EOF > /etc/docker/daemon.json
+```json
 {
   "tls": true,
-  "tlscacert": "/tls/client-ca-certificate.pem",
   "tlscert": "/etc/docker/certs.d/registry.example.com/client-certificate.pem",
   "tlskey": "/etc/docker/certs.d/registry.example.com/client-private-key.pem"
 }
-EOF
+```
+
+When using a private PKI for the server certificate, copy the CA as well and update the configuration accordingly
+
+```bash
+cp ca-certificate.pem /etc/docker/certs.d/registry.example.com/ca-certificate.pem
+```
+
+In the configuration file:
+
+```json
+{
+  "tlscert": "/etc/docker/certs.d/registry.example.com/client-certificate.pem",
+  "tlskey": "/etc/docker/certs.d/registry.example.com/client-private-key.pem",
+  "tlscacert": "/etc/docker/certs.d/registry.example.com/ca-certificate.pem"
+}
 ```
 
 Finally, restart Docker:
@@ -100,16 +114,15 @@ cp client-certificate.pem /etc/containers/certs.d/registry.example.com/client-ce
 cp client-private-key.pem /etc/containers/certs.d/registry.example.com/client-private-key.pem
 ```
 
-Then, you need to configure Podman to use the client certificate and its private key:
+If you are using a private PKI for the server certificate, copy the CA as well:
 
 ```bash
-cat <<EOF > /etc/containers/containers.conf
-[registries.insecure]
-registries = []
+cp ca-certificate.pem /etc/containers/certs.d/registry.example.com/ca-certificate.pem
+```
 
-[registries.block]
-registries = []
+Then, you need to configure Podman to use the client certificate and its private key, in `/etc/containers/containers.conf`:
 
+```toml
 [registries.tls]
 registries = ["registry.example.com"]
 
@@ -117,10 +130,10 @@ registries = ["registry.example.com"]
 location = "registry.example.com"
 insecure = false
 tlsverify = true
-certificate = "/tls/client-ca-certificate.pem"
 client_cert = "/etc/containers/certs.d/registry.example.com/client-certificate.pem"
 client_key = "/etc/containers/certs.d/registry.example.com/client-private-key.pem"
-EOF
+# Uncomment the following line if you are using a private PKI for the server certificate
+# certificate = "/etc/containers/certs.d/registry.example.com/ca-certificate.pem"
 ```
 
 Finally, restart Podman if its running as a service:
@@ -142,20 +155,36 @@ mkdir -p /etc/containerd/certs.d/registry.example.com
 Copy the client certificate and its private key to the directory:
 
 ```bash
-cp client-certificate.pem /etc/containerd/certs.d/registry.example.com/client-certificate.pem
-cp client-private-key.pem /etc/containerd/certs.d/registry.example.com/client-private-key.pem
+cp client-certificate.pem /etc/containerd/certs.d/registry.example.com/client.cert
+cp client-private-key.pem /etc/containerd/certs.d/registry.example.com/client.key
+```
+
+When using a private PKI for the server certificate, copy the CA as well:
+
+```bash
+cp ca-certificate.pem /etc/containerd/certs.d/registry.example.com/ca.crt
 ```
 
 Then, you need to configure containerd to use the client certificate and its private key:
 
-```bash
-cat <<EOF > /etc/containerd/config.toml
+Modify your config.toml (default location: `/etc/containerd/config.toml`) as follows:
+
+With containerd 2.x:
+
+```toml
+version = 3
+
+[plugins."io.containerd.cri.v1.images".registry]
+   config_path = "/etc/containerd/certs.d"
+```
+
+Alternatively if you are still using containerd 1.x:
+
+```toml
+version = 2
+
 [plugins."io.containerd.grpc.v1.cri".registry]
-  [plugins."io.containerd.grpc.v1.cri".registry.mtls]
-    client_certificate = "/etc/containerd/certs.d/registry.example.com/client-certificate.pem"
-    client_private_key = "/etc/containerd/certs.d/registry.example.com/client-private-key.pem"
-    client_ca_certificate = "/tls/client-ca-certificate.pem"
-EOF
+config_path = "/etc/containerd/certs.d"
 ```
 
 Finally, restart containerd:
