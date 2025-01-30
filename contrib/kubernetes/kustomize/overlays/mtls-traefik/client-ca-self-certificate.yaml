@@ -1,0 +1,17 @@
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: client-ca
+  namespace: simple-registry
+spec:
+  isCA: true
+  commonName: "Simple Registry Client CA"
+  secretName: client-ca
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: client-ca-self
+    kind: Issuer
+    group: cert-manager.io

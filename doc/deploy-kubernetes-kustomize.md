@@ -25,6 +25,8 @@ This guide will walk you through deploying Simple-Registry in a Kubernetes clust
     kubectl apply -k contrib/kubernetes/overlays/tls
     # For mTLS, you can use:
     kubectl apply -k contrib/kubernetes/overlays/mtls
+    # For mTLS with Traefik, you can use:
+    kubectl apply -k contrib/kubernetes/overlays/mtls
     ```
 
 For production-ready deployments, you should customize the resources in the `contrib/kubernetes/overlays` directory to

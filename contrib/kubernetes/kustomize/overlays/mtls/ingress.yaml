@@ -7,6 +7,9 @@ metadata:
   annotations:
     ingress.cilium.io/tls-passthrough: "enabled"
     ingress.cilium.io/force-https: "true"
+    # nginx ingress controller must have the --enable-ssl-passthrough set
+    # to true in the command line arguments to support TLS passthrough
+    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
 spec:
   rules:
   - host: cr.example.com
