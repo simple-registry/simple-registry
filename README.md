@@ -2,7 +2,16 @@
 
 A fully OCI-compliant and Docker-compatible container registry.
 
-Goals
+## Features
+
+- Online garbage collection
+- Pull-through cache
+- Access control policies
+- Retention policies
+- Out of the box mTLS support
+
+## Properties
+
 - Resource efficient: Asynchronous, Streaming operations
 - Secure: mTLS, authorization policies (powered by CEL)
 - Scalable: light footprint
@@ -26,6 +35,11 @@ Commands:
   server            Run the registry listeners
 
 ```
+
+## Additional Configuration
+
+- [Access Control Policies documentation](doc/configure-access-control-policies.md)
+- [Retention Policies documentation](doc/configure-retention-policies.md)
 
 ## Configuration
 
@@ -93,12 +107,6 @@ Multiple storage backends are supported: filesystem or s3-baked.
 
 - `root_dir` (string): The root directory for the storage.
 
-> [!NOTE]
-> Last access time of manifest links is used for the retention policy engine to determine
-> the last pull time.
-> Please ensure that your host filesystem hasn't access time disabled, otherwise policies using
-> last pull time as condition may not behave as expected.
-
 #### S3 Storage (`storage.s3`)
 
 - `access_key_id` (string): The access key ID for the S3 server
@@ -162,34 +170,13 @@ url = "https://index.docker.io/v2/library"
 - `default_allow` (bool): If true, the default policy is to allow access. If false, the default policy is to deny access.
 - `rules` (list of string): A list of CEL policies that must be satisfied for the identity to access the repository.
 
-```toml
-[repository."my-registry".access_policy]
-default_allow = true
-rules = [
-  "identity.username == 'admin'",
-  "identity.certificate.organizations.contains('admin')"
-]
-```
-
-Rules are evaluated in the specified order.
-First rule conflicting default will apply.
+Please refer to the [Access Control Policies documentation](doc/configure-access-control-policies.md) for more information.
 
 #### Retention Policy (`repository."<namespace>".retention_policy`)
 
 - `rules` (list of string): A list of CEL policies that must be satisfied to _keep_ an image in the registry.
 
-```toml
-[repository."my-registry".access_policy]
-rules = [
-  'image.tag != "latest"',
-  'image.pushed_at < now() - days(15)',
-  'image.last_pulled_at < now() - days(15)',
-  'top(image.tag, last_pulled, 10)', # image.tag is among top 10 last pulled
-  'top(image.tag, last_pushed, 10)', # image.tag is among top 10 last pushed
-]
-```
-
-Currently, this policy is enforced by the `scrub` command, which can be run as a cron job.
+Please refer to the [Retention Policies documentation](doc/configure-retention-policies.md) for more information.
 
 ### Tracing (`observability.tracing`)
 
@@ -197,56 +184,6 @@ If not provided, tracing is disabled.
 
 - `endpoint` (string): The endpoint for the tracing service
 - `sampling_rate` (f64): Sampling rate for tracing
-
-## Access Control policies CEL rules
-
-Access Control rules are expressed with CEL, the "Common Expression Language".
-They are evaluated in the specified order.
-
-If `default_allow` is set to `true`, the default policy is to allow access,
-and the first policy that evaluates to `true` will **deny** access.
-
-If `default_allow` is set to `false`, the default policy is to deny access,
-and the first policy that evaluates to `true` will **allow** access.
-
-### Variables
-
-- `identity.id`: The identity ID as specified in the configuration file
-- `identity.username`: The username for the identity
-- `identity.certificate.common_names`: The list of common names from the client certificate
-- `identity.certificate.organizations`: The list of organizations from the client certificate
-- `request.action`: The action being requested
-- `request.namespace`: The repository being accessed
-- `request.digest`: The digest of the blob being accessed
-- `request.reference`: The reference of the item being accessed
-
-The following `request.action` actions are supported:
-- `get-api-version`: Get the API version
-- `start-upload`, `update-upload`, `complete-upload`, `get-upload`: Upload a blob
-- `cancel-upload`: Delete a pending upload
-- `get-blob`: Download a blob
-- `delete-blob`: Delete a blob
-- `put-manifest`: Upload a manifest
-- `get-manifest`: Download a manifest
-- `delete-manifest`: Delete a manifest
-- `get-referrers`: Get the referrers of a manifest
-- `list-catalog`: List the catalog
-- `list-tags`: List the tags
-
-## Retention policies CEL rules
-
-### Variables
-
-- `image.tag`: The tag of the image, when evaluating a Tag (can be unspecified)
-- `image.pushed_at`: The time the manifest was pushed at
-- `image.last_pulled_at`: The time the manifest was last pulled (can be unspecified)
-- `last_pushed`: A list of the last pushed tags ordered by reverse push time (most recent first)
-- `last_pulled`: A list of the last pulled tags ordered by reverse pull time (most recent first)
-
-In addition to those variables, some helper functions are available:
-- `now()`: Returns the current time in seconds since epoch (1st of January 1970).
-- `days(d)`: Returns the number of seconds in `d` days.
-- `top(s, collection, k)`: Check if `s` is among the top `k` elements of `collection`.
 
 ## Roadmap
 
