@@ -5,11 +5,11 @@ When no Retention Policies are defined, all manifests are kept indefinitely.
 
 You can configure Retention Policies following a set of rules expressed as [CEL (the "Common Expression Language")](https://cel.dev/) expressions.
 
-> [!INFO]
+> [!NOTE]
 > Currently, this policy is enforced by the `scrub` command, which can be run as a recurrent task (e.g. a systemd timer,
 > a Kubernetes `CronJob`, etc.)
 
-> [!NOTE]
+> [!WARNING]
 > When using local filesystem as storage backend, last access time of manifest links is used for the retention policy
 > engine to determine the last pull time.
 > Please ensure that your host filesystem hasn't access time disabled, otherwise policies using last pull time as
