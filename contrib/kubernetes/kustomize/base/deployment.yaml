@@ -24,6 +24,12 @@ spec:
           value: info
         ports:
         - containerPort: 8000
+        resources:
+          requests:
+            memory: "150Mi"
+            cpu: "100m"
+          limits:
+            memory: "500Mi"
         volumeMounts:
         - name: simple-registry-config
           mountPath: /config.toml
