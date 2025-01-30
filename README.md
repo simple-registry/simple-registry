@@ -2,13 +2,13 @@
 
 A fully OCI-compliant and Docker-compatible container registry.
 
-## Features
+## Key Features
 
 - Online garbage collection
 - Pull-through cache
 - Access control policies
 - Retention policies
-- Out of the box mTLS support
+- Native mTLS support
 
 ## Properties
 
