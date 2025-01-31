@@ -121,7 +121,7 @@ impl RepositoryUpstream {
         }
 
         debug!("Basic authentication required by upstream");
-        Err(registry::Error::Internal(
+        Err(registry::Error::Unauthorized(
             "Authentication required by upstream".to_string(),
         ))
     }
@@ -154,7 +154,7 @@ impl RepositoryUpstream {
             Ok(response) => response,
             Err(e) => {
                 error!("Failed to authenticate with upstream: {:?}", e);
-                return Err(registry::Error::Internal(
+                return Err(registry::Error::Unauthorized(
                     "Failed to authenticate with upstream".to_string(),
                 ));
             }
@@ -265,7 +265,7 @@ impl RepositoryUpstream {
             if response.status() == StatusCode::UNAUTHORIZED {
                 if authenticate_count > 0 {
                     debug!("Too many upstream authentication requests");
-                    return Err(registry::Error::Internal(
+                    return Err(registry::Error::Unauthorized(
                         "Too many upstream authentication requests".to_string(),
                     ));
                 }
@@ -306,6 +306,14 @@ impl RepositoryUpstream {
 
         if response.status().is_success() {
             Ok(response)
+        } else if response.status() == StatusCode::UNAUTHORIZED {
+            Err(registry::Error::Unauthorized(
+                "Failed to authenticate with upstream".to_string(),
+            ))
+        } else if response.status() == StatusCode::FORBIDDEN {
+            Err(registry::Error::Denied(
+                "Access to upstream is forbidden".to_string(),
+            ))
         } else {
             error!(
                 "Failed to fetch manifest from upstream: {}",
