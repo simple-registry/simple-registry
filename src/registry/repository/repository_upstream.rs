@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+#[derive(Debug)]
 pub struct RepositoryUpstream {
     token_cache: Arc<CacheStore>,
     pub url: String,
@@ -121,11 +122,12 @@ impl RepositoryUpstream {
         }
 
         debug!("Basic authentication required by upstream");
-        Err(registry::Error::Internal(
+        Err(registry::Error::Unauthorized(
             "Authentication required by upstream".to_string(),
         ))
     }
 
+    #[tracing::instrument]
     async fn query_bearer_token(
         &self,
         realm: &str,
@@ -154,7 +156,7 @@ impl RepositoryUpstream {
             Ok(response) => response,
             Err(e) => {
                 error!("Failed to authenticate with upstream: {:?}", e);
-                return Err(registry::Error::Internal(
+                return Err(registry::Error::Unauthorized(
                     "Failed to authenticate with upstream".to_string(),
                 ));
             }
@@ -190,13 +192,13 @@ impl RepositoryUpstream {
         };
 
         debug!("Retrieved token from cache for namespace: {namespace:?}");
-        let header = format!("Bearer {token}");
-        Ok(Some(HeaderValue::from_str(&header).map_err(|e| {
+        Ok(Some(HeaderValue::from_str(&token).map_err(|e| {
             debug!("Failed to build bearer token: {:?}", e);
             registry::Error::Internal("Failed to build bearer token for upstream".to_string())
         })?))
     }
 
+    #[tracing::instrument]
     pub async fn query(
         &self,
         namespace: &str,
@@ -227,6 +229,7 @@ impl RepositoryUpstream {
             }
 
             if let Some(authorization_header) = &authorization_header {
+                debug!("Using bearer token for upstream authentication");
                 request = request.header(AUTHORIZATION, authorization_header);
             }
 
@@ -265,7 +268,7 @@ impl RepositoryUpstream {
             if response.status() == StatusCode::UNAUTHORIZED {
                 if authenticate_count > 0 {
                     debug!("Too many upstream authentication requests");
-                    return Err(registry::Error::Internal(
+                    return Err(registry::Error::Unauthorized(
                         "Too many upstream authentication requests".to_string(),
                     ));
                 }
@@ -306,6 +309,14 @@ impl RepositoryUpstream {
 
         if response.status().is_success() {
             Ok(response)
+        } else if response.status() == StatusCode::UNAUTHORIZED {
+            Err(registry::Error::Unauthorized(
+                "Failed to authenticate with upstream".to_string(),
+            ))
+        } else if response.status() == StatusCode::FORBIDDEN {
+            Err(registry::Error::Denied(
+                "Access to upstream is forbidden".to_string(),
+            ))
         } else {
             error!(
                 "Failed to fetch manifest from upstream: {}",

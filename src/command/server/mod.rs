@@ -267,7 +267,7 @@ where
         registry::Error::NameUnknown => (StatusCode::NOT_FOUND, "NAME_UNKNOWN"),
         //RegistryError::SizeInvalid => (StatusCode::BAD_REQUEST, "SIZE_INVALID"),
         registry::Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
-        //RegistryError::Denied => (StatusCode::FORBIDDEN, "DENIED"),
+        registry::Error::Denied(_) => (StatusCode::FORBIDDEN, "DENIED"),
         registry::Error::Unsupported => (StatusCode::BAD_REQUEST, "UNSUPPORTED"),
         //RegistryError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "TOOMANYREQUESTS"),
         // Convenience
