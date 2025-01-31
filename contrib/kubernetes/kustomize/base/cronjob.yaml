@@ -2,7 +2,7 @@
 kind: CronJob
 apiVersion: batch/v1
 metadata:
-  name: cronjob
+  name: scrub
   namespace: simple-registry
 spec:
   schedule: "*/5 * * * *"
