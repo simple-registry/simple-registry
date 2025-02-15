@@ -4,6 +4,7 @@ tls.d/*.srl
 tls.d/*.csr
 /.*env
 /.idea
-/data-simple-registry
 /config.toml
-/conformance/minio-data
+
+/conformance.test
+/conformance/*-data

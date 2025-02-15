@@ -1,0 +1,16 @@
+services:
+  valkey:
+    image: valkey/valkey:8.0.2
+    ports:
+      - "6379:6379"
+  simple-registry:
+    image: ghcr.io/simple-registry/simple-registry:main
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config.toml:/config.toml
+      - ./data:/data
+    environment:
+      RUST_LOG: "info"
+    command:
+      - server

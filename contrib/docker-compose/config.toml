@@ -1,0 +1,18 @@
+[server]
+bind_address = "0.0.0.0"
+port = 8000
+
+[storage.fs]
+root_dir = "./data"
+
+[[repository."hub".upstream]]
+url = "https://registry-1.docker.io"
+
+[repository."hub".access_policy]
+default_allow = true
+
+[[repository."ghcr".upstream]]
+url = "https://ghcr.io"
+
+[repository."ghcr".access_policy]
+default_allow = true

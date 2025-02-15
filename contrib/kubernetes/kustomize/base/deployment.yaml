@@ -1,0 +1,55 @@
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: simple-registry
+  namespace: simple-registry
+  labels:
+    app: simple-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simple-registry
+  template:
+    metadata:
+      labels:
+        app: simple-registry
+    spec:
+      containers:
+      - name: simple-registry
+        image: ghcr.io/simple-registry/simple-registry:main
+        args:
+        - server
+        env:
+        - name: RUST_LOG
+          value: info
+        ports:
+        - containerPort: 8000
+        startupProbe:
+          tcpSocket:
+            port: 8000
+          periodSeconds: 1
+          failureThreshold: 3
+          successThreshold: 1
+        livenessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 1
+          periodSeconds: 2
+          failureThreshold: 3
+          successThreshold: 1
+        resources:
+          requests:
+            memory: "150Mi"
+            cpu: "100m"
+          limits:
+            memory: "500Mi"
+        volumeMounts:
+        - name: simple-registry-config
+          mountPath: /config.toml
+          subPath: config.toml
+      volumes:
+      - name: simple-registry-config
+        secret:
+          secretName: simple-registry-config

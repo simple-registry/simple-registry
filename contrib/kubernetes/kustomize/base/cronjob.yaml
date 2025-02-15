@@ -1,0 +1,36 @@
+---
+kind: CronJob
+apiVersion: batch/v1
+metadata:
+  name: scrub
+  namespace: simple-registry
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: cronjob
+            image: ghcr.io/simple-registry/simple-registry:main
+            args:
+            - scrub
+            env:
+            - name: RUST_LOG
+              value: info
+            resources:
+              requests:
+                memory: "16Mi"
+                cpu: "100m"
+              limits:
+                memory: "16Mi"
+            volumeMounts:
+              - name: simple-registry-config
+                mountPath: /config.toml
+                subPath: config.toml
+          volumes:
+            - name: simple-registry-config
+              secret:
+                secretName: simple-registry-config
