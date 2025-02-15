@@ -6,5 +6,6 @@ resources:
 - namespace.yaml
 - valkey-deployment.yaml
 - valkey-service.yaml
+- cronjob.yaml
 - deployment.yaml
 - service.yaml

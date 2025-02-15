@@ -4,12 +4,8 @@ kind: Kustomization
 
 resources:
 - ../../base
-- client-ca-self-issuer.yaml
-- client-ca-self-certificate.yaml
-- client-issuer.yaml
-- server-certificate.yaml
 - secret.yaml
-- ingress.yaml
+- ingressroutetcp.yaml
 
 patches:
   - target: { kind: Deployment, labelSelector: app=simple-registry }

@@ -5,14 +5,10 @@ metadata:
   name: simple-registry
   namespace: simple-registry
 spec:
-  entryPoints:
-    - websecure
   routes:
     - match: HostSNI(`cr.example.com`)
-      service:
-        name: simple-registry
-        port:
-          number: 8000
-
+      services:
+        - name: simple-registry
+          port: 8000
   tls:
     passthrough: true

@@ -1,8 +1,0 @@
----
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: client-ca
-  namespace: simple-registry
-spec:
-  selfSigned: {}

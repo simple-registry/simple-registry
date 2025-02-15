@@ -4,6 +4,8 @@ apiVersion: apps/v1
 metadata:
   name: simple-registry
   namespace: simple-registry
+  labels:
+    app: simple-registry
 spec:
   replicas: 1
   selector:
@@ -24,6 +26,19 @@ spec:
           value: info
         ports:
         - containerPort: 8000
+        startupProbe:
+          tcpSocket:
+            port: 8000
+          periodSeconds: 1
+          failureThreshold: 3
+          successThreshold: 1
+        livenessProbe:
+          tcpSocket:
+            port: 8000
+          initialDelaySeconds: 1
+          periodSeconds: 2
+          failureThreshold: 3
+          successThreshold: 1
         resources:
           requests:
             memory: "150Mi"
@@ -37,4 +52,4 @@ spec:
       volumes:
       - name: simple-registry-config
         secret:
-          secretName: simple-registry
+          secretName: simple-registry-config
