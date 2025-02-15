@@ -8,7 +8,7 @@ mTLS is a way to secure communication between two parties by requiring both part
 
 In the context of simple-registry, mTLS is used to secure the communication between the registry and the container runtime,
 according to Access Control Policies rules. Then, Access Control Policies can take advantage of the client certificate
-informations in policy rules, through `identity.certificate.common_names` and `identity.certificate.organizations` variables.
+information in policy rules, through `identity.certificate.common_names` and `identity.certificate.organizations` variables.
 
 When mTLS is enabled in the configuration, there is 3 possible scenarios when a client connects to simple-registry:
 1. The client presents no certificate, in this case fields of `identity.certificate` are empty.

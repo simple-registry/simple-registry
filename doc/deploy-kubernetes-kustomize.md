@@ -21,12 +21,10 @@ This guide will walk you through deploying Simple-Registry in a Kubernetes clust
     ```shell
     # For TLS terminated by the ingress controller:
     kubectl apply -k contrib/kubernetes/overlays/simple
-    # For TLS with custom certificate and key, you can either customize the Ingress from the "simple" variant, or use:
+    # For TLS passthrough (required for policy enforcement):
     kubectl apply -k contrib/kubernetes/overlays/tls
-    # For mTLS, you can use:
-    kubectl apply -k contrib/kubernetes/overlays/mtls
-    # For mTLS with Traefik, you can use:
-    kubectl apply -k contrib/kubernetes/overlays/mtls
+    # For TLS passthrough with Traefik
+    kubectl apply -k contrib/kubernetes/overlays/tls-traefik
     ```
 
 For production-ready deployments, you should customize the resources in the `contrib/kubernetes/overlays` directory to
