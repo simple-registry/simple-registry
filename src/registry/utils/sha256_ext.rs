@@ -40,7 +40,7 @@ impl Sha256Ext for Sha256 {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use sha2::Digest;
 

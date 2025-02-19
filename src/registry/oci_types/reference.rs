@@ -71,7 +71,7 @@ impl<'de> Deserialize<'de> for Reference {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[test]

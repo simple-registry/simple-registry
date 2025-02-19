@@ -56,7 +56,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for NotifyingReader<R> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[tokio::test]

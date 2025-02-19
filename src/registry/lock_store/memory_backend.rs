@@ -55,7 +55,7 @@ pub type MemoryReadLockGuard = tokio::sync::OwnedRwLockReadGuard<()>;
 pub type MemoryWriteLockGuard = tokio::sync::OwnedRwLockWriteGuard<()>;
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[tokio::test]

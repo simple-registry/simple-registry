@@ -45,7 +45,7 @@ impl Manifest {
 }
 
 #[cfg(test)]
-pub mod test {
+pub mod tests {
     use super::*;
 
     pub fn demo_manifest() -> Manifest {

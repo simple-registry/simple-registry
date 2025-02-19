@@ -566,7 +566,7 @@ pub fn parse_authorization_header(header: &HeaderValue) -> Option<(String, Strin
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use hyper::HeaderMap;
 

@@ -66,7 +66,7 @@ impl<'de> Deserialize<'de> for DataSize {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[test]

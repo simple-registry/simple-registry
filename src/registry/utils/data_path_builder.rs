@@ -250,7 +250,7 @@ impl DataPathBuilder {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::registry::oci_types::Digest;
 

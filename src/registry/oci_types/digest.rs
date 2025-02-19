@@ -123,7 +123,7 @@ impl Serialize for Digest {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use std::convert::TryInto;
 
