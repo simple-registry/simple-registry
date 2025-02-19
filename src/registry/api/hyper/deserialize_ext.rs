@@ -1,14 +1,25 @@
 use regex::Captures;
-use serde::de;
-use serde::de::{DeserializeOwned, DeserializeSeed, Error, IntoDeserializer, MapAccess, Visitor};
+use serde::de::{DeserializeSeed, Error, IntoDeserializer, MapAccess, Visitor};
+use serde::{de, Deserialize};
 
-pub fn deserialize<T: DeserializeOwned>(content: &str, regex: &regex::Regex) -> Option<T> {
-    regex.captures(content).and_then(|captures| {
+pub trait DeserializeExt {
+    fn from_regex(content: &str, regex: &regex::Regex) -> Option<Self>
+    where
+        Self: Sized;
+}
+
+impl<T> DeserializeExt for T
+where
+    T: for<'a> Deserialize<'a> + Sized,
+{
+    fn from_regex(content: &str, regex: &regex::Regex) -> Option<Self> {
+        let captures = regex.captures(content)?;
         let deserializer = CapturesDeserializer {
             captures: &captures,
         };
+
         T::deserialize(deserializer).ok()
-    })
+    }
 }
 
 struct CapturesDeserializer<'a> {
@@ -90,5 +101,31 @@ impl<'de> MapAccess<'de> for CapturesMapAccess<'_> {
                 "Missing capture group for field '{key}'"
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use regex::Regex;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Test {
+        foo: String,
+        bar: String,
+    }
+
+    #[test]
+    fn test_deserialize_ext() {
+        let regex = Regex::new(r"(?P<foo>\w+) (?P<bar>\w+)").unwrap();
+        let content = "hello world";
+        let test: Test = Test::from_regex(content, &regex).unwrap();
+        assert_eq!(
+            test,
+            Test {
+                foo: "hello".to_string(),
+                bar: "world".to_string()
+            }
+        );
     }
 }

@@ -1,84 +1,20 @@
-use crate::command::server::response::Body;
 use crate::command::server::{
     BlobParameters, ManifestParameters, NewUploadParameters, ReferrerParameters, TagsParameters,
-    UploadParameters, RANGE_RE,
+    UploadParameters,
 };
+use crate::registry::api::body::Body;
+use crate::registry::api::hyper::request_ext::RequestExt;
+use crate::registry::api::hyper::response_ext::ResponseExt;
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, ReferrerList};
 use crate::registry::{Error, GetBlobResponse, Registry, Repository, StartUploadResponse};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
-use hyper::header::HeaderValue;
+use hyper::header::{CONTENT_RANGE, RANGE};
 use hyper::{Request, Response, StatusCode};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
-use tracing::{instrument, warn};
-
-pub fn parse_range_header(range_header: &HeaderValue) -> Result<(u64, u64), Error> {
-    let range_str = range_header.to_str().map_err(|e| {
-        warn!("Error parsing Range header as string: {}", e);
-        Error::RangeNotSatisfiable
-    })?;
-
-    let captures = RANGE_RE.captures(range_str).ok_or_else(|| {
-        warn!("Invalid Range header format: {}", range_str);
-        Error::RangeNotSatisfiable
-    })?;
-
-    let (Some(start), Some(end)) = (captures.name("start"), captures.name("end")) else {
-        return Err(Error::RangeNotSatisfiable);
-    };
-
-    let start = start.as_str().parse::<u64>().map_err(|e| {
-        warn!("Error parsing 'start' in Range header: {}", e);
-        Error::RangeNotSatisfiable
-    })?;
-
-    let end = end.as_str().parse::<u64>().map_err(|e| {
-        warn!("Error parsing 'end' in Range header: {}", e);
-        Error::RangeNotSatisfiable
-    })?;
-
-    if start > end {
-        warn!(
-            "Range start ({}) is greater than range end ({})",
-            start, end
-        );
-        return Err(Error::RangeNotSatisfiable);
-    }
-
-    Ok((start, end))
-}
-
-pub fn parse_query_parameters<T: DeserializeOwned + Default>(
-    query: Option<&str>,
-) -> Result<T, Error> {
-    let Some(query) = query else {
-        return Ok(Default::default());
-    };
-
-    serde_urlencoded::from_str(query).map_err(|e| {
-        warn!("Failed to parse query parameters: {}", e);
-        Error::Unsupported
-    })
-}
-
-pub fn paginated_response(body: String, link: Option<String>) -> Result<Response<Body>, Error> {
-    let res = match link {
-        Some(link) => Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
-            .header("Link", format!("<{link}>; rel=\"next\""))
-            .body(Body::fixed(body.into_bytes()))?,
-        None => Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
-            .body(Body::fixed(body.into_bytes()))?,
-    };
-
-    Ok(res)
-}
+use tracing::instrument;
 
 #[instrument]
 pub async fn handle_get_api_version() -> Result<Response<Body>, Error> {
@@ -164,19 +100,13 @@ pub async fn handle_get_blob<D: DataStore + 'static>(
     accepted_mime_types: &[String],
     parameters: BlobParameters,
 ) -> Result<Response<Body>, Error> {
-    let range = request
-        .headers()
-        .get("range")
-        .map(parse_range_header)
-        .transpose()?;
-
     let res = match registry
         .get_blob(
             repository,
             accepted_mime_types,
             &parameters.name,
             &parameters.digest,
-            range,
+            request.range(RANGE)?,
         )
         .await?
     {
@@ -244,7 +174,7 @@ pub async fn handle_start_upload<D: DataStore>(
         digest: Option<String>,
     }
 
-    let query: UploadQuery = parse_query_parameters(request.uri().query())?;
+    let query: UploadQuery = request.query_parameters()?;
     let digest = query
         .digest
         .map(|s| Digest::try_from(s.as_str()))
@@ -276,13 +206,7 @@ pub async fn handle_patch_upload<D: DataStore>(
     request: Request<Incoming>,
     parameters: UploadParameters,
 ) -> Result<Response<Body>, Error> {
-    let range = request
-        .headers()
-        .get("content-range")
-        .map(parse_range_header)
-        .transpose()?;
-
-    let start_offset = range.map(|(start, _)| start);
+    let start_offset = request.range(CONTENT_RANGE)?.map(|(start, _)| start);
 
     let body = request.into_data_stream();
     let location = format!("/v2/{}/blobs/uploads/{}", &parameters.name, parameters.uuid);
@@ -314,7 +238,7 @@ pub async fn handle_put_upload<D: DataStore>(
         digest: String,
     }
 
-    let query: CompleteUploadQuery = parse_query_parameters(request.uri().query())?;
+    let query: CompleteUploadQuery = request.query_parameters()?;
     let digest = Digest::try_from(query.digest.as_str())?;
 
     let body = request.into_data_stream();
@@ -467,7 +391,7 @@ pub async fn handle_get_referrers<D: DataStore>(
         artifact_type: Option<String>,
     }
 
-    let query: GetReferrersQuery = parse_query_parameters(request.uri().query())?;
+    let query: GetReferrersQuery = request.query_parameters()?;
     let query_supplied_artifact_type = query.artifact_type.is_some();
 
     let manifests = registry
@@ -512,14 +436,14 @@ pub async fn handle_list_catalog<D: DataStore>(
         repositories: Vec<String>,
     }
 
-    let query: CatalogQuery = parse_query_parameters(request.uri().query())?;
+    let query: CatalogQuery = request.query_parameters()?;
 
     let (repositories, link) = registry.list_catalog(query.n, query.last).await?;
 
     let catalog = CatalogResponse { repositories };
     let catalog = serde_json::to_string(&catalog)?;
 
-    paginated_response(catalog, link)
+    Response::paginated(Body::fixed(catalog.into_bytes()), link.as_deref())
 }
 
 #[instrument(skip(request))]
@@ -540,7 +464,7 @@ pub async fn handle_list_tags<D: DataStore>(
         tags: Vec<String>,
     }
 
-    let query: TagsQuery = parse_query_parameters(request.uri().query())?;
+    let query: TagsQuery = request.query_parameters()?;
 
     let (tags, link) = registry
         .list_tags(&parameters.name, query.n, query.last)
@@ -551,5 +475,5 @@ pub async fn handle_list_tags<D: DataStore>(
         tags,
     };
     let tag_list = serde_json::to_string(&tag_list)?;
-    paginated_response(tag_list, link)
+    Response::paginated(Body::fixed(tag_list.into_bytes()), link.as_deref())
 }

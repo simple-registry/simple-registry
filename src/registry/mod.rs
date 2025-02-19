@@ -10,6 +10,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::instrument;
 
+pub mod api;
 mod blob;
 pub mod cache_store;
 mod content_discovery;

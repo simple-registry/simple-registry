@@ -25,17 +25,15 @@ use uuid::Uuid;
 
 mod handlers;
 mod insecure_listener;
-mod params;
-mod response;
 mod server_context;
 mod tls_listener;
 
 use crate::command::server::insecure_listener::InsecureListener;
-use crate::command::server::params::deserialize;
-use crate::command::server::response::Body;
 use crate::command::server::server_context::ServerContext;
 use crate::command::server::tls_listener::TlsListener;
 use crate::configuration::{IdentityConfig, ServerConfig};
+use crate::registry::api::body::Body;
+use crate::registry::api::hyper::deserialize_ext::DeserializeExt;
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
@@ -55,7 +53,6 @@ lazy_static! {
         Regex::new(r"^/v2/(?P<name>.+)/referrers/(?P<digest>.+)$").unwrap();
     static ref ROUTE_LIST_TAGS_REGEX: Regex = Regex::new(r"^/v2/(?P<name>.+)/tags/list$").unwrap();
     static ref ROUTE_CATALOG_REGEX: Regex = Regex::new(r"^/v2/_catalog$").unwrap();
-    static ref RANGE_RE: Regex = Regex::new(r"^(?:bytes=)?(?P<start>\d+)-(?P<end>\d+)$").unwrap();
 }
 
 #[derive(Debug, Deserialize)]
@@ -343,8 +340,7 @@ async fn router<D: DataStore + 'static>(
             }
             _ => Err(registry::Error::Unsupported),
         }
-    } else if let Some(parameters) = deserialize::<NewUploadParameters>(&path, &ROUTE_UPLOADS_REGEX)
-    {
+    } else if let Some(parameters) = NewUploadParameters::from_regex(&path, &ROUTE_UPLOADS_REGEX) {
         match *request.method() {
             Method::POST => {
                 let repository = context.registry.validate_namespace(&parameters.name)?;
@@ -357,7 +353,7 @@ async fn router<D: DataStore + 'static>(
             }
             _ => Err(registry::Error::Unsupported),
         }
-    } else if let Some(parameters) = deserialize::<UploadParameters>(&path, &ROUTE_UPLOAD_REGEX) {
+    } else if let Some(parameters) = UploadParameters::from_regex(&path, &ROUTE_UPLOAD_REGEX) {
         match *request.method() {
             Method::GET => {
                 let repository = context.registry.validate_namespace(&parameters.name)?;
@@ -397,7 +393,7 @@ async fn router<D: DataStore + 'static>(
             }
             _ => Err(registry::Error::Unsupported),
         }
-    } else if let Some(parameters) = deserialize::<BlobParameters>(&path, &ROUTE_BLOB_REGEX) {
+    } else if let Some(parameters) = BlobParameters::from_regex(&path, &ROUTE_BLOB_REGEX) {
         match *request.method() {
             Method::GET => {
                 let repository = context.registry.validate_namespace(&parameters.name)?;
@@ -445,8 +441,7 @@ async fn router<D: DataStore + 'static>(
             }
             _ => Err(registry::Error::Unsupported),
         }
-    } else if let Some(parameters) = deserialize::<ManifestParameters>(&path, &ROUTE_MANIFEST_REGEX)
-    {
+    } else if let Some(parameters) = ManifestParameters::from_regex(&path, &ROUTE_MANIFEST_REGEX) {
         match *request.method() {
             Method::GET => {
                 let repository = context.registry.validate_namespace(&parameters.name)?;
@@ -502,9 +497,7 @@ async fn router<D: DataStore + 'static>(
             }
             _ => Err(registry::Error::Unsupported),
         }
-    } else if let Some(parameters) =
-        deserialize::<ReferrerParameters>(&path, &ROUTE_REFERRERS_REGEX)
-    {
+    } else if let Some(parameters) = ReferrerParameters::from_regex(&path, &ROUTE_REFERRERS_REGEX) {
         match *request.method() {
             Method::GET => {
                 let repository = context.registry.validate_namespace(&parameters.name)?;
@@ -525,7 +518,7 @@ async fn router<D: DataStore + 'static>(
             }
             _ => Err(registry::Error::Unsupported),
         }
-    } else if let Some(parameters) = deserialize::<TagsParameters>(&path, &ROUTE_LIST_TAGS_REGEX) {
+    } else if let Some(parameters) = TagsParameters::from_regex(&path, &ROUTE_LIST_TAGS_REGEX) {
         match *request.method() {
             Method::GET => {
                 let repository = context.registry.validate_namespace(&parameters.name)?;
