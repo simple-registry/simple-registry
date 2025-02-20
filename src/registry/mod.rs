@@ -19,6 +19,7 @@ mod error;
 pub mod lock_store;
 mod manifest;
 pub mod oci_types;
+mod policy;
 pub mod policy_types;
 mod repository;
 mod scrub;
@@ -31,7 +32,6 @@ use crate::registry::cache_store::CacheStore;
 pub use repository::Repository;
 
 use crate::registry::data_store::DataStore;
-pub use blob::GetBlobResponse;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
 pub use upload::StartUploadResponse;

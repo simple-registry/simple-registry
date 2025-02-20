@@ -1,5 +1,7 @@
 use crate::registry::Error;
-use hyper::header::HeaderName;
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
+use hyper::header::{HeaderName, ACCEPT, AUTHORIZATION};
 use hyper::Request;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -12,6 +14,10 @@ lazy_static! {
 
 pub trait RequestExt {
     fn query_parameters<D: DeserializeOwned + Default>(&self) -> Result<D, Error>;
+
+    fn provided_credentials(&self) -> Option<(String, String)>;
+
+    fn accepted_content_types(&self) -> Vec<String>;
 
     fn range(&self, header_name: HeaderName) -> Result<Option<(u64, u64)>, Error>;
 }
@@ -26,6 +32,28 @@ impl<T> RequestExt for Request<T> {
             warn!("Failed to parse query parameters: {}", e);
             Error::Unsupported
         })
+    }
+
+    fn provided_credentials(&self) -> Option<(String, String)> {
+        let value = self
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Basic "))
+            .and_then(|value| BASE64_STANDARD.decode(value).ok())
+            .and_then(|value| String::from_utf8(value).ok())?;
+
+        let (username, password) = value.split_once(':')?;
+        Some((username.to_string(), password.to_string()))
+    }
+
+    fn accepted_content_types(&self) -> Vec<String> {
+        self.headers()
+            .get_all(ACCEPT)
+            .iter()
+            .filter_map(|h| h.to_str().ok())
+            .map(ToString::to_string)
+            .collect()
     }
 
     fn range(&self, header: HeaderName) -> Result<Option<(u64, u64)>, Error> {
@@ -72,7 +100,9 @@ impl<T> RequestExt for Request<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::header::RANGE;
+    use crate::registry::api::body::Body;
+    use hyper::header::{HeaderValue, RANGE};
+    use hyper::HeaderMap;
     use std::collections::HashMap;
 
     #[test]
@@ -86,6 +116,89 @@ mod tests {
         assert_eq!(query_parameters.len(), 2);
         assert_eq!(query_parameters.get("foo"), Some(&"bar".to_string()));
         assert_eq!(query_parameters.get("baz"), Some(&"qux".to_string()));
+    }
+
+    #[test]
+    fn test_parse_authorization_header() {
+        let request = Request::builder()
+            .header(
+                AUTHORIZATION,
+                HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA=="),
+            )
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            request.provided_credentials(),
+            Some(("user".to_string(), "password".to_string()))
+        );
+
+        let request = Request::builder()
+            .header(
+                AUTHORIZATION,
+                HeaderValue::from_static("Bearer dXNlcjpwYXNzd29yZA=="),
+            )
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(request.provided_credentials(), None);
+
+        let request = Request::builder()
+            .header(
+                AUTHORIZATION,
+                HeaderValue::from_static("Basic dXNlcjpw YXNzd29yZA="),
+            )
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(request.provided_credentials(), None);
+
+        let request = Request::builder()
+            .header(
+                AUTHORIZATION,
+                HeaderValue::from_static("Basic dXNlcjpwY%%%%XNzd29yZA"),
+            )
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(request.provided_credentials(), None);
+
+        let request = Request::builder()
+            .header(
+                AUTHORIZATION,
+                HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA==="),
+            )
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(request.provided_credentials(), None);
+
+        let request = Request::builder()
+            .header(
+                AUTHORIZATION,
+                HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA=="),
+            )
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            request.provided_credentials(),
+            Some(("user".to_string(), "password".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_get_accepted_content_type() {
+        let mut headers = HeaderMap::new();
+        headers.append(ACCEPT, HeaderValue::from_static("application/json"));
+        headers.append(ACCEPT, HeaderValue::from_static("application/xml"));
+        headers.append(ACCEPT, HeaderValue::from_static("text/plain"));
+
+        let mut request = Request::builder();
+        for (key, value) in headers.iter() {
+            request = request.header(key, value);
+        }
+        let request = request.body(Body::empty()).unwrap();
+
+        let result = request.accepted_content_types();
+        assert_eq!(
+            result,
+            vec!["application/json", "application/xml", "text/plain"]
+        );
     }
 
     #[test]

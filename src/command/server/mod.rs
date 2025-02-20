@@ -1,17 +1,14 @@
 use crate::{command, configuration, registry};
 use argh::FromArgs;
-use base64::prelude::BASE64_STANDARD;
-use base64::Engine;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{HeaderValue, ACCEPT, AUTHORIZATION};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use lazy_static::lazy_static;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -21,9 +18,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::pin;
 use tracing::{debug, error, info, instrument};
-use uuid::Uuid;
 
-mod handlers;
 mod insecure_listener;
 mod server_context;
 mod tls_listener;
@@ -34,9 +29,15 @@ use crate::command::server::tls_listener::TlsListener;
 use crate::configuration::{IdentityConfig, ServerConfig};
 use crate::registry::api::body::Body;
 use crate::registry::api::hyper::deserialize_ext::DeserializeExt;
+use crate::registry::api::hyper::request_ext::RequestExt;
+use crate::registry::api::{
+    QueryBlobParameters, QueryManifestParameters, QueryNewUploadParameters, QueryUploadParameters,
+    ReferrerParameters, RegistryAPIBlobHandlersExt, RegistryAPIContentDiscoveryHandlersExt,
+    RegistryAPIManifestHandlersExt, RegistryAPIUploadHandlersExt, RegistryAPIVersionHandlerExt,
+    TagsParameters,
+};
 use crate::registry::data_store::DataStore;
-use crate::registry::oci_types::{Digest, Reference};
-use crate::registry::policy_types::{ClientIdentity, ClientRequest};
+use crate::registry::policy_types::ClientIdentity;
 use crate::registry::Registry;
 
 lazy_static! {
@@ -53,40 +54,6 @@ lazy_static! {
         Regex::new(r"^/v2/(?P<name>.+)/referrers/(?P<digest>.+)$").unwrap();
     static ref ROUTE_LIST_TAGS_REGEX: Regex = Regex::new(r"^/v2/(?P<name>.+)/tags/list$").unwrap();
     static ref ROUTE_CATALOG_REGEX: Regex = Regex::new(r"^/v2/_catalog$").unwrap();
-}
-
-#[derive(Debug, Deserialize)]
-pub struct NewUploadParameters {
-    pub name: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UploadParameters {
-    pub name: String,
-    pub uuid: Uuid,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ManifestParameters {
-    pub name: String,
-    pub reference: Reference,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReferrerParameters {
-    pub name: String,
-    pub digest: Digest,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TagsParameters {
-    pub name: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BlobParameters {
-    pub name: String,
-    pub digest: Digest,
 }
 
 pub enum ServiceListener<D> {
@@ -306,307 +273,68 @@ where
     }
 }
 
-#[instrument(skip(context, request))]
+#[instrument(skip(context, req))]
 async fn router<D: DataStore + 'static>(
     context: Arc<ServerContext<D>>,
-    request: Request<Incoming>,
-    mut identity: ClientIdentity,
+    req: Request<Incoming>,
+    mut id: ClientIdentity,
 ) -> Result<Response<Body>, registry::Error> {
-    let path = request.uri().path().to_string();
+    let path = req.uri().path().to_string();
 
-    let basic_auth_credentials = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(parse_authorization_header);
-
-    debug!("Authorization: {:?}", basic_auth_credentials);
-
-    let identity = match basic_auth_credentials {
-        Some((username, password)) => {
-            let identity_id = context.validate_credentials(&username, &password)?;
-            identity.username = Some(username);
-            identity.id = identity_id;
-            identity
-        }
-        None => identity,
-    };
+    if let Some((username, password)) = req.provided_credentials() {
+        id.id = context.validate_credentials(&username, &password)?;
+        id.username = Some(username);
+    }
 
     if ROUTE_API_VERSION_REGEX.is_match(&path) {
-        match *request.method() {
-            Method::GET => {
-                context.validate_request(None, ClientRequest::get_api_version(), identity)?;
-
-                handlers::handle_get_api_version().await
-            }
+        match *req.method() {
+            Method::GET => context.registry.handle_get_api_version(id).await,
             _ => Err(registry::Error::Unsupported),
         }
-    } else if let Some(parameters) = NewUploadParameters::from_regex(&path, &ROUTE_UPLOADS_REGEX) {
-        match *request.method() {
-            Method::POST => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::start_upload(&parameters.name),
-                    identity,
-                )?;
-                handlers::handle_start_upload(&context.registry, request, parameters).await
-            }
+    } else if let Some(params) = QueryNewUploadParameters::from_regex(&path, &ROUTE_UPLOADS_REGEX) {
+        match *req.method() {
+            Method::POST => context.registry.handle_start_upload(req, params, id).await,
             _ => Err(registry::Error::Unsupported),
         }
-    } else if let Some(parameters) = UploadParameters::from_regex(&path, &ROUTE_UPLOAD_REGEX) {
-        match *request.method() {
-            Method::GET => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::get_upload(&parameters.name),
-                    identity,
-                )?;
-                handlers::handle_get_upload_progress(&context.registry, parameters).await
-            }
-            Method::PATCH => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::update_upload(&parameters.name),
-                    identity,
-                )?;
-                handlers::handle_patch_upload(&context.registry, request, parameters).await
-            }
-            Method::PUT => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::complete_upload(&parameters.name),
-                    identity,
-                )?;
-                handlers::handle_put_upload(&context.registry, request, parameters).await
-            }
-            Method::DELETE => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::cancel_upload(&parameters.name),
-                    identity,
-                )?;
-                handlers::handle_delete_upload(&context.registry, parameters).await
-            }
+    } else if let Some(params) = QueryUploadParameters::from_regex(&path, &ROUTE_UPLOAD_REGEX) {
+        match *req.method() {
+            Method::GET => context.registry.handle_get_upload(params, id).await,
+            Method::PATCH => context.registry.handle_patch_upload(req, params, id).await,
+            Method::PUT => context.registry.handle_put_upload(req, params, id).await,
+            Method::DELETE => context.registry.handle_delete_upload(params, id).await,
             _ => Err(registry::Error::Unsupported),
         }
-    } else if let Some(parameters) = BlobParameters::from_regex(&path, &ROUTE_BLOB_REGEX) {
-        match *request.method() {
-            Method::GET => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::get_blob(&parameters.name, &parameters.digest),
-                    identity,
-                )?;
-
-                let accepted_mime_types = get_accepted_content_type(&request);
-                handlers::handle_get_blob(
-                    &context.registry,
-                    repository,
-                    request,
-                    &accepted_mime_types,
-                    parameters,
-                )
-                .await
-            }
-            Method::HEAD => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::get_blob(&parameters.name, &parameters.digest),
-                    identity,
-                )?;
-
-                let accepted_mime_types = get_accepted_content_type(&request);
-                handlers::handle_head_blob(
-                    &context.registry,
-                    repository,
-                    &accepted_mime_types,
-                    parameters,
-                )
-                .await
-            }
-            Method::DELETE => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::delete_blob(&parameters.name, &parameters.digest),
-                    identity,
-                )?;
-                handlers::handle_delete_blob(&context.registry, parameters).await
-            }
+    } else if let Some(params) = QueryBlobParameters::from_regex(&path, &ROUTE_BLOB_REGEX) {
+        match *req.method() {
+            Method::GET => context.registry.handle_get_blob(req, params, id).await,
+            Method::HEAD => context.registry.handle_head_blob(req, params, id).await,
+            Method::DELETE => context.registry.handle_delete_blob(params, id).await,
             _ => Err(registry::Error::Unsupported),
         }
-    } else if let Some(parameters) = ManifestParameters::from_regex(&path, &ROUTE_MANIFEST_REGEX) {
-        match *request.method() {
-            Method::GET => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::get_manifest(&parameters.name, &parameters.reference),
-                    identity,
-                )?;
-
-                let accepted_mime_types = get_accepted_content_type(&request);
-                handlers::handle_get_manifest(
-                    &context.registry,
-                    repository,
-                    &accepted_mime_types,
-                    parameters,
-                )
-                .await
-            }
-            Method::HEAD => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::get_manifest(&parameters.name, &parameters.reference),
-                    identity,
-                )?;
-
-                let accepted_mime_types = get_accepted_content_type(&request);
-                handlers::handle_head_manifest(
-                    &context.registry,
-                    repository,
-                    &accepted_mime_types,
-                    parameters,
-                )
-                .await
-            }
-            Method::PUT => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::put_manifest(&parameters.name, &parameters.reference),
-                    identity,
-                )?;
-                handlers::handle_put_manifest(&context.registry, request, parameters).await
-            }
-            Method::DELETE => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::delete_manifest(&parameters.name, &parameters.reference),
-                    identity,
-                )?;
-                handlers::handle_delete_manifest(&context.registry, parameters).await
-            }
+    } else if let Some(params) = QueryManifestParameters::from_regex(&path, &ROUTE_MANIFEST_REGEX) {
+        match *req.method() {
+            Method::GET => context.registry.handle_get_manifest(req, params, id).await,
+            Method::HEAD => context.registry.handle_head_manifest(req, params, id).await,
+            Method::PUT => context.registry.handle_put_manifest(req, params, id).await,
+            Method::DELETE => context.registry.handle_delete_manifest(params, id).await,
             _ => Err(registry::Error::Unsupported),
         }
-    } else if let Some(parameters) = ReferrerParameters::from_regex(&path, &ROUTE_REFERRERS_REGEX) {
-        match *request.method() {
-            Method::GET => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::get_referrers(&parameters.name, &parameters.digest),
-                    identity,
-                )?;
-                handlers::handle_get_referrers(&context.registry, request, parameters).await
-            }
+    } else if let Some(params) = ReferrerParameters::from_regex(&path, &ROUTE_REFERRERS_REGEX) {
+        match *req.method() {
+            Method::GET => context.registry.handle_get_referrers(req, params, id).await,
             _ => Err(registry::Error::Unsupported),
         }
     } else if ROUTE_CATALOG_REGEX.is_match(&path) {
-        match *request.method() {
-            Method::GET => {
-                context.validate_request(None, ClientRequest::list_catalog(), identity)?;
-                handlers::handle_list_catalog(&context.registry, request).await
-            }
+        match *req.method() {
+            Method::GET => context.registry.handle_list_catalog(req, id).await,
             _ => Err(registry::Error::Unsupported),
         }
-    } else if let Some(parameters) = TagsParameters::from_regex(&path, &ROUTE_LIST_TAGS_REGEX) {
-        match *request.method() {
-            Method::GET => {
-                let repository = context.registry.validate_namespace(&parameters.name)?;
-                context.validate_request(
-                    Some(repository),
-                    ClientRequest::list_tags(&parameters.name),
-                    identity,
-                )?;
-                handlers::handle_list_tags(&context.registry, request, parameters).await
-            }
+    } else if let Some(params) = TagsParameters::from_regex(&path, &ROUTE_LIST_TAGS_REGEX) {
+        match *req.method() {
+            Method::GET => context.registry.handle_list_tags(req, params, id).await,
             _ => Err(registry::Error::Unsupported),
         }
     } else {
         Err(registry::Error::NotFound)
-    }
-}
-
-fn get_accepted_content_type<T>(request: &Request<T>) -> Vec<String> {
-    request
-        .headers()
-        .get_all(ACCEPT)
-        .iter()
-        .filter_map(|h| h.to_str().ok())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-}
-
-pub fn parse_authorization_header(header: &HeaderValue) -> Option<(String, String)> {
-    let value = header
-        .to_str()
-        .ok()
-        .and_then(|value| value.strip_prefix("Basic "))
-        .and_then(|value| BASE64_STANDARD.decode(value).ok())
-        .and_then(|value| String::from_utf8(value).ok())?;
-
-    let (username, password) = value.split_once(':')?;
-    Some((username.to_string(), password.to_string()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use hyper::HeaderMap;
-
-    #[test]
-    fn test_get_accepted_content_type() {
-        let mut headers = HeaderMap::new();
-        headers.append(ACCEPT, HeaderValue::from_static("application/json"));
-        headers.append(ACCEPT, HeaderValue::from_static("application/xml"));
-        headers.append(ACCEPT, HeaderValue::from_static("text/plain"));
-
-        let mut request = Request::builder();
-        for (key, value) in headers.iter() {
-            request = request.header(key, value);
-        }
-        let request = request.body(Body::empty()).unwrap();
-
-        let result = get_accepted_content_type(&request);
-        assert_eq!(
-            result,
-            vec!["application/json", "application/xml", "text/plain"]
-        );
-    }
-
-    #[test]
-    fn test_parse_authorization_header() {
-        let header = HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA==");
-        let result = parse_authorization_header(&header);
-        assert_eq!(result, Some(("user".to_string(), "password".to_string())));
-
-        let header = HeaderValue::from_static("Bearer dXNlcjpwYXNzd29yZA==");
-        let result = parse_authorization_header(&header);
-        assert_eq!(result, None);
-
-        let header = HeaderValue::from_static("Basic dXNlcjpw YXNzd29yZA=");
-        let result = parse_authorization_header(&header);
-        assert_eq!(result, None);
-
-        let header = HeaderValue::from_static("Basic dXNlcjpwY%%%%XNzd29yZA");
-        let result = parse_authorization_header(&header);
-        assert_eq!(result, None);
-
-        let header = HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA===");
-        let result = parse_authorization_header(&header);
-        assert_eq!(result, None);
-
-        let header = HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA==");
-        let result = parse_authorization_header(&header);
-        assert_eq!(result, Some(("user".to_string(), "password".to_string())));
     }
 }
