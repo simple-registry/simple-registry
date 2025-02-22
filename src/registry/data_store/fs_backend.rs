@@ -3,10 +3,10 @@ use crate::registry::data_store::{BlobEntityLinkIndex, DataStore, Error, Reader,
 use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
-use crate::registry::utils::{DataLink, DataPathBuilder};
+use crate::registry::utils::{DataLink, DataPathBuilder, HashingReader};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sha2::{Digest as ShaDigestTrait, Sha256};
+use sha2::{Digest as Sha256Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -14,7 +14,7 @@ use std::io::{ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, File};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{copy, AsyncRead, AsyncSeekExt};
 use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
@@ -381,15 +381,15 @@ impl DataStore for FSBackend {
         Ok(uuid.to_string())
     }
 
-    #[instrument(skip(self, source))]
-    async fn write_upload(
+    #[instrument(skip(self, stream))]
+    async fn write_upload<S: AsyncRead + Unpin + Send + Sync>(
         &self,
         name: &str,
         uuid: &str,
-        source: &[u8],
+        stream: S,
         append: bool,
     ) -> Result<(), Error> {
-        let start_offset = if append {
+        let upload_size = if append {
             let (_, size, _) = self.read_upload_summary(name, uuid).await?;
             size
         } else {
@@ -412,28 +412,20 @@ impl DataStore for FSBackend {
                 }
             })?;
 
-        file.seek(SeekFrom::Start(start_offset)).await?;
+        file.seek(SeekFrom::Start(upload_size)).await?;
 
         let path = self
             .tree
-            .upload_hash_context_path(name, uuid, "sha256", start_offset);
+            .upload_hash_context_path(name, uuid, "sha256", upload_size);
         let state = fs::read(&path).await?;
-        let mut hasher = Sha256::deserialize_state(&state)?;
 
-        file.seek(SeekFrom::Start(start_offset)).await?;
+        let mut stream = HashingReader::with_hash_state(stream, &state)?;
+        let upload_size = upload_size + copy(&mut stream, &mut file).await?;
 
-        let mut total_bytes_written = 0u64;
-
-        file.write_all(source).await?;
-        hasher.update(source);
-        total_bytes_written += source.len() as u64;
-
-        let offset = start_offset + total_bytes_written;
         let path = self
             .tree
-            .upload_hash_context_path(name, uuid, "sha256", offset);
-        let state = hasher.serialize_state();
-        fs::write(&path, &state).await?;
+            .upload_hash_context_path(name, uuid, "sha256", upload_size);
+        fs::write(&path, &stream.hash_state()).await?;
 
         Ok(())
     }

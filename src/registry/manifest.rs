@@ -1,9 +1,8 @@
+use crate::registry::api::hyper::response_ext::IntoAsyncRead;
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, Manifest, Reference};
 use crate::registry::utils::DataLink;
 use crate::registry::{Error, Registry, Repository};
-use futures_util::StreamExt;
-use http_body_util::BodyExt;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::Method;
 use tokio::io::AsyncReadExt;
@@ -173,14 +172,7 @@ impl<D: DataStore> Registry<D> {
             let digest = Self::parse_header(&res, "docker-content-digest")?;
 
             let mut content = Vec::new();
-            let mut body = res.into_data_stream();
-            while let Some(frame) = body.next().await {
-                let frame = frame.map_err(|e| {
-                    error!("Data stream error: {}", e);
-                    Error::Internal("Data stream error".to_string())
-                })?;
-                content.extend_from_slice(&frame);
-            }
+            res.into_async_read().read_to_end(&mut content).await?;
 
             // NOTE: a side effect of storing the manifest locally at this stage is that blobs indexes
             // are also created locally even though the blob itself may not yet be available locally.

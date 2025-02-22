@@ -1,13 +1,13 @@
 use crate::configuration::{Error, RepositoryUpstreamConfig};
 use crate::registry;
+use crate::registry::api::hyper::response_ext::IntoAsyncRead;
 use crate::registry::cache_store::CacheStore;
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::repository::authentication_scheme::AuthenticationScheme;
 use crate::registry::repository::bearer_token::BearerToken;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use futures_util::StreamExt;
-use http_body_util::{BodyExt, Empty};
+use http_body_util::Empty;
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{HeaderValue, ACCEPT, AUTHORIZATION, LOCATION, WWW_AUTHENTICATE};
 use hyper::http::request;
@@ -21,6 +21,7 @@ use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
@@ -151,9 +152,13 @@ impl RepositoryUpstream {
         let req = req.body(Empty::new())?;
 
         debug!("Requesting token from upstream");
-
-        let response = match self.client.request(req).await {
-            Ok(response) => response,
+        let content = match self.client.request(req).await {
+            Ok(response) => {
+                let mut reader = response.into_async_read();
+                let mut content = Vec::new();
+                reader.read_to_end(&mut content).await?;
+                content
+            }
             Err(e) => {
                 error!("Failed to authenticate with upstream: {:?}", e);
                 return Err(registry::Error::Unauthorized(
@@ -161,18 +166,6 @@ impl RepositoryUpstream {
                 ));
             }
         };
-
-        // TODO: this pattern is present in multiple places across the codebase, consider refactoring,
-        // and using a more efficient implementation
-        let mut content = Vec::new();
-        let mut body = response.into_data_stream();
-        while let Some(frame) = body.next().await {
-            let frame = frame.map_err(|e| {
-                error!("Data stream error: {}", e);
-                std::io::Error::new(std::io::ErrorKind::Other, e)
-            })?;
-            content.extend_from_slice(&frame);
-        }
 
         let token = BearerToken::from_slice(&content)?;
 

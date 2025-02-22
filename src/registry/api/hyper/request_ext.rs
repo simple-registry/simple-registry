@@ -1,11 +1,16 @@
 use crate::registry::Error;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use futures_util::TryStreamExt;
+use http_body_util::BodyExt;
 use hyper::header::{HeaderName, ACCEPT, AUTHORIZATION};
 use hyper::Request;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::de::DeserializeOwned;
+use std::io;
+use tokio::io::AsyncRead;
+use tokio_util::io::StreamReader;
 use tracing::warn;
 
 lazy_static! {
@@ -97,6 +102,23 @@ impl<T> RequestExt for Request<T> {
     }
 }
 
+pub trait IntoAsyncRead {
+    fn into_async_read(self) -> impl AsyncRead;
+}
+
+impl<S> IntoAsyncRead for Request<S>
+where
+    S: BodyExt,
+    S::Error: Sync + Send + std::error::Error + 'static,
+{
+    fn into_async_read(self) -> impl AsyncRead {
+        let stream = self
+            .into_data_stream()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+        StreamReader::new(stream)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +126,7 @@ mod tests {
     use hyper::header::{HeaderValue, RANGE};
     use hyper::HeaderMap;
     use std::collections::HashMap;
+    use tokio::io::AsyncReadExt;
 
     #[test]
     fn test_query_parameters() {
@@ -245,5 +268,17 @@ mod tests {
 
         let range = request.range(RANGE);
         assert!(range.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_into_async_read() {
+        let mut request = Request::builder()
+            .body(String::from("Hello World!"))
+            .unwrap()
+            .into_async_read();
+
+        let mut buf = Vec::new();
+        request.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"Hello World!");
     }
 }

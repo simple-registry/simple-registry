@@ -1,10 +1,9 @@
 use crate::registry::api::body::Body;
-use crate::registry::api::hyper::request_ext::RequestExt;
+use crate::registry::api::hyper::request_ext::{IntoAsyncRead, RequestExt};
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, StartUploadResponse};
-use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::header::CONTENT_RANGE;
 use hyper::{Request, Response, StatusCode};
@@ -146,11 +145,15 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
 
         let start_offset = request.range(CONTENT_RANGE)?.map(|(start, _)| start);
 
-        let body = request.into_data_stream();
         let location = format!("/v2/{}/blobs/uploads/{}", &parameters.name, parameters.uuid);
 
         let range_max = self
-            .patch_upload(&parameters.name, parameters.uuid, start_offset, body)
+            .patch_upload(
+                &parameters.name,
+                parameters.uuid,
+                start_offset,
+                request.into_async_read(),
+            )
             .await?;
         let range_max = format!("0-{range_max}");
 
@@ -187,9 +190,13 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
         let query: CompleteUploadQuery = request.query_parameters()?;
         let digest = Digest::try_from(query.digest.as_str())?;
 
-        let body = request.into_data_stream();
-        self.complete_upload(&parameters.name, parameters.uuid, digest, body)
-            .await?;
+        self.complete_upload(
+            &parameters.name,
+            parameters.uuid,
+            digest,
+            request.into_async_read(),
+        )
+        .await?;
 
         let location = format!("/v2/{}/blobs/{}", &parameters.name, query.digest);
 
