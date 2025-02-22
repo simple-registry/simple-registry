@@ -232,10 +232,11 @@ impl Configuration {
     }
 
     pub fn load_from_str(slice: &str) -> Result<Self, Error> {
-        let config: Configuration = toml::from_str(slice).unwrap_or_else(|e| {
+        let config: Configuration = toml::from_str(slice).map_err(|e| {
             println!("Configuration file format error:");
-            panic!("{e}")
-        });
+            println!("{e}");
+            Error::ConfigurationFileFormat(e.to_string())
+        })?;
 
         if let DataStoreConfig::S3(storage) = &config.storage {
             if storage.multipart_min_part_size.to_usize() < 5 * 1024 * 1024 {
