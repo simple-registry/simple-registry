@@ -7,7 +7,7 @@ mod memory_backend;
 mod redis_backend;
 
 pub use error::Error;
-use memory_backend::{MemoryBackend, MemoryReadLockGuard, MemoryWriteLockGuard};
+use memory_backend::{MemoryBackend, MemoryLockGuard};
 use redis_backend::{RedisBackend, RedisLockGuard};
 
 #[derive(Debug)]
@@ -16,17 +16,12 @@ enum Backend {
     Memory(MemoryBackend),
 }
 
-pub enum ReadLockGuard {
-    Redis(RedisLockGuard),
-    Memory(MemoryReadLockGuard),
-}
-
 pub enum WriteLockGuard {
     Redis(RedisLockGuard),
-    Memory(MemoryWriteLockGuard),
+    Memory(MemoryLockGuard),
 }
 
-/// A lock store that can acquire read and write locks for a given key
+/// A lock store that can acquire exclusive locks for a given key
 /// The underlying implementation can be either in-memory or backed by a Redis-compatible backend
 #[derive(Debug)]
 pub struct LockStore {
@@ -62,71 +57,25 @@ impl LockStore {
         Ok(LockStore { backend })
     }
 
-    /// Acquire a read lock for a given key.
-    ///
-    /// This will block until the read lock is acquired.
-    /// Multiple read locks can be acquired for the same key at the same time.
-    /// If a write lock is acquired for the key, no read locks can be acquired until the write lock is released.
+    /// Acquire an exclusive lock for a given key.
+    /// This will block until the lock is acquired.
     ///
     /// # Arguments
     ///
-    /// * `key` - The key to acquire the read lock for
+    /// * `key` - The key to acquire the lock for
     ///
     /// # Returns
     ///
-    /// * `Ok(ReadLockGuard)` if the read lock was acquired successfully
+    /// * `Ok(WriteLockGuard)` if the lock was acquired successfully
     ///
     /// # Errors
     ///
-    /// * `Error::BackendError` if the read lock could not be acquired
-    #[instrument(skip(self))]
-    pub async fn acquire_read_lock(&self, key: &str) -> Result<ReadLockGuard, Error> {
-        match &self.backend {
-            Backend::Redis(lock) => {
-                let guard = lock
-                    .acquire_read_lock(key)
-                    .await
-                    .map(ReadLockGuard::Redis)?;
-                if let ReadLockGuard::Redis(_guard_inner) = &guard {
-                    debug!("Acquired read lock for key");
-                }
-
-                Ok(guard)
-            }
-            Backend::Memory(lock) => {
-                let guard = ReadLockGuard::Memory(lock.acquire_read_lock(key).await);
-                if let ReadLockGuard::Memory(_guard_inner) = &guard {
-                    debug!("Acquired read lock for key");
-                }
-
-                Ok(guard)
-            }
-        }
-    }
-
-    /// Acquire a write lock for a given key.
-    /// This will block until the write lock is acquired.
-    /// A write lock cannot be acquired if there is already another read or write lock on the key.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to acquire the write lock for
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(WriteLockGuard)` if the write lock was acquired successfully
-    ///
-    /// # Errors
-    ///
-    /// * `Error::BackendError` if the write lock could not be acquired
+    /// * `Error::BackendError` if the lock could not be acquired
     #[instrument(skip(self))]
     pub async fn acquire_write_lock(&self, key: &str) -> Result<WriteLockGuard, Error> {
         match &self.backend {
             Backend::Redis(lock) => {
-                let guard = lock
-                    .acquire_write_lock(key)
-                    .await
-                    .map(WriteLockGuard::Redis)?;
+                let guard = lock.acquire_lock(key).await.map(WriteLockGuard::Redis)?;
                 if let WriteLockGuard::Redis(_redis_guard) = &guard {
                     debug!("Acquired write lock for key");
                 }
@@ -134,7 +83,7 @@ impl LockStore {
                 Ok(guard)
             }
             Backend::Memory(lock) => {
-                let guard = WriteLockGuard::Memory(lock.acquire_write_lock(key).await);
+                let guard = WriteLockGuard::Memory(lock.acquire_lock(key).await);
                 if let WriteLockGuard::Memory(_in_memory_guard) = &guard {
                     debug!("Acquired write lock for key");
                 }

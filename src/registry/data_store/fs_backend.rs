@@ -253,7 +253,6 @@ impl DataStore for FSBackend {
         digest: &Digest,
         artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = format!(
             "{}/sha256",
             self.tree.manifest_referrers_dir(namespace, digest)
@@ -291,11 +290,11 @@ impl DataStore for FSBackend {
         continuation_token: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
         let path = self.tree.uploads_root_dir(namespace);
-
-        let mut uploads = Vec::new();
-        for upload in self.collect_directory_entries(&path).await? {
-            uploads.push(upload);
-        }
+        let uploads: Vec<_> = self
+            .collect_directory_entries(&path)
+            .await?
+            .into_iter()
+            .collect();
 
         Ok(Self::paginate(&uploads, n, continuation_token))
     }
@@ -554,14 +553,12 @@ impl DataStore for FSBackend {
 
     #[instrument(skip(self))]
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_path(digest);
         Ok(fs::read(path).await?)
     }
 
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_index_path(digest);
         let content = fs::read_to_string(&path).await?;
 
@@ -571,7 +568,6 @@ impl DataStore for FSBackend {
 
     #[instrument(skip(self))]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_path(digest);
         self.get_file_size(&path, Error::BlobNotFound).await
     }
@@ -607,8 +603,6 @@ impl DataStore for FSBackend {
         digest: &Digest,
         start_offset: Option<u64>,
     ) -> Result<Box<dyn Reader>, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
-
         let path = self.tree.blob_path(digest);
         let mut file = match File::open(&path).await {
             Ok(file) => file,
@@ -691,15 +685,6 @@ impl DataStore for FSBackend {
             namespace, reference
         );
 
-        match self.read_link(namespace, reference).await.ok() {
-            Some(existing_digest) if &existing_digest == digest => return Ok(()),
-            Some(existing_digest) if &existing_digest != digest => {
-                // NOTE: no locks here, the delete_link will take care of it
-                self.delete_link(namespace, reference).await?;
-            }
-            _ => {}
-        }
-
         let _guard = self
             .lock_store
             .acquire_write_lock(&digest.to_string())
@@ -709,11 +694,32 @@ impl DataStore for FSBackend {
             .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
 
+        let link_path = self.tree.get_link_path(reference, namespace);
+
+        match self.read_link(namespace, reference).await.ok() {
+            Some(existing_digest) if &existing_digest == digest => return Ok(()),
+            Some(existing_digest) if &existing_digest != digest => {
+                let _ = fs::remove_file(&link_path).await;
+
+                let is_referenced = self
+                    .blob_link_index_update(namespace, digest, |index| {
+                        index.remove(reference);
+                    })
+                    .await?;
+
+                if !is_referenced {
+                    debug!("Deleting no longer referenced Blob: {}", digest);
+                    let path = self.tree.blob_container_dir(digest);
+                    let _ = self.delete_empty_parent_dirs(&path).await;
+                }
+            }
+            _ => {}
+        }
+
         let path = self.tree.get_link_parent_path(reference, namespace);
         debug!("Creating link container dir at path: {}", path);
         fs::create_dir_all(&path).await?;
 
-        let link_path = self.tree.get_link_path(reference, namespace);
         debug!("Creating link at path: {}", link_path);
         fs::write(&link_path, digest.to_string()).await?;
 

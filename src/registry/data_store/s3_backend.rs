@@ -1144,7 +1144,6 @@ impl DataStore for S3Backend {
 
     #[instrument(skip(self))]
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_path(digest);
         let blob = self.get_object_body_as_vec(&path, None).await?;
         Ok(blob)
@@ -1152,7 +1151,6 @@ impl DataStore for S3Backend {
 
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_index_path(digest);
 
         let data = self.get_object_body_as_vec(&path, None).await?;
@@ -1163,7 +1161,6 @@ impl DataStore for S3Backend {
 
     #[instrument(skip(self))]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_path(digest);
 
         let content_length = self.get_object_size(&path).await?;
@@ -1207,8 +1204,6 @@ impl DataStore for S3Backend {
         digest: &Digest,
         start_offset: Option<u64>,
     ) -> Result<Box<dyn Reader>, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
-
         let path = self.tree.blob_path(digest);
         let res = self.get_object(&path, start_offset).await?;
         Ok(Box::new(res.body.into_async_read()))
@@ -1265,21 +1260,33 @@ impl DataStore for S3Backend {
         reference: &DataLink,
         digest: &Digest,
     ) -> Result<(), Error> {
-        match self.read_link(namespace, reference).await.ok() {
-            Some(existing_digest) if existing_digest == *digest => return Ok(()),
-            Some(existing_digest) if existing_digest != *digest => {
-                self.delete_link(namespace, reference).await?;
-            }
-            _ => {}
-        }
-
         let _guard = self
             .lock_store
             .acquire_write_lock(&digest.to_string())
             .await;
 
-        let path = self.tree.get_link_path(reference, namespace);
-        self.put_object(&path, digest.to_string().into_bytes())
+        let link_path = self.tree.get_link_path(reference, namespace);
+
+        match self.read_link(namespace, reference).await.ok() {
+            Some(existing_digest) if existing_digest == *digest => return Ok(()),
+            Some(existing_digest) if existing_digest != *digest => {
+                self.delete_object(&link_path).await?;
+
+                let is_referenced = self
+                    .blob_link_index_update(namespace, digest, |index| {
+                        index.remove(reference);
+                    })
+                    .await?;
+
+                if !is_referenced {
+                    let path = self.tree.blob_container_dir(digest);
+                    self.delete_object_with_prefix(&path).await?;
+                }
+            }
+            _ => {}
+        }
+
+        self.put_object(&link_path, digest.to_string().into_bytes())
             .await?;
 
         self.blob_link_index_update(namespace, digest, |index| {
