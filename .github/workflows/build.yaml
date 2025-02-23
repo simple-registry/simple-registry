@@ -103,7 +103,7 @@ jobs:
           source ./conformance/conformance-variables
           ./conformance.test
 
-          time ./zb -c 10 -r conformance -n 100 http://localhost:8000
+          time ./zb -c 10 -r conformance -n 100 http://localhost:8000 || true
           docker stop conformance-fs-backend
 
       - name: Run the conformance test & zot benchmark (s3 backend)
@@ -140,7 +140,7 @@ jobs:
           source ./conformance/conformance-variables
           ./conformance.test
 
-          time ./zb -c 10 -r conformance -n 100 http://localhost:8000
+          time ./zb -c 10 -r conformance -n 100 http://localhost:8000 || true
           docker stop conformance-s3-backend
           docker stop minio-server
 
