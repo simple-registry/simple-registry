@@ -963,7 +963,10 @@ impl DataStore for S3Backend {
         let mut chunk = self.load_staged_chunk(name, uuid, uploaded_size).await?;
         let mut stream = HashingReader::with_hash_state(stream, &state)?;
 
-        let mut stream_chunk = vec![0; 4 * 10 * 1024 * 1024];
+        let stream_chunk_size =
+            usize::try_from(self.multipart_part_size).unwrap_or(100 * 10 * 1024 * 1024);
+
+        let mut stream_chunk = vec![0; stream_chunk_size];
         loop {
             let bytes_read = stream.read(&mut stream_chunk).await?;
             if bytes_read == 0 {
