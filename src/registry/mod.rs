@@ -1,12 +1,8 @@
 use chrono::Duration;
-use hyper::body::Incoming;
-use hyper::header::AsHeaderName;
-use hyper::Response;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::str::FromStr;
 use std::sync::Arc;
 use tracing::instrument;
 
@@ -101,27 +97,5 @@ impl<D: DataStore> Registry<D> {
         } else {
             Err(Error::NameInvalid)
         }
-    }
-
-    fn get_header<K>(res: &Response<Incoming>, header: K) -> Option<String>
-    where
-        K: AsHeaderName,
-    {
-        res.headers()
-            .get(header)
-            .and_then(|header| header.to_str().ok())
-            .map(ToString::to_string)
-    }
-
-    fn parse_header<T, K>(res: &Response<Incoming>, header: K) -> Result<T, Error>
-    where
-        T: FromStr,
-        K: AsHeaderName,
-    {
-        res.headers()
-            .get(header)
-            .and_then(|header| header.to_str().ok())
-            .and_then(|header| header.parse().ok())
-            .ok_or(Error::Unsupported)
     }
 }

@@ -1,4 +1,4 @@
-use crate::registry::api::hyper::response_ext::IntoAsyncRead;
+use crate::registry::api::hyper::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, Manifest, Reference};
 use crate::registry::utils::DataLink;
@@ -94,9 +94,9 @@ impl<D: DataStore> Registry<D> {
                 .query_upstream_manifest(&Method::HEAD, accepted_mime_types, namespace, &reference)
                 .await?;
 
-            let media_type = Self::get_header(&res, CONTENT_TYPE);
-            let digest = Self::parse_header(&res, "docker-content-digest")?;
-            let size = Self::parse_header(&res, CONTENT_LENGTH)?;
+            let media_type = res.get_header(CONTENT_TYPE);
+            let digest = res.parse_header("docker-content-digest")?;
+            let size = res.parse_header(CONTENT_LENGTH)?;
 
             // Store locally before returning
             let _ = self
@@ -168,8 +168,8 @@ impl<D: DataStore> Registry<D> {
                 .query_upstream_manifest(&Method::GET, accepted_mime_types, namespace, &reference)
                 .await?;
 
-            let media_type = Self::get_header(&res, CONTENT_TYPE);
-            let digest = Self::parse_header(&res, "docker-content-digest")?;
+            let media_type = res.get_header(CONTENT_TYPE);
+            let digest = res.parse_header("docker-content-digest")?;
 
             let mut content = Vec::new();
             res.into_async_read().read_to_end(&mut content).await?;

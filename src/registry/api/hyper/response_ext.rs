@@ -1,21 +1,53 @@
-use crate::registry::api::body::Body;
 use crate::registry::Error;
 use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
+use hyper::header::AsHeaderName;
 use hyper::{Response, StatusCode};
 use serde::de::StdError;
 use std::io;
+use std::str::FromStr;
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
 
-pub trait PaginatedResponseExt {
-    fn paginated(content: Body, link: Option<&str>) -> Result<Self, Error>
+pub trait ResponseExt<B> {
+    fn get_header<K>(&self, header: K) -> Option<String>
+    where
+        K: AsHeaderName;
+
+    fn parse_header<T, K>(&self, header: K) -> Result<T, Error>
+    where
+        T: FromStr,
+        K: AsHeaderName;
+
+    fn paginated(content: B, link: Option<&str>) -> Result<Self, Error>
     where
         Self: Sized;
 }
 
-impl PaginatedResponseExt for Response<Body> {
-    fn paginated(body: Body, link: Option<&str>) -> Result<Response<Body>, Error> {
+impl<B> ResponseExt<B> for Response<B> {
+    fn get_header<K>(&self, header: K) -> Option<String>
+    where
+        K: AsHeaderName,
+    {
+        self.headers()
+            .get(header)
+            .and_then(|header| header.to_str().ok())
+            .map(ToString::to_string)
+    }
+
+    fn parse_header<T, K>(&self, header: K) -> Result<T, Error>
+    where
+        T: FromStr,
+        K: AsHeaderName,
+    {
+        self.headers()
+            .get(header)
+            .and_then(|header| header.to_str().ok())
+            .and_then(|header| header.parse().ok())
+            .ok_or(Error::Unsupported)
+    }
+
+    fn paginated(body: B, link: Option<&str>) -> Result<Response<B>, Error> {
         let res = match link {
             Some(link) => Response::builder()
                 .status(StatusCode::OK)
@@ -52,7 +84,34 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::api::body::Body;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn test_get_header() {
+        let res = Response::builder()
+            .header("Content-Type", "application/json")
+            .body(Body::Empty)
+            .unwrap();
+        assert_eq!(
+            res.get_header("Content-Type"),
+            Some("application/json".to_string())
+        );
+        assert_eq!(res.get_header("Content-Length"), None);
+    }
+
+    #[test]
+    fn test_parse_header() {
+        let res = Response::builder()
+            .header("Content-Length", "42")
+            .body(Body::Empty)
+            .unwrap();
+        assert_eq!(res.parse_header::<u64, _>("Content-Length"), Ok(42));
+        assert_eq!(
+            res.parse_header::<u64, _>("Content-Type"),
+            Err(Error::Unsupported)
+        );
+    }
 
     #[test]
     fn test_paginated() {
@@ -62,12 +121,12 @@ mod tests {
 
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
-            res.headers().get("Content-Type").unwrap(),
-            "application/json"
+            res.get_header("Content-Type"),
+            Some(String::from("application/json"))
         );
         assert_eq!(
-            res.headers().get("Link").unwrap(),
-            "<http://example.com>; rel=\"next\""
+            res.get_header("Link"),
+            Some(String::from("<http://example.com>; rel=\"next\""))
         );
 
         let body = Body::Empty;
@@ -76,10 +135,10 @@ mod tests {
 
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
-            res.headers().get("Content-Type").unwrap(),
-            "application/json"
+            res.get_header("Content-Type"),
+            Some(String::from("application/json"))
         );
-        assert_eq!(res.headers().get("Link"), None);
+        assert_eq!(res.get_header("Link"), None);
     }
 
     #[tokio::test]

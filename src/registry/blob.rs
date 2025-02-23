@@ -1,4 +1,5 @@
 use crate::registry::api::hyper::response_ext::IntoAsyncRead;
+use crate::registry::api::hyper::response_ext::ResponseExt;
 use crate::registry::data_store::{DataStore, Reader};
 use crate::registry::oci_types::Digest;
 use crate::registry::utils::{tee_reader, DataLink};
@@ -37,8 +38,8 @@ impl<D: DataStore + 'static> Registry<D> {
                 .query_upstream_blob(&Method::HEAD, accepted_mime_types, namespace, &digest)
                 .await?;
 
-            let digest = Self::parse_header(&res, "docker-content-digest")?;
-            let size = Self::parse_header(&res, CONTENT_LENGTH)?;
+            let digest = res.parse_header("docker-content-digest")?;
+            let size = res.parse_header(CONTENT_LENGTH)?;
             return Ok(HeadBlobResponse { digest, size });
         }
 

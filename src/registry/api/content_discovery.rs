@@ -1,6 +1,6 @@
 use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::RequestExt;
-use crate::registry::api::hyper::response_ext::PaginatedResponseExt;
+use crate::registry::api::hyper::response_ext::ResponseExt;
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, ReferrerList};
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};

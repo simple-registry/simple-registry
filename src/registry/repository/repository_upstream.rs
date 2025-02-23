@@ -1,6 +1,6 @@
 use crate::configuration::{Error, RepositoryUpstreamConfig};
 use crate::registry;
-use crate::registry::api::hyper::response_ext::IntoAsyncRead;
+use crate::registry::api::hyper::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::cache_store::CacheStore;
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::repository::authentication_scheme::AuthenticationScheme;
@@ -238,14 +238,8 @@ impl RepositoryUpstream {
             };
 
             if response.status().is_redirection() {
-                if let Some(new_location) = response.headers().get(LOCATION).cloned() {
-                    location = new_location
-                        .to_str()
-                        .map_err(|e| {
-                            error!("Failed to parse Location header: {:?}", e);
-                            registry::Error::Internal("Failed to parse Location header".to_string())
-                        })?
-                        .to_string();
+                if let Some(new_location) = response.get_header(LOCATION) {
+                    location = new_location;
                     redirect_count += 1;
 
                     if redirect_count >= self.max_redirect {
@@ -266,23 +260,18 @@ impl RepositoryUpstream {
                     ));
                 }
 
-                let (token, token_ttl) = if let Some(www_authenticate_header) = response
-                    .headers()
-                    .get(WWW_AUTHENTICATE)
-                    .and_then(|header| header.to_str().ok())
-                {
-                    match AuthenticationScheme::from_www_authenticate_header(
-                        www_authenticate_header,
-                    )? {
-                        AuthenticationScheme::Bearer(realm, parameters) => {
-                            self.query_bearer_token(&realm, &parameters).await
+                let (token, token_ttl) =
+                    if let Some(auth_header) = response.get_header(WWW_AUTHENTICATE) {
+                        match AuthenticationScheme::from_www_authenticate_header(&auth_header)? {
+                            AuthenticationScheme::Bearer(realm, parameters) => {
+                                self.query_bearer_token(&realm, &parameters).await
+                            }
+                            AuthenticationScheme::Basic => self.get_basic_auth_header(),
                         }
-                        AuthenticationScheme::Basic => self.get_basic_auth_header(),
-                    }
-                } else {
-                    // If no WWW-Authenticate header is present, assume we need to use basic auth.
-                    self.get_basic_auth_header()
-                }?;
+                    } else {
+                        // If no WWW-Authenticate header is present, assume we need to use basic auth.
+                        self.get_basic_auth_header()
+                    }?;
 
                 self.token_cache.store(namespace, &token, token_ttl).await?;
 
