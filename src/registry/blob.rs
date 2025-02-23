@@ -6,6 +6,7 @@ use crate::registry::utils::{tee_reader, DataLink};
 use crate::registry::{data_store, Error, Registry, Repository};
 use hyper::header::CONTENT_LENGTH;
 use hyper::Method;
+use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
@@ -48,6 +49,38 @@ impl<D: DataStore + 'static> Registry<D> {
         Ok(HeadBlobResponse { digest, size })
     }
 
+    #[instrument(skip(storage_engine, stream))]
+    async fn copy_blob<E, S>(
+        storage_engine: Arc<E>,
+        stream: S,
+        namespace: String,
+        digest: Digest,
+    ) -> Result<(), data_store::Error>
+    where
+        E: DataStore,
+        S: AsyncRead + Send + Sync + Unpin,
+    {
+        let session_id = Uuid::new_v4().to_string();
+
+        storage_engine
+            .create_upload(&namespace, &session_id)
+            .await?;
+
+        storage_engine
+            .write_upload(&namespace, &session_id, stream, false)
+            .await?;
+
+        if let Err(e) = storage_engine
+            .complete_upload(&namespace, &session_id, Some(digest))
+            .await
+        {
+            debug!("Failed to complete upload: {:?}", e);
+            return Err(e);
+        }
+
+        Ok::<(), data_store::Error>(())
+    }
+
     #[instrument(skip(repository))]
     pub async fn get_blob(
         &self,
@@ -80,38 +113,20 @@ impl<D: DataStore + 'static> Registry<D> {
                 .query_upstream_blob(&Method::GET, accepted_mime_types, namespace, digest)
                 .await?;
 
-            let total_length = Self::parse_header(&res, CONTENT_LENGTH)?;
+            let total_length = res.parse_header(CONTENT_LENGTH)?;
 
             let stream = res.into_async_read();
+            let (response_reader, copy_reader) =
+                tee_reader(stream, self.streaming_chunk_size).await?;
 
-            let (stream1, stream2) = tee_reader(stream, self.streaming_chunk_size, 100).await?;
+            tokio::spawn(Self::copy_blob(
+                self.storage_engine.clone(),
+                copy_reader,
+                namespace.to_string(),
+                digest.to_owned(),
+            ));
 
-            let digest = Some(digest.clone());
-            let namespace = namespace.to_string();
-            let storage_engine = self.storage_engine.clone();
-            tokio::spawn(async move {
-                let session_id = Uuid::new_v4().to_string();
-
-                storage_engine
-                    .create_upload(&namespace, &session_id)
-                    .await?;
-
-                storage_engine
-                    .write_upload(&namespace, &session_id, stream2, false)
-                    .await?;
-
-                if let Err(e) = storage_engine
-                    .complete_upload(&namespace, &session_id, digest)
-                    .await
-                {
-                    debug!("Failed to complete upload: {:?}", e);
-                    return Err(e);
-                }
-
-                Ok::<(), data_store::Error>(())
-            });
-
-            let reader: Box<dyn Reader> = Box::new(stream1);
+            let reader: Box<dyn Reader> = Box::new(response_reader);
             return Ok(GetBlobResponse::Reader(reader, total_length));
         }
 

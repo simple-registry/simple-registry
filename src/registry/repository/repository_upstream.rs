@@ -191,7 +191,7 @@ impl RepositoryUpstream {
         })?))
     }
 
-    #[tracing::instrument]
+    #[tracing::instrument(skip(self))]
     pub async fn query(
         &self,
         namespace: &str,
