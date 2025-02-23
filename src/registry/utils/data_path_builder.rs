@@ -536,16 +536,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_link_parent_path() {
-        let builder = DataPathBuilder::new("".to_string());
-        let digest = Digest::Sha256("1234567890abcdef".to_string());
-        assert_eq!(
-            builder.get_link_parent_path(&DataLink::Digest(digest), "name"),
-            "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef"
-        );
-    }
-
-    #[test]
     fn test_get_link_container_path() {
         let builder = DataPathBuilder::new("".to_string());
         let digest = Digest::Sha256("1234567890abcdef".to_string());
@@ -561,15 +551,6 @@ mod tests {
         assert_eq!(
             builder.get_link_path(&DataLink::Tag("tag".to_string()), "name"),
             "v2/repositories/name/_manifests/tags/tag/current/link"
-        );
-    }
-
-    #[test]
-    fn test_get_link_parent_path_tag() {
-        let builder = DataPathBuilder::new("".to_string());
-        assert_eq!(
-            builder.get_link_parent_path(&DataLink::Tag("tag".to_string()), "name"),
-            "v2/repositories/name/_manifests/tags/tag/current"
         );
     }
 

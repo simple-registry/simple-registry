@@ -231,7 +231,7 @@ impl FSBackend {
             // XXX: hack for crappy filesystems
             let metadata = file.metadata().await?;
             if metadata.len() == contents.len() as u64 {
-                break
+                break;
             }
             sleep(Duration::from_millis(100)).await;
         }
