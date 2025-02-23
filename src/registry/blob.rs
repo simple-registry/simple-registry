@@ -116,8 +116,7 @@ impl<D: DataStore + 'static> Registry<D> {
             let total_length = res.parse_header(CONTENT_LENGTH)?;
 
             let stream = res.into_async_read();
-            let (response_reader, copy_reader) =
-                tee_reader(stream, self.streaming_chunk_size).await?;
+            let (response_reader, copy_reader) = tee_reader(stream).await?;
 
             tokio::spawn(Self::copy_blob(
                 self.storage_engine.clone(),

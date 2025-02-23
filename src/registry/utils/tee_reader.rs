@@ -54,10 +54,7 @@ impl AsyncRead for ChannelReader {
 ///
 /// # Returns
 /// A future resolving to a pair of `AsyncRead` handles.
-pub async fn tee_reader<R>(
-    mut reader: R,
-    buffer_size: usize,
-) -> io::Result<(ChannelReader, ChannelReader)>
+pub async fn tee_reader<R>(mut reader: R) -> io::Result<(ChannelReader, ChannelReader)>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -66,7 +63,7 @@ where
 
     // Spawn a background task to read from the source.
     task::spawn(async move {
-        let mut buf = vec![0u8; buffer_size];
+        let mut buf = vec![0u8; 8192];
         loop {
             match reader.read(&mut buf).await {
                 Ok(0) => break, // EOF reached.
@@ -108,7 +105,7 @@ mod tests {
     #[tokio::test]
     async fn test_tee_reader() {
         let data = b"hello world";
-        let (mut reader1, mut reader2) = tee_reader(&data[..], 4).await.unwrap();
+        let (mut reader1, mut reader2) = tee_reader(&data[..]).await.unwrap();
 
         let (result1, result2) = tokio::join!(
             async {
