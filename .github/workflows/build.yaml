@@ -84,6 +84,28 @@ jobs:
         run: |
           docker build -t ${CONFORMANCE_IMAGE_NAME} -f Dockerfile --build-arg RELEASE_MODE=release .
 
+      - name: Run the conformance test & zot benchmark (filesystem backend)
+        run: |
+          docker run --rm -d \
+            -v ./conformance/config-fs.toml:/config.toml \
+            --network host \
+            --name conformance-fs-backend \
+            ${CONFORMANCE_IMAGE_NAME} \
+            server
+
+          for i in {1..10}; do
+            if nc -z -w 3 127.0.0.1 8000; then
+              break
+            fi
+            sleep 1
+          done
+
+          source ./conformance/conformance-variables
+          ./conformance.test
+
+          time ./zb -c 10 -r conformance -n 100 http://localhost:8000
+          docker stop conformance-fs-backend
+
       - name: Run the conformance test & zot benchmark (s3 backend)
         run: |
           mkdir -p ./conformance/minio-data/registry
@@ -121,29 +143,6 @@ jobs:
           time ./zb -c 10 -r conformance -n 100 http://localhost:8000
           docker stop conformance-s3-backend
           docker stop minio-server
-
-      - name: Run the conformance test & zot benchmark (filesystem backend)
-        run: |
-          docker run --rm -d \
-            -v ./conformance/config-fs.toml:/config.toml \
-            --network host \
-            --name conformance-fs-backend \
-            ${CONFORMANCE_IMAGE_NAME} \
-            server
-
-          for i in {1..10}; do
-            if nc -z -w 3 127.0.0.1 8000; then
-              break
-            fi
-            sleep 1
-          done
-
-          source ./conformance/conformance-variables
-          ./conformance.test
-
-          # XXX: failing for now
-          # time ./zb -c 10 -r conformance -n 100 http://localhost:8000
-          docker stop conformance-fs-backend
 
   build:
     runs-on: ubuntu-latest

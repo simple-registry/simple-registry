@@ -229,13 +229,6 @@ impl DataPathBuilder {
         }
     }
 
-    pub fn get_link_parent_path(&self, reference: &DataLink, name: &str) -> String {
-        match reference {
-            DataLink::Tag(tag) => self.manifest_tag_link_parent_dir(name, tag),
-            _ => self.get_link_container_path(reference, name),
-        }
-    }
-
     pub fn get_link_container_path(&self, reference: &DataLink, name: &str) -> String {
         match reference {
             DataLink::Tag(tag) => self.manifest_tag_link_container_dir(name, tag),

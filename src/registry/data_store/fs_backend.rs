@@ -14,7 +14,7 @@ use std::io::{ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, File};
-use tokio::io::{copy, AsyncRead, AsyncSeekExt};
+use tokio::io::{copy, AsyncRead, AsyncSeekExt, AsyncWriteExt};
 use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
@@ -212,6 +212,21 @@ impl FSBackend {
             (items, None)
         }
     }
+
+    async fn sync_write<P>(path: P, contents: &[u8]) -> Result<(), Error>
+    where
+        P: AsRef<Path>,
+    {
+        if let Some(parent) = path.as_ref().parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        let mut file = File::create(&path).await?;
+        file.write_all(contents).await?;
+        file.flush().await?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -357,26 +372,14 @@ impl DataStore for FSBackend {
             .lock_store
             .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
-        let container_dir = self.tree.upload_container_path(name, uuid);
-        fs::create_dir_all(&container_dir).await?;
-
         let content_path = self.tree.upload_path(name, uuid);
-        fs::write(content_path, "").await?;
-
-        let container_dir = self.tree.upload_start_date_container_dir(name, uuid);
-        fs::create_dir_all(&container_dir).await?;
+        Self::sync_write(&content_path, &[]).await?;
 
         let date_path = self.tree.upload_start_date_path(name, uuid);
-        fs::write(date_path, Utc::now().to_rfc3339()).await?;
-
-        let container_dir = self
-            .tree
-            .upload_hash_context_container_path(name, uuid, "sha256");
-        fs::create_dir_all(&container_dir).await?;
+        Self::sync_write(&date_path, Utc::now().to_rfc3339().as_bytes()).await?;
 
         let path = self.tree.upload_hash_context_path(name, uuid, "sha256", 0);
-        let state = Sha256::serialized_empty_state();
-        fs::write(&path, state).await?;
+        Self::sync_write(&path, &Sha256::serialized_empty_state()).await?;
 
         Ok(uuid.to_string())
     }
@@ -421,11 +424,12 @@ impl DataStore for FSBackend {
 
         let mut stream = HashingReader::with_hash_state(stream, &state)?;
         let upload_size = upload_size + copy(&mut stream, &mut file).await?;
+        file.flush().await?;
 
         let path = self
             .tree
             .upload_hash_context_path(name, uuid, "sha256", upload_size);
-        fs::write(&path, &stream.hash_state()).await?;
+        Self::sync_write(&path, &stream.hash_state()).await?;
 
         Ok(())
     }
@@ -534,11 +538,8 @@ impl DataStore for FSBackend {
             .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
 
-        let blob_root = self.tree.blob_container_dir(&digest);
-        fs::create_dir_all(&blob_root).await?;
-
         let blob_path = self.tree.blob_path(&digest);
-        fs::write(blob_path, content).await?;
+        Self::sync_write(blob_path, content).await?;
 
         Ok(digest)
     }
@@ -708,12 +709,8 @@ impl DataStore for FSBackend {
             _ => {}
         }
 
-        let path = self.tree.get_link_parent_path(reference, namespace);
-        debug!("Creating link container dir at path: {}", path);
-        fs::create_dir_all(&path).await?;
-
         debug!("Creating link at path: {}", link_path);
-        fs::write(&link_path, digest.to_string()).await?;
+        Self::sync_write(&link_path, digest.to_string().as_bytes()).await?;
 
         debug!("Increasing reference count for digest: {}", digest);
 
