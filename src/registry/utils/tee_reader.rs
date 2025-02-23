@@ -12,6 +12,7 @@ use tokio::{
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::StreamReader;
+use tracing::error;
 
 /// A helper type that converts an MPSC Receiver of byte chunks into an `AsyncRead`.
 pub struct ChannelReader {
@@ -50,20 +51,18 @@ impl AsyncRead for ChannelReader {
 /// # Arguments
 /// - `reader`: The underlying source which implements `AsyncRead`.
 /// - `buffer_size`: The size of the temporary read buffer.
-/// - `channel_capacity`: The maximum number of chunks buffered for each consumer.
 ///
 /// # Returns
 /// A future resolving to a pair of `AsyncRead` handles.
 pub async fn tee_reader<R>(
     mut reader: R,
     buffer_size: usize,
-    channel_capacity: usize,
 ) -> io::Result<(ChannelReader, ChannelReader)>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    let (tx1, rx1) = mpsc::channel::<io::Result<Bytes>>(channel_capacity);
-    let (tx2, rx2) = mpsc::channel::<io::Result<Bytes>>(channel_capacity);
+    let (tx1, rx1) = mpsc::channel::<io::Result<Bytes>>(10);
+    let (tx2, rx2) = mpsc::channel::<io::Result<Bytes>>(10);
 
     // Spawn a background task to read from the source.
     task::spawn(async move {
@@ -72,16 +71,23 @@ where
             match reader.read(&mut buf).await {
                 Ok(0) => break, // EOF reached.
                 Ok(n) => {
-                    // Send the chunk to both channels concurrently.
-                    let send1 = tx1.send(Ok(Bytes::copy_from_slice(&buf[..n])));
-                    let send2 = tx2.send(Ok(Bytes::copy_from_slice(&buf[..n])));
+                    let chunk = Bytes::copy_from_slice(&buf[..n]);
+                    let send1 = tx1.send(Ok(chunk.clone()));
+                    let send2 = tx2.send(Ok(chunk));
                     if try_join(send1, send2).await.is_err() {
-                        // If at least one receiver has dropped, stop reading.
+                        // If at least one receiver has dropped, stop reading, and notify an error to the other.
+                        tx1.send(Err(io::ErrorKind::BrokenPipe.into())).await.ok();
+                        tx2.send(Err(io::ErrorKind::BrokenPipe.into())).await.ok();
                         break;
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error reading from source: {e:?}");
+                    error!("Error reading from source: {e:?}");
+                    let _ = try_join(
+                        tx1.send(Err(e.kind().into())),
+                        tx2.send(Err(e.kind().into())),
+                    )
+                    .await;
                     break;
                 }
             }
@@ -102,7 +108,7 @@ mod tests {
     #[tokio::test]
     async fn test_tee_reader() {
         let data = b"hello world";
-        let (mut reader1, mut reader2) = tee_reader(&data[..], 4, 2).await.unwrap();
+        let (mut reader1, mut reader2) = tee_reader(&data[..], 4).await.unwrap();
 
         let (result1, result2) = tokio::join!(
             async {
