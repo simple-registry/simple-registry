@@ -12,15 +12,15 @@ lto = "fat"
 arc-swap = "1.7.1"
 argh = "0.1.13"
 argon2 = "0.5.3"
-async-trait = "0.1.85"
-aws-sdk-s3 = "1.71.0"
+async-trait = "0.1.86"
+aws-sdk-s3 = "1.76.0"
 base64 = "0.22.1"
 cel-interpreter = "0.9.0"
 chrono = "0.4.39"
 futures-util = { version = "0.3.31", default-features = false }
 hex = "0.4.3"
 http-body-util = "0.1.2"
-hyper = { version = "1.5.2" , features = ["full"]}
+hyper = { version = "1.6.0" , features = ["full"]}
 hyper-util = { version = "0.1.10", features = ["tokio", "server-graceful"] }
 hyper-rustls = "0.27.5"
 lazy_static = "1.5.0"
@@ -30,22 +30,22 @@ opentelemetry-otlp = "0.27.0"
 opentelemetry_sdk = { version = "0.27.1", features = ["rt-tokio"] }
 opentelemetry-semantic-conventions = { version = "0.27.0", features = ["semconv_experimental"] }
 opentelemetry-stdout = "0.27.0"
-redis = { version = "0.28.2", features = ["tokio-comp"] }
+redis = { version = "0.29.0", features = ["tokio-comp"] }
 regex = "1.11.1"
-rustls = { version = "0.23.21", features = ["aws-lc-rs"] }
+rustls = { version = "0.23.23", features = ["aws-lc-rs"] }
 rustls-native-certs = "0.8.1"
-rustls-pki-types = "1.10.1"
-serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.137"
+rustls-pki-types = "1.11.0"
+serde = { version = "1.0.218", features = ["derive"] }
+serde_json = "1.0.139"
 serde_urlencoded = "0.7.1"
 sha2 = "0.11.0-pre.4"
 tokio = { version = "1.43.0", features = ["full", "tracing"] }
 tokio-rustls = "0.26.1"
 tokio-util = "0.7.13"
-toml = "0.8.19"
+toml = "0.8.20"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tracing-opentelemetry = "0.28.0"
 uuid = { version = "1.12.1", features = ["v4", "serde"] }
-x509-parser = "0.16.0"
+x509-parser = "0.17.0"
 tokio-stream = "0.1.17"
