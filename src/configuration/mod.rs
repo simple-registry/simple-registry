@@ -54,8 +54,6 @@ pub struct ServerConfig {
     #[serde(default = "ServerConfig::default_query_timeout_grace_period")]
     pub query_timeout_grace_period: u64,
     pub tls: Option<ServerTlsConfig>,
-    #[serde(default = "ServerConfig::default_streaming_chunk_size")]
-    pub streaming_chunk_size: DataSize,
 }
 
 impl ServerConfig {
@@ -69,10 +67,6 @@ impl ServerConfig {
 
     fn default_query_timeout_grace_period() -> u64 {
         60
-    }
-
-    fn default_streaming_chunk_size() -> DataSize {
-        DataSize::WithUnit(50, "MIB".to_string())
     }
 }
 
@@ -144,8 +138,8 @@ pub struct StorageS3Config {
     pub multipart_copy_chunk_size: DataSize,
     #[serde(default = "StorageS3Config::default_multipart_copy_jobs")]
     pub multipart_copy_jobs: usize,
-    #[serde(default = "StorageS3Config::default_multipart_min_part_size")]
-    pub multipart_min_part_size: DataSize,
+    #[serde(default = "StorageS3Config::default_multipart_part_size")]
+    pub multipart_part_size: DataSize,
 }
 
 impl StorageS3Config {
@@ -161,8 +155,8 @@ impl StorageS3Config {
         4
     }
 
-    fn default_multipart_min_part_size() -> DataSize {
-        DataSize::WithUnit(5, "MIB".to_string())
+    fn default_multipart_part_size() -> DataSize {
+        DataSize::WithUnit(100, "MIB".to_string())
     }
 }
 
@@ -239,19 +233,12 @@ impl Configuration {
         })?;
 
         if let DataStoreConfig::S3(storage) = &config.storage {
-            if storage.multipart_min_part_size.to_usize() < 5 * 1024 * 1024 {
+            if storage.multipart_part_size.to_usize() < 50 * 1024 * 1024 {
                 return Err(Error::StreamingChunkSize(
-                    "Multipart part size must be at least 5MiB".to_string(),
+                    "Multipart part size must be at least 50MiB".to_string(),
                 ));
             }
         };
-
-        let streaming_chunk_size = config.server.streaming_chunk_size.to_usize();
-        if streaming_chunk_size < 5 * 1024 * 1024 {
-            return Err(Error::StreamingChunkSize(
-                "Streaming chunk size must be at least 5MiB".to_string(),
-            ));
-        }
         Ok(config)
     }
 }
@@ -277,10 +264,6 @@ mod tests {
         assert_eq!(config.server.port, 8000);
         assert_eq!(config.server.query_timeout, 3600);
         assert_eq!(config.server.query_timeout_grace_period, 60);
-        assert_eq!(
-            config.server.streaming_chunk_size.to_usize(),
-            50 * 1024 * 1024
-        );
         assert!(config.lock_store.redis.is_none());
         assert!(config.cache_store.redis.is_none());
         assert_eq!(

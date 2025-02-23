@@ -38,7 +38,6 @@ lazy_static! {
 }
 
 pub struct Registry<D> {
-    streaming_chunk_size: usize,
     storage_engine: Arc<D>,
     repositories: HashMap<String, Repository>,
     scrub_dry_run: bool,
@@ -55,7 +54,6 @@ impl<D: DataStore> Registry<D> {
     #[instrument(skip(repositories_config, storage_engine, token_cache))]
     pub fn new(
         repositories_config: HashMap<String, RepositoryConfig>,
-        streaming_chunk_size: usize,
         storage_engine: Arc<D>,
         token_cache: Arc<CacheStore>,
     ) -> Result<Self, configuration::Error> {
@@ -66,7 +64,6 @@ impl<D: DataStore> Registry<D> {
         }
 
         let res = Self {
-            streaming_chunk_size,
             storage_engine,
             repositories,
             scrub_dry_run: true,

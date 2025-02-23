@@ -23,7 +23,6 @@ TLS files are also automatically reloaded on changes if they are valid.
 - `port` (uint16): The port to bind the server to
 - `query_timeout` (uint64): The timeout for queries in seconds
 - `query_timeout_grace_period` (uint64): The grace period for queries in seconds
-- `streaming_chunk_size` (uint64 | string): The chunk size for streaming in bytes (both downloading and pull-through blob caching)
 
 ### Optional TLS (`server.tls`)
 
@@ -74,7 +73,7 @@ Multiple storage backends are supported: filesystem or s3-baked.
 - `bucket` (string): The bucket for the S3 server
 - `region` (string): The region for the S3 server
 - `key_prefix` (optional, string): The key prefix for all s3 keys
-- `multipart_min_part_size` (uint64 | string): The minimum part size for multipart copy in bytes (default: 5MB)
+  `multipart_part_size` (uint64 | string): The minimum part size for multipart uploads in bytes (default: 100MB)
 - `multipart_copy_threshold` (uint64 | string): The threshold for multipart copy in bytes (default: 5GB)
 - `multipart_copy_chunk_size` (uint64 | string): The chunk size for multipart copy in bytes (default: 100MB)
 - `multipart_copy_jobs` (usize): The max number of concurrent multipart copy jobs (default: 4)

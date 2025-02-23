@@ -40,7 +40,7 @@ pub struct S3Backend {
     multipart_copy_threshold: u64,
     multipart_copy_chunk_size: u64,
     multipart_copy_jobs: usize,
-    multipart_min_part_size: u64,
+    multipart_part_size: u64,
 }
 
 impl Debug for S3Backend {
@@ -83,7 +83,7 @@ impl S3Backend {
             multipart_copy_threshold: config.multipart_copy_threshold.to_u64(),
             multipart_copy_chunk_size: config.multipart_copy_chunk_size.to_u64(),
             multipart_copy_jobs: config.multipart_copy_jobs,
-            multipart_min_part_size: config.multipart_min_part_size.to_u64(),
+            multipart_part_size: config.multipart_part_size.to_u64(),
         }
     }
 
@@ -974,7 +974,7 @@ impl DataStore for S3Backend {
             chunk.extend(stream_chunk);
             let chunk_len = chunk.len() as u64;
 
-            if chunk_len >= self.multipart_min_part_size {
+            if chunk_len >= self.multipart_part_size {
                 // The hash computation must take into account:
                 // - completed parts
                 // - current staged chunk if any + source: chunk.len()
