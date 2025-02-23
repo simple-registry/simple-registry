@@ -1296,6 +1296,11 @@ impl DataStore for S3Backend {
         match self.read_link(namespace, reference).await.ok() {
             Some(existing_digest) if existing_digest == *digest => return Ok(()),
             Some(existing_digest) if existing_digest != *digest => {
+                let _existing_digest_guard = self
+                    .lock_store
+                    .acquire_write_lock(&existing_digest.to_string())
+                    .await;
+
                 self.delete_object(&link_path).await?;
 
                 let is_referenced = self

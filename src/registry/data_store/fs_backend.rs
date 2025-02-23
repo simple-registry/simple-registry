@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{self, File};
 use tokio::io::{copy, AsyncRead, AsyncSeekExt, AsyncWriteExt};
+use tokio::time::{sleep, Duration};
 use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
@@ -224,6 +225,16 @@ impl FSBackend {
         let mut file = File::create(&path).await?;
         file.write_all(contents).await?;
         file.flush().await?;
+        file.sync_all().await?;
+
+        loop {
+            // XXX: hack for crappy filesystems
+            let metadata = file.metadata().await?;
+            if metadata.len() == contents.len() as u64 {
+                break
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
 
         Ok(())
     }
@@ -483,7 +494,7 @@ impl DataStore for FSBackend {
             hasher.to_digest()
         };
 
-        let _guard = self
+        let _digest_guard = self
             .lock_store
             .acquire_write_lock(&digest.to_string())
             .await;
@@ -528,7 +539,7 @@ impl DataStore for FSBackend {
         hasher.update(content);
         let digest = hasher.to_digest();
 
-        let _guard = self
+        let _digest_guard = self
             .lock_store
             .acquire_write_lock(&digest.to_string())
             .await;
@@ -612,7 +623,7 @@ impl DataStore for FSBackend {
 
     #[instrument(skip(self))]
     async fn delete_blob(&self, digest: &Digest) -> Result<(), Error> {
-        let _guard = self
+        let _digest_guard = self
             .lock_store
             .acquire_write_lock(&digest.to_string())
             .await;
@@ -674,11 +685,11 @@ impl DataStore for FSBackend {
         digest: &Digest,
     ) -> Result<(), Error> {
         debug!(
-            "Creating link for namespace: {}, reference: {:?}",
+            "Creating or updating link for namespace: {}, reference: {:?}",
             namespace, reference
         );
 
-        let _guard = self
+        let _digest_guard = self
             .lock_store
             .acquire_write_lock(&digest.to_string())
             .await;
@@ -692,7 +703,10 @@ impl DataStore for FSBackend {
         match self.read_link(namespace, reference).await.ok() {
             Some(existing_digest) if &existing_digest == digest => return Ok(()),
             Some(existing_digest) if &existing_digest != digest => {
-                let _ = fs::remove_file(&link_path).await;
+                let _existing_digest_guard = self
+                    .lock_store
+                    .acquire_write_lock(&existing_digest.to_string())
+                    .await;
 
                 let is_referenced = self
                     .blob_link_index_update(namespace, digest, |index| {
@@ -729,11 +743,21 @@ impl DataStore for FSBackend {
             "Deleting link for namespace: {}, reference: {:?}",
             namespace, reference
         );
+
         let digest = match self.read_link(namespace, reference).await {
             Ok(digest) => digest,
             Err(Error::ReferenceNotFound) => return Ok(()),
             Err(e) => return Err(e),
         };
+
+        let _digest_guard = self
+            .lock_store
+            .acquire_write_lock(&digest.to_string())
+            .await;
+        let _guard = self
+            .lock_store
+            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
+            .await;
 
         let link_path = self.tree.get_link_path(reference, namespace);
         if fs::metadata(&link_path).await.is_err() {
@@ -742,15 +766,6 @@ impl DataStore for FSBackend {
 
         let path = self.tree.get_link_container_path(reference, namespace);
         debug!("Deleting link at path: {}", path);
-
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
 
         let _ = self.delete_empty_parent_dirs(&path).await;
 

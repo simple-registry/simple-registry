@@ -6,7 +6,7 @@ use crate::registry::{Error, Registry, Repository};
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::Method;
 use tokio::io::AsyncReadExt;
-use tracing::{debug, error, instrument, warn};
+use tracing::{error, instrument, warn};
 
 pub struct GetManifestResponse {
     pub media_type: Option<String>,
@@ -35,10 +35,7 @@ pub fn parse_manifest_digests(
     body: &[u8],
     content_type: Option<&String>,
 ) -> Result<ParsedManifestDigests, Error> {
-    let manifest: Manifest = serde_json::from_slice(body).map_err(|e| {
-        debug!("Failed to deserialize manifest: {}", e);
-        Error::ManifestInvalid("Failed to deserialize manifest".to_string())
-    })?;
+    let manifest: Manifest = serde_json::from_slice(body).unwrap_or_default();
 
     if content_type.is_some()
         && manifest.media_type.is_some()
@@ -208,7 +205,8 @@ impl<D: DataStore> Registry<D> {
 
         let content = self.storage_engine.read_blob(&digest).await?;
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|e| {
-            debug!("Failed to deserialize manifest: {}", e);
+            warn!("Failed to deserialize manifest (2): {}", e);
+            warn!("Manifest content: {:?}", String::from_utf8_lossy(&content));
             Error::ManifestInvalid("Failed to deserialize manifest".to_string())
         })?;
 
