@@ -392,7 +392,7 @@ impl S3Backend {
         namespace: &str,
         digest: &Digest,
         operation: O,
-    ) -> Result<bool, Error>
+    ) -> Result<(), Error>
     where
         O: FnOnce(&mut HashSet<DataLink>),
     {
@@ -415,12 +415,15 @@ impl S3Backend {
             reference_index.namespace.remove(namespace);
         }
 
-        let is_referenced = !reference_index.namespace.is_empty();
+        if reference_index.namespace.is_empty() {
+            let path = self.tree.blob_container_dir(digest);
+            self.delete_object_with_prefix(&path).await?;
+        } else {
+            let content = serde_json::to_vec(&reference_index)?;
+            self.put_object(&path, content).await?;
+        }
 
-        let content = serde_json::to_vec(&reference_index)?;
-        self.put_object(&path, content).await?;
-
-        Ok(is_referenced)
+        Ok(())
     }
 
     #[instrument(skip(self))]
@@ -1136,7 +1139,6 @@ impl DataStore for S3Backend {
 
         let blob_path = self.tree.blob_path(&digest);
         self.copy_object(&blob_path, &key).await?;
-        self.blob_link_index_update(name, &digest, |_| {}).await?;
 
         // NOTE: in case of error, remaining parts will be deleted by the scrub job
         let key = self.tree.upload_container_path(name, uuid);
@@ -1306,16 +1308,10 @@ impl DataStore for S3Backend {
 
                 self.delete_object(&link_path).await?;
 
-                let is_referenced = self
-                    .blob_link_index_update(namespace, digest, |index| {
-                        index.remove(reference);
-                    })
-                    .await?;
-
-                if !is_referenced {
-                    let path = self.tree.blob_container_dir(digest);
-                    self.delete_object_with_prefix(&path).await?;
-                }
+                self.blob_link_index_update(namespace, digest, |index| {
+                    index.remove(reference);
+                })
+                .await?;
             }
             _ => {}
         }
@@ -1348,16 +1344,10 @@ impl DataStore for S3Backend {
 
         self.delete_object(&link_path).await?;
 
-        let is_referenced = self
-            .blob_link_index_update(namespace, &digest, |index| {
-                index.remove(reference);
-            })
-            .await?;
-
-        if !is_referenced {
-            let path = self.tree.blob_container_dir(&digest);
-            self.delete_object_with_prefix(&path).await?;
-        }
+        self.blob_link_index_update(namespace, &digest, |index| {
+            index.remove(reference);
+        })
+        .await?;
 
         Ok(())
     }

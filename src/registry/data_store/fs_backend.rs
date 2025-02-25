@@ -140,7 +140,7 @@ impl FSBackend {
         namespace: &str,
         digest: &Digest,
         operation: O,
-    ) -> Result<bool, Error>
+    ) -> Result<(), Error>
     where
         O: FnOnce(&mut HashSet<DataLink>),
     {
@@ -173,15 +173,18 @@ impl FSBackend {
             }
         };
 
-        let is_referenced = !reference_index.namespace.is_empty();
+        if reference_index.namespace.is_empty() {
+            debug!("Deleting no longer referenced Blob: {}", digest);
+            let path = self.tree.blob_container_dir(digest);
+            let _ = self.delete_empty_parent_dirs(&path).await;
+        } else {
+            debug!("Writing reference count to path: {}", path);
+            let content = serde_json::to_string(&reference_index)?;
+            fs::write(&path, content).await?;
+            debug!("Reference index for {} updated", digest);
+        }
 
-        debug!("Writing reference count to path: {}", path);
-        let content = serde_json::to_string(&reference_index)?;
-        fs::write(&path, content).await?;
-
-        debug!("Reference index for {} updated", digest);
-
-        Ok(is_referenced)
+        Ok(())
     }
 
     pub fn paginate<T>(
@@ -483,15 +486,16 @@ impl DataStore for FSBackend {
         let path = self.tree.upload_path(name, uuid);
         let size = self.get_file_size(&path, Error::UploadNotFound).await?;
 
-        let digest = if let Some(digest) = digest {
-            digest
-        } else {
-            let path = self
-                .tree
-                .upload_hash_context_path(name, uuid, "sha256", size);
-            let state = fs::read(&path).await?;
-            let hasher = Sha256::deserialize_state(&state)?;
-            hasher.to_digest()
+        let digest = match digest {
+            Some(digest) => digest,
+            None => {
+                let path = self
+                    .tree
+                    .upload_hash_context_path(name, uuid, "sha256", size);
+                let state = fs::read(&path).await?;
+                let hasher = Sha256::deserialize_state(&state)?;
+                hasher.to_digest()
+            }
         };
 
         let _digest_guard = self
@@ -509,10 +513,6 @@ impl DataStore for FSBackend {
         let upload_path = self.tree.upload_path(name, uuid);
         let blob_path = self.tree.blob_path(&digest);
         fs::rename(&upload_path, &blob_path).await?;
-
-        let _ = self
-            .blob_link_index_update(name, &digest, |_| { /* NO-OP */ })
-            .await?;
 
         let path = self.tree.upload_container_path(name, uuid);
         let _ = self.delete_empty_parent_dirs(&path).await;
@@ -708,17 +708,10 @@ impl DataStore for FSBackend {
                     .acquire_write_lock(&existing_digest.to_string())
                     .await;
 
-                let is_referenced = self
-                    .blob_link_index_update(namespace, digest, |index| {
-                        index.remove(reference);
-                    })
-                    .await?;
-
-                if !is_referenced {
-                    debug!("Deleting no longer referenced Blob: {}", digest);
-                    let path = self.tree.blob_container_dir(digest);
-                    let _ = self.delete_empty_parent_dirs(&path).await;
-                }
+                self.blob_link_index_update(namespace, digest, |index| {
+                    index.remove(reference);
+                })
+                .await?;
             }
             _ => {}
         }
@@ -728,11 +721,10 @@ impl DataStore for FSBackend {
 
         debug!("Increasing reference count for digest: {}", digest);
 
-        let _ = self
-            .blob_link_index_update(namespace, digest, |index| {
-                index.insert(reference.clone());
-            })
-            .await?;
+        self.blob_link_index_update(namespace, digest, |index| {
+            index.insert(reference.clone());
+        })
+        .await?;
 
         Ok(())
     }
@@ -770,18 +762,10 @@ impl DataStore for FSBackend {
         let _ = self.delete_empty_parent_dirs(&path).await;
 
         debug!("Unregistering reference: {:?}", reference);
-
-        let is_referenced = self
-            .blob_link_index_update(namespace, &digest, |index| {
-                index.remove(reference);
-            })
-            .await?;
-
-        if !is_referenced {
-            debug!("Deleting no longer referenced Blob: {}", digest);
-            let path = self.tree.blob_container_dir(&digest);
-            let _ = self.delete_empty_parent_dirs(&path).await;
-        }
+        self.blob_link_index_update(namespace, &digest, |index| {
+            index.remove(reference);
+        })
+        .await?;
 
         Ok(())
     }
