@@ -41,11 +41,11 @@ impl<D: DataStore + 'static> InsecureListener<D> {
             let stream = TokioIo::new(tcp);
             let context = self.context.load();
 
-            tokio::spawn(serve_request(
+            tokio::spawn(Box::pin(serve_request(
                 stream,
                 context.clone(),
                 ClientIdentity::default(),
-            ));
+            )));
         }
     }
 }

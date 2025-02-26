@@ -116,7 +116,7 @@ impl<D: DataStore + 'static> TlsListener<D> {
                 let stream = TokioIo::new(tls);
                 let context = self.context.load();
 
-                tokio::spawn(serve_request(stream, context.clone(), identity));
+                tokio::spawn(Box::pin(serve_request(stream, context.clone(), identity)));
             }
         }
     }
