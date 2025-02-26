@@ -26,7 +26,7 @@ use crate::registry::data_store::{BlobEntityLinkIndex, DataStore, Error, Reader,
 use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
-use crate::registry::utils::{DataLink, DataPathBuilder, HashingReader};
+use crate::registry::utils::{DataLink, DataPathBuilder};
 
 const PUSHED_AT_METADATA_KEY: &str = "pushed";
 const LAST_PULLED_AT_METADATA_KEY: &str = "last-pulled";
@@ -919,7 +919,7 @@ impl DataStore for S3Backend {
         &self,
         name: &str,
         uuid: &str,
-        stream: S,
+        mut stream: S,
         append: bool,
     ) -> Result<(), Error> {
         let upload_path = self.tree.upload_path(name, uuid);
@@ -964,7 +964,7 @@ impl DataStore for S3Backend {
         // we store it in as a staging blob.
         // First, we load the staged chunk if any and append the new data
         let mut chunk = self.load_staged_chunk(name, uuid, uploaded_size).await?;
-        let mut stream = HashingReader::with_hash_state(stream, &state)?;
+        let mut hasher = Sha256::deserialize_state(&state)?;
 
         let stream_chunk_size =
             usize::try_from(self.multipart_part_size).unwrap_or(100 * 10 * 1024 * 1024);
@@ -978,6 +978,8 @@ impl DataStore for S3Backend {
 
             let stream_chunk = &stream_chunk[..bytes_read];
             chunk.extend(stream_chunk);
+            hasher.update(stream_chunk);
+
             let chunk_len = chunk.len() as u64;
 
             if chunk_len >= self.multipart_part_size {
@@ -990,7 +992,7 @@ impl DataStore for S3Backend {
                     "sha256",
                     uploaded_size + chunk_len,
                 );
-                self.put_object(&hash_state_path, stream.hash_state())
+                self.put_object(&hash_state_path, hasher.serialize_state())
                     .await?;
 
                 self.upload_part(&upload_path, &upload_id, uploaded_parts, chunk.clone())
@@ -1012,7 +1014,7 @@ impl DataStore for S3Backend {
                 "sha256",
                 uploaded_size + (chunk.len() as u64),
             );
-            self.put_object(&hash_state_path, stream.hash_state())
+            self.put_object(&hash_state_path, hasher.serialize_state())
                 .await?;
 
             self.store_staged_chunk(name, uuid, chunk, uploaded_size)
