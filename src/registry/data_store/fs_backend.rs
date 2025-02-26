@@ -3,20 +3,25 @@ use crate::registry::data_store::{BlobEntityLinkIndex, DataStore, Error, Reader,
 use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
-use crate::registry::utils::{DataLink, DataPathBuilder, HashingReader};
+use crate::registry::utils::{DataLink, DataPathBuilder};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sha2::{Digest as Sha256Digest, Sha256};
 use std::collections::HashSet;
-use std::fmt;
 use std::fmt::{Debug, Formatter};
+use std::fs::{File, OpenOptions};
+use std::io::Seek;
+use std::io::Write;
 use std::io::{ErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::fs::{self, File};
-use tokio::io::{copy, AsyncRead, AsyncSeekExt, AsyncWriteExt};
-use tokio::time::{sleep, Duration};
+use std::{fmt, fs};
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio_io_compat::CompatHelperTrait;
 use tracing::{debug, error, instrument};
+
+// NOTE: since async FS operations perform very poorly on most platforms, we choose to use standard
+// synchronous IO operations as much as possible (while keeping reasonable complexity).
 
 #[derive(Clone)]
 pub struct FSBackend {
@@ -42,7 +47,7 @@ impl FSBackend {
 
     #[instrument]
     pub async fn get_file_size(&self, path: &str, not_found_error: Error) -> Result<u64, Error> {
-        match fs::metadata(&path).await {
+        match fs::metadata(path) {
             Ok(metadata) => Ok(metadata.len()),
             Err(e) if e.kind() == ErrorKind::NotFound => Err(not_found_error),
             Err(e) => Err(e.into()),
@@ -55,8 +60,8 @@ impl FSBackend {
         let mut repositories = Vec::new();
 
         while let Some(current_path) = path_stack.pop() {
-            if let Ok(mut entries) = fs::read_dir(&current_path).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Ok(mut entries) = fs::read_dir(&current_path) {
+                while let Some(Ok(entry)) = entries.next() {
                     let path = entry.path();
 
                     if path.is_dir() {
@@ -90,14 +95,14 @@ impl FSBackend {
     #[instrument]
     pub async fn collect_directory_entries(&self, path: &str) -> Result<Vec<String>, Error> {
         let mut entries = Vec::new();
-        let mut read_dir = match fs::read_dir(&path).await {
+        let read_dir = match fs::read_dir(path) {
             Ok(rd) => rd,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(entries),
             Err(e) => return Err(e.into()),
         };
 
-        while let Some(entry) = read_dir.next_entry().await? {
-            if let Some(name) = entry.file_name().to_str() {
+        for entry in read_dir {
+            if let Some(name) = entry?.file_name().to_str() {
                 entries.push(name.to_string());
             }
         }
@@ -110,7 +115,7 @@ impl FSBackend {
         let path = PathBuf::from(path);
         let root_dir = Path::new(&self.tree.prefix);
 
-        let _ = fs::remove_dir_all(&path).await;
+        let _ = fs::remove_dir_all(&path);
 
         let mut parent = path.parent();
         while let Some(parent_path) = parent {
@@ -118,16 +123,18 @@ impl FSBackend {
                 break;
             }
 
-            let Ok(mut entries) = fs::read_dir(&parent_path).await else {
+            let Ok(mut entries) = fs::read_dir(parent_path) else {
                 break;
             };
 
-            if entries.next_entry().await?.is_some() {
-                break;
+            if let Some(entry) = entries.next() {
+                if entry.is_ok() {
+                    break;
+                }
             }
 
             debug!("Deleting empty parent dir: {}", parent_path.display());
-            fs::remove_dir(parent_path).await?;
+            fs::remove_dir(parent_path)?;
 
             parent = parent_path.parent();
         }
@@ -146,12 +153,12 @@ impl FSBackend {
     {
         debug!("Ensuring container directory for digest: {}", digest);
         let path = self.tree.blob_container_dir(digest);
-        fs::create_dir_all(&path).await?;
+        fs::create_dir_all(&path)?;
 
         debug!("Updating reference count for digest: {}", digest);
         let path = self.tree.blob_index_path(digest);
 
-        let mut reference_index = match fs::read_to_string(&path).await {
+        let mut reference_index = match fs::read_to_string(&path) {
             Ok(content) => serde_json::from_str::<BlobEntityLinkIndex>(&content)?,
             Err(e) if e.kind() == ErrorKind::NotFound => BlobEntityLinkIndex::default(),
             Err(e) => Err(e)?,
@@ -180,7 +187,7 @@ impl FSBackend {
         } else {
             debug!("Writing reference count to path: {}", path);
             let content = serde_json::to_string(&reference_index)?;
-            fs::write(&path, content).await?;
+            fs::write(&path, content)?;
             debug!("Reference index for {} updated", digest);
         }
 
@@ -217,27 +224,16 @@ impl FSBackend {
         }
     }
 
-    async fn sync_write<P>(path: P, contents: &[u8]) -> Result<(), Error>
+    fn write_file<P>(path: P, contents: &[u8]) -> Result<(), Error>
     where
         P: AsRef<Path>,
     {
         if let Some(parent) = path.as_ref().parent() {
-            fs::create_dir_all(parent).await?;
+            fs::create_dir_all(parent)?;
         }
 
-        let mut file = File::create(&path).await?;
-        file.write_all(contents).await?;
-        file.flush().await?;
-        file.sync_all().await?;
-
-        loop {
-            // XXX: hack for crappy filesystems
-            let metadata = file.metadata().await?;
-            if metadata.len() == contents.len() as u64 {
-                break;
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
+        let mut file = File::create(&path)?;
+        file.write_all(contents)?;
 
         Ok(())
     }
@@ -293,7 +289,7 @@ impl DataStore for FSBackend {
             let manifest_digest = Digest::Sha256(manifest_digest);
             let blob_path = self.tree.blob_path(&manifest_digest);
 
-            let manifest = fs::read(&blob_path).await?;
+            let manifest = fs::read(&blob_path)?;
             let manifest_len = manifest.len();
 
             let manifest = Manifest::from_slice(&manifest)?;
@@ -387,13 +383,13 @@ impl DataStore for FSBackend {
             .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
         let content_path = self.tree.upload_path(name, uuid);
-        Self::sync_write(&content_path, &[]).await?;
+        Self::write_file(&content_path, &[])?;
 
         let date_path = self.tree.upload_start_date_path(name, uuid);
-        Self::sync_write(&date_path, Utc::now().to_rfc3339().as_bytes()).await?;
+        Self::write_file(&date_path, Utc::now().to_rfc3339().as_bytes())?;
 
         let path = self.tree.upload_hash_context_path(name, uuid, "sha256", 0);
-        Self::sync_write(&path, &Sha256::serialized_empty_state()).await?;
+        Self::write_file(&path, &Sha256::serialized_empty_state())?;
 
         Ok(uuid.to_string())
     }
@@ -403,24 +399,23 @@ impl DataStore for FSBackend {
         &self,
         name: &str,
         uuid: &str,
-        stream: S,
+        mut stream: S,
         append: bool,
     ) -> Result<(), Error> {
         let upload_size = if append {
-            let (_, size, _) = self.read_upload_summary(name, uuid).await?;
-            size
+            let path = self.tree.upload_path(name, uuid);
+            self.get_file_size(&path, Error::UploadNotFound).await?
         } else {
             0
         };
 
         let file_path = self.tree.upload_path(name, uuid);
-        let mut file = fs::OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .append(false)
             .write(true)
             .open(&file_path)
-            .await
             .map_err(|e| {
                 error!("Error opening upload file {:}: {}", file_path, e);
                 match e.kind() {
@@ -429,22 +424,30 @@ impl DataStore for FSBackend {
                 }
             })?;
 
-        file.seek(SeekFrom::Start(upload_size)).await?;
+        file.seek(SeekFrom::Start(upload_size))?;
 
         let path = self
             .tree
             .upload_hash_context_path(name, uuid, "sha256", upload_size);
-        let state = fs::read(&path).await?;
+        let hash_state = fs::read(&path)?;
+        let mut hash = Sha256::deserialize_state(&hash_state)?;
 
-        let mut stream = HashingReader::with_hash_state(stream, &state)?;
-        let upload_size = upload_size + copy(&mut stream, &mut file).await?;
-        file.flush().await?;
+        // poll the stream asynchronously and synchronously write to the file
+        let mut buffer = vec![0; 8192];
+        let mut wrote_size = 0;
+        while let Ok(size) = stream.read(&mut buffer).await {
+            if size == 0 {
+                break;
+            }
+            file.write_all(&buffer[..size])?;
+            hash.update(&buffer[..size]);
+            wrote_size += size as u64;
+        }
 
-        let path = self
-            .tree
-            .upload_hash_context_path(name, uuid, "sha256", upload_size);
-        Self::sync_write(&path, &stream.hash_state()).await?;
-
+        let path =
+            self.tree
+                .upload_hash_context_path(name, uuid, "sha256", upload_size + wrote_size);
+        Self::write_file(&path, &hash.serialize_state())?;
         Ok(())
     }
 
@@ -460,14 +463,13 @@ impl DataStore for FSBackend {
         let path = self
             .tree
             .upload_hash_context_path(name, uuid, "sha256", size);
-        let state = fs::read(&path).await?;
+        let state = fs::read(&path)?;
 
         let hasher = Sha256::deserialize_state(&state)?;
         let digest = hasher.to_digest();
 
         let date = self.tree.upload_start_date_path(name, uuid);
         let start_date = fs::read_to_string(&date)
-            .await
             .ok()
             .and_then(|date| DateTime::parse_from_rfc3339(&date).ok())
             .unwrap_or_default() // Fallbacks to epoch
@@ -486,16 +488,15 @@ impl DataStore for FSBackend {
         let path = self.tree.upload_path(name, uuid);
         let size = self.get_file_size(&path, Error::UploadNotFound).await?;
 
-        let digest = match digest {
-            Some(digest) => digest,
-            None => {
-                let path = self
-                    .tree
-                    .upload_hash_context_path(name, uuid, "sha256", size);
-                let state = fs::read(&path).await?;
-                let hasher = Sha256::deserialize_state(&state)?;
-                hasher.to_digest()
-            }
+        let digest = if let Some(digest) = digest {
+            digest
+        } else {
+            let path = self
+                .tree
+                .upload_hash_context_path(name, uuid, "sha256", size);
+            let state = fs::read(&path)?;
+            let hasher = Sha256::deserialize_state(&state)?;
+            hasher.to_digest()
         };
 
         let _digest_guard = self
@@ -508,11 +509,11 @@ impl DataStore for FSBackend {
             .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
         let blob_root = self.tree.blob_container_dir(&digest);
-        fs::create_dir_all(&blob_root).await?;
+        fs::create_dir_all(&blob_root)?;
 
         let upload_path = self.tree.upload_path(name, uuid);
         let blob_path = self.tree.blob_path(&digest);
-        fs::rename(&upload_path, &blob_path).await?;
+        fs::rename(&upload_path, &blob_path)?;
 
         let path = self.tree.upload_container_path(name, uuid);
         let _ = self.delete_empty_parent_dirs(&path).await;
@@ -550,7 +551,7 @@ impl DataStore for FSBackend {
             .await;
 
         let blob_path = self.tree.blob_path(&digest);
-        Self::sync_write(blob_path, content).await?;
+        Self::write_file(blob_path, content)?;
 
         Ok(digest)
     }
@@ -558,13 +559,13 @@ impl DataStore for FSBackend {
     #[instrument(skip(self))]
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error> {
         let path = self.tree.blob_path(digest);
-        Ok(fs::read(path).await?)
+        Ok(fs::read(path)?)
     }
 
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
         let path = self.tree.blob_index_path(digest);
-        let content = fs::read_to_string(&path).await?;
+        let content = fs::read_to_string(&path)?;
 
         let index = serde_json::from_str(&content)?;
         Ok(index)
@@ -587,7 +588,7 @@ impl DataStore for FSBackend {
             _ => return Err(Error::ReferenceNotFound),
         };
 
-        let metadata = fs::metadata(&key).await?;
+        let metadata = fs::metadata(&key)?;
 
         let created_at = metadata.created()?;
         let created_at = DateTime::<Utc>::from(created_at).with_timezone(&Utc);
@@ -608,17 +609,17 @@ impl DataStore for FSBackend {
         start_offset: Option<u64>,
     ) -> Result<Box<dyn Reader>, Error> {
         let path = self.tree.blob_path(digest);
-        let mut file = match File::open(&path).await {
+        let mut file = match File::open(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == ErrorKind::NotFound => return Err(Error::BlobNotFound),
             Err(e) => return Err(e.into()),
         };
 
         if let Some(offset) = start_offset {
-            file.seek(SeekFrom::Start(offset)).await?;
+            file.seek(SeekFrom::Start(offset))?;
         }
 
-        Ok(Box::new(file))
+        Ok(Box::new(file.tokio_io()))
     }
 
     #[instrument(skip(self))]
@@ -643,16 +644,16 @@ impl DataStore for FSBackend {
         match reference {
             DataLink::Tag(_) => {
                 let path = self.tree.get_link_path(reference, name);
-                let _ = fs::metadata(&path).await?;
+                let _ = fs::metadata(&path)?;
 
                 let digest = self.read_link(name, reference).await?;
                 let link = DataLink::Digest(digest);
                 let path = self.tree.get_link_path(&link, name);
-                let _ = fs::metadata(&path).await?;
+                let _ = fs::metadata(&path)?;
             }
             DataLink::Digest(_) => {
                 let path = self.tree.get_link_path(reference, name);
-                let _ = fs::metadata(&path).await?;
+                let _ = fs::metadata(&path)?;
             }
             _ => {
                 return Ok(()); // No-op
@@ -671,7 +672,7 @@ impl DataStore for FSBackend {
         let path = self.tree.get_link_path(reference, name);
         debug!("Reading link at path: {}", path);
 
-        let link = fs::read_to_string(path).await?;
+        let link = fs::read_to_string(path)?;
         debug!("Link content: {}", link);
 
         Ok(Digest::try_from(link.as_str())?)
@@ -717,7 +718,7 @@ impl DataStore for FSBackend {
         }
 
         debug!("Creating link at path: {}", link_path);
-        Self::sync_write(&link_path, digest.to_string().as_bytes()).await?;
+        Self::write_file(&link_path, digest.to_string().as_bytes())?;
 
         debug!("Increasing reference count for digest: {}", digest);
 
@@ -752,7 +753,7 @@ impl DataStore for FSBackend {
             .await;
 
         let link_path = self.tree.get_link_path(reference, namespace);
-        if fs::metadata(&link_path).await.is_err() {
+        if fs::metadata(&link_path).is_err() {
             return Ok(());
         }
 

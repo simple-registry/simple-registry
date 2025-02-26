@@ -3049,6 +3049,7 @@ dependencies = [
  "serde_urlencoded",
  "sha2 0.11.0-pre.4",
  "tokio",
+ "tokio-io-compat",
  "tokio-rustls 0.26.1",
  "tokio-stream",
  "tokio-util",
@@ -3298,6 +3299,15 @@ dependencies = [
  "tokio-macros",
  "tracing",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "tokio-io-compat"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b00e15989f806f85bf3753c2fd372d7b27166c7f4ff2792ac57b9a682186aa93"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

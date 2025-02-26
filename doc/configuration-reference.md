@@ -63,6 +63,11 @@ Multiple storage backends are supported: filesystem or s3-baked.
 
 ### Filesystem Storage (`storage.fs`)
 
+> [!NOTE]
+> The filesystem storage backend is not leveraging the async API for filesystem operations.
+> The async implementation is inefficient on most platforms.
+> In scenarios where you need massive-scale parallelism, consider switching to S3-compatible storage.
+
 - `root_dir` (string): The root directory for the storage.
 
 ### S3 Storage (`storage.s3`)
