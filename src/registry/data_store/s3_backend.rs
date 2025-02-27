@@ -40,7 +40,7 @@ pub struct S3Backend {
     multipart_copy_threshold: u64,
     multipart_copy_chunk_size: u64,
     multipart_copy_jobs: usize,
-    multipart_part_size: u64,
+    multipart_part_size: usize,
 }
 
 impl Debug for S3Backend {
@@ -83,7 +83,7 @@ impl S3Backend {
             multipart_copy_threshold: config.multipart_copy_threshold.to_u64(),
             multipart_copy_chunk_size: config.multipart_copy_chunk_size.to_u64(),
             multipart_copy_jobs: config.multipart_copy_jobs,
-            multipart_part_size: config.multipart_part_size.to_u64(),
+            multipart_part_size: config.multipart_part_size.to_usize(),
         }
     }
 
@@ -966,10 +966,7 @@ impl DataStore for S3Backend {
         let mut chunk = self.load_staged_chunk(name, uuid, uploaded_size).await?;
         let mut hasher = Sha256::deserialize_state(&state)?;
 
-        let stream_chunk_size =
-            usize::try_from(self.multipart_part_size).unwrap_or(100 * 10 * 1024 * 1024);
-
-        let mut stream_chunk = vec![0; stream_chunk_size];
+        let mut stream_chunk = vec![0; self.multipart_part_size];
         loop {
             let bytes_read = stream.read(&mut stream_chunk).await?;
             if bytes_read == 0 {
@@ -980,9 +977,8 @@ impl DataStore for S3Backend {
             chunk.extend(stream_chunk);
             hasher.update(stream_chunk);
 
-            let chunk_len = chunk.len() as u64;
-
-            if chunk_len >= self.multipart_part_size {
+            if chunk.len() >= self.multipart_part_size {
+                let chunk_len = chunk.len() as u64;
                 // The hash computation must take into account:
                 // - completed parts
                 // - current staged chunk if any + source: chunk.len()
@@ -995,12 +991,12 @@ impl DataStore for S3Backend {
                 self.put_object(&hash_state_path, hasher.serialize_state())
                     .await?;
 
-                self.upload_part(&upload_path, &upload_id, uploaded_parts, chunk.clone())
+                self.upload_part(&upload_path, &upload_id, uploaded_parts, chunk)
                     .await?;
 
                 uploaded_parts += 1;
                 uploaded_size += chunk_len;
-                chunk.clear();
+                chunk = Vec::new();
             }
         }
 
@@ -1057,10 +1053,6 @@ impl DataStore for S3Backend {
             .ok()
             .unwrap_or_default() // Fallbacks to epoch
             .with_timezone(&Utc);
-
-        // don't forget to count the staging blob
-        let staged_path = self.tree.upload_staged_container_path(name, uuid, size);
-        size += self.get_object_size(&staged_path).await.unwrap_or_default();
 
         Ok((digest, size, start_date))
     }
