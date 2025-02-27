@@ -94,8 +94,14 @@ impl<D: DataStore> Registry<D> {
 
         let session_id = session_id.to_string();
 
+        let append = self
+            .storage_engine
+            .read_upload_summary(namespace, &session_id)
+            .await
+            .is_ok();
+
         self.storage_engine
-            .write_upload(namespace, &session_id, stream, false)
+            .write_upload(namespace, &session_id, stream, append)
             .await?;
 
         let (upload_digest, _, _) = self
