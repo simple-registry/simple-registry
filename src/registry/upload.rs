@@ -1,11 +1,8 @@
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::{Error, Registry};
-use futures_util::StreamExt;
-use http_body_util::BodyDataStream;
-use hyper::body::Incoming;
-use hyper::Request;
-use tracing::{debug, error, instrument, warn};
+use tokio::io::AsyncRead;
+use tracing::{error, instrument, warn};
 use uuid::Uuid;
 
 pub enum StartUploadResponse {
@@ -37,14 +34,17 @@ impl<D: DataStore> Registry<D> {
         Ok(StartUploadResponse::Session(location, session_uuid))
     }
 
-    #[instrument(skip(body))]
-    pub async fn patch_upload(
+    #[instrument(skip(stream))]
+    pub async fn patch_upload<S>(
         &self,
         namespace: &str,
         session_id: Uuid,
         start_offset: Option<u64>,
-        body: BodyDataStream<Request<Incoming>>,
-    ) -> Result<u64, Error> {
+        stream: S,
+    ) -> Result<u64, Error>
+    where
+        S: AsyncRead + Unpin + Send + Sync,
+    {
         self.validate_namespace(namespace)?;
 
         let session_id = session_id.to_string();
@@ -59,7 +59,8 @@ impl<D: DataStore> Registry<D> {
             }
         };
 
-        self.upload_body_chunk(namespace, &session_id, body, true)
+        self.storage_engine
+            .write_upload(namespace, &session_id, stream, true)
             .await?;
 
         let (_, size, _) = self
@@ -78,19 +79,29 @@ impl<D: DataStore> Registry<D> {
         Ok(size - 1)
     }
 
-    #[instrument(skip(body))]
-    pub async fn complete_upload(
+    #[instrument(skip(stream))]
+    pub async fn complete_upload<S>(
         &self,
         namespace: &str,
         session_id: Uuid,
         digest: Digest,
-        body: BodyDataStream<Request<Incoming>>,
-    ) -> Result<(), Error> {
+        stream: S,
+    ) -> Result<(), Error>
+    where
+        S: AsyncRead + Unpin + Send + Sync,
+    {
         self.validate_namespace(namespace)?;
 
         let session_id = session_id.to_string();
 
-        self.upload_body_chunk(namespace, &session_id, body, false)
+        let append = self
+            .storage_engine
+            .read_upload_summary(namespace, &session_id)
+            .await
+            .is_ok();
+
+        self.storage_engine
+            .write_upload(namespace, &session_id, stream, append)
             .await?;
 
         let (upload_digest, _, _) = self
@@ -109,46 +120,6 @@ impl<D: DataStore> Registry<D> {
         self.storage_engine
             .delete_upload(namespace, &session_id)
             .await?;
-
-        Ok(())
-    }
-
-    async fn upload_body_chunk(
-        &self,
-        namespace: &str,
-        session_id: &str,
-        mut body: BodyDataStream<Request<Incoming>>, // TODO: is there a mean to share this logic with the pull through channel?
-        mut append: bool,
-    ) -> Result<(), Error> {
-        let mut chunk = Vec::new();
-        while let Some(frame) = body.next().await {
-            let frame = frame.map_err(|e| {
-                error!("Data stream error: {}", e);
-                Error::Internal("Data stream error".to_string())
-            })?;
-            chunk.extend_from_slice(&frame);
-
-            while chunk.len() >= self.streaming_chunk_size {
-                debug!("Chunk too large, creating a part: {}", chunk.len());
-                let (current_part, next_part) = chunk.split_at(self.streaming_chunk_size);
-
-                self.storage_engine
-                    .write_upload(namespace, session_id, current_part, append)
-                    .await?;
-
-                if !append {
-                    append = true;
-                }
-                chunk = next_part.to_vec();
-            }
-        }
-
-        if !chunk.is_empty() {
-            debug!("Remaining chunk data, creating a part: {}", chunk.len());
-            self.storage_engine
-                .write_upload(namespace, session_id, &chunk, append)
-                .await?;
-        }
 
         Ok(())
     }

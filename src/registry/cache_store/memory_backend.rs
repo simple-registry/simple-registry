@@ -65,7 +65,7 @@ impl MemoryBackend {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use std::time::Duration;
 

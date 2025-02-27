@@ -15,12 +15,7 @@ impl MemoryBackend {
         }
     }
 
-    pub async fn acquire_read_lock(&self, key: &str) -> MemoryReadLockGuard {
-        let lock = self.get_lock_for_key(key).await;
-        lock.read_owned().await
-    }
-
-    pub async fn acquire_write_lock(&self, key: &str) -> MemoryWriteLockGuard {
+    pub async fn acquire_lock(&self, key: &str) -> MemoryLockGuard {
         let lock = self.get_lock_for_key(key).await;
         lock.write_owned().await
     }
@@ -51,33 +46,17 @@ impl MemoryBackend {
     }
 }
 
-pub type MemoryReadLockGuard = tokio::sync::OwnedRwLockReadGuard<()>;
-pub type MemoryWriteLockGuard = tokio::sync::OwnedRwLockWriteGuard<()>;
+pub type MemoryLockGuard = tokio::sync::OwnedRwLockWriteGuard<()>;
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_acquire_read_lock() {
+    async fn test_acquire_lock() {
         let memory_backend = MemoryBackend::new();
 
-        let lock_1 = memory_backend.acquire_read_lock("test").await;
-        let lock_2 = memory_backend.acquire_read_lock("test").await;
-        assert_eq!(memory_backend.get_lock_count().await, 1);
-
-        drop(lock_1);
-        assert_eq!(memory_backend.get_lock_count().await, 1);
-
-        drop(lock_2);
-        assert_eq!(memory_backend.get_lock_count().await, 0);
-    }
-
-    #[tokio::test]
-    async fn test_acquire_write_lock() {
-        let memory_backend = MemoryBackend::new();
-
-        let lock = memory_backend.acquire_write_lock("test").await;
+        let lock = memory_backend.acquire_lock("test").await;
         assert_eq!(memory_backend.get_lock_count().await, 1);
 
         drop(lock);

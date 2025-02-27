@@ -51,3 +51,6 @@ impl hyper::body::Body for Body {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {}

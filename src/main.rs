@@ -116,18 +116,14 @@ fn set_fs_watcher<D: DataStore + 'static>(
                 }
             };
 
-            let registry = match build_registry(
-                config.cache_store,
-                config.repository,
-                config.server.streaming_chunk_size.to_usize(),
-                data_store.clone(),
-            ) {
-                Ok(registry) => registry,
-                Err(err) => {
-                    error!("Failed to create registry with new configuration: {}", err);
-                    return;
-                }
-            };
+            let registry =
+                match build_registry(config.cache_store, config.repository, data_store.clone()) {
+                    Ok(registry) => registry,
+                    Err(err) => {
+                        error!("Failed to create registry with new configuration: {}", err);
+                        return;
+                    }
+                };
 
             if let Err(err) = server.notify_config_change(config.server, &config.identity, registry)
             {
@@ -160,17 +156,11 @@ fn set_fs_watcher<D: DataStore + 'static>(
 fn build_registry<D: DataStore>(
     cache_config: CacheStoreConfig,
     repository_config: HashMap<String, RepositoryConfig>,
-    streaming_chunk_size: usize,
     data_store: Arc<D>,
 ) -> Result<Registry<D>, Error> {
     let cache_store = Arc::new(CacheStore::new(cache_config)?);
 
-    Registry::new(
-        repository_config,
-        streaming_chunk_size,
-        data_store,
-        cache_store,
-    )
+    Registry::new(repository_config, data_store, cache_store)
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -235,12 +225,7 @@ async fn handle_command<D: DataStore + 'static>(
     arguments: GlobalArguments,
     data_store: Arc<D>,
 ) -> Result<(), command::Error> {
-    let registry = build_registry(
-        config.cache_store,
-        config.repository,
-        config.server.streaming_chunk_size.to_usize(),
-        data_store.clone(),
-    )?;
+    let registry = build_registry(config.cache_store, config.repository, data_store.clone())?;
 
     match arguments.nested {
         SubCommand::Scrub(scrub_options) => {

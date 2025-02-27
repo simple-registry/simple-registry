@@ -17,6 +17,7 @@ use aws_sdk_s3::{
 use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
 use sha2::{Digest as ShaDigestTrait, Sha256};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Semaphore;
 use tracing::{debug, error, instrument};
 
@@ -39,7 +40,7 @@ pub struct S3Backend {
     multipart_copy_threshold: u64,
     multipart_copy_chunk_size: u64,
     multipart_copy_jobs: usize,
-    multipart_min_part_size: u64,
+    multipart_part_size: usize,
 }
 
 impl Debug for S3Backend {
@@ -82,7 +83,7 @@ impl S3Backend {
             multipart_copy_threshold: config.multipart_copy_threshold.to_u64(),
             multipart_copy_chunk_size: config.multipart_copy_chunk_size.to_u64(),
             multipart_copy_jobs: config.multipart_copy_jobs,
-            multipart_min_part_size: config.multipart_min_part_size.to_u64(),
+            multipart_part_size: config.multipart_part_size.to_usize(),
         }
     }
 
@@ -391,7 +392,7 @@ impl S3Backend {
         namespace: &str,
         digest: &Digest,
         operation: O,
-    ) -> Result<bool, Error>
+    ) -> Result<(), Error>
     where
         O: FnOnce(&mut HashSet<DataLink>),
     {
@@ -414,12 +415,15 @@ impl S3Backend {
             reference_index.namespace.remove(namespace);
         }
 
-        let is_referenced = !reference_index.namespace.is_empty();
+        if reference_index.namespace.is_empty() {
+            let path = self.tree.blob_container_dir(digest);
+            self.delete_object_with_prefix(&path).await?;
+        } else {
+            let content = serde_json::to_vec(&reference_index)?;
+            self.put_object(&path, content).await?;
+        }
 
-        let content = serde_json::to_vec(&reference_index)?;
-        self.put_object(&path, content).await?;
-
-        Ok(is_referenced)
+        Ok(())
     }
 
     #[instrument(skip(self))]
@@ -524,7 +528,7 @@ impl S3Backend {
         part_number: i32,
         body: Vec<u8>,
     ) -> Result<String, Error> {
-        let body = ByteStream::from(body.clone());
+        let body = ByteStream::from(body);
 
         let res = self
             .s3_client
@@ -910,18 +914,18 @@ impl DataStore for S3Backend {
         Ok(uuid.to_string())
     }
 
-    #[instrument(skip(self, source))]
-    async fn write_upload(
+    #[instrument(skip(self, stream))]
+    async fn write_upload<S: AsyncRead + Unpin + Send + Sync>(
         &self,
         name: &str,
         uuid: &str,
-        source: &[u8],
+        mut stream: S,
         append: bool,
     ) -> Result<(), Error> {
         let upload_path = self.tree.upload_path(name, uuid);
 
-        let uploaded_size;
-        let uploaded_parts;
+        let mut uploaded_size;
+        let mut uploaded_parts;
         let upload_id;
 
         if append {
@@ -935,13 +939,13 @@ impl DataStore for S3Backend {
                 .await?;
 
             uploaded_size = parts_size;
-            uploaded_parts = i32::try_from(parts.len()).unwrap_or_default(); // Safe unwrap, max parts is 10000
+            uploaded_parts = i32::try_from(parts.len()).unwrap_or_default() + 1;
         } else {
             self.abort_pending_uploads(&upload_path).await?;
 
             upload_id = self.create_multipart_upload(&upload_path).await?;
             uploaded_size = 0;
-            uploaded_parts = 0;
+            uploaded_parts = 1;
         }
 
         let staged_path = self
@@ -955,37 +959,63 @@ impl DataStore for S3Backend {
         let state = self
             .get_object_body_as_vec(&hasher_state_path, None)
             .await?;
-        let mut hasher = Sha256::deserialize_state(&state)?;
-
-        hasher.update(source);
 
         // NOTE: if the part is not big enough (at least 5M, as per the S3 protocol),
         // we store it in as a staging blob.
         // First, we load the staged chunk if any and append the new data
         let mut chunk = self.load_staged_chunk(name, uuid, uploaded_size).await?;
-        chunk.extend(source);
-        let chunk_len = chunk.len() as u64;
+        let mut hasher = Sha256::deserialize_state(&state)?;
 
-        // The hash computation must take into account:
-        // - completed parts
-        // - current staged chunk if any + source: chunk.len()
-        let state = hasher.serialize_state();
-        let hash_state_path =
-            self.tree
-                .upload_hash_context_path(name, uuid, "sha256", uploaded_size + chunk_len);
-        self.put_object(&hash_state_path, state).await?;
+        let mut stream_chunk = vec![0; self.multipart_part_size];
+        loop {
+            let bytes_read = stream.read(&mut stream_chunk).await?;
+            if bytes_read == 0 {
+                break;
+            }
+
+            let stream_chunk = &stream_chunk[..bytes_read];
+            chunk.extend(stream_chunk);
+            hasher.update(stream_chunk);
+
+            if chunk.len() >= self.multipart_part_size {
+                let chunk_len = chunk.len() as u64;
+                // The hash computation must take into account:
+                // - completed parts
+                // - current staged chunk if any + source: chunk.len()
+                let hash_state_path = self.tree.upload_hash_context_path(
+                    name,
+                    uuid,
+                    "sha256",
+                    uploaded_size + chunk_len,
+                );
+                self.put_object(&hash_state_path, hasher.serialize_state())
+                    .await?;
+
+                self.upload_part(&upload_path, &upload_id, uploaded_parts, chunk)
+                    .await?;
+
+                uploaded_parts += 1;
+                uploaded_size += chunk_len;
+                chunk = Vec::new();
+            }
+        }
 
         // If the chunk is still too small, store it again and return.
         // If there is no subsequent calls to this method, the chunk will be loaded back and stored
         // as last part in the complete_upload() method.
-        if (chunk.len() as u64) < self.multipart_min_part_size {
+        if !chunk.is_empty() {
+            let hash_state_path = self.tree.upload_hash_context_path(
+                name,
+                uuid,
+                "sha256",
+                uploaded_size + (chunk.len() as u64),
+            );
+            self.put_object(&hash_state_path, hasher.serialize_state())
+                .await?;
+
             self.store_staged_chunk(name, uuid, chunk, uploaded_size)
                 .await?;
-            return Ok(());
         }
-
-        self.upload_part(&upload_path, &upload_id, uploaded_parts + 1, chunk)
-            .await?;
 
         Ok(())
     }
@@ -1023,10 +1053,6 @@ impl DataStore for S3Backend {
             .ok()
             .unwrap_or_default() // Fallbacks to epoch
             .with_timezone(&Utc);
-
-        // don't forget to count the staging blob
-        let staged_path = self.tree.upload_staged_container_path(name, uuid, size);
-        size += self.get_object_size(&staged_path).await.unwrap_or_default();
 
         Ok((digest, size, start_date))
     }
@@ -1107,7 +1133,6 @@ impl DataStore for S3Backend {
 
         let blob_path = self.tree.blob_path(&digest);
         self.copy_object(&blob_path, &key).await?;
-        self.blob_link_index_update(name, &digest, |_| {}).await?;
 
         // NOTE: in case of error, remaining parts will be deleted by the scrub job
         let key = self.tree.upload_container_path(name, uuid);
@@ -1144,7 +1169,6 @@ impl DataStore for S3Backend {
 
     #[instrument(skip(self))]
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_path(digest);
         let blob = self.get_object_body_as_vec(&path, None).await?;
         Ok(blob)
@@ -1152,7 +1176,6 @@ impl DataStore for S3Backend {
 
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_index_path(digest);
 
         let data = self.get_object_body_as_vec(&path, None).await?;
@@ -1163,7 +1186,6 @@ impl DataStore for S3Backend {
 
     #[instrument(skip(self))]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
         let path = self.tree.blob_path(digest);
 
         let content_length = self.get_object_size(&path).await?;
@@ -1207,8 +1229,6 @@ impl DataStore for S3Backend {
         digest: &Digest,
         start_offset: Option<u64>,
     ) -> Result<Box<dyn Reader>, Error> {
-        let _guard = self.lock_store.acquire_read_lock(&digest.to_string()).await;
-
         let path = self.tree.blob_path(digest);
         let res = self.get_object(&path, start_offset).await?;
         Ok(Box::new(res.body.into_async_read()))
@@ -1265,21 +1285,32 @@ impl DataStore for S3Backend {
         reference: &DataLink,
         digest: &Digest,
     ) -> Result<(), Error> {
-        match self.read_link(namespace, reference).await.ok() {
-            Some(existing_digest) if existing_digest == *digest => return Ok(()),
-            Some(existing_digest) if existing_digest != *digest => {
-                self.delete_link(namespace, reference).await?;
-            }
-            _ => {}
-        }
-
         let _guard = self
             .lock_store
             .acquire_write_lock(&digest.to_string())
             .await;
 
-        let path = self.tree.get_link_path(reference, namespace);
-        self.put_object(&path, digest.to_string().into_bytes())
+        let link_path = self.tree.get_link_path(reference, namespace);
+
+        match self.read_link(namespace, reference).await.ok() {
+            Some(existing_digest) if existing_digest == *digest => return Ok(()),
+            Some(existing_digest) if existing_digest != *digest => {
+                let _existing_digest_guard = self
+                    .lock_store
+                    .acquire_write_lock(&existing_digest.to_string())
+                    .await;
+
+                self.delete_object(&link_path).await?;
+
+                self.blob_link_index_update(namespace, digest, |index| {
+                    index.remove(reference);
+                })
+                .await?;
+            }
+            _ => {}
+        }
+
+        self.put_object(&link_path, digest.to_string().into_bytes())
             .await?;
 
         self.blob_link_index_update(namespace, digest, |index| {
@@ -1307,16 +1338,10 @@ impl DataStore for S3Backend {
 
         self.delete_object(&link_path).await?;
 
-        let is_referenced = self
-            .blob_link_index_update(namespace, &digest, |index| {
-                index.remove(reference);
-            })
-            .await?;
-
-        if !is_referenced {
-            let path = self.tree.blob_container_dir(&digest);
-            self.delete_object_with_prefix(&path).await?;
-        }
+        self.blob_link_index_update(namespace, &digest, |index| {
+            index.remove(reference);
+        })
+        .await?;
 
         Ok(())
     }

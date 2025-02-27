@@ -6,6 +6,7 @@ use cel_interpreter::Program;
 use hyper::body::Incoming;
 use hyper::{Method, Response};
 use std::sync::Arc;
+use tracing::instrument;
 
 mod authentication_scheme;
 mod bearer_token;
@@ -67,6 +68,7 @@ impl Repository {
         !self.upstream.is_empty()
     }
 
+    #[instrument(skip(self))]
     pub async fn query_upstream_blob(
         &self,
         method: &Method,
@@ -87,6 +89,7 @@ impl Repository {
         response
     }
 
+    #[instrument(skip(self))]
     pub async fn query_upstream_manifest(
         &self,
         method: &Method,

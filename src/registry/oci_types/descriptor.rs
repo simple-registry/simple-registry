@@ -28,9 +28,9 @@ impl From<Manifest> for Option<Descriptor> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
-    use crate::registry::oci_types::manifest::test::demo_manifest;
+    use crate::registry::oci_types::manifest::tests::demo_manifest;
 
     #[test]
     fn test_from_manifest() {

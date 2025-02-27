@@ -2,7 +2,7 @@ use crate::registry::oci_types::{Descriptor, Error};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
     pub media_type: Option<String>,
@@ -45,7 +45,7 @@ impl Manifest {
 }
 
 #[cfg(test)]
-pub mod test {
+pub mod tests {
     use super::*;
 
     pub fn demo_manifest() -> Manifest {

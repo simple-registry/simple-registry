@@ -1,14 +1,13 @@
+use crate::registry::api::hyper::response_ext::IntoAsyncRead;
+use crate::registry::api::hyper::response_ext::ResponseExt;
 use crate::registry::data_store::{DataStore, Reader};
 use crate::registry::oci_types::Digest;
-use crate::registry::utils::{DataLink, NotifyingReader};
+use crate::registry::utils::{tee_reader, DataLink};
 use crate::registry::{data_store, Error, Registry, Repository};
-use futures_util::TryStreamExt;
-use http_body_util::BodyExt;
 use hyper::header::CONTENT_LENGTH;
 use hyper::Method;
-use tokio::io;
+use std::sync::Arc;
 use tokio::io::AsyncRead;
-use tokio_util::io::StreamReader;
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
@@ -40,14 +39,46 @@ impl<D: DataStore + 'static> Registry<D> {
                 .query_upstream_blob(&Method::HEAD, accepted_mime_types, namespace, &digest)
                 .await?;
 
-            let digest = Self::parse_header(&res, "docker-content-digest")?;
-            let size = Self::parse_header(&res, CONTENT_LENGTH)?;
+            let digest = res.parse_header("docker-content-digest")?;
+            let size = res.parse_header(CONTENT_LENGTH)?;
             return Ok(HeadBlobResponse { digest, size });
         }
 
         let size = self.storage_engine.get_blob_size(&digest).await?;
 
         Ok(HeadBlobResponse { digest, size })
+    }
+
+    #[instrument(skip(storage_engine, stream))]
+    async fn copy_blob<E, S>(
+        storage_engine: Arc<E>,
+        stream: S,
+        namespace: String,
+        digest: Digest,
+    ) -> Result<(), data_store::Error>
+    where
+        E: DataStore,
+        S: AsyncRead + Send + Sync + Unpin,
+    {
+        let session_id = Uuid::new_v4().to_string();
+
+        storage_engine
+            .create_upload(&namespace, &session_id)
+            .await?;
+
+        storage_engine
+            .write_upload(&namespace, &session_id, stream, false)
+            .await?;
+
+        if let Err(e) = storage_engine
+            .complete_upload(&namespace, &session_id, Some(digest))
+            .await
+        {
+            debug!("Failed to complete upload: {:?}", e);
+            return Err(e);
+        }
+
+        Ok::<(), data_store::Error>(())
     }
 
     #[instrument(skip(repository))]
@@ -82,66 +113,19 @@ impl<D: DataStore + 'static> Registry<D> {
                 .query_upstream_blob(&Method::GET, accepted_mime_types, namespace, digest)
                 .await?;
 
-            let total_length = Self::parse_header(&res, CONTENT_LENGTH)?;
+            let total_length = res.parse_header(CONTENT_LENGTH)?;
 
-            let stream = res
-                .into_data_stream()
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
-            let reader = StreamReader::new(stream);
+            let stream = res.into_async_read();
+            let (response_reader, copy_reader) = tee_reader(stream).await?;
 
-            let (stream_reader, mut receiver) =
-                NotifyingReader::new(reader, self.streaming_chunk_size);
+            tokio::spawn(Self::copy_blob(
+                self.storage_engine.clone(),
+                copy_reader,
+                namespace.to_string(),
+                digest.to_owned(),
+            ));
 
-            let chunk_size = self.streaming_chunk_size;
-            let digest = Some(digest.clone());
-            let namespace = namespace.to_string();
-            let storage_engine = self.storage_engine.clone();
-            tokio::spawn(async move {
-                let mut append = false;
-                let session_id = Uuid::new_v4().to_string();
-                let mut buffer = Vec::with_capacity(chunk_size);
-
-                storage_engine
-                    .create_upload(&namespace, &session_id)
-                    .await?;
-                while let Some(chunk) = receiver.recv().await {
-                    buffer.extend_from_slice(&chunk);
-                    if buffer.len() >= chunk_size {
-                        let (current_part, next_part) = buffer.split_at(chunk_size);
-                        debug!("Uploading chunk {:?} (len = {:?})", digest, buffer.len());
-                        storage_engine
-                            .write_upload(&namespace, &session_id, current_part, append)
-                            .await?;
-
-                        buffer = next_part.to_vec();
-                        if !append {
-                            append = true;
-                        }
-                    }
-                }
-                if !buffer.is_empty() {
-                    debug!(
-                        "Uploading final chunk {:?} (len = {:?})",
-                        digest,
-                        buffer.len()
-                    );
-                    storage_engine
-                        .write_upload(&namespace, &session_id, &buffer, append)
-                        .await?;
-                }
-
-                if let Err(e) = storage_engine
-                    .complete_upload(&namespace, &session_id, digest)
-                    .await
-                {
-                    debug!("Failed to complete upload: {:?}", e);
-                    return Err(e);
-                }
-
-                Ok::<(), data_store::Error>(())
-            });
-
-            let reader: Box<dyn Reader> = Box::new(stream_reader);
+            let reader: Box<dyn Reader> = Box::new(response_reader);
             return Ok(GetBlobResponse::Reader(reader, total_length));
         }
 

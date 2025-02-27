@@ -1,13 +1,12 @@
+use crate::registry::api::hyper::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, Manifest, Reference};
 use crate::registry::utils::DataLink;
 use crate::registry::{Error, Registry, Repository};
-use futures_util::StreamExt;
-use http_body_util::BodyExt;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::Method;
 use tokio::io::AsyncReadExt;
-use tracing::{debug, error, instrument, warn};
+use tracing::{error, instrument, warn};
 
 pub struct GetManifestResponse {
     pub media_type: Option<String>,
@@ -36,10 +35,7 @@ pub fn parse_manifest_digests(
     body: &[u8],
     content_type: Option<&String>,
 ) -> Result<ParsedManifestDigests, Error> {
-    let manifest: Manifest = serde_json::from_slice(body).map_err(|e| {
-        debug!("Failed to deserialize manifest: {}", e);
-        Error::ManifestInvalid("Failed to deserialize manifest".to_string())
-    })?;
+    let manifest: Manifest = serde_json::from_slice(body).unwrap_or_default();
 
     if content_type.is_some()
         && manifest.media_type.is_some()
@@ -95,9 +91,9 @@ impl<D: DataStore> Registry<D> {
                 .query_upstream_manifest(&Method::HEAD, accepted_mime_types, namespace, &reference)
                 .await?;
 
-            let media_type = Self::get_header(&res, CONTENT_TYPE);
-            let digest = Self::parse_header(&res, "docker-content-digest")?;
-            let size = Self::parse_header(&res, CONTENT_LENGTH)?;
+            let media_type = res.get_header(CONTENT_TYPE);
+            let digest = res.parse_header("docker-content-digest")?;
+            let size = res.parse_header(CONTENT_LENGTH)?;
 
             // Store locally before returning
             let _ = self
@@ -169,18 +165,11 @@ impl<D: DataStore> Registry<D> {
                 .query_upstream_manifest(&Method::GET, accepted_mime_types, namespace, &reference)
                 .await?;
 
-            let media_type = Self::get_header(&res, CONTENT_TYPE);
-            let digest = Self::parse_header(&res, "docker-content-digest")?;
+            let media_type = res.get_header(CONTENT_TYPE);
+            let digest = res.parse_header("docker-content-digest")?;
 
             let mut content = Vec::new();
-            let mut body = res.into_data_stream();
-            while let Some(frame) = body.next().await {
-                let frame = frame.map_err(|e| {
-                    error!("Data stream error: {}", e);
-                    Error::Internal("Data stream error".to_string())
-                })?;
-                content.extend_from_slice(&frame);
-            }
+            res.into_async_read().read_to_end(&mut content).await?;
 
             // NOTE: a side effect of storing the manifest locally at this stage is that blobs indexes
             // are also created locally even though the blob itself may not yet be available locally.
@@ -216,7 +205,8 @@ impl<D: DataStore> Registry<D> {
 
         let content = self.storage_engine.read_blob(&digest).await?;
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|e| {
-            debug!("Failed to deserialize manifest: {}", e);
+            warn!("Failed to deserialize manifest (2): {}", e);
+            warn!("Manifest content: {:?}", String::from_utf8_lossy(&content));
             Error::ManifestInvalid("Failed to deserialize manifest".to_string())
         })?;
 

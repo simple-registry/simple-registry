@@ -9,9 +9,7 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::RootCertStore;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use std::fmt::Display;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -59,14 +57,19 @@ impl<D: DataStore + 'static> TlsListener<D> {
 
     fn build_tls_acceptor(tls_config: &ServerTlsConfig) -> Result<TlsAcceptor, Error> {
         debug!("Detected TLS configuration");
-        let server_certs =
-            Self::load_certificate_bundle(tls_config.server_certificate_bundle.as_str())?;
-        let server_key = Self::load_private_key(tls_config.server_private_key.as_str())?;
+        let server_certs = CertificateDer::pem_file_iter(&tls_config.server_certificate_bundle)?
+            .collect::<Result<_, _>>()?;
+        let server_key = PrivateKeyDer::from_pem_file(&tls_config.server_private_key)?;
 
         let server_config = if let Some(client_ca_bundle) = tls_config.client_ca_bundle.as_ref() {
             debug!("Client CA bundle detected (will serve with TLS client authentication)");
-            let client_cert = Self::load_certificate_bundle(client_ca_bundle)?;
-            let client_cert_store = Self::build_root_store(client_cert)?;
+            let client_certs: Vec<CertificateDer> =
+                CertificateDer::pem_file_iter(client_ca_bundle)?.collect::<Result<_, _>>()?;
+
+            let mut client_cert_store = RootCertStore::empty();
+            for client_cert in client_certs {
+                client_cert_store.add(client_cert)?;
+            }
 
             let client_cert_verifier = WebPkiClientVerifier::builder(Arc::new(client_cert_store))
                 .allow_unauthenticated()
@@ -86,30 +89,6 @@ impl<D: DataStore + 'static> TlsListener<D> {
         let server_config = Arc::new(server_config);
         let tls_acceptor = TlsAcceptor::from(server_config);
         Ok(tls_acceptor)
-    }
-
-    fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>, Error> {
-        info!("Loading private key from {}", path);
-        let key = PrivateKeyDer::from_pem_file(path)?;
-
-        Ok(key)
-    }
-
-    fn load_certificate_bundle<T: AsRef<Path> + Display>(
-        path: T,
-    ) -> Result<Vec<CertificateDer<'static>>, Error> {
-        info!("Loading certificate bundle from {}", path);
-        let certs = CertificateDer::pem_file_iter(path)?.collect::<Result<Vec<_>, _>>()?;
-
-        Ok(certs)
-    }
-
-    fn build_root_store(certs: Vec<CertificateDer>) -> Result<RootCertStore, Error> {
-        let mut root_store = RootCertStore::empty();
-        for cert in certs {
-            root_store.add(cert)?;
-        }
-        Ok(root_store)
     }
 
     pub async fn serve(&self) -> Result<(), command::Error> {
@@ -137,7 +116,7 @@ impl<D: DataStore + 'static> TlsListener<D> {
                 let stream = TokioIo::new(tls);
                 let context = self.context.load();
 
-                tokio::spawn(serve_request(stream, context.clone(), identity));
+                tokio::spawn(Box::pin(serve_request(stream, context.clone(), identity)));
             }
         }
     }

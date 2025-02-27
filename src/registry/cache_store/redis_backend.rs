@@ -32,7 +32,7 @@ impl RedisBackend {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use crate::configuration::RedisCacheConfig;
     use std::time::Duration;

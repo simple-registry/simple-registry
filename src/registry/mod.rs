@@ -1,15 +1,12 @@
 use chrono::Duration;
-use hyper::body::Incoming;
-use hyper::header::AsHeaderName;
-use hyper::Response;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::str::FromStr;
 use std::sync::Arc;
 use tracing::instrument;
 
+pub mod api;
 mod blob;
 pub mod cache_store;
 mod content_discovery;
@@ -18,6 +15,7 @@ mod error;
 pub mod lock_store;
 mod manifest;
 pub mod oci_types;
+mod policy;
 pub mod policy_types;
 mod repository;
 mod scrub;
@@ -30,7 +28,6 @@ use crate::registry::cache_store::CacheStore;
 pub use repository::Repository;
 
 use crate::registry::data_store::DataStore;
-pub use blob::GetBlobResponse;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
 pub use upload::StartUploadResponse;
@@ -41,7 +38,6 @@ lazy_static! {
 }
 
 pub struct Registry<D> {
-    streaming_chunk_size: usize,
     storage_engine: Arc<D>,
     repositories: HashMap<String, Repository>,
     scrub_dry_run: bool,
@@ -58,7 +54,6 @@ impl<D: DataStore> Registry<D> {
     #[instrument(skip(repositories_config, storage_engine, token_cache))]
     pub fn new(
         repositories_config: HashMap<String, RepositoryConfig>,
-        streaming_chunk_size: usize,
         storage_engine: Arc<D>,
         token_cache: Arc<CacheStore>,
     ) -> Result<Self, configuration::Error> {
@@ -69,7 +64,6 @@ impl<D: DataStore> Registry<D> {
         }
 
         let res = Self {
-            streaming_chunk_size,
             storage_engine,
             repositories,
             scrub_dry_run: true,
@@ -100,27 +94,5 @@ impl<D: DataStore> Registry<D> {
         } else {
             Err(Error::NameInvalid)
         }
-    }
-
-    fn get_header<K>(res: &Response<Incoming>, header: K) -> Option<String>
-    where
-        K: AsHeaderName,
-    {
-        res.headers()
-            .get(header)
-            .and_then(|header| header.to_str().ok())
-            .map(ToString::to_string)
-    }
-
-    fn parse_header<T, K>(res: &Response<Incoming>, header: K) -> Result<T, Error>
-    where
-        T: FromStr,
-        K: AsHeaderName,
-    {
-        res.headers()
-            .get(header)
-            .and_then(|header| header.to_str().ok())
-            .and_then(|header| header.parse().ok())
-            .ok_or(Error::Unsupported)
     }
 }

@@ -74,11 +74,11 @@ pub trait DataStore: Send + Sync {
 
     async fn create_upload(&self, namespace: &str, uuid: &str) -> Result<String, Error>;
 
-    async fn write_upload(
+    async fn write_upload<S: AsyncRead + Unpin + Send + Sync>(
         &self,
         namespace: &str,
         uuid: &str,
-        source: &[u8],
+        stream: S,
         append: bool,
     ) -> Result<(), Error>;
 
