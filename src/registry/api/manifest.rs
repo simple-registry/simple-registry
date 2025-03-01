@@ -1,11 +1,13 @@
 use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::RequestExt;
+use crate::registry::api::hyper::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT};
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::Reference;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
+use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
 use hyper::{Request, Response, StatusCode};
 use serde::Deserialize;
 use tracing::instrument;
@@ -71,15 +73,15 @@ impl<D: DataStore> RegistryAPIManifestHandlersExt for Registry<D> {
         let res = if let Some(media_type) = manifest.media_type {
             Response::builder()
                 .status(StatusCode::OK)
-                .header("Content-Type", media_type)
-                .header("Docker-Content-Digest", manifest.digest.to_string())
-                .header("Content-Length", manifest.size)
+                .header(CONTENT_TYPE, media_type)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string())
+                .header(CONTENT_LENGTH, manifest.size)
                 .body(Body::empty())?
         } else {
             Response::builder()
                 .status(StatusCode::OK)
-                .header("Docker-Content-Digest", manifest.digest.to_string())
-                .header("Content-Length", manifest.size)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string())
+                .header(CONTENT_LENGTH, manifest.size)
                 .body(Body::empty())?
         };
 
@@ -112,13 +114,13 @@ impl<D: DataStore> RegistryAPIManifestHandlersExt for Registry<D> {
         let res = if let Some(content_type) = manifest.media_type {
             Response::builder()
                 .status(StatusCode::OK)
-                .header("Content-Type", content_type)
-                .header("Docker-Content-Digest", manifest.digest.to_string())
+                .header(CONTENT_TYPE, content_type)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string())
                 .body(Body::fixed(manifest.content))?
         } else {
             Response::builder()
                 .status(StatusCode::OK)
-                .header("Docker-Content-Digest", manifest.digest.to_string())
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string())
                 .body(Body::fixed(manifest.content))?
         };
 
@@ -140,17 +142,10 @@ impl<D: DataStore> RegistryAPIManifestHandlersExt for Registry<D> {
         )?;
 
         let content_type = request
-            .headers()
-            .get("Content-Type")
-            .map(|h| h.to_str())
-            .transpose()
-            .map_err(|_| {
-                Error::ManifestInvalid("Unable to parse provided Content-Type header".to_string())
-            })?
+            .get_header(CONTENT_TYPE)
             .ok_or(Error::ManifestInvalid(
                 "No Content-Type header provided".to_string(),
-            ))?
-            .to_string();
+            ))?;
 
         let request_body = request.into_body().collect().await.map_err(|_| {
             Error::ManifestInvalid("Unable to retrieve manifest from client query".to_string())
@@ -171,14 +166,14 @@ impl<D: DataStore> RegistryAPIManifestHandlersExt for Registry<D> {
         let res = match manifest.subject {
             Some(subject) => Response::builder()
                 .status(StatusCode::CREATED)
-                .header("Location", location)
-                .header("Docker-Content-Digest", manifest.digest.to_string())
-                .header("OCI-Subject", subject.to_string())
+                .header(LOCATION, location)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string())
+                .header(OCI_SUBJECT, subject.to_string())
                 .body(Body::empty())?,
             None => Response::builder()
                 .status(StatusCode::CREATED)
-                .header("Location", location)
-                .header("Docker-Content-Digest", manifest.digest.to_string())
+                .header(LOCATION, location)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string())
                 .body(Body::empty())?,
         };
 

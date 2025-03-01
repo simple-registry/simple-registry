@@ -1,11 +1,12 @@
 use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::{IntoAsyncRead, RequestExt};
+use crate::registry::api::hyper::{DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID};
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, StartUploadResponse};
 use hyper::body::Incoming;
-use hyper::header::CONTENT_RANGE;
+use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE, LOCATION, RANGE};
 use hyper::{Request, Response, StatusCode};
 use serde::Deserialize;
 use tracing::instrument;
@@ -82,17 +83,14 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
         let res = match self.start_upload(&parameters.name, digest).await? {
             StartUploadResponse::ExistingBlob(digest) => Response::builder()
                 .status(StatusCode::CREATED)
-                .header(
-                    "Location",
-                    format!("/v2/{}/blobs/{}", parameters.name, digest),
-                )
-                .header("Docker-Content-Digest", digest.to_string())
+                .header(LOCATION, format!("/v2/{}/blobs/{digest}", parameters.name))
+                .header(DOCKER_CONTENT_DIGEST, digest.to_string())
                 .body(Body::empty())?,
             StartUploadResponse::Session(location, session_uuid) => Response::builder()
                 .status(StatusCode::ACCEPTED)
-                .header("Location", location)
-                .header("Range", "0-0")
-                .header("Docker-Upload-UUID", session_uuid.to_string())
+                .header(LOCATION, location)
+                .header(RANGE, "0-0")
+                .header(DOCKER_UPLOAD_UUID, session_uuid.to_string())
                 .body(Body::empty())?,
         };
 
@@ -121,9 +119,9 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
 
         let res = Response::builder()
             .status(StatusCode::NO_CONTENT)
-            .header("Location", location)
-            .header("Range", range_max)
-            .header("Docker-Upload-UUID", parameters.uuid.to_string())
+            .header(LOCATION, location)
+            .header(RANGE, range_max)
+            .header(DOCKER_UPLOAD_UUID, parameters.uuid.to_string())
             .body(Body::empty())?;
 
         Ok(res)
@@ -159,10 +157,10 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
 
         let res = Response::builder()
             .status(StatusCode::ACCEPTED)
-            .header("Location", location)
-            .header("Range", range_max)
-            .header("Content-Length", "0")
-            .header("Docker-Upload-UUID", parameters.uuid.to_string())
+            .header(LOCATION, location)
+            .header(RANGE, range_max)
+            .header(CONTENT_LENGTH, 0)
+            .header(DOCKER_UPLOAD_UUID, parameters.uuid.to_string())
             .body(Body::empty())?;
 
         Ok(res)
@@ -202,8 +200,8 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
 
         let res = Response::builder()
             .status(StatusCode::CREATED)
-            .header("Location", location)
-            .header("Docker-Content-Digest", query.digest)
+            .header(LOCATION, location)
+            .header(DOCKER_CONTENT_DIGEST, query.digest)
             .body(Body::empty())?;
 
         Ok(res)

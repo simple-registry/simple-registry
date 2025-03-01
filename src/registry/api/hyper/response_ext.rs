@@ -1,7 +1,7 @@
 use crate::registry::Error;
 use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
-use hyper::header::AsHeaderName;
+use hyper::header::{AsHeaderName, CONTENT_TYPE, LINK};
 use hyper::{Response, StatusCode};
 use serde::de::StdError;
 use std::io;
@@ -51,12 +51,12 @@ impl<B> ResponseExt<B> for Response<B> {
         let res = match link {
             Some(link) => Response::builder()
                 .status(StatusCode::OK)
-                .header("Content-Type", "application/json")
-                .header("Link", format!("<{link}>; rel=\"next\""))
+                .header(CONTENT_TYPE, "application/json")
+                .header(LINK, format!("<{link}>; rel=\"next\""))
                 .body(body)?,
             None => Response::builder()
                 .status(StatusCode::OK)
-                .header("Content-Type", "application/json")
+                .header(CONTENT_TYPE, "application/json")
                 .body(body)?,
         };
 
@@ -85,30 +85,31 @@ where
 mod tests {
     use super::*;
     use crate::registry::api::body::Body;
+    use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LINK};
     use tokio::io::AsyncReadExt;
 
     #[test]
     fn test_get_header() {
         let res = Response::builder()
-            .header("Content-Type", "application/json")
+            .header(CONTENT_TYPE, "application/json")
             .body(Body::Empty)
             .unwrap();
         assert_eq!(
-            res.get_header("Content-Type"),
+            res.get_header(CONTENT_TYPE),
             Some("application/json".to_string())
         );
-        assert_eq!(res.get_header("Content-Length"), None);
+        assert_eq!(res.get_header(CONTENT_LENGTH), None);
     }
 
     #[test]
     fn test_parse_header() {
         let res = Response::builder()
-            .header("Content-Length", "42")
+            .header(CONTENT_LENGTH, "42")
             .body(Body::Empty)
             .unwrap();
         assert_eq!(res.parse_header::<u64, _>("Content-Length"), Ok(42));
         assert_eq!(
-            res.parse_header::<u64, _>("Content-Type"),
+            res.parse_header::<u64, _>(CONTENT_TYPE),
             Err(Error::Unsupported)
         );
     }
@@ -121,11 +122,11 @@ mod tests {
 
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
-            res.get_header("Content-Type"),
+            res.get_header(CONTENT_TYPE),
             Some(String::from("application/json"))
         );
         assert_eq!(
-            res.get_header("Link"),
+            res.get_header(LINK),
             Some(String::from("<http://example.com>; rel=\"next\""))
         );
 
@@ -135,17 +136,17 @@ mod tests {
 
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
-            res.get_header("Content-Type"),
+            res.get_header(CONTENT_TYPE),
             Some(String::from("application/json"))
         );
-        assert_eq!(res.get_header("Link"), None);
+        assert_eq!(res.get_header(LINK), None);
     }
 
     #[tokio::test]
     async fn test_into_async_read() {
         let mut reader = Response::builder()
             .status(StatusCode::OK)
-            .header("Content-Type", "application/json")
+            .header(CONTENT_TYPE, "application/json")
             .body(String::from("Hello World!"))
             .unwrap()
             .into_async_read();

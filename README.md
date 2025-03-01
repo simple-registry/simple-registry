@@ -45,9 +45,7 @@ Commands:
 
 ## Roadmap
 
-- [ ] Kubernetes Operator (new project)
 - [ ] OpenMetrics exporter
-- [ ] Health-checks
 
 ## References
 
