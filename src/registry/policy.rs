@@ -51,6 +51,11 @@ impl<D: DataStore> Registry<D> {
         identity: &ClientIdentity,
         policies: &[Program],
     ) -> Result<(), Error> {
+        if policies.is_empty() {
+            debug!("No deny policies defined, allowing access");
+            return Ok(());
+        }
+
         let context = self.build_policy_context(identity, request)?;
 
         for policy in policies {
@@ -87,6 +92,11 @@ impl<D: DataStore> Registry<D> {
         identity: &ClientIdentity,
         policies: &[Program],
     ) -> Result<(), Error> {
+        if policies.is_empty() {
+            debug!("No allow policies defined, allowing access");
+            return Err(Self::deny());
+        }
+
         let context = self.build_policy_context(identity, request)?;
 
         for policy in policies {
