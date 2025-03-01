@@ -15,12 +15,9 @@ use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watc
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
-use opentelemetry_sdk::trace::{RandomIdGenerator, Sampler, TracerProvider};
-use opentelemetry_sdk::{runtime, Resource};
-use opentelemetry_semantic_conventions::{
-    attribute::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_NAME, SERVICE_VERSION},
-    SCHEMA_URL,
-};
+use opentelemetry_sdk::trace::{RandomIdGenerator, Sampler, SdkTracerProvider};
+use opentelemetry_sdk::{Resource};
+use opentelemetry_semantic_conventions::attribute::SERVICE_VERSION;
 use opentelemetry_stdout as stdout;
 use std::collections::HashMap;
 use std::mem;
@@ -36,18 +33,15 @@ mod configuration;
 mod registry;
 
 fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {
-    let _ = TracerProvider::builder()
+    let _ = SdkTracerProvider::builder()
         .with_simple_exporter(stdout::SpanExporter::default())
         .build();
 
-    let resource = Resource::from_schema_url(
-        [
-            KeyValue::new(SERVICE_NAME, env!("CARGO_PKG_NAME")),
-            KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
-            KeyValue::new(DEPLOYMENT_ENVIRONMENT_NAME, "develop"),
-        ],
-        SCHEMA_URL,
-    );
+    let resource = Resource::builder()
+        .with_service_name(env!("CARGO_PKG_NAME"))
+        .with_attribute(KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")))
+        .build()
+    ;
 
     let subscriber = tracing_subscriber::registry()
         .with(EnvFilter::from_default_env())
@@ -64,14 +58,14 @@ fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {
                 .with_endpoint(endpoint)
                 .build()?;
 
-            let provider = TracerProvider::builder()
+            let provider = SdkTracerProvider::builder()
                 .with_id_generator(RandomIdGenerator::default())
                 .with_resource(resource)
                 .with_sampler(sampler)
-                .with_batch_exporter(exporter, runtime::Tokio)
+                .with_batch_exporter(exporter)
                 .build();
 
-            let tracer = provider.tracer("tracing-otel-subscriber");
+            let tracer = provider.tracer(env!("CARGO_PKG_NAME"));
             global::set_tracer_provider(provider);
 
             subscriber.with(OpenTelemetryLayer::new(tracer)).init();
