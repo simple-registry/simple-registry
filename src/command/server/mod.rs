@@ -42,6 +42,7 @@ use crate::registry::policy_types::ClientIdentity;
 use crate::registry::Registry;
 
 lazy_static! {
+    static ref ROUTE_HEALTHZ_REGEX: Regex = Regex::new(r"^/healthz$").unwrap();
     static ref ROUTE_API_VERSION_REGEX: Regex = Regex::new(r"^/v2/?$").unwrap();
     static ref ROUTE_UPLOADS_REGEX: Regex =
         Regex::new(r"^/v2/(?P<name>.+)/blobs/uploads/?$").unwrap();
@@ -334,6 +335,11 @@ async fn router<D: DataStore + 'static>(
             Method::GET => context.registry.handle_list_tags(req, params, id).await,
             _ => Err(registry::Error::Unsupported),
         }
+    } else if ROUTE_HEALTHZ_REGEX.is_match(&path) {
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::Fixed(Full::new(Bytes::from("{\"status\":\"ok\"}"))))?)
     } else {
         Err(registry::Error::NotFound)
     }
