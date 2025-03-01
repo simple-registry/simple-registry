@@ -640,25 +640,21 @@ impl DataStore for FSBackend {
     }
 
     #[instrument(skip(self))]
-    async fn update_last_pulled(&self, name: &str, reference: &DataLink) -> Result<(), Error> {
-        match reference {
-            DataLink::Tag(_) => {
-                let path = self.tree.get_link_path(reference, name);
-                let _ = fs::metadata(&path)?;
+    async fn update_last_pulled(
+        &self,
+        name: &str,
+        tag: Option<String>,
+        digest: &Digest,
+    ) -> Result<(), Error> {
+        if let Some(tag) = tag {
+            let path = self.tree.get_link_path(&DataLink::Tag(tag), name);
+            let _ = fs::metadata(&path)?;
+        }
 
-                let digest = self.read_link(name, reference).await?;
-                let link = DataLink::Digest(digest);
-                let path = self.tree.get_link_path(&link, name);
-                let _ = fs::metadata(&path)?;
-            }
-            DataLink::Digest(_) => {
-                let path = self.tree.get_link_path(reference, name);
-                let _ = fs::metadata(&path)?;
-            }
-            _ => {
-                return Ok(()); // No-op
-            }
-        };
+        let path = self
+            .tree
+            .get_link_path(&DataLink::Digest(digest.clone()), name);
+        let _ = fs::metadata(&path)?;
 
         Ok(())
     }

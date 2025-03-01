@@ -135,7 +135,6 @@ mod tests {
     use super::*;
     use crate::registry::api::body::Body;
     use hyper::header::{HeaderValue, RANGE};
-    use hyper::HeaderMap;
     use std::collections::HashMap;
     use tokio::io::AsyncReadExt;
 
