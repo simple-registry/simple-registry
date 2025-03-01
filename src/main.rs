@@ -16,7 +16,7 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::trace::{RandomIdGenerator, Sampler, SdkTracerProvider};
-use opentelemetry_sdk::{Resource};
+use opentelemetry_sdk::Resource;
 use opentelemetry_semantic_conventions::attribute::SERVICE_VERSION;
 use opentelemetry_stdout as stdout;
 use std::collections::HashMap;
@@ -40,8 +40,7 @@ fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {
     let resource = Resource::builder()
         .with_service_name(env!("CARGO_PKG_NAME"))
         .with_attribute(KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")))
-        .build()
-    ;
+        .build();
 
     let subscriber = tracing_subscriber::registry()
         .with(EnvFilter::from_default_env())

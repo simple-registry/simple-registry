@@ -3,7 +3,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
-use hyper::header::{HeaderName, ACCEPT, AUTHORIZATION};
+use hyper::header::{AsHeaderName, HeaderName, ACCEPT, AUTHORIZATION};
 use hyper::Request;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -18,6 +18,7 @@ lazy_static! {
 }
 
 pub trait RequestExt {
+    fn get_header<K: AsHeaderName>(&self, header: K) -> Option<String>;
     fn query_parameters<D: DeserializeOwned + Default>(&self) -> Result<D, Error>;
 
     fn provided_credentials(&self) -> Option<(String, String)>;
@@ -28,6 +29,16 @@ pub trait RequestExt {
 }
 
 impl<T> RequestExt for Request<T> {
+    fn get_header<K>(&self, header: K) -> Option<String>
+    where
+        K: AsHeaderName,
+    {
+        self.headers()
+            .get(header)
+            .and_then(|header| header.to_str().ok())
+            .map(ToString::to_string)
+    }
+
     fn query_parameters<D: DeserializeOwned + Default>(&self) -> Result<D, Error> {
         let Some(query) = self.uri().query() else {
             return Ok(Default::default());
@@ -206,15 +217,10 @@ mod tests {
 
     #[test]
     fn test_get_accepted_content_type() {
-        let mut headers = HeaderMap::new();
-        headers.append(ACCEPT, HeaderValue::from_static("application/json"));
-        headers.append(ACCEPT, HeaderValue::from_static("application/xml"));
-        headers.append(ACCEPT, HeaderValue::from_static("text/plain"));
-
-        let mut request = Request::builder();
-        for (key, value) in headers.iter() {
-            request = request.header(key, value);
-        }
+        let request = Request::builder()
+            .header(ACCEPT, HeaderValue::from_static("application/json"))
+            .header(ACCEPT, HeaderValue::from_static("application/xml"))
+            .header(ACCEPT, HeaderValue::from_static("text/plain"));
         let request = request.body(Body::empty()).unwrap();
 
         let result = request.accepted_content_types();

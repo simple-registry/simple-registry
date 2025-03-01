@@ -1,4 +1,5 @@
 use crate::registry::api::hyper::response_ext::{IntoAsyncRead, ResponseExt};
+use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, Manifest, Reference};
 use crate::registry::utils::DataLink;
@@ -92,7 +93,7 @@ impl<D: DataStore> Registry<D> {
                 .await?;
 
             let media_type = res.get_header(CONTENT_TYPE);
-            let digest = res.parse_header("docker-content-digest")?;
+            let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
             let size = res.parse_header(CONTENT_LENGTH)?;
 
             // Store locally before returning
@@ -166,7 +167,7 @@ impl<D: DataStore> Registry<D> {
                 .await?;
 
             let media_type = res.get_header(CONTENT_TYPE);
-            let digest = res.parse_header("docker-content-digest")?;
+            let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
 
             let mut content = Vec::new();
             res.into_async_read().read_to_end(&mut content).await?;

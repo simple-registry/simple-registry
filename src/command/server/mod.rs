@@ -2,6 +2,7 @@ use crate::{command, configuration, registry};
 use argh::FromArgs;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
+use hyper::header::{CONTENT_TYPE, WWW_AUTHENTICATE};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -140,7 +141,7 @@ async fn serve_request<D: DataStore + 'static, S>(
     pin!(conn);
 
     for (iter, sleep_duration) in context.timeouts.iter().enumerate() {
-        debug!("iter = {} sleep_duration = {:?}", iter, sleep_duration);
+        debug!("iter = {iter} sleep_duration = {sleep_duration:?}");
         tokio::select! {
             res = conn.as_mut() => {
                 // Polling the connection returned a result.
@@ -148,14 +149,14 @@ async fn serve_request<D: DataStore + 'static, S>(
                 // and break out of the loop.
                 match res {
                     Ok(()) => debug!("after polling conn, no error"),
-                    Err(e) =>  debug!("error serving connection: {:?}", e),
+                    Err(e) =>  debug!("error serving connection: {e:?}"),
                 };
                 break;
             }
             () = tokio::time::sleep(*sleep_duration) => {
                 // tokio::time::sleep returned a result.
                 // Call graceful_shutdown on the connection and continue the loop.
-                debug!("iter = {} got timeout_interval, calling conn.graceful_shutdown", iter);
+                debug!("iter = {iter} got timeout_interval, calling conn.graceful_shutdown");
                 conn.as_mut().graceful_shutdown();
             }
         }
@@ -207,9 +208,9 @@ async fn handle_request<D: DataStore + 'static>(
         .unwrap_or_default();
 
     if error_level {
-        error!("{} {:?} {} {}{}", status, elapsed, method, path, span_id);
+        error!("{status} {elapsed:?} {method} {path} {span_id}");
     } else {
-        info!("{} {:?} {} {}{}", status, elapsed, method, path, span_id);
+        info!("{status} {elapsed:?} {method} {path} {span_id}");
     }
 
     response
@@ -255,19 +256,18 @@ where
     let body = Bytes::from(body);
 
     match error {
-        registry::Error::Unauthorized(_) => {
-            let basic_realm = format!("Basic realm=\"{}\", charset=\"UTF-8\"", "Docker Registry");
-
-            Response::builder()
-                .status(status)
-                .header("Content-Type", "application/json")
-                .header("WWW-Authenticate", basic_realm)
-                .body(Body::Fixed(Full::new(body)))
-                .unwrap()
-        }
+        registry::Error::Unauthorized(_) => Response::builder()
+            .status(status)
+            .header(CONTENT_TYPE, "application/json")
+            .header(
+                WWW_AUTHENTICATE,
+                r#"Basic realm="Simple Registry", charset="UTF-8""#,
+            )
+            .body(Body::Fixed(Full::new(body)))
+            .unwrap(),
         _ => Response::builder()
             .status(status)
-            .header("Content-Type", "application/json")
+            .header(CONTENT_TYPE, "application/json")
             .body(Body::Fixed(Full::new(body)))
             .unwrap(),
     }
