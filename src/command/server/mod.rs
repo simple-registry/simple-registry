@@ -8,6 +8,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use lazy_static::lazy_static;
+use opentelemetry::trace::TraceContextExt;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
@@ -18,7 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::pin;
-use tracing::{debug, error, info, instrument};
+use tokio::time::Instant;
+use tracing::{debug, error, info, instrument, Span};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 mod insecure_listener;
 mod server_context;
@@ -170,51 +173,30 @@ async fn handle_request<D: DataStore + 'static>(
     request: Request<Incoming>,
     identity: ClientIdentity,
 ) -> Result<Response<Body>, Infallible> {
-    let start_time = std::time::Instant::now();
-    let method = request.method().to_string();
-    let path = request.uri().path().to_string();
-    let error_level;
+    let start_time = Instant::now();
+    let method = request.method().to_owned();
+    let path = request.uri().path().to_owned();
+    let trace_id = Span::current().context().span().span_context().trace_id();
 
-    let response = match router(context, request, identity).await {
-        Ok(res) => {
-            error_level = false;
-            Ok::<Response<Body>, Infallible>(res)
+    match router(context, request, identity).await {
+        Ok(response) => {
+            let elapsed = start_time.elapsed();
+            let status = response.status();
+
+            info!("{trace_id} {elapsed:?} - {status} {method} {path}");
+            Ok(response)
         }
         Err(error) => {
-            error_level = true;
-            if let Some(trace_id) = tracing::Span::current().id().as_ref() {
-                let span_id = format!("{trace_id:?}");
-                Ok(registry_error_to_response_raw(
-                    &error,
-                    json!({
-                        "span_id": span_id
-                    }),
-                ))
-            } else {
-                Ok(registry_error_to_response_raw(&error, None::<String>))
-            }
+            let response =
+                registry_error_to_response_raw(&error, json!({"trace_id": trace_id.to_string()}));
+
+            let elapsed = start_time.elapsed();
+            let status = response.status();
+
+            error!("{trace_id} {elapsed:?} - {status} {method} {path}");
+            Ok(response)
         }
-    };
-
-    let elapsed = start_time.elapsed();
-    let status = response
-        .as_ref()
-        .map(|r| r.status().to_string())
-        .unwrap_or("(UNKNOWN STATUS)".to_string());
-
-    let span_id = tracing::Span::current()
-        .id()
-        .as_ref()
-        .map(|id| format!(" {:x}", id.into_u64()))
-        .unwrap_or_default();
-
-    if error_level {
-        error!("{status} {elapsed:?} {method} {path} {span_id}");
-    } else {
-        info!("{status} {elapsed:?} {method} {path} {span_id}");
     }
-
-    response
 }
 
 pub fn registry_error_to_response_raw<T>(error: &registry::Error, details: T) -> Response<Body>
