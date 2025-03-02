@@ -30,6 +30,7 @@ use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 
 mod command;
 mod configuration;
+mod metrics_provider;
 mod registry;
 
 fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {

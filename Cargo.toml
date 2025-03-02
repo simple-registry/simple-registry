@@ -27,9 +27,11 @@ lazy_static = "1.5.0"
 notify = "8.0.0"
 opentelemetry = "0.28.0"
 opentelemetry-otlp = { version = "0.28.0" , features = ["grpc-tonic"]}
+opentelemetry-prometheus = "0.28.0"
 opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
 opentelemetry-semantic-conventions = { version = "0.28.0", features = ["semconv_experimental"] }
 opentelemetry-stdout = "0.28.0"
+prometheus = "0.13.4"
 redis = { version = "0.29.0", features = ["tokio-comp"] }
 regex = "1.11.1"
 rustls = { version = "0.23.23", features = ["aws-lc-rs"] }

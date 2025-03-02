@@ -24,7 +24,6 @@ pub enum Error {
     // Convenience
     RangeNotSatisfiable,
     // Catch-all
-    NotFound,
     Internal(String),
 }
 
@@ -49,7 +48,6 @@ impl Display for Error {
             // Convenience
             Error::RangeNotSatisfiable => write!(f, "range not satisfiable"),
             // Catch-all
-            Error::NotFound => write!(f, "resource not found"),
             Error::Internal(s) => write!(f, "internal server error: {s}"),
         }
     }
