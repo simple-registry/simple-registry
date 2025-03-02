@@ -396,7 +396,11 @@ async fn router<'a, D: DataStore + 'static>(
         return (Some("metrics"), response);
     };
 
-    (Some("unsupported"), Err(registry::Error::Unsupported))
+    if [Method::GET, Method::HEAD].contains(req.method()) {
+        (Some("not-found"), Err(registry::Error::NotFound))
+    } else {
+        (Some("unsupported"), Err(registry::Error::Unsupported))
+    }
 }
 
 pub fn registry_error_to_response_raw<T>(error: &registry::Error, details: T) -> Response<Body>
@@ -421,6 +425,7 @@ where
         // Convenience
         registry::Error::RangeNotSatisfiable => (StatusCode::RANGE_NOT_SATISFIABLE, "SIZE_INVALID"), // Can't find a better code from the OCI spec
         // Catch-all
+        registry::Error::NotFound => (StatusCode::NOT_FOUND, "NOT_FOUND"),
         registry::Error::Internal(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_SERVER_ERROR")
         }
