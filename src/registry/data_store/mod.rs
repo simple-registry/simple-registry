@@ -119,7 +119,12 @@ pub trait DataStore: Send + Sync {
 
     async fn delete_blob(&self, digest: &Digest) -> Result<(), Error>;
 
-    async fn update_last_pulled(&self, name: &str, reference: &DataLink) -> Result<(), Error>;
+    async fn update_last_pulled(
+        &self,
+        name: &str,
+        tag: Option<String>,
+        digest: &Digest,
+    ) -> Result<(), Error>;
 
     async fn read_link(&self, namespace: &str, reference: &DataLink) -> Result<Digest, Error>;
 

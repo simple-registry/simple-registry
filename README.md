@@ -43,12 +43,6 @@ Commands:
 - [Retention Policies documentation](doc/configure-retention-policies.md)
 - [mTLS documentation](doc/configure-mtls.md)
 
-## Roadmap
-
-- [ ] Kubernetes Operator (new project)
-- [ ] OpenMetrics exporter
-- [ ] Health-checks
-
 ## References
 
 - [OCI Distribution Specification](https://github.com/opencontainers/distribution-spec/blob/main/spec.md)
