@@ -1246,25 +1246,21 @@ impl DataStore for S3Backend {
     }
 
     #[instrument(skip(self))]
-    async fn update_last_pulled(&self, name: &str, reference: &DataLink) -> Result<(), Error> {
-        match reference {
-            DataLink::Tag(_) => {
-                let key = self.tree.get_link_path(reference, name);
-                self.update_last_pulled_metadata(&key).await?;
+    async fn update_last_pulled(
+        &self,
+        name: &str,
+        tag: Option<String>,
+        digest: &Digest,
+    ) -> Result<(), Error> {
+        if let Some(tag) = tag {
+            let key = self.tree.get_link_path(&DataLink::Tag(tag), name);
+            self.update_last_pulled_metadata(&key).await?;
+        }
 
-                let digest = self.read_link(name, reference).await?;
-                let link = DataLink::Digest(digest);
-                let key = self.tree.get_link_path(&link, name);
-                self.update_last_pulled_metadata(&key).await?;
-            }
-            DataLink::Digest(_) => {
-                let key = self.tree.get_link_path(reference, name);
-                self.update_last_pulled_metadata(&key).await?;
-            }
-            _ => {
-                return Ok(()); // No-op
-            }
-        };
+        let key = self
+            .tree
+            .get_link_path(&DataLink::Digest(digest.clone()), name);
+        self.update_last_pulled_metadata(&key).await?;
 
         Ok(())
     }

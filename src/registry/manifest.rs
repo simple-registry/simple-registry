@@ -1,4 +1,5 @@
 use crate::registry::api::hyper::response_ext::{IntoAsyncRead, ResponseExt};
+use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, Manifest, Reference};
 use crate::registry::utils::DataLink;
@@ -92,7 +93,7 @@ impl<D: DataStore> Registry<D> {
                 .await?;
 
             let media_type = res.get_header(CONTENT_TYPE);
-            let digest = res.parse_header("docker-content-digest")?;
+            let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
             let size = res.parse_header(CONTENT_LENGTH)?;
 
             // Store locally before returning
@@ -122,8 +123,13 @@ impl<D: DataStore> Registry<D> {
     ) -> Result<HeadManifestResponse, Error> {
         let link = reference.into();
         let digest = self.storage_engine.read_link(namespace, &link).await?;
+        let tag = match link {
+            DataLink::Tag(tag) => Some(tag),
+            _ => None,
+        };
+
         self.storage_engine
-            .update_last_pulled(namespace, &link)
+            .update_last_pulled(namespace, tag, &digest)
             .await?;
 
         let mut reader = self
@@ -166,7 +172,7 @@ impl<D: DataStore> Registry<D> {
                 .await?;
 
             let media_type = res.get_header(CONTENT_TYPE);
-            let digest = res.parse_header("docker-content-digest")?;
+            let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
 
             let mut content = Vec::new();
             res.into_async_read().read_to_end(&mut content).await?;
@@ -177,9 +183,13 @@ impl<D: DataStore> Registry<D> {
             self.put_manifest(namespace, reference.clone(), media_type.as_ref(), &content)
                 .await?;
 
-            let link = reference.into();
+            let tag = match reference {
+                Reference::Tag(tag) => Some(tag),
+                Reference::Digest(_) => None,
+            };
+
             self.storage_engine
-                .update_last_pulled(namespace, &link)
+                .update_last_pulled(namespace, tag, &digest)
                 .await?;
 
             return Ok(GetManifestResponse {
@@ -200,7 +210,7 @@ impl<D: DataStore> Registry<D> {
         let link = reference.into();
         let digest = self.storage_engine.read_link(namespace, &link).await?;
         self.storage_engine
-            .update_last_pulled(namespace, &link)
+            .update_last_pulled(namespace, None, &digest)
             .await?;
 
         let content = self.storage_engine.read_blob(&digest).await?;

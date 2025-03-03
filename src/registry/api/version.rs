@@ -1,4 +1,5 @@
 use crate::registry::api::body::Body;
+use crate::registry::api::hyper::{DOCKER_DISTRIBUTION_API_VERSION, X_POWERED_BY};
 use crate::registry::data_store::DataStore;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
@@ -22,8 +23,8 @@ impl<D: DataStore> RegistryAPIVersionHandlerExt for Registry<D> {
 
         let res = Response::builder()
             .status(StatusCode::OK)
-            .header("Docker-Distribution-API-Version", "registry/2.0")
-            .header("X-Powered-By", "Simple-Registry")
+            .header(DOCKER_DISTRIBUTION_API_VERSION, "registry/2.0")
+            .header(X_POWERED_BY, "Simple-Registry")
             .body(Body::empty())?;
 
         Ok(res)

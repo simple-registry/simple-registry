@@ -36,18 +36,25 @@ Commands:
 
 ```
 
+## Additional endpoints
+
+In addition to the standard distribution endpoints, Simple-Registry provides the following endpoints:
+
+- `/health`: Health check endpoint
+- `/metrics`: Prometheus metrics endpoint
+
+### Metrics
+
+- `http_requests_total` (counter): Total number of HTTP requests made.
+- `http_request_duration_milliseconds_bucket`, `http_request_duration_milliseconds_sum`, `http_request_duration_milliseconds_count` (histogram): The HTTP request latencies in milliseconds.
+- `http_requests_in_flight` (gauge): The current number of HTTP requests being served.
+
 ## Configuration
 
 - [Configuration Reference](doc/configuration-reference.md)
 - [Access Control Policies documentation](doc/configure-access-control-policies.md)
 - [Retention Policies documentation](doc/configure-retention-policies.md)
 - [mTLS documentation](doc/configure-mtls.md)
-
-## Roadmap
-
-- [ ] Kubernetes Operator (new project)
-- [ ] OpenMetrics exporter
-- [ ] Health-checks
 
 ## References
 

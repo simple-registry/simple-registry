@@ -1,11 +1,13 @@
 use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::RequestExt;
 use crate::registry::api::hyper::response_ext::ResponseExt;
+use crate::registry::api::hyper::OCI_FILTERS_APPLIED;
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, ReferrerList};
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
 use hyper::body::Incoming;
+use hyper::header::CONTENT_TYPE;
 use hyper::{Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -80,13 +82,13 @@ impl<D: DataStore> RegistryAPIContentDiscoveryHandlersExt for Registry<D> {
         let res = if query_supplied_artifact_type {
             Response::builder()
                 .status(StatusCode::OK)
-                .header("Content-Type", "application/vnd.oci.image.index.v1+json")
-                .header("OCI-Filters-Applied", "artifactType")
+                .header(CONTENT_TYPE, "application/vnd.oci.image.index.v1+json")
+                .header(OCI_FILTERS_APPLIED, "artifactType")
                 .body(Body::fixed(referrer_list))?
         } else {
             Response::builder()
                 .status(StatusCode::OK)
-                .header("Content-Type", "application/vnd.oci.image.index.v1+json")
+                .header(CONTENT_TYPE, "application/vnd.oci.image.index.v1+json")
                 .body(Body::fixed(referrer_list))?
         };
 
