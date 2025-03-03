@@ -41,7 +41,7 @@ impl MetricsProvider {
         let metrics_meter = provider.meter(env!("CARGO_PKG_NAME"));
 
         let metric_http_request_total = metrics_meter
-            .u64_counter("http_requests_total")
+            .u64_counter("http_requests")
             .with_description("Total number of HTTP requests made.")
             .build();
 
