@@ -265,6 +265,15 @@ async fn router<'a, D: DataStore + 'static>(
 
     if ROUTE_API_VERSION_REGEX.is_match(&path) {
         if req.method() == Method::GET {
+            // TODO: make this part customizable
+            if !context.credentials.is_empty() && id.username.is_none() {
+                return (
+                    Some("api-version"),
+                    Err(registry::Error::Unauthorized(
+                        "Access denied (requires credentials)".to_string(),
+                    )),
+                );
+            }
             return (
                 Some("api-version"),
                 context.registry.handle_get_api_version(id).await,
