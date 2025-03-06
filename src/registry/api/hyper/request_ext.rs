@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use std::io;
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
-use tracing::warn;
+use tracing::{debug, error, warn};
 
 lazy_static! {
     static ref RANGE_RE: Regex = Regex::new(r"^(?:bytes=)?(?P<start>\d+)-(?P<end>\d+)$").unwrap();
@@ -51,13 +51,15 @@ impl<T> RequestExt for Request<T> {
     }
 
     fn provided_credentials(&self) -> Option<(String, String)> {
-        let value = self
-            .headers()
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Basic "))
-            .and_then(|value| BASE64_STANDARD.decode(value).ok())
-            .and_then(|value| String::from_utf8(value).ok())?;
+        let Some(authorization) = self.get_header(AUTHORIZATION) else {
+            debug!("No authorization header found");
+            return None;
+        };
+
+        error!("Authorization header: {authorization}");
+        let value = authorization.strip_prefix("Basic ")?;
+        let value = BASE64_STANDARD.decode(value).ok()?;
+        let value = String::from_utf8(value).ok()?;
 
         let (username, password) = value.split_once(':')?;
         Some((username.to_string(), password.to_string()))
@@ -73,17 +75,12 @@ impl<T> RequestExt for Request<T> {
     }
 
     fn range(&self, header: HeaderName) -> Result<Option<(u64, u64)>, Error> {
-        let Some(range_header) = self.headers().get(header) else {
+        let Some(range_header) = self.get_header(header) else {
             return Ok(None);
         };
 
-        let range_str = range_header.to_str().map_err(|e| {
-            warn!("Error parsing Range header as string: {}", e);
-            Error::RangeNotSatisfiable
-        })?;
-
-        let captures = RANGE_RE.captures(range_str).ok_or_else(|| {
-            warn!("Invalid Range header format: {}", range_str);
+        let captures = RANGE_RE.captures(&range_header).ok_or_else(|| {
+            warn!("Invalid Range header format: {}", range_header);
             Error::RangeNotSatisfiable
         })?;
 

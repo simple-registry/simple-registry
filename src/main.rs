@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-use crate::command::{scrub, server};
+use crate::command::{argon, scrub, server};
 use crate::configuration::{
     CacheStoreConfig, Configuration, DataStoreConfig, Error, ObservabilityConfig, RepositoryConfig,
     ServerTlsConfig,
@@ -181,6 +181,7 @@ impl GlobalArguments {
 #[derive(FromArgs, PartialEq, Debug)]
 #[argh(subcommand)]
 enum SubCommand {
+    Argon(argon::Options),
     Scrub(scrub::Options),
     Serve(server::Options),
 }
@@ -222,6 +223,7 @@ async fn handle_command<D: DataStore + 'static>(
     let registry = build_registry(config.cache_store, config.repository, data_store.clone())?;
 
     match arguments.nested {
+        SubCommand::Argon(_) => argon::Command::run(),
         SubCommand::Scrub(scrub_options) => {
             let scrub = scrub::Command::new(&scrub_options, registry);
             scrub.run().await
