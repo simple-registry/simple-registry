@@ -56,7 +56,6 @@ impl<T> RequestExt for Request<T> {
             return None;
         };
 
-        error!("Authorization header: {authorization}");
         let value = authorization.strip_prefix("Basic ")?;
         let value = BASE64_STANDARD.decode(value).ok()?;
         let value = String::from_utf8(value).ok()?;
