@@ -29,7 +29,7 @@ pub fn manifest_should_be_purged(
     last_pulled: &Vec<String>,
 ) -> Result<bool, Error> {
     let mut context = Context::default();
-    debug!("Policy context (image) : {:?}", manifest);
+    debug!("Policy context (image) : {manifest:?}");
 
     context.add_variable("image", manifest)?;
     context.add_variable("last_pushed", last_pushed)?;
@@ -60,10 +60,7 @@ pub fn manifest_should_be_purged(
     for policy in rules {
         let evaluation_result = policy.execute(&context)?;
 
-        debug!(
-            "CEL program '{:?}' evaluates to {:?}",
-            policy, evaluation_result
-        );
+        debug!("CEL program '{policy:?}' evaluates to {evaluation_result:?}");
         match evaluation_result {
             Value::Bool(true) => {
                 debug!("Retention policy matched");
@@ -83,7 +80,7 @@ pub fn manifest_should_be_purged(
 
 impl<D: DataStore> Registry<D> {
     pub async fn enforce_retention(&self, namespace: &str) -> Result<(), Error> {
-        info!("'{}': Enforcing retention policy", namespace);
+        info!("'{namespace}': Enforcing retention policy");
 
         let mut marker = None;
         let mut tag_names = Vec::new();
@@ -135,14 +132,14 @@ impl<D: DataStore> Registry<D> {
             .collect::<Vec<String>>();
 
         for (tag, info) in &tags {
-            debug!("'{}': Checking tag '{}' for retention", namespace, tag);
+            debug!("'{namespace}': Checking tag '{tag}' for retention");
 
             let Some((_, found_repository)) = self
                 .repositories
                 .iter()
                 .find(|(repository, _)| namespace.starts_with(*repository))
             else {
-                warn!("Unable to find repository for namespace: {}", namespace);
+                warn!("Unable to find repository for namespace: {namespace}");
                 return Ok(());
             };
 
@@ -158,7 +155,7 @@ impl<D: DataStore> Registry<D> {
                 &last_pushed,
                 &last_pulled,
             )? {
-                info!("Available for cleanup: {}:{}", namespace, tag);
+                info!("Available for cleanup: {namespace}:{tag}");
                 if !self.scrub_dry_run {
                     let reference = Reference::Tag(tag.to_string());
                     let _ = self.delete_manifest(namespace, reference).await;
@@ -173,7 +170,7 @@ impl<D: DataStore> Registry<D> {
     }
 
     pub(crate) async fn scrub_uploads(&self, namespace: &str) -> Result<(), Error> {
-        info!("'{}': Checking for obsolete uploads", namespace);
+        info!("'{namespace}': Checking for obsolete uploads");
 
         let mut marker = None;
         loop {
@@ -184,7 +181,7 @@ impl<D: DataStore> Registry<D> {
 
             for uuid in uploads {
                 if let Err(error) = self.check_upload(namespace, &uuid).await {
-                    error!("Failed to check upload '{}': {}", uuid, error);
+                    error!("Failed to check upload '{uuid}': {error}");
                 }
             }
 
@@ -210,10 +207,10 @@ impl<D: DataStore> Registry<D> {
             return Ok(());
         }
 
-        warn!("'{}': upload '{}' is obsolete", namespace, uuid);
+        warn!("'{namespace}': upload '{uuid}' is obsolete");
         if !self.scrub_dry_run {
-            if let Err(err) = self.storage_engine.delete_upload(namespace, uuid).await {
-                error!("Failed to delete upload '{}': {}", uuid, err);
+            if let Err(error) = self.storage_engine.delete_upload(namespace, uuid).await {
+                error!("Failed to delete upload '{uuid}': {error}");
             }
         }
 
@@ -221,7 +218,7 @@ impl<D: DataStore> Registry<D> {
     }
 
     pub(crate) async fn scrub_tags(&self, namespace: &str) -> Result<(), Error> {
-        info!("'{}': Checking tags/revision inconsistencies", namespace);
+        info!("'{namespace}': Checking tags/revision inconsistencies");
 
         let mut marker = None;
         loop {
@@ -232,7 +229,7 @@ impl<D: DataStore> Registry<D> {
 
             for tag in tags {
                 if let Err(error) = self.check_tag(namespace, &tag).await {
-                    error!("Failed to check tag '{}': {}", tag, error);
+                    error!("Failed to check tag '{tag}': {error}");
                 }
             }
 
@@ -246,25 +243,22 @@ impl<D: DataStore> Registry<D> {
     }
 
     async fn check_tag(&self, namespace: &str, tag: &str) -> Result<(), Error> {
-        debug!(
-            "Checking {}:{} for revision inconsistencies",
-            namespace, tag
-        );
+        debug!("Checking {namespace}:{tag} for revision inconsistencies");
         let digest = self
             .storage_engine
             .read_link(namespace, &DataLink::Tag(tag.to_string()))
             .await?;
 
         let link_reference = DataLink::Digest(digest.clone());
-        if let Err(e) = self.ensure_link(namespace, &link_reference, &digest).await {
-            warn!("Failed to ensure link: {}", e);
+        if let Err(error) = self.ensure_link(namespace, &link_reference, &digest).await {
+            warn!("Failed to ensure link: {error}");
         }
 
         Ok(())
     }
 
     pub(crate) async fn scrub_revisions(&self, namespace: &str) -> Result<(), Error> {
-        info!("'{}': Checking for revision inconsistencies", namespace);
+        info!("'{namespace}': Checking for revision inconsistencies");
 
         let mut marker = None;
 
@@ -306,11 +300,7 @@ impl<D: DataStore> Registry<D> {
             return Ok(());
         };
 
-        debug!(
-            "Checking {}@{} config link: {}",
-            namespace, revision, config_digest
-        );
-
+        debug!("Checking {namespace}/{revision} config link: {config_digest}");
         let link_reference = DataLink::Config(config_digest.clone());
         self.ensure_link(namespace, &link_reference, &config_digest)
             .await?;
@@ -328,10 +318,7 @@ impl<D: DataStore> Registry<D> {
             return Ok(());
         };
 
-        debug!(
-            "Checking {}@{} subject link: {}",
-            namespace, revision, subject_digest
-        );
+        debug!("Checking {namespace}/{revision} subject link: {subject_digest}");
         let link_reference = DataLink::Referrer(subject_digest.clone(), revision.clone());
         self.ensure_link(namespace, &link_reference, revision)
             .await?;
@@ -346,10 +333,7 @@ impl<D: DataStore> Registry<D> {
         layers: &Vec<Digest>,
     ) -> Result<(), Error> {
         for layer_digest in layers {
-            debug!(
-                "Checking {}@{} layer link: {}",
-                namespace, revision, layer_digest
-            );
+            debug!("Checking {namespace}/{revision} layer link: {layer_digest}",);
 
             let link_reference = DataLink::Layer(layer_digest.clone());
             self.ensure_link(namespace, &link_reference, layer_digest)
@@ -373,15 +357,12 @@ impl<D: DataStore> Registry<D> {
 
         if let Some(link_digest) = blob_digest {
             if &link_digest == digest {
-                debug!("Link {:?} -> {:?} is valid", link_reference, digest);
+                debug!("Link {link_reference} -> {digest} is valid");
                 return Ok(());
             }
         }
 
-        warn!(
-            "Missing or invalid link: {:?} -> {:?}",
-            link_reference, digest
-        );
+        warn!("Missing or invalid link: {link_reference} -> {digest}");
         if !self.scrub_dry_run {
             self.storage_engine
                 .create_link(namespace, link_reference, digest)
@@ -426,14 +407,11 @@ impl<D: DataStore> Registry<D> {
                     .is_err()
                 {
                     let Some(index) = blob_index.namespace.get_mut(&namespace) else {
-                        error!("Failed to get namespace index: {}", namespace);
+                        error!("Failed to get namespace index: {namespace}");
                         continue;
                     };
 
-                    warn!(
-                        "Orphan link: {}@{} -> {:?}",
-                        namespace, blob, link_reference
-                    );
+                    warn!("Orphan link: {namespace}/{blob} -> {link_reference}");
                     if !self.scrub_dry_run {
                         index.remove(&link_reference);
                     }
@@ -446,10 +424,10 @@ impl<D: DataStore> Registry<D> {
             .retain(|_, references| !references.is_empty());
 
         if blob_index.namespace.is_empty() {
-            warn!("Orphan blob: {}", blob);
+            warn!("Orphan blob: {blob}");
             if !self.scrub_dry_run {
-                if let Err(err) = self.storage_engine.delete_blob(blob).await {
-                    error!("Failed to delete blob: {}", err);
+                if let Err(error) = self.storage_engine.delete_blob(blob).await {
+                    error!("Failed to delete blob: {error}");
                 }
             }
         }

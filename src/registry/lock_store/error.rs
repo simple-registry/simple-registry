@@ -17,7 +17,7 @@ impl fmt::Display for Error {
 
 impl From<RedisError> for Error {
     fn from(error: RedisError) -> Self {
-        let error = format!("Redis error: {error:?}");
+        let error = format!("Redis error: {error}");
         debug!("{error}");
         Error::BackendError(error)
     }

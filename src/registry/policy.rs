@@ -25,8 +25,8 @@ impl<D: DataStore> Registry<D> {
         };
 
         debug!(
-            "Default allow: {:?} for namespace: {:?} ({:?})",
-            repository.access_default_allow, namespace, repository.name
+            "Default allow: {} for namespace: {namespace} ({})",
+            repository.access_default_allow, repository.name
         );
 
         if repository.access_default_allow {
@@ -59,15 +59,12 @@ impl<D: DataStore> Registry<D> {
         let context = self.build_policy_context(identity, request)?;
 
         for policy in policies {
-            let evaluation_result = policy.execute(&context).map_err(|e| {
-                error!("Policy execution failed: {}", e);
+            let evaluation_result = policy.execute(&context).map_err(|error| {
+                error!("Policy execution failed: {error}");
                 Self::deny()
             })?;
 
-            debug!(
-                "CEL program '{:?}' evaluates to {:?}",
-                policy, evaluation_result
-            );
+            debug!("CEL program '{policy:?}' evaluates to {evaluation_result:?}");
             match evaluation_result {
                 Value::Bool(false) => {
                     info!("Policy matched, denying access");
@@ -100,15 +97,12 @@ impl<D: DataStore> Registry<D> {
         let context = self.build_policy_context(identity, request)?;
 
         for policy in policies {
-            let evaluation_result = policy.execute(&context).map_err(|e| {
-                error!("Policy execution failed: {}", e);
+            let evaluation_result = policy.execute(&context).map_err(|error| {
+                error!("Policy execution failed: {error}");
                 Self::deny()
             })?;
 
-            debug!(
-                "CEL program '{:?}' evaluates to {:?}",
-                policy, evaluation_result
-            );
+            debug!("CEL program '{policy:?}' evaluates to {evaluation_result:?}");
             match evaluation_result {
                 Value::Bool(true) => {
                     debug!("Policy matched, allowing access");
@@ -123,8 +117,8 @@ impl<D: DataStore> Registry<D> {
         }
 
         debug!(
-            "Default policy denied access: {:?} for {:?}",
-            request, identity.id
+            "Default policy denied access: {request:?} for {:?}",
+            identity.id
         );
         Err(Self::deny())
     }
@@ -137,15 +131,15 @@ impl<D: DataStore> Registry<D> {
     ) -> Result<Context, Error> {
         let mut context = Context::default();
 
-        debug!("Policy context (request) : {:?}", request);
-        context.add_variable("request", request).map_err(|e| {
-            error!("Failed to add request to policy context: {}", e);
+        debug!("Policy context (request) : {request:?}");
+        context.add_variable("request", request).map_err(|error| {
+            error!("Failed to add request to policy context: {error}");
             Self::deny()
         })?;
 
-        debug!("Policy context (identity) : {:?}", identity);
+        debug!("Policy context (identity) : {identity:?}");
         context.add_variable("identity", identity).map_err(|e| {
-            error!("Failed to add identity to policy context: {}", e);
+            error!("Failed to add identity to policy context: {e}");
             Self::deny()
         })?;
 

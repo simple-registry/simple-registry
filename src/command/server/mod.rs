@@ -162,7 +162,7 @@ async fn serve_request<D: DataStore + 'static, S>(
                 // and break out of the loop.
                 match res {
                     Ok(()) => debug!("after polling conn, no error"),
-                    Err(e) =>  debug!("error serving connection: {e:?}"),
+                    Err(error) =>  debug!("error serving connection: {error}"),
                 };
                 break;
             }

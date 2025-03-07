@@ -159,8 +159,8 @@ impl RepositoryUpstream {
                 reader.read_to_end(&mut content).await?;
                 content
             }
-            Err(e) => {
-                error!("Failed to authenticate with upstream: {:?}", e);
+            Err(error) => {
+                error!("Failed to authenticate with upstream: {error}");
                 return Err(registry::Error::Unauthorized(
                     "Failed to authenticate with upstream".to_string(),
                 ));
@@ -179,14 +179,14 @@ impl RepositoryUpstream {
         &self,
         namespace: &str,
     ) -> Result<Option<HeaderValue>, registry::Error> {
-        debug!("Checking bearer token in cache for namespace: {namespace:?}");
+        debug!("Checking bearer token in cache for namespace: {namespace}");
         let Ok(token) = self.token_cache.retrieve(namespace).await else {
             return Ok(None);
         };
 
-        debug!("Retrieved token from cache for namespace: {namespace:?}");
-        Ok(Some(HeaderValue::from_str(&token).map_err(|e| {
-            debug!("Failed to build bearer token: {:?}", e);
+        debug!("Retrieved token from cache for namespace: {namespace}");
+        Ok(Some(HeaderValue::from_str(&token).map_err(|error| {
+            debug!("Failed to build bearer token: {error}");
             registry::Error::Internal("Failed to build bearer token for upstream".to_string())
         })?))
     }
@@ -213,7 +213,7 @@ impl RepositoryUpstream {
         let mut authenticate_count = 0;
 
         let response = loop {
-            info!("Requesting manifest from upstream: {}", &location);
+            info!("Requesting manifest from upstream: {location}");
 
             let mut request = request::Builder::new().method(method).uri(&location);
 
@@ -229,8 +229,8 @@ impl RepositoryUpstream {
             let request = request.body(Empty::new())?;
             let response = match self.client.request(request).await {
                 Ok(res) => res,
-                Err(e) => {
-                    error!("Failed to fetch manifest from upstream: {:?}", e);
+                Err(error) => {
+                    error!("Failed to fetch manifest from upstream: {error}");
                     return Err(registry::Error::Internal(
                         "Failed to fetch manifest from upstream".to_string(),
                     ));
@@ -275,8 +275,8 @@ impl RepositoryUpstream {
 
                 self.token_cache.store(namespace, &token, token_ttl).await?;
 
-                authorization_header = Some(HeaderValue::from_str(&token).map_err(|e| {
-                    debug!("Failed to build bearer token: {:?}", e);
+                authorization_header = Some(HeaderValue::from_str(&token).map_err(|error| {
+                    debug!("Failed to build bearer token: {error}");
                     registry::Error::Internal(
                         "Failed to build bearer token for upstream".to_string(),
                     )

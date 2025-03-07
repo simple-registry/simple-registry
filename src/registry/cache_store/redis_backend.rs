@@ -19,13 +19,13 @@ impl RedisBackend {
 
     pub async fn store(&self, key: &str, value: &str, expires_in: u64) -> Result<(), Error> {
         let mut conn = self.get_connection().await?;
-        let key = format!("{}{}", self.key_prefix, key);
+        let key = format!("{}{key}", self.key_prefix);
         Ok(conn.set_ex(key, value, expires_in).await?)
     }
 
     pub async fn retrieve(&self, key: &str) -> Result<String, Error> {
         let mut conn = self.get_connection().await?;
-        let key = format!("{}{}", self.key_prefix, key);
+        let key = format!("{}{key}", self.key_prefix);
         let value: Option<String> = conn.get(key).await?;
         value.ok_or(Error::NotFound)
     }

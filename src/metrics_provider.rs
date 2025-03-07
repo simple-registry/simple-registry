@@ -8,10 +8,11 @@ use tracing::error;
 
 lazy_static! {
     pub static ref IN_FLIGHT_REQUESTS: AtomicU64 = AtomicU64::new(0);
-    pub static ref METRICS_PROVIDER: MetricsProvider = MetricsProvider::new().unwrap_or_else(|e| {
-        error!("Unable to create metrics provider: {}", e);
-        std::process::exit(1);
-    });
+    pub static ref METRICS_PROVIDER: MetricsProvider =
+        MetricsProvider::new().unwrap_or_else(|error| {
+            error!("Unable to create metrics provider: {error}");
+            std::process::exit(1);
+        });
 }
 
 pub struct MetricsProvider {
@@ -31,8 +32,8 @@ impl MetricsProvider {
             .without_scope_info()
             .without_target_info()
             .build()
-            .map_err(|e| {
-                error!("Unable to create Prometheus exporter: {}", e);
+            .map_err(|error| {
+                error!("Unable to create Prometheus exporter: {error}");
                 configuration::Error::Http(String::from("Unable to create Prometheus exporter"))
             })?;
 

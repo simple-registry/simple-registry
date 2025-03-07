@@ -43,8 +43,8 @@ pub fn parse_manifest_digests(
         && manifest.media_type.as_ref() != content_type
     {
         warn!(
-            "Manifest media type mismatch: {:?} (expected) != {:?} (found)",
-            content_type, manifest.media_type
+            "Manifest media type mismatch: {content_type:?} (expected) != {:?} (found)",
+            manifest.media_type
         );
         return Err(Error::ManifestInvalid(
             "Expected manifest media type mismatch".to_string(),
@@ -136,8 +136,8 @@ impl<D: DataStore> Registry<D> {
             .storage_engine
             .build_blob_reader(&digest, None)
             .await
-            .map_err(|e| {
-                error!("Failed to build blob reader: {}", e);
+            .map_err(|error| {
+                error!("Failed to build blob reader: {error}");
                 Error::ManifestUnknown
             })?;
 
@@ -214,8 +214,8 @@ impl<D: DataStore> Registry<D> {
             .await?;
 
         let content = self.storage_engine.read_blob(&digest).await?;
-        let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|e| {
-            warn!("Failed to deserialize manifest (2): {}", e);
+        let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|error| {
+            warn!("Failed to deserialize manifest (2): {error}");
             warn!("Manifest content: {:?}", String::from_utf8_lossy(&content));
             Error::ManifestInvalid("Failed to deserialize manifest".to_string())
         })?;
@@ -258,10 +258,7 @@ impl<D: DataStore> Registry<D> {
                 let digest = self.storage_engine.create_blob(body).await?;
 
                 if provided_digest != digest {
-                    warn!(
-                        "Provided digest does not match calculated digest: {} != {}",
-                        provided_digest, digest
-                    );
+                    warn!("Provided digest does not match calculated digest: {provided_digest} != {digest}");
                     return Err(Error::ManifestInvalid(
                         "Provided digest does not match calculated digest".to_string(),
                     ));

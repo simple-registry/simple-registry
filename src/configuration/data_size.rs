@@ -74,9 +74,9 @@ mod tests {
         for unit in &[
             "K", "KB", "M", "MB", "G", "GB", "KI", "KIB", "MI", "MIB", "GI", "GIB",
         ] {
-            let size: DataSize = serde_json::from_str(&format!(r#""10{}""#, unit)).unwrap();
+            let size: DataSize = serde_json::from_str(&format!(r#""10{unit}""#)).unwrap();
             let DataSize::WithUnit(quantity, u) = size else {
-                panic!("Expected DataSize::WithUnit, got {:?}", size);
+                panic!("Expected DataSize::WithUnit, got {size:?}");
             };
             assert_eq!(quantity, 10);
             assert_eq!(u, unit.to_string());
@@ -87,7 +87,7 @@ mod tests {
     fn test_data_size_deserialization_without_unit() {
         let size: DataSize = serde_json::from_str(r#""10""#).unwrap();
         let DataSize::WithoutUnit(quantity) = size else {
-            panic!("Expected DataSize::WithoutUnit, got {:?}", size);
+            panic!("Expected DataSize::WithoutUnit, got {size:?}");
         };
         assert_eq!(quantity, 10);
     }

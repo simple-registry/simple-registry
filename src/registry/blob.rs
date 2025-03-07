@@ -71,12 +71,12 @@ impl<D: DataStore + 'static> Registry<D> {
             .write_upload(&namespace, &session_id, stream, false)
             .await?;
 
-        if let Err(e) = storage_engine
+        if let Err(error) = storage_engine
             .complete_upload(&namespace, &session_id, Some(digest))
             .await
         {
-            debug!("Failed to complete upload: {:?}", e);
-            return Err(e);
+            debug!("Failed to complete upload: {error}");
+            return Err(error);
         }
 
         Ok::<(), data_store::Error>(())
@@ -99,14 +99,11 @@ impl<D: DataStore + 'static> Registry<D> {
 
             match self.get_local_blob(digest, range).await {
                 Ok(local_blob) => {
-                    debug!("Returning blob from local store: {:?}", digest);
+                    debug!("Returning blob from local store: {digest}");
                     return Ok(local_blob);
                 }
-                Err(e) => {
-                    debug!(
-                        "Failed to get blob from local store, pulling from upstream {:?}: {:?}",
-                        digest, e
-                    );
+                Err(error) => {
+                    debug!("Failed to get blob from local store, pulling from upstream {digest}: {error}");
                 }
             }
 
@@ -171,13 +168,13 @@ impl<D: DataStore + 'static> Registry<D> {
         self.validate_namespace(namespace)?;
 
         let link = DataLink::Layer(digest.clone());
-        if let Err(e) = self.storage_engine.delete_link(namespace, &link).await {
-            warn!("Failed to delete layer link: {:?}", e);
+        if let Err(error) = self.storage_engine.delete_link(namespace, &link).await {
+            warn!("Failed to delete layer link: {error}");
         }
 
         let link = DataLink::Config(digest);
-        if let Err(e) = self.storage_engine.delete_link(namespace, &link).await {
-            warn!("Failed to delete config link: {:?}", e);
+        if let Err(error) = self.storage_engine.delete_link(namespace, &link).await {
+            warn!("Failed to delete config link: {error}");
         }
 
         Ok(())

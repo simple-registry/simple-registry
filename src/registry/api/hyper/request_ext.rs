@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use std::io;
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 lazy_static! {
     static ref RANGE_RE: Regex = Regex::new(r"^(?:bytes=)?(?P<start>\d+)-(?P<end>\d+)$").unwrap();
@@ -44,8 +44,8 @@ impl<T> RequestExt for Request<T> {
             return Ok(Default::default());
         };
 
-        serde_urlencoded::from_str(query).map_err(|e| {
-            warn!("Failed to parse query parameters: {}", e);
+        serde_urlencoded::from_str(query).map_err(|error| {
+            warn!("Failed to parse query parameters: {error}");
             Error::Unsupported
         })
     }
@@ -56,7 +56,6 @@ impl<T> RequestExt for Request<T> {
             return None;
         };
 
-        error!("Authorization header: {authorization}");
         let value = authorization.strip_prefix("Basic ")?;
         let value = BASE64_STANDARD.decode(value).ok()?;
         let value = String::from_utf8(value).ok()?;
@@ -80,7 +79,7 @@ impl<T> RequestExt for Request<T> {
         };
 
         let captures = RANGE_RE.captures(&range_header).ok_or_else(|| {
-            warn!("Invalid Range header format: {}", range_header);
+            warn!("Invalid Range header format: {range_header}");
             Error::RangeNotSatisfiable
         })?;
 
@@ -88,21 +87,18 @@ impl<T> RequestExt for Request<T> {
             return Err(Error::RangeNotSatisfiable);
         };
 
-        let start = start.as_str().parse::<u64>().map_err(|e| {
-            warn!("Error parsing 'start' in Range header: {}", e);
+        let start = start.as_str().parse::<u64>().map_err(|error| {
+            warn!("Error parsing 'start' in Range header: {error}");
             Error::RangeNotSatisfiable
         })?;
 
-        let end = end.as_str().parse::<u64>().map_err(|e| {
-            warn!("Error parsing 'end' in Range header: {}", e);
+        let end = end.as_str().parse::<u64>().map_err(|error| {
+            warn!("Error parsing 'end' in Range header: {error}");
             Error::RangeNotSatisfiable
         })?;
 
         if start > end {
-            warn!(
-                "Range start ({}) is greater than range end ({})",
-                start, end
-            );
+            warn!("Range start ({start}) is greater than range end ({end})");
             return Err(Error::RangeNotSatisfiable);
         }
 

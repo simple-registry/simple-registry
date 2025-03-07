@@ -45,15 +45,15 @@ impl<D> ServerContext<D> {
         let (identity_id, identity_password) =
             self.credentials.get(username).ok_or_else(Self::deny)?;
 
-        let identity_password = PasswordHash::new(identity_password).map_err(|e| {
-            error!("Unable to hash password: {}", e);
+        let identity_password = PasswordHash::new(identity_password).map_err(|error| {
+            error!("Unable to hash password: {error}");
             Self::deny()
         })?;
 
         Argon2::default()
             .verify_password(password.as_bytes(), &identity_password)
-            .map_err(|e| {
-                error!("Unable to verify password: {}", e);
+            .map_err(|error| {
+                error!("Unable to verify password: {error}");
                 Self::deny()
             })?;
 

@@ -57,14 +57,14 @@ impl Display for Error {
 
 impl From<cache_store::Error> for Error {
     fn from(error: cache_store::Error) -> Self {
-        warn!("Cache error: {:?}", error);
+        warn!("Cache error: {error}");
         Error::Internal("Cache error during operations".to_string())
     }
 }
 
 impl From<oci_types::Error> for Error {
     fn from(error: oci_types::Error) -> Self {
-        warn!("OCI error: {:?}", error);
+        warn!("OCI error: {error}");
         Error::NameInvalid
     }
 }
@@ -76,7 +76,7 @@ impl From<data_store::Error> for Error {
             data_store::Error::BlobNotFound => Error::BlobUnknown,
             data_store::Error::ReferenceNotFound => Error::ManifestBlobUnknown,
             _ => {
-                warn!("Data store error: {:?}", error);
+                warn!("Data store error: {error}");
                 Error::Internal("Data store error during operations".to_string())
             }
         }
@@ -85,14 +85,14 @@ impl From<data_store::Error> for Error {
 
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
-        debug!("Error: {:?}", error);
+        debug!("Error: {error}");
         Error::Internal("I/O error during operations".to_string())
     }
 }
 
 impl From<hyper::http::Error> for Error {
     fn from(error: hyper::http::Error) -> Self {
-        debug!("Hyper HTTP error: {:?}", error);
+        debug!("Hyper HTTP error: {error}");
         Error::Internal("HTTP error during operations".to_string())
     }
 }
@@ -100,21 +100,21 @@ impl From<hyper::http::Error> for Error {
 // XXX: at least repository_upstream is using this error type
 impl From<serde_json::Error> for Error {
     fn from(error: serde_json::Error) -> Self {
-        debug!("Serde JSON error: {:?}", error);
+        debug!("Serde JSON error: {error}");
         Error::Internal("(De)Serialization error during operations".to_string())
     }
 }
 
 impl From<cel_interpreter::ExecutionError> for Error {
-    fn from(err: cel_interpreter::ExecutionError) -> Self {
-        debug!("CEL error: {:?}", err);
+    fn from(error: cel_interpreter::ExecutionError) -> Self {
+        debug!("CEL error: {error}");
         Error::Internal("Policy evaluation error".to_string())
     }
 }
 
 impl From<Box<dyn std::error::Error>> for Error {
     fn from(error: Box<dyn std::error::Error>) -> Self {
-        debug!("Error: {:?}", error);
+        debug!("STD Error: {error}");
         Error::Internal("Error during operations".to_string())
     }
 }

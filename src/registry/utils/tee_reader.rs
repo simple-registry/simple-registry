@@ -78,11 +78,11 @@ where
                         break;
                     }
                 }
-                Err(e) => {
-                    error!("Error reading from source: {e:?}");
+                Err(error) => {
+                    error!("Error reading from source: {error}");
                     let _ = try_join(
-                        tx1.send(Err(e.kind().into())),
-                        tx2.send(Err(e.kind().into())),
+                        tx1.send(Err(error.kind().into())),
+                        tx2.send(Err(error.kind().into())),
                     )
                     .await;
                     break;
