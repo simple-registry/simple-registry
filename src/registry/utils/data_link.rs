@@ -1,5 +1,6 @@
 use crate::registry::oci_types::{Digest, Reference};
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum DataLink {
@@ -8,6 +9,18 @@ pub enum DataLink {
     Layer(Digest),
     Config(Digest),
     Referrer(Digest, Digest),
+}
+
+impl Display for DataLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DataLink::Tag(s) => write!(f, "tag:{s}"),
+            DataLink::Digest(d) => write!(f, "digest:{d}"),
+            DataLink::Layer(d) => write!(f, "layer:{d}"),
+            DataLink::Config(d) => write!(f, "config:{d}"),
+            DataLink::Referrer(l, r) => write!(f, "referrer:{l}-{r}"),
+        }
+    }
 }
 
 impl From<Reference> for DataLink {

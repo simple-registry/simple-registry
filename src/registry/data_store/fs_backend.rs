@@ -74,7 +74,7 @@ impl FSBackend {
                                     path.parent().and_then(|p| p.strip_prefix(base_path).ok())
                                 {
                                     if let Some(name) = name.to_str() {
-                                        debug!("Found repository: {}", name);
+                                        debug!("Found repository: {name}");
                                         repositories.push(name.to_string());
                                     }
                                 }
@@ -151,11 +151,11 @@ impl FSBackend {
     where
         O: FnOnce(&mut HashSet<DataLink>),
     {
-        debug!("Ensuring container directory for digest: {}", digest);
+        debug!("Ensuring container directory for digest: {digest}");
         let path = self.tree.blob_container_dir(digest);
         fs::create_dir_all(&path)?;
 
-        debug!("Updating reference count for digest: {}", digest);
+        debug!("Updating reference count for digest: {digest}");
         let path = self.tree.blob_index_path(digest);
 
         let mut reference_index = match fs::read_to_string(&path) {
@@ -181,14 +181,14 @@ impl FSBackend {
         };
 
         if reference_index.namespace.is_empty() {
-            debug!("Deleting no longer referenced Blob: {}", digest);
+            debug!("Deleting no longer referenced Blob: {digest}");
             let path = self.tree.blob_container_dir(digest);
             let _ = self.delete_empty_parent_dirs(&path).await;
         } else {
-            debug!("Writing reference count to path: {}", path);
+            debug!("Writing reference count to path: {path}");
             let content = serde_json::to_string(&reference_index)?;
             fs::write(&path, content)?;
-            debug!("Reference index for {} updated", digest);
+            debug!("Reference index for {digest} updated");
         }
 
         Ok(())
@@ -264,7 +264,7 @@ impl DataStore for FSBackend {
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
         let path = self.tree.manifest_tags_dir(namespace);
-        debug!("Listing tags in path: {}", path);
+        debug!("Listing tags in path: {path}");
         let mut tags = self.collect_directory_entries(&path).await?;
         tags.sort();
 
@@ -416,11 +416,11 @@ impl DataStore for FSBackend {
             .append(false)
             .write(true)
             .open(&file_path)
-            .map_err(|e| {
-                error!("Error opening upload file {:}: {}", file_path, e);
-                match e.kind() {
+            .map_err(|error| {
+                error!("Error opening upload file {file_path:}: {error}");
+                match error.kind() {
                     ErrorKind::NotFound => Error::UploadNotFound,
-                    _ => e.into(),
+                    _ => error.into(),
                 }
             })?;
 
@@ -661,15 +661,12 @@ impl DataStore for FSBackend {
 
     #[instrument(skip(self))]
     async fn read_link(&self, name: &str, reference: &DataLink) -> Result<Digest, Error> {
-        debug!(
-            "Reading link for namespace: {}, reference: {:?}",
-            name, reference
-        );
+        debug!("Reading link for namespace: {name}, reference: {reference}");
         let path = self.tree.get_link_path(reference, name);
-        debug!("Reading link at path: {}", path);
+        debug!("Reading link at path: {path}");
 
         let link = fs::read_to_string(path)?;
-        debug!("Link content: {}", link);
+        debug!("Link content: {link}");
 
         Ok(Digest::try_from(link.as_str())?)
     }
@@ -681,10 +678,7 @@ impl DataStore for FSBackend {
         reference: &DataLink,
         digest: &Digest,
     ) -> Result<(), Error> {
-        debug!(
-            "Creating or updating link for namespace: {}, reference: {:?}",
-            namespace, reference
-        );
+        debug!("Creating or updating link for namespace: {namespace}, reference: {reference}");
 
         let _digest_guard = self
             .lock_store
@@ -713,10 +707,10 @@ impl DataStore for FSBackend {
             _ => {}
         }
 
-        debug!("Creating link at path: {}", link_path);
+        debug!("Creating link at path: {link_path}");
         Self::write_file(&link_path, digest.to_string().as_bytes())?;
 
-        debug!("Increasing reference count for digest: {}", digest);
+        debug!("Increasing reference count for digest: {digest}");
 
         self.blob_link_index_update(namespace, digest, |index| {
             index.insert(reference.clone());
@@ -728,10 +722,7 @@ impl DataStore for FSBackend {
 
     #[instrument(skip(self))]
     async fn delete_link(&self, namespace: &str, reference: &DataLink) -> Result<(), Error> {
-        debug!(
-            "Deleting link for namespace: {}, reference: {:?}",
-            namespace, reference
-        );
+        debug!("Deleting link for namespace: {namespace}, reference: {reference}");
 
         let digest = match self.read_link(namespace, reference).await {
             Ok(digest) => digest,
@@ -754,11 +745,11 @@ impl DataStore for FSBackend {
         }
 
         let path = self.tree.get_link_container_path(reference, namespace);
-        debug!("Deleting link at path: {}", path);
+        debug!("Deleting link at path: {path}");
 
         let _ = self.delete_empty_parent_dirs(&path).await;
 
-        debug!("Unregistering reference: {:?}", reference);
+        debug!("Unregistering reference: {reference}");
         self.blob_link_index_update(namespace, &digest, |index| {
             index.remove(reference);
         })

@@ -182,7 +182,7 @@ impl S3Backend {
 
     #[instrument(skip(self))]
     async fn delete_object_with_prefix(&self, prefix: &str) -> Result<(), Error> {
-        debug!("Deleting objects with prefix: {}", prefix);
+        debug!("Deleting objects with prefix: {prefix}");
 
         let mut next_continuation_token = None;
         loop {
@@ -200,7 +200,7 @@ impl S3Backend {
 
             for object in res.contents.unwrap_or_default() {
                 if let Some(key) = object.key {
-                    debug!("Deleting object: {}", key);
+                    debug!("Deleting object: {key}");
                     self.delete_object(&key).await?;
                 }
             }
@@ -256,8 +256,8 @@ impl S3Backend {
         content_length: u64,
     ) -> Result<(), Error> {
         debug!(
-            "Copying object '{}' to '{}' using multipart upload (max {} jobs)",
-            source, destination, self.multipart_copy_jobs
+            "Copying object '{source}' to '{destination}' using multipart upload (max {} jobs)",
+            self.multipart_copy_jobs
         );
         let res = self
             .s3_client
@@ -288,11 +288,12 @@ impl S3Backend {
         let semaphore = Arc::new(Semaphore::new(self.multipart_copy_jobs));
         let mut tasks = Vec::new();
 
-        for (part_number, (offset, part_size)) in offsets.into_iter().enumerate() {
+        for (part_number, (start_offset, part_size)) in offsets.into_iter().enumerate() {
             let Ok(part_number) = i32::try_from(part_number + 1) else {
                 error!("Error copying parts: too many parts");
                 return Err(Error::StorageBackend("Error copying parts".to_string()));
             };
+            let end_offset = start_offset + part_size - 1;
 
             let semaphore = semaphore.clone();
             let source = source.to_string();
@@ -305,19 +306,12 @@ impl S3Backend {
                 .key(&destination)
                 .part_number(part_number)
                 .upload_id(&upload_id)
-                .copy_source(format!("{}/{}", self.bucket, source))
-                .copy_source_range(format!("bytes={}-{}", offset, offset + part_size - 1));
+                .copy_source(format!("{}/{source}", self.bucket))
+                .copy_source_range(format!("bytes={start_offset}-{end_offset}"));
 
             let task = tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap(); // TODO: fix unwrap()
-                debug!(
-                    "Copying part {} ({}-{}) of object '{}' to '{}'",
-                    part_number,
-                    offset,
-                    offset + part_size - 1,
-                    source,
-                    destination
-                );
+                debug!("Copying part {part_number} ({start_offset}-{end_offset}) from '{source}' to '{destination}'");
 
                 let res = query.send().await?;
                 let res = res.copy_part_result.ok_or_else(|| {
@@ -339,8 +333,8 @@ impl S3Backend {
             tasks.push(task);
         }
 
-        let parts = try_join_all(tasks).await.map_err(|e| {
-            error!("Error copying parts: {}", e);
+        let parts = try_join_all(tasks).await.map_err(|error| {
+            error!("Error copying parts: {error}");
             Error::StorageBackend("Error copying parts".to_string())
         })?;
         let parts = parts
@@ -373,12 +367,12 @@ impl S3Backend {
             self.multipart_copy_object(destination, source, content_length)
                 .await?;
         } else {
-            debug!("Copying object '{}' to '{}'", source, destination);
+            debug!("Copying object '{source}' to '{destination}'");
             self.s3_client
                 .copy_object()
                 .bucket(&self.bucket)
                 .key(destination)
-                .copy_source(format!("{}/{}", self.bucket, source))
+                .copy_source(format!("{}/{source}", self.bucket))
                 .send()
                 .await?;
         }
@@ -575,7 +569,7 @@ impl S3Backend {
             .copy_object()
             .bucket(&self.bucket)
             .key(key)
-            .copy_source(format!("{}/{}", self.bucket, key))
+            .copy_source(format!("{}/{key}", self.bucket))
             .metadata_directive(MetadataDirective::Replace)
             .metadata(PUSHED_AT_METADATA_KEY, pushed_at)
             .metadata(LAST_PULLED_AT_METADATA_KEY, Utc::now().to_rfc3339())
@@ -594,10 +588,7 @@ impl DataStore for S3Backend {
         n: u16,
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
-        debug!(
-            "Fetching {} namespace(s) with continuation token: {:?}",
-            n, last
-        );
+        debug!("Fetching {n} namespace(s) with continuation token: {last:?}");
         let base_prefix = format!("{}/", self.tree.repository_dir());
         let base_prefix_len = base_prefix.len();
 
@@ -647,10 +638,7 @@ impl DataStore for S3Backend {
         n: u16,
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
-        debug!(
-            "Listing {} tag(s) for namespace '{}' starting with continuation_token '{:?}'",
-            n, namespace, last
-        );
+        debug!("Listing {n} tag(s) for namespace '{namespace}' starting with continuation_token '{last:?}'");
         let base_prefix = format!("{}/", self.tree.manifest_tags_dir(namespace));
         let base_prefix_len = base_prefix.len();
 
@@ -764,10 +752,7 @@ impl DataStore for S3Backend {
         n: u16,
         continuation_token: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
-        debug!(
-            "Fetching {} upload(s) for namespace '{}' with continuation token: {:?}",
-            n, namespace, continuation_token
-        );
+        debug!("Fetching {n} upload(s) for namespace '{namespace}' with continuation token: {continuation_token:?}");
         let base_prefix = format!("{}/", self.tree.uploads_root_dir(namespace));
         let base_prefix_len = base_prefix.len();
 
@@ -810,10 +795,7 @@ impl DataStore for S3Backend {
         n: u16,
         continuation_token: Option<String>,
     ) -> Result<(Vec<Digest>, Option<String>), Error> {
-        debug!(
-            "Fetching {} blob(s) with continuation token: {:?}",
-            n, continuation_token
-        );
+        debug!("Fetching {n} blob(s) with continuation token: {continuation_token:?}");
         let algorithm = "sha256";
         let path = self.tree.blobs_root_dir();
 
@@ -858,10 +840,7 @@ impl DataStore for S3Backend {
         n: u16,
         continuation_token: Option<String>,
     ) -> Result<(Vec<Digest>, Option<String>), Error> {
-        debug!(
-            "Fetching {} revision(s) for namespace '{}' with continuation token: {:?}",
-            n, namespace, continuation_token
-        );
+        debug!("Fetching {n} revision(s) for namespace '{namespace}' with continuation token: {continuation_token:?}");
         let base_prefix = format!(
             "{}/",
             self.tree

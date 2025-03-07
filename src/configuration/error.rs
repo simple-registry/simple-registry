@@ -25,28 +25,28 @@ impl fmt::Display for Error {
             Error::Cache(err) => write!(f, "Cache error: {err}"),
             Error::Lock(err) => write!(f, "Lock error: {err}"),
             Error::Io(err) => write!(f, "IO error: {err}"),
-            Error::MissingExpectedTLSSection(err) => {
-                write!(f, "Missing expected TLS section: {err}")
+            Error::MissingExpectedTLSSection(error) => {
+                write!(f, "Missing expected TLS section: {error}")
             }
-            Error::ConfigurationFileFormat(err) => {
+            Error::ConfigurationFileFormat(error) => {
                 write!(f, "Configuration file format error.")?;
-                write!(f, "{}", err.as_str())
+                write!(f, "{error}")
             }
-            Error::StreamingChunkSize(err) => {
-                write!(f, "Streaming chunk size error: {err}")
+            Error::StreamingChunkSize(error) => {
+                write!(f, "Streaming chunk size error: {error}")
             }
-            Error::Http(err) => {
-                write!(f, "HTTP error: {err}")
+            Error::Http(error) => {
+                write!(f, "HTTP error: {error}")
             }
-            Error::Tls(err) => {
-                write!(f, "TLS error: {err}")
+            Error::Tls(error) => {
+                write!(f, "TLS error: {error}")
             }
-            Error::TracingInit(err) => {
-                write!(f, "Tracing initialization error: {err}")
+            Error::TracingInit(error) => {
+                write!(f, "Tracing initialization error: {error}")
             }
-            Error::CELPolicy(err) => {
+            Error::CELPolicy(error) => {
                 write!(f, "CEL policy error")?;
-                write!(f, "{err}")
+                write!(f, "{error}")
             }
         }
     }
@@ -54,14 +54,14 @@ impl fmt::Display for Error {
 
 impl From<cache_store::Error> for Error {
     fn from(error: cache_store::Error) -> Self {
-        debug!("Cache error: {error:?}");
+        debug!("Cache error: {error}");
         Error::Cache(error)
     }
 }
 
 impl From<lock_store::Error> for Error {
     fn from(error: lock_store::Error) -> Self {
-        debug!("Lock error: {error:?}");
+        debug!("Lock error: {error}");
         Error::Lock(error)
     }
 }
@@ -74,14 +74,14 @@ impl From<io::Error> for Error {
 
 impl From<toml::de::Error> for Error {
     fn from(error: toml::de::Error) -> Self {
-        debug!("TOML error: {error:?}");
+        debug!("TOML error: {error}");
         Error::ConfigurationFileFormat(error.to_string())
     }
 }
 
 impl From<InvalidHeaderValue> for Error {
-    fn from(err: InvalidHeaderValue) -> Self {
-        Error::Http(format!("{err:?}"))
+    fn from(error: InvalidHeaderValue) -> Self {
+        Error::Http(format!("{error}"))
     }
 }
 

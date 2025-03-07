@@ -67,9 +67,9 @@ impl<D: DataStore> Registry<D> {
             .storage_engine
             .read_upload_summary(namespace, &session_id)
             .await
-            .map_err(|e| {
-                error!("Error reading uploaded file: {:?}", e);
-                e
+            .map_err(|error| {
+                error!("Error reading uploaded file: {error}");
+                error
             })?;
 
         if size < 1 {
@@ -110,7 +110,7 @@ impl<D: DataStore> Registry<D> {
             .await?;
 
         if upload_digest != digest {
-            warn!("Expected digest '{}', got '{}'", digest, upload_digest);
+            warn!("Expected digest '{digest}', got '{upload_digest}'");
             return Err(Error::DigestInvalid);
         }
 

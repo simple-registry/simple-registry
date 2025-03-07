@@ -46,11 +46,11 @@ impl DataPathBuilder {
     }
 
     pub fn uploads_root_dir(&self, namespace: &str) -> String {
-        format!("{}/{}/_uploads", self.repository_dir(), namespace)
+        format!("{}/{namespace}/_uploads", self.repository_dir())
     }
 
     pub fn upload_container_path(&self, name: &str, uuid: &str) -> String {
-        format!("{}/{}", self.uploads_root_dir(name), uuid)
+        format!("{}/{uuid}", self.uploads_root_dir(name))
     }
 
     pub fn upload_path(&self, name: &str, uuid: &str) -> String {
@@ -58,7 +58,7 @@ impl DataPathBuilder {
     }
 
     pub fn upload_staged_container_path(&self, name: &str, uuid: &str, offset: u64) -> String {
-        format!("{}/{}/staged/{}", self.uploads_root_dir(name), uuid, offset)
+        format!("{}/{uuid}/staged/{offset}", self.uploads_root_dir(name))
     }
 
     pub fn upload_hash_context_container_path(
@@ -68,10 +68,8 @@ impl DataPathBuilder {
         algorithm: &str,
     ) -> String {
         format!(
-            "{}/{}/hashstates/{}",
+            "{}/{uuid}/hashstates/{algorithm}",
             self.uploads_root_dir(name),
-            uuid,
-            algorithm
         )
     }
 
@@ -83,14 +81,13 @@ impl DataPathBuilder {
         offset: u64,
     ) -> String {
         format!(
-            "{}/{}",
-            self.upload_hash_context_container_path(name, uuid, algorithm),
-            offset
+            "{}/{offset}",
+            self.upload_hash_context_container_path(name, uuid, algorithm)
         )
     }
 
     pub fn upload_start_date_container_dir(&self, name: &str, uuid: &str) -> String {
-        format!("{}/{}", self.uploads_root_dir(name), uuid)
+        format!("{}/{uuid}", self.uploads_root_dir(name))
     }
 
     pub fn upload_start_date_path(&self, name: &str, uuid: &str) -> String {
@@ -101,11 +98,11 @@ impl DataPathBuilder {
     }
 
     pub fn manifests_root_dir(&self, namespace: &str) -> String {
-        format!("{}/{}/_manifests", self.repository_dir(), namespace)
+        format!("{}/{namespace}/_manifests", self.repository_dir())
     }
 
     pub fn manifest_revisions_link_root_dir(&self, name: &str, algorithm: &str) -> String {
-        format!("{}/revisions/{}", self.manifests_root_dir(name), algorithm)
+        format!("{}/revisions/{algorithm}", self.manifests_root_dir(name))
     }
 
     pub fn manifest_revisions_link_container_dir(&self, name: &str, digest: &Digest) -> String {
@@ -124,7 +121,7 @@ impl DataPathBuilder {
     }
 
     pub fn layers_root_dir(&self, namespace: &str) -> String {
-        format!("{}/{}/_layers", self.repository_dir(), namespace)
+        format!("{}/{namespace}/_layers", self.repository_dir())
     }
 
     pub fn manifest_layer_link_container_dir(&self, name: &str, digest: &Digest) -> String {
@@ -144,7 +141,7 @@ impl DataPathBuilder {
     }
 
     pub fn config_root_dir(&self, namespace: &str) -> String {
-        format!("{}/{}/_config", self.repository_dir(), namespace)
+        format!("{}/{namespace}/_config", self.repository_dir())
     }
 
     pub fn manifest_config_link_container_dir(&self, name: &str, digest: &Digest) -> String {
@@ -203,7 +200,7 @@ impl DataPathBuilder {
     }
 
     pub fn manifest_tag_link_container_dir(&self, namespace: &str, tag: &str) -> String {
-        format!("{}/tags/{}", self.manifests_root_dir(namespace), tag)
+        format!("{}/tags/{tag}", self.manifests_root_dir(namespace))
     }
 
     pub fn manifest_tag_link_parent_dir(&self, namespace: &str, tag: &str) -> String {

@@ -112,7 +112,7 @@ impl<D: DataStore + 'static> TlsListener<D> {
                     .and_then(|(_, cert)| ClientIdentity::from_cert(&cert).ok())
                     .unwrap_or_default();
 
-                debug!("Accepted connection from {:?}", remote_address);
+                debug!("Accepted connection from {remote_address}");
                 let stream = TokioIo::new(tls);
                 let context = self.context.load();
 

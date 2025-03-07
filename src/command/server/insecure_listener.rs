@@ -37,7 +37,7 @@ impl<D: DataStore + 'static> InsecureListener<D> {
             debug!("Waiting for incoming connection");
             let (tcp, remote_address) = listener.accept().await?;
 
-            debug!("Accepted connection from {:?}", remote_address);
+            debug!("Accepted connection from {remote_address}");
             let stream = TokioIo::new(tcp);
             let context = self.context.load();
 

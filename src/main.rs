@@ -97,15 +97,15 @@ fn set_fs_watcher<D: DataStore + 'static>(
         let server = server_watcher.clone();
         let config_path = config_watcher_path.clone();
         let Ok(event) = event else {
-            error!("Failed to watch configuration file: {:?}", event);
+            error!("Failed to watch configuration file: {event:?}");
             return;
         };
 
         if event.kind.is_modify() {
             let config = match Configuration::load(config_path) {
                 Ok(config) => config,
-                Err(err) => {
-                    error!("Failed to reload configuration: {}", err);
+                Err(error) => {
+                    error!("Failed to reload configuration: {error}");
                     return;
                 }
             };
@@ -113,15 +113,16 @@ fn set_fs_watcher<D: DataStore + 'static>(
             let registry =
                 match build_registry(config.cache_store, config.repository, data_store.clone()) {
                     Ok(registry) => registry,
-                    Err(err) => {
-                        error!("Failed to create registry with new configuration: {}", err);
+                    Err(error) => {
+                        error!("Failed to create registry with new configuration: {error}");
                         return;
                     }
                 };
 
-            if let Err(err) = server.notify_config_change(config.server, &config.identity, registry)
+            if let Err(error) =
+                server.notify_config_change(config.server, &config.identity, registry)
             {
-                error!("Failed to notify server of configuration change: {}", err);
+                error!("Failed to notify server of configuration change: {error}");
             } else {
                 info!("Server notified of configuration change");
             }
