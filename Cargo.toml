@@ -17,6 +17,7 @@ aws-sdk-s3 = "1.77.0"
 base64 = "0.22.1"
 cel-interpreter = "0.9.0"
 chrono = "0.4.40"
+fs4 = { version = "0.13", features = ["sync"] }
 futures-util = { version = "0.3.31", default-features = false }
 hex = "0.4.3"
 http-body-util = "0.1.2"

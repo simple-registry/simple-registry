@@ -6,6 +6,7 @@ use crate::registry::utils::sha256_ext::Sha256Ext;
 use crate::registry::utils::{DataLink, DataPathBuilder};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use fs4::fs_std::FileExt;
 use sha2::{Digest as Sha256Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
@@ -158,9 +159,9 @@ impl FSBackend {
         debug!("Updating reference count for digest: {digest}");
         let path = self.tree.blob_index_path(digest);
 
-        let mut reference_index = match fs::read_to_string(&path) {
+        let mut reference_index = match Self::read_string(&path) {
             Ok(content) => serde_json::from_str::<BlobEntityLinkIndex>(&content)?,
-            Err(e) if e.kind() == ErrorKind::NotFound => BlobEntityLinkIndex::default(),
+            Err(Error::ReferenceNotFound) => BlobEntityLinkIndex::default(),
             Err(e) => Err(e)?,
         };
 
@@ -187,7 +188,7 @@ impl FSBackend {
         } else {
             debug!("Writing reference count to path: {path}");
             let content = serde_json::to_string(&reference_index)?;
-            fs::write(&path, content)?;
+            Self::write_file(&path, content.as_bytes())?;
             debug!("Reference index for {digest} updated");
         }
 
@@ -233,9 +234,66 @@ impl FSBackend {
         }
 
         let mut file = File::create(&path)?;
-        file.write_all(contents)?;
+        file.lock_exclusive()?;
+        
+        let result = file.write_all(contents);
+
+        #[allow(unstable_name_collisions)]
+        let unlock_result = file.unlock();
+
+        result.and(unlock_result)?;
 
         Ok(())
+    }
+    
+    fn read_file<P>(path: P) -> Result<Vec<u8>, Error>
+    where
+        P: AsRef<Path>,
+    {
+        let file = File::open(&path)?;
+        #[allow(unstable_name_collisions)]
+        file.lock_shared()?;
+        
+        let result = fs::read(&path);
+
+        #[allow(unstable_name_collisions)]
+        let unlock_result = file.unlock();
+        
+        match result {
+            Ok(content) => {
+                unlock_result?;
+                Ok(content)
+            }
+            Err(e) => {
+                let _ = unlock_result;
+                Err(e.into())
+            }
+        }
+    }
+    
+    fn read_string<P>(path: P) -> Result<String, Error>
+    where
+        P: AsRef<Path>,
+    {
+        let file = File::open(&path)?;
+        #[allow(unstable_name_collisions)]
+        file.lock_shared()?;
+        
+        let result = fs::read_to_string(&path);
+
+        #[allow(unstable_name_collisions)]
+        let unlock_result = file.unlock();
+
+        match result {
+            Ok(content) => {
+                unlock_result?;
+                Ok(content)
+            }
+            Err(e) => {
+                let _ = unlock_result;
+                Err(e.into())
+            }
+        }
     }
 }
 
@@ -424,25 +482,36 @@ impl DataStore for FSBackend {
                 }
             })?;
 
+        file.lock_exclusive()?;
         file.seek(SeekFrom::Start(upload_size))?;
 
         let path = self
             .tree
             .upload_hash_context_path(name, uuid, "sha256", upload_size);
-        let hash_state = fs::read(&path)?;
+        let hash_state = Self::read_file(&path)?;
         let mut hash = Sha256::deserialize_state(&hash_state)?;
 
         // poll the stream asynchronously and synchronously write to the file
         let mut buffer = vec![0; 8192];
         let mut wrote_size = 0;
-        while let Ok(size) = stream.read(&mut buffer).await {
-            if size == 0 {
-                break;
+        
+        let result = async {
+            while let Ok(size) = stream.read(&mut buffer).await {
+                if size == 0 {
+                    break;
+                }
+                file.write_all(&buffer[..size])?;
+                hash.update(&buffer[..size]);
+                wrote_size += size as u64;
             }
-            file.write_all(&buffer[..size])?;
-            hash.update(&buffer[..size]);
-            wrote_size += size as u64;
-        }
+            Ok::<_, Error>(())
+        }.await;
+
+        #[allow(unstable_name_collisions)]
+        let unlock_result = file.unlock();
+
+        result?;
+        unlock_result?;
 
         let path =
             self.tree
@@ -463,15 +532,15 @@ impl DataStore for FSBackend {
         let path = self
             .tree
             .upload_hash_context_path(name, uuid, "sha256", size);
-        let state = fs::read(&path)?;
+        let state = Self::read_file(&path)?;
 
         let hasher = Sha256::deserialize_state(&state)?;
         let digest = hasher.to_digest();
 
         let date = self.tree.upload_start_date_path(name, uuid);
-        let start_date = fs::read_to_string(&date)
+        let date_str = Self::read_string(&date).unwrap_or_default();
+        let start_date = DateTime::parse_from_rfc3339(&date_str)
             .ok()
-            .and_then(|date| DateTime::parse_from_rfc3339(&date).ok())
             .unwrap_or_default() // Fallbacks to epoch
             .with_timezone(&Utc);
 
@@ -494,7 +563,7 @@ impl DataStore for FSBackend {
             let path = self
                 .tree
                 .upload_hash_context_path(name, uuid, "sha256", size);
-            let state = fs::read(&path)?;
+            let state = Self::read_file(&path)?;
             let hasher = Sha256::deserialize_state(&state)?;
             hasher.to_digest()
         };
@@ -559,13 +628,13 @@ impl DataStore for FSBackend {
     #[instrument(skip(self))]
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error> {
         let path = self.tree.blob_path(digest);
-        Ok(fs::read(path)?)
+        Self::read_file(path)
     }
 
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
         let path = self.tree.blob_index_path(digest);
-        let content = fs::read_to_string(&path)?;
+        let content = Self::read_string(&path)?;
 
         let index = serde_json::from_str(&content)?;
         Ok(index)
@@ -665,7 +734,7 @@ impl DataStore for FSBackend {
         let path = self.tree.get_link_path(reference, name);
         debug!("Reading link at path: {path}");
 
-        let link = fs::read_to_string(path)?;
+        let link = Self::read_string(path)?;
         debug!("Link content: {link}");
 
         Ok(Digest::try_from(link.as_str())?)
