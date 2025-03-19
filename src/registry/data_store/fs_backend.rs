@@ -235,7 +235,7 @@ impl FSBackend {
 
         let mut file = File::create(&path)?;
         file.lock_exclusive()?;
-        
+
         let result = file.write_all(contents);
 
         #[allow(unstable_name_collisions)]
@@ -245,7 +245,7 @@ impl FSBackend {
 
         Ok(())
     }
-    
+
     fn read_file<P>(path: P) -> Result<Vec<u8>, Error>
     where
         P: AsRef<Path>,
@@ -253,12 +253,12 @@ impl FSBackend {
         let file = File::open(&path)?;
         #[allow(unstable_name_collisions)]
         file.lock_shared()?;
-        
+
         let result = fs::read(&path);
 
         #[allow(unstable_name_collisions)]
         let unlock_result = file.unlock();
-        
+
         match result {
             Ok(content) => {
                 unlock_result?;
@@ -270,7 +270,7 @@ impl FSBackend {
             }
         }
     }
-    
+
     fn read_string<P>(path: P) -> Result<String, Error>
     where
         P: AsRef<Path>,
@@ -278,7 +278,7 @@ impl FSBackend {
         let file = File::open(&path)?;
         #[allow(unstable_name_collisions)]
         file.lock_shared()?;
-        
+
         let result = fs::read_to_string(&path);
 
         #[allow(unstable_name_collisions)]
@@ -494,7 +494,7 @@ impl DataStore for FSBackend {
         // poll the stream asynchronously and synchronously write to the file
         let mut buffer = vec![0; 8192];
         let mut wrote_size = 0;
-        
+
         let result = async {
             while let Ok(size) = stream.read(&mut buffer).await {
                 if size == 0 {
@@ -505,7 +505,8 @@ impl DataStore for FSBackend {
                 wrote_size += size as u64;
             }
             Ok::<_, Error>(())
-        }.await;
+        }
+        .await;
 
         #[allow(unstable_name_collisions)]
         let unlock_result = file.unlock();
