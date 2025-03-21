@@ -589,46 +589,76 @@ impl DataStore for S3Backend {
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
         debug!("Fetching {n} namespace(s) with continuation token: {last:?}");
+
+        // List all objects under the repository directory
         let base_prefix = format!("{}/", self.tree.repository_dir());
         let base_prefix_len = base_prefix.len();
 
-        let res = self
-            .s3_client
-            .list_objects_v2()
-            .bucket(&self.bucket)
-            .prefix(&base_prefix)
-            .delimiter("_");
+        let mut namespaces = Vec::new();
+        let mut continuation_token = None;
 
-        let res = match last {
-            Some(last) => res.start_after(last),
-            _ => res,
-        };
+        // List all objects recursively to find all namespaces
+        loop {
+            let mut request = self
+                .s3_client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&base_prefix)
+                .max_keys(i32::from(n));
 
-        let res = res.max_keys(i32::from(n)).send().await?;
-
-        let mut repositories = Vec::new();
-        for common_prefixes in res.common_prefixes.unwrap_or_default() {
-            let Some(key) = common_prefixes.prefix else {
-                continue;
-            };
-
-            let mut key = key[base_prefix_len..].to_string();
-            if key.ends_with('_') {
-                key = key.trim_end_matches('_').to_string();
-            }
-            if key.ends_with('/') {
-                key = key.trim_end_matches('/').to_string();
+            if let Some(token) = continuation_token {
+                request = request.continuation_token(token);
             }
 
-            repositories.push(key);
+            let res = request.send().await?;
+
+            for object in res.contents.unwrap_or_default() {
+                let Some(key) = object.key else {
+                    continue;
+                };
+
+                // We need to extract the namespace from the path
+                // In S3, the path will be something like:
+                // v2/repositories/namespace/_manifests/... or
+                // v2/repositories/namespace/nested/_manifests/...
+                let rel_path = &key[base_prefix_len..];
+
+                // Look for special directories that indicate a namespace
+                for marker in &["/_manifests/", "/_layers/", "/_uploads/", "/_config/"] {
+                    if let Some(idx) = rel_path.find(marker) {
+                        let namespace = rel_path[..idx].to_string();
+                        namespaces.push(namespace);
+                        break; // Found a namespace, no need to check other markers
+                    }
+                }
+            }
+
+            if res.is_truncated == Some(true) {
+                continuation_token = res.next_continuation_token;
+            } else {
+                break;
+            }
         }
 
-        let next_last = match res.is_truncated {
-            Some(true) => repositories.last().cloned(),
-            _ => None,
+        let start_idx = if let Some(last_item) = &last {
+            namespaces
+                .iter()
+                .position(|ns| ns > last_item)
+                .unwrap_or(namespaces.len())
+        } else {
+            0
         };
 
-        Ok((repositories, next_last))
+        let end_idx = std::cmp::min(start_idx + usize::from(n), namespaces.len());
+        let result_namespaces = namespaces[start_idx..end_idx].to_vec();
+
+        let next_token = if end_idx < namespaces.len() {
+            result_namespaces.last().cloned()
+        } else {
+            None
+        };
+
+        Ok((result_namespaces, next_token))
     }
 
     #[instrument(skip(self))]
@@ -642,40 +672,60 @@ impl DataStore for S3Backend {
         let base_prefix = format!("{}/", self.tree.manifest_tags_dir(namespace));
         let base_prefix_len = base_prefix.len();
 
-        let res = self
-            .s3_client
-            .list_objects_v2()
-            .bucket(&self.bucket)
-            .prefix(&base_prefix)
-            .delimiter("/")
-            .max_keys(i32::from(n));
+        let mut all_tags = Vec::new();
+        let mut continuation_token = None;
 
-        let res = match last {
-            Some(last) => res.start_after(last),
-            _ => res,
-        };
+        loop {
+            let mut request = self
+                .s3_client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&base_prefix)
+                .delimiter("/")
+                .max_keys(i32::from(n));
 
-        let res = res.send().await?;
-
-        let mut tags = Vec::new();
-        for common_prefixes in res.common_prefixes.unwrap_or_default() {
-            let Some(key) = common_prefixes.prefix else {
-                continue;
-            };
-
-            let mut key = key[base_prefix_len..].to_string();
-            if key.ends_with('/') {
-                key = key.trim_end_matches('/').to_string();
+            if let Some(token) = continuation_token {
+                request = request.continuation_token(token);
             }
-            tags.push(key);
+
+            let res = request.send().await?;
+
+            for common_prefixes in res.common_prefixes.unwrap_or_default() {
+                if let Some(key) = common_prefixes.prefix {
+                    let mut tag = key[base_prefix_len..].to_string();
+                    if tag.ends_with('/') {
+                        tag = tag.trim_end_matches('/').to_string();
+                    }
+                    all_tags.push(tag);
+                }
+            }
+
+            if res.is_truncated == Some(true) {
+                continuation_token = res.next_continuation_token;
+            } else {
+                break;
+            }
         }
 
-        let next_last = match res.is_truncated {
-            Some(true) => tags.last().cloned(),
-            _ => None,
+        let start_idx = if let Some(last_tag) = &last {
+            all_tags
+                .iter()
+                .position(|tag| tag > last_tag)
+                .unwrap_or(all_tags.len())
+        } else {
+            0
         };
 
-        Ok((tags, next_last))
+        let end_idx = std::cmp::min(start_idx + usize::from(n), all_tags.len());
+        let result_tags = all_tags[start_idx..end_idx].to_vec();
+
+        let next_token = if end_idx < all_tags.len() {
+            result_tags.last().cloned()
+        } else {
+            None
+        };
+
+        Ok((result_tags, next_token))
     }
 
     #[instrument(skip(self))]
@@ -798,40 +848,65 @@ impl DataStore for S3Backend {
         debug!("Fetching {n} blob(s) with continuation token: {continuation_token:?}");
         let algorithm = "sha256";
         let path = self.tree.blobs_root_dir();
-
         let base_prefix = format!("{path}/{algorithm}/");
         let base_prefix_len = base_prefix.len();
 
-        let res = self
-            .s3_client
-            .list_objects_v2()
-            .bucket(&self.bucket)
-            .prefix(&base_prefix)
-            .max_keys(i32::from(n))
-            .set_continuation_token(continuation_token)
-            .send()
-            .await?;
+        // For consistent pagination, we need to get all blobs matching our criteria first
+        let mut all_blobs = Vec::new();
+        let mut list_continuation_token = None;
 
-        let mut blobs = Vec::new();
+        loop {
+            let mut request = self
+                .s3_client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&base_prefix)
+                .max_keys(i32::from(n)); // Use larger value to reduce API calls
 
-        for object in res.contents.unwrap_or_default() {
-            let Some(key) = object.key else { continue };
-
-            if !key.ends_with("data") {
-                continue;
+            if let Some(token) = list_continuation_token {
+                request = request.continuation_token(token);
             }
 
-            let key = key[..key.len() - 5].to_string();
-            let key = key[base_prefix_len + 3..].to_string(); // +3 for the 2 char prefix + delimiter
-            blobs.push(Digest::Sha256(key));
+            let res = request.send().await?;
+
+            for object in res.contents.unwrap_or_default() {
+                if let Some(key) = object.key {
+                    if !key.ends_with("data") {
+                        continue;
+                    }
+
+                    let key = key[..key.len() - 5].to_string();
+                    let digest_value = key[base_prefix_len + 3..].to_string();
+                    all_blobs.push(Digest::Sha256(digest_value));
+                }
+            }
+
+            if res.is_truncated == Some(true) {
+                list_continuation_token = res.next_continuation_token;
+            } else {
+                break;
+            }
         }
 
-        let next_last = match res.is_truncated {
-            Some(true) => res.next_continuation_token,
-            _ => None,
+        let start_idx = if let Some(token) = &continuation_token {
+            all_blobs
+                .iter()
+                .position(|digest| digest.to_string() > *token)
+                .unwrap_or(all_blobs.len())
+        } else {
+            0
         };
 
-        Ok((blobs, next_last))
+        let end_idx = std::cmp::min(start_idx + usize::from(n), all_blobs.len());
+        let result_blobs = all_blobs[start_idx..end_idx].to_vec();
+
+        let next_token = if end_idx < all_blobs.len() {
+            result_blobs.last().map(ToString::to_string)
+        } else {
+            None
+        };
+
+        Ok((result_blobs, next_token))
     }
 
     async fn list_revisions(
@@ -1319,5 +1394,112 @@ impl DataStore for S3Backend {
         .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::configuration::{DataSize, LockStoreConfig, StorageS3Config};
+    use crate::registry::data_store::tests::{
+        test_datastore_blob_operations, test_datastore_link_operations, test_datastore_list_blobs,
+        test_datastore_list_namespaces, test_datastore_list_referrers,
+        test_datastore_list_revisions, test_datastore_list_tags, test_datastore_list_uploads,
+        test_datastore_upload_operations,
+    };
+    use uuid::Uuid;
+
+    // Helper function to create a test S3Backend
+    async fn create_test_backend() -> S3Backend {
+        let config = StorageS3Config {
+            endpoint: "http://127.0.0.1:9000".to_string(),
+            region: "region".to_string(),
+            bucket: "registry".to_string(),
+            access_key_id: "root".to_string(),
+            secret_key: "roottoor".to_string(),
+            key_prefix: Some(format!("test-{}", Uuid::new_v4())),
+            multipart_copy_threshold: DataSize::WithoutUnit(5 * 1024 * 1024), // 5MB
+            multipart_copy_chunk_size: DataSize::WithoutUnit(5 * 1024 * 1024), // 5MB
+            multipart_copy_jobs: 4,
+            multipart_part_size: DataSize::WithoutUnit(5 * 1024 * 1024), // 5MB
+        };
+
+        let lock_store = LockStore::new(LockStoreConfig::default()).unwrap();
+
+        S3Backend::new(config, lock_store)
+    }
+
+    // Helper to clean up test data
+    async fn cleanup_test_prefix(backend: &S3Backend) {
+        if let Err(e) = backend
+            .delete_object_with_prefix(&backend.tree.prefix)
+            .await
+        {
+            println!("Warning: Failed to clean up test data: {:?}", e);
+        }
+    }
+
+    // Generic DataStore trait tests
+    #[tokio::test]
+    async fn test_list_namespaces() {
+        let backend = create_test_backend().await;
+        test_datastore_list_namespaces(&backend).await;
+        cleanup_test_prefix(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_tags() {
+        let backend = create_test_backend().await;
+        test_datastore_list_tags(&backend).await;
+        cleanup_test_prefix(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_referrers() {
+        let backend = create_test_backend().await;
+        test_datastore_list_referrers(&backend).await;
+        cleanup_test_prefix(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_uploads() {
+        let backend = create_test_backend().await;
+        test_datastore_list_uploads(&backend).await;
+        cleanup_test_prefix(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_blobs() {
+        let backend = create_test_backend().await;
+        test_datastore_list_blobs(&backend).await;
+        cleanup_test_prefix(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_revisions() {
+        let backend = create_test_backend().await;
+        test_datastore_list_revisions(&backend).await;
+        cleanup_test_prefix(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_blob_operations() {
+        let backend = create_test_backend().await;
+        test_datastore_blob_operations(&backend).await;
+        cleanup_test_prefix(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_upload_operations() {
+        let backend = create_test_backend().await;
+        test_datastore_upload_operations(&backend).await;
+        cleanup_test_prefix(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_link_operations() {
+        let backend = create_test_backend().await;
+        test_datastore_link_operations(&backend).await;
+        cleanup_test_prefix(&backend).await;
     }
 }

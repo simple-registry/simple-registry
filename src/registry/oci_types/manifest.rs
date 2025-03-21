@@ -2,9 +2,10 @@ use crate::registry::oci_types::{Descriptor, Error};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
+    pub schema_version: i32,
     pub media_type: Option<String>,
     #[serde(default)]
     pub config: Option<Descriptor>,
@@ -44,6 +45,20 @@ impl Manifest {
     }
 }
 
+impl Default for Manifest {
+    fn default() -> Self {
+        Self {
+            schema_version: 2,
+            media_type: None,
+            config: None,
+            layers: Vec::new(),
+            subject: None,
+            annotations: HashMap::new(),
+            artifact_type: None,
+        }
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -56,20 +71,17 @@ pub mod tests {
                 digest: "sha256:99c9d5e2bdc7ef0223f56c845a695ea0f8f11f5b55ea6f74e1f7df0d4f90026c"
                     .to_string(),
                 size: 1234,
-                annotations: HashMap::new(),
-                artifact_type: None,
+                ..Descriptor::default()
             }),
             layers: vec![Descriptor {
                 media_type: "application/vnd.oci.image.layer.v1.tar".to_string(),
                 digest: "sha256:99c9d5e2bdc7ef0223f56c845a695ea0f8f11f5b55ea6f74e1f7df0d4f90026c"
                     .to_string(),
                 size: 5678,
-                annotations: HashMap::new(),
-                artifact_type: None,
+                ..Descriptor::default()
             }],
-            subject: None,
-            annotations: HashMap::new(),
             artifact_type: Some("oci.image.index.v1".to_string()),
+            ..Manifest::default()
         }
     }
 

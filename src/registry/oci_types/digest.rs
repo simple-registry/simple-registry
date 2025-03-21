@@ -5,7 +5,7 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Ord, Eq, Hash, PartialEq, PartialOrd)]
 pub enum Digest {
     Sha256(String),
 }

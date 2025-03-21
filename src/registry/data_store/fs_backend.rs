@@ -6,6 +6,7 @@ use crate::registry::utils::sha256_ext::Sha256Ext;
 use crate::registry::utils::{DataLink, DataPathBuilder};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use fs4::fs_std::FileExt;
 use sha2::{Digest as Sha256Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
@@ -158,9 +159,9 @@ impl FSBackend {
         debug!("Updating reference count for digest: {digest}");
         let path = self.tree.blob_index_path(digest);
 
-        let mut reference_index = match fs::read_to_string(&path) {
+        let mut reference_index = match Self::read_string(&path) {
             Ok(content) => serde_json::from_str::<BlobEntityLinkIndex>(&content)?,
-            Err(e) if e.kind() == ErrorKind::NotFound => BlobEntityLinkIndex::default(),
+            Err(Error::ReferenceNotFound) => BlobEntityLinkIndex::default(),
             Err(e) => Err(e)?,
         };
 
@@ -187,7 +188,7 @@ impl FSBackend {
         } else {
             debug!("Writing reference count to path: {path}");
             let content = serde_json::to_string(&reference_index)?;
-            fs::write(&path, content)?;
+            Self::write_file(&path, content.as_bytes())?;
             debug!("Reference index for {digest} updated");
         }
 
@@ -200,28 +201,26 @@ impl FSBackend {
         continuation_token: Option<String>,
     ) -> (Vec<T>, Option<String>)
     where
-        T: Clone + ToString,
+        T: Clone + ToString + Ord,
     {
         let start = match continuation_token {
-            Some(continuation_token) => {
-                // search for the index of element lexicographically immediately after the continuation token
-                items
-                    .iter()
-                    .position(|r| r.to_string() > continuation_token)
-                    .unwrap_or(items.len())
-            }
+            Some(token) => match items.iter().position(|item| item.to_string() == token) {
+                Some(pos) => pos + 1,
+                None => 0,
+            },
             None => 0,
         };
 
         let end = (start + n as usize).min(items.len());
+        let result = items[start..end].to_vec();
 
-        let items = items[start..end].to_vec();
-        if end < items.len() {
-            let next = items[end].to_string();
-            (items, Some(next))
+        let next_token = if !result.is_empty() && end < items.len() {
+            Some(result.last().unwrap().to_string())
         } else {
-            (items, None)
-        }
+            None
+        };
+
+        (result, next_token)
     }
 
     fn write_file<P>(path: P, contents: &[u8]) -> Result<(), Error>
@@ -233,9 +232,66 @@ impl FSBackend {
         }
 
         let mut file = File::create(&path)?;
-        file.write_all(contents)?;
+        file.lock_exclusive()?;
+
+        let result = file.write_all(contents);
+
+        #[allow(unstable_name_collisions)]
+        let unlock_result = file.unlock();
+
+        result.and(unlock_result)?;
 
         Ok(())
+    }
+
+    fn read_file<P>(path: P) -> Result<Vec<u8>, Error>
+    where
+        P: AsRef<Path>,
+    {
+        let file = File::open(&path)?;
+        #[allow(unstable_name_collisions)]
+        file.lock_shared()?;
+
+        let result = fs::read(&path);
+
+        #[allow(unstable_name_collisions)]
+        let unlock_result = file.unlock();
+
+        match result {
+            Ok(content) => {
+                unlock_result?;
+                Ok(content)
+            }
+            Err(e) => {
+                let _ = unlock_result;
+                Err(e.into())
+            }
+        }
+    }
+
+    fn read_string<P>(path: P) -> Result<String, Error>
+    where
+        P: AsRef<Path>,
+    {
+        let file = File::open(&path)?;
+        #[allow(unstable_name_collisions)]
+        file.lock_shared()?;
+
+        let result = fs::read_to_string(&path);
+
+        #[allow(unstable_name_collisions)]
+        let unlock_result = file.unlock();
+
+        match result {
+            Ok(content) => {
+                unlock_result?;
+                Ok(content)
+            }
+            Err(e) => {
+                let _ = unlock_result;
+                Err(e.into())
+            }
+        }
     }
 }
 
@@ -424,25 +480,37 @@ impl DataStore for FSBackend {
                 }
             })?;
 
+        file.lock_exclusive()?;
         file.seek(SeekFrom::Start(upload_size))?;
 
         let path = self
             .tree
             .upload_hash_context_path(name, uuid, "sha256", upload_size);
-        let hash_state = fs::read(&path)?;
+        let hash_state = Self::read_file(&path)?;
         let mut hash = Sha256::deserialize_state(&hash_state)?;
 
         // poll the stream asynchronously and synchronously write to the file
         let mut buffer = vec![0; 8192];
         let mut wrote_size = 0;
-        while let Ok(size) = stream.read(&mut buffer).await {
-            if size == 0 {
-                break;
+
+        let result = async {
+            while let Ok(size) = stream.read(&mut buffer).await {
+                if size == 0 {
+                    break;
+                }
+                file.write_all(&buffer[..size])?;
+                hash.update(&buffer[..size]);
+                wrote_size += size as u64;
             }
-            file.write_all(&buffer[..size])?;
-            hash.update(&buffer[..size]);
-            wrote_size += size as u64;
+            Ok::<_, Error>(())
         }
+        .await;
+
+        #[allow(unstable_name_collisions)]
+        let unlock_result = file.unlock();
+
+        result?;
+        unlock_result?;
 
         let path =
             self.tree
@@ -463,15 +531,15 @@ impl DataStore for FSBackend {
         let path = self
             .tree
             .upload_hash_context_path(name, uuid, "sha256", size);
-        let state = fs::read(&path)?;
+        let state = Self::read_file(&path)?;
 
         let hasher = Sha256::deserialize_state(&state)?;
         let digest = hasher.to_digest();
 
         let date = self.tree.upload_start_date_path(name, uuid);
-        let start_date = fs::read_to_string(&date)
+        let date_str = Self::read_string(&date).unwrap_or_default();
+        let start_date = DateTime::parse_from_rfc3339(&date_str)
             .ok()
-            .and_then(|date| DateTime::parse_from_rfc3339(&date).ok())
             .unwrap_or_default() // Fallbacks to epoch
             .with_timezone(&Utc);
 
@@ -494,7 +562,7 @@ impl DataStore for FSBackend {
             let path = self
                 .tree
                 .upload_hash_context_path(name, uuid, "sha256", size);
-            let state = fs::read(&path)?;
+            let state = Self::read_file(&path)?;
             let hasher = Sha256::deserialize_state(&state)?;
             hasher.to_digest()
         };
@@ -559,13 +627,13 @@ impl DataStore for FSBackend {
     #[instrument(skip(self))]
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error> {
         let path = self.tree.blob_path(digest);
-        Ok(fs::read(path)?)
+        Self::read_file(path)
     }
 
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
         let path = self.tree.blob_index_path(digest);
-        let content = fs::read_to_string(&path)?;
+        let content = Self::read_string(&path)?;
 
         let index = serde_json::from_str(&content)?;
         Ok(index)
@@ -665,7 +733,7 @@ impl DataStore for FSBackend {
         let path = self.tree.get_link_path(reference, name);
         debug!("Reading link at path: {path}");
 
-        let link = fs::read_to_string(path)?;
+        let link = Self::read_string(path)?;
         debug!("Link content: {link}");
 
         Ok(Digest::try_from(link.as_str())?)
@@ -756,5 +824,205 @@ impl DataStore for FSBackend {
         .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::configuration::{LockStoreConfig, StorageFSConfig};
+    use crate::registry::data_store::tests::{
+        test_datastore_blob_operations, test_datastore_link_operations, test_datastore_list_blobs,
+        test_datastore_list_namespaces, test_datastore_list_referrers,
+        test_datastore_list_revisions, test_datastore_list_tags, test_datastore_list_uploads,
+        test_datastore_upload_operations,
+    };
+    use tempfile::TempDir;
+
+    fn create_test_backend() -> (FSBackend, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let root_dir = temp_dir.path().to_str().unwrap().to_string();
+
+        let config = StorageFSConfig { root_dir };
+
+        let lock_store = LockStore::new(LockStoreConfig::default()).unwrap();
+        let backend = FSBackend::new(config, lock_store);
+
+        (backend, temp_dir)
+    }
+
+    // Implementation-specific tests
+    #[test]
+    fn test_paginate() {
+        let items: Vec<String> = vec![];
+        let (result, token) = FSBackend::paginate(&items, 10, None);
+        assert!(result.is_empty());
+        assert!(token.is_none());
+
+        let items: Vec<String> = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let (result, token) = FSBackend::paginate(&items, 10, None);
+        assert_eq!(result, items);
+        assert!(token.is_none());
+
+        let (page1, token1) = FSBackend::paginate(&items, 2, None);
+        assert_eq!(page1, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(token1, Some("b".to_string()));
+
+        let (page2, token2) = FSBackend::paginate(&items, 2, token1);
+        assert_eq!(page2, vec!["c".to_string(), "d".to_string()]);
+        assert_eq!(token2, None);
+
+        let (page1, token1) = FSBackend::paginate(&items, 1, None);
+        assert_eq!(page1, vec!["a".to_string()]);
+        assert_eq!(token1, Some("a".to_string()));
+
+        let (page2, token2) = FSBackend::paginate(&items, 1, token1);
+        assert_eq!(page2, vec!["b".to_string()]);
+        assert_eq!(token2, Some("b".to_string()));
+
+        let (page3, token3) = FSBackend::paginate(&items, 1, token2);
+        assert_eq!(page3, vec!["c".to_string()]);
+        assert_eq!(token3, Some("c".to_string()));
+
+        let (page4, token4) = FSBackend::paginate(&items, 1, token3);
+        assert_eq!(page4, vec!["d".to_string()]);
+        assert_eq!(token4, None);
+    }
+
+    #[test]
+    fn test_write_and_read_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_path = temp_dir.path().join("test_file.txt");
+        let test_content = b"Hello, world!";
+
+        FSBackend::write_file(&test_path, test_content).unwrap();
+        assert!(test_path.exists());
+
+        let content = FSBackend::read_file(&test_path).unwrap();
+        assert_eq!(content, test_content);
+
+        let test_string = "Hello world!";
+        FSBackend::write_file(&test_path, test_string.as_bytes()).unwrap();
+        let string_content = FSBackend::read_string(&test_path).unwrap();
+        assert_eq!(string_content, test_string);
+    }
+
+    #[tokio::test]
+    async fn test_collect_directory_entries() {
+        let (backend, _temp_dir) = create_test_backend();
+        let namespace = "test-repo";
+
+        let digest1 = backend.create_blob(b"content1").await.unwrap();
+        let digest2 = backend.create_blob(b"content2").await.unwrap();
+
+        backend
+            .create_link(namespace, &DataLink::Tag("file1.txt".to_string()), &digest1)
+            .await
+            .unwrap();
+        backend
+            .create_link(namespace, &DataLink::Tag("file2.txt".to_string()), &digest2)
+            .await
+            .unwrap();
+
+        let tags_dir = backend.tree.manifest_tags_dir(namespace);
+
+        // Test the collect_directory_entries method
+        let entries = backend.collect_directory_entries(&tags_dir).await.unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.contains(&"file1.txt".to_string()));
+        assert!(entries.contains(&"file2.txt".to_string()));
+
+        // Test empty directory case
+        let empty_namespace = "empty-repo";
+        let empty_tags_dir = backend.tree.manifest_tags_dir(empty_namespace);
+        let empty_entries = backend.collect_directory_entries(&empty_tags_dir).await;
+        assert_eq!(Ok(Vec::new()), empty_entries);
+
+        // Test non-existent directory case
+        let non_existent_dir = backend.tree.manifest_tags_dir("non-existent-repo");
+        let non_existent_entries = backend.collect_directory_entries(&non_existent_dir).await;
+        assert_eq!(Ok(Vec::new()), non_existent_entries);
+    }
+
+    #[tokio::test]
+    async fn test_delete_empty_parent_dirs() {
+        let (backend, temp_dir) = create_test_backend();
+
+        let nested_dir = temp_dir.path().join("a/b/c/d");
+        fs::create_dir_all(&nested_dir).unwrap();
+
+        let test_file = nested_dir.join("test.txt");
+        fs::write(&test_file, b"test").unwrap();
+
+        fs::remove_file(&test_file).unwrap();
+
+        backend
+            .delete_empty_parent_dirs(nested_dir.to_str().unwrap())
+            .await
+            .unwrap();
+
+        assert!(!nested_dir.exists());
+        assert!(temp_dir.path().exists());
+    }
+
+    // Generic DataStore trait tests
+    #[tokio::test]
+    async fn test_list_namespaces() {
+        let (backend, _temp_dir) = create_test_backend();
+        test_datastore_list_namespaces(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_tags() {
+        let (backend, _temp_dir) = create_test_backend();
+        test_datastore_list_tags(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_referrers() {
+        let (backend, _temp_dir) = create_test_backend();
+        test_datastore_list_referrers(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_uploads() {
+        let (backend, _temp_dir) = create_test_backend();
+        test_datastore_list_uploads(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_blobs() {
+        let (backend, _temp_dir) = create_test_backend();
+        test_datastore_list_blobs(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_list_revisions() {
+        let (backend, _temp_dir) = create_test_backend();
+        test_datastore_list_revisions(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_blob_operations() {
+        let (backend, _temp_dir) = create_test_backend();
+        test_datastore_blob_operations(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_upload_operations() {
+        let (backend, _temp_dir) = create_test_backend();
+        test_datastore_upload_operations(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_link_operations() {
+        let (backend, _temp_dir) = create_test_backend();
+        test_datastore_link_operations(&backend).await;
     }
 }

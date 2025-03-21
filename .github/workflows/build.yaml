@@ -51,9 +51,30 @@ jobs:
         rustup component add llvm-tools
         cargo install grcov
               
+        CARGO_INCREMENTAL=0 RUSTFLAGS='-Cinstrument-coverage' LLVM_PROFILE_FILE='cargo-test-%p-%m.profraw' cargo build
+        
+          mkdir -p ./test/minio-data/registry
+          docker run --rm -d \
+            -v ./test/minio-data:/data \
+            -e MINIO_ROOT_USER=root \
+            -e MINIO_ROOT_PASSWORD=roottoor \
+            -e MINIO_VOLUMES=/data \
+            --network host \
+            --name minio-server \
+            quay.io/minio/minio \
+            minio server /data
+
+        # Ensure minio service is running
+        while ! nc -z localhost 9000; do
+          echo "Waiting for minio to start..."
+          sleep 1;
+        done
+
         CARGO_INCREMENTAL=0 RUSTFLAGS='-Cinstrument-coverage' LLVM_PROFILE_FILE='cargo-test-%p-%m.profraw' cargo test
         grcov . --binary-path ./target/debug/deps/ -s . -t html --branch --ignore-not-existing --ignore "target/**" -o target/coverage/html
         grcov . --binary-path ./target/debug/deps/ -s . -t markdown --branch --ignore-not-existing --ignore "../*" --ignore "/*" --ignore "target/**"
+        
+        docker stop minio-server
     - name: Upload coverage report
       uses: actions/upload-artifact@v4
       with:
