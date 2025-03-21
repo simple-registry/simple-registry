@@ -54,3 +54,6 @@ tracing-opentelemetry = "0.29.0"
 uuid = { version = "1.16.0", features = ["v4", "serde"] }
 x509-parser = "0.17.0"
 tokio-stream = "0.1.17"
+
+[dev-dependencies]
+tempfile = "3.10.0"
