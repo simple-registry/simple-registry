@@ -180,3 +180,221 @@ impl<D: DataStore + 'static> Registry<D> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::test_utils::{
+        create_test_blob, create_test_fs_backend, create_test_s3_backend,
+    };
+    use std::io::Cursor;
+    use tokio::io::AsyncReadExt;
+
+    async fn test_head_blob_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let content = b"test blob content";
+
+        let (digest, repository) = create_test_blob(registry, namespace, content).await;
+        let response = registry
+            .head_blob(&repository, &[], namespace, digest.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(response.digest, digest);
+        assert_eq!(response.size, content.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn test_head_blob_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_head_blob_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_head_blob_s3() {
+        let registry = create_test_s3_backend().await;
+        test_head_blob_impl(&registry).await;
+    }
+
+    async fn test_get_blob_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let content = b"test blob content";
+
+        let (digest, repository) = create_test_blob(registry, namespace, content).await;
+        let response = registry
+            .get_blob(&repository, &[], namespace, &digest, None)
+            .await
+            .unwrap();
+
+        match response {
+            GetBlobResponse::Reader(mut reader, size) => {
+                assert_eq!(size, content.len() as u64);
+                let mut buf = Vec::new();
+                reader.read_to_end(&mut buf).await.unwrap();
+                assert_eq!(buf, content);
+            }
+            _ => panic!("Expected Reader response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_blob_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_get_blob_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_blob_s3() {
+        let registry = create_test_s3_backend().await;
+        test_get_blob_impl(&registry).await;
+    }
+
+    async fn test_get_blob_with_range_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let content = b"test blob content";
+
+        let (digest, repository) = create_test_blob(registry, namespace, content).await;
+        let range = Some((5, 10)); // Get bytes 5-10 (inclusive)
+        let response = registry
+            .get_blob(&repository, &[], namespace, &digest, range)
+            .await
+            .unwrap();
+
+        match response {
+            GetBlobResponse::RangedReader(mut reader, (start, end), total_size) => {
+                assert_eq!(start, 5);
+                assert_eq!(end, 10);
+                assert_eq!(total_size, content.len() as u64);
+
+                let mut buf = Vec::new();
+                reader.read_to_end(&mut buf).await.unwrap();
+                assert_eq!(buf, &content[5..=10]); // Note: using inclusive range
+            }
+            _ => panic!("Expected RangedReader response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_blob_with_range_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_get_blob_with_range_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_blob_with_range_s3() {
+        let registry = create_test_s3_backend().await;
+        test_get_blob_with_range_impl(&registry).await;
+    }
+
+    async fn test_delete_blob_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let content = b"test blob content";
+
+        // Create the blob and ensure the namespace exists
+        let (digest, _) = create_test_blob(registry, namespace, content).await;
+
+        // Create test links
+        let layer_link = DataLink::Layer(digest.clone());
+        let config_link = DataLink::Config(digest.clone());
+        registry
+            .storage_engine
+            .create_link(namespace, &layer_link, &digest)
+            .await
+            .unwrap();
+        registry
+            .storage_engine
+            .create_link(namespace, &config_link, &digest)
+            .await
+            .unwrap();
+
+        // Verify links exist
+        assert!(registry
+            .storage_engine
+            .read_link(namespace, &layer_link)
+            .await
+            .is_ok());
+        assert!(registry
+            .storage_engine
+            .read_link(namespace, &config_link)
+            .await
+            .is_ok());
+
+        // Verify blob index is updated
+        let blob_index = registry
+            .storage_engine
+            .read_blob_index(&digest)
+            .await
+            .unwrap();
+        assert!(blob_index.namespace.contains_key(namespace));
+        let namespace_links = blob_index.namespace.get(namespace).unwrap();
+        assert!(namespace_links.contains(&layer_link));
+        assert!(namespace_links.contains(&config_link));
+
+        // Delete the blob
+        registry
+            .delete_blob(namespace, digest.clone())
+            .await
+            .unwrap();
+
+        // Verify links are deleted
+        assert!(registry
+            .storage_engine
+            .read_link(namespace, &layer_link)
+            .await
+            .is_err());
+        assert!(registry
+            .storage_engine
+            .read_link(namespace, &config_link)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_blob_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_delete_blob_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_blob_s3() {
+        let registry = create_test_s3_backend().await;
+        test_delete_blob_impl(&registry).await;
+    }
+
+    async fn test_copy_blob_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let content = b"test blob content";
+
+        let (digest, _) = create_test_blob(registry, namespace, content).await;
+
+        // Create a test stream
+        let stream = Cursor::new(content.to_vec());
+        let storage_engine = registry.storage_engine.clone();
+
+        // Test copy_blob
+        Registry::<D>::copy_blob(
+            storage_engine,
+            stream,
+            namespace.to_string(),
+            digest.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Verify the blob was copied correctly
+        let stored_content = registry.storage_engine.read_blob(&digest).await.unwrap();
+        assert_eq!(stored_content, content);
+    }
+
+    #[tokio::test]
+    async fn test_copy_blob_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_copy_blob_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_copy_blob_s3() {
+        let registry = create_test_s3_backend().await;
+        test_copy_blob_impl(&registry).await;
+    }
+}
