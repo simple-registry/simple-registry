@@ -9,6 +9,7 @@ use hyper::header::CONTENT_LENGTH;
 use hyper::Method;
 use std::sync::Arc;
 use tokio::io::AsyncRead;
+use tokio::io::AsyncReadExt;
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
@@ -154,11 +155,15 @@ impl<D: DataStore + 'static> Registry<D> {
         };
 
         match range {
-            Some((start, end)) => Ok(GetBlobResponse::RangedReader(
-                reader,
-                (start, end),
-                total_length,
-            )),
+            Some((start, end)) => {
+                let reader = Box::new(reader.take(end - start + 1));
+
+                Ok(GetBlobResponse::RangedReader(
+                    reader,
+                    (start, end),
+                    total_length,
+                ))
+            }
             None => Ok(GetBlobResponse::Reader(reader, total_length)),
         }
     }
