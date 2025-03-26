@@ -359,3 +359,313 @@ impl<D: DataStore> Registry<D> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
+    use serde_json::json;
+
+    fn create_test_manifest() -> (Vec<u8>, String) {
+        let manifest = json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+            "config": {
+                "mediaType": "application/vnd.docker.container.image.v1+json",
+                "digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                "size": 1234
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                    "digest": "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+                    "size": 5678
+                }
+            ]
+        });
+
+        let content = serde_json::to_vec(&manifest).unwrap();
+        let media_type = "application/vnd.docker.distribution.manifest.v2+json".to_string();
+        (content, media_type)
+    }
+
+    fn create_test_manifest_with_subject() -> (Vec<u8>, String) {
+        let manifest = json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+            "subject": {
+                "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                "digest": "sha256:9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba",
+                "size": 1234
+            },
+            "config": {
+                "mediaType": "application/vnd.docker.container.image.v1+json",
+                "digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                "size": 1234
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                    "digest": "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+                    "size": 5678
+                }
+            ]
+        });
+
+        let content = serde_json::to_vec(&manifest).unwrap();
+        let media_type = "application/vnd.docker.distribution.manifest.v2+json".to_string();
+        (content, media_type)
+    }
+
+    async fn test_put_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let tag = "latest";
+        let (content, media_type) = create_test_manifest();
+
+        // Test put manifest with tag
+        let response = registry
+            .put_manifest(namespace, Reference::Tag(tag.to_string()), Some(&media_type), &content)
+            .await
+            .unwrap();
+
+        // Verify manifest was stored
+        let stored_manifest = registry
+            .get_manifest(
+                &registry.validate_namespace(namespace).unwrap(),
+                &[media_type.clone()],
+                namespace,
+                Reference::Tag(tag.to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(stored_manifest.content, content);
+        assert_eq!(stored_manifest.media_type.unwrap(), media_type);
+        assert_eq!(stored_manifest.digest, response.digest);
+
+        // Test put manifest with digest
+        let digest = response.digest.clone();
+        let response = registry
+            .put_manifest(namespace, Reference::Digest(digest.clone()), Some(&media_type), &content)
+            .await
+            .unwrap();
+
+        assert_eq!(response.digest, digest);
+    }
+
+    #[tokio::test]
+    async fn test_put_manifest_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_put_manifest_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_put_manifest_s3() {
+        let registry = create_test_s3_backend().await;
+        test_put_manifest_impl(&registry).await;
+    }
+
+    async fn test_get_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let tag = "latest";
+        let (content, media_type) = create_test_manifest();
+
+        // Put manifest first
+        let response = registry
+            .put_manifest(namespace, Reference::Tag(tag.to_string()), Some(&media_type), &content)
+            .await
+            .unwrap();
+
+        // Test get manifest by tag
+        let manifest = registry
+            .get_manifest(
+                &registry.validate_namespace(namespace).unwrap(),
+                &[media_type.clone()],
+                namespace,
+                Reference::Tag(tag.to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(manifest.content, content);
+        assert_eq!(manifest.media_type.unwrap(), media_type);
+        assert_eq!(manifest.digest, response.digest);
+
+        // Test get manifest by digest
+        let manifest = registry
+            .get_manifest(
+                &registry.validate_namespace(namespace).unwrap(),
+                &[media_type.clone()],
+                namespace,
+                Reference::Digest(response.digest.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(manifest.content, content);
+        assert_eq!(manifest.media_type.unwrap(), media_type);
+        assert_eq!(manifest.digest, response.digest);
+    }
+
+    #[tokio::test]
+    async fn test_get_manifest_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_get_manifest_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_manifest_s3() {
+        let registry = create_test_s3_backend().await;
+        test_get_manifest_impl(&registry).await;
+    }
+
+    async fn test_head_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let tag = "latest";
+        let (content, media_type) = create_test_manifest();
+
+        // Put manifest first
+        let response = registry
+            .put_manifest(namespace, Reference::Tag(tag.to_string()), Some(&media_type), &content)
+            .await
+            .unwrap();
+
+        // Test head manifest by tag
+        let manifest = registry
+            .head_manifest(
+                &registry.validate_namespace(namespace).unwrap(),
+                &[media_type.clone()],
+                namespace,
+                Reference::Tag(tag.to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(manifest.media_type.unwrap(), media_type);
+        assert_eq!(manifest.digest, response.digest);
+        assert_eq!(manifest.size, content.len());
+
+        // Test head manifest by digest
+        let manifest = registry
+            .head_manifest(
+                &registry.validate_namespace(namespace).unwrap(),
+                &[media_type.clone()],
+                namespace,
+                Reference::Digest(response.digest.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(manifest.media_type.unwrap(), media_type);
+        assert_eq!(manifest.digest, response.digest);
+        assert_eq!(manifest.size, content.len());
+    }
+
+    #[tokio::test]
+    async fn test_head_manifest_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_head_manifest_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_head_manifest_s3() {
+        let registry = create_test_s3_backend().await;
+        test_head_manifest_impl(&registry).await;
+    }
+
+    async fn test_delete_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let tag = "latest";
+        let (content, media_type) = create_test_manifest();
+
+        // Put manifest first
+        let response = registry
+            .put_manifest(namespace, Reference::Tag(tag.to_string()), Some(&media_type), &content)
+            .await
+            .unwrap();
+
+        // Test delete manifest by tag
+        registry
+            .delete_manifest(namespace, Reference::Tag(tag.to_string()))
+            .await
+            .unwrap();
+
+        // Verify tag is deleted
+        assert!(registry
+            .get_manifest(
+                &registry.validate_namespace(namespace).unwrap(),
+                &[media_type.clone()],
+                namespace,
+                Reference::Tag(tag.to_string()),
+            )
+            .await
+            .is_err());
+
+        // Test delete manifest by digest
+        registry
+            .delete_manifest(namespace, Reference::Digest(response.digest.clone()))
+            .await
+            .unwrap();
+
+        // Verify digest is deleted
+        assert!(registry
+            .get_manifest(
+                &registry.validate_namespace(namespace).unwrap(),
+                &[media_type.clone()],
+                namespace,
+                Reference::Digest(response.digest),
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_delete_manifest_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_delete_manifest_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_manifest_s3() {
+        let registry = create_test_s3_backend().await;
+        test_delete_manifest_impl(&registry).await;
+    }
+
+    #[test]
+    fn test_parse_manifest_digests() {
+        // Test regular manifest
+        let (content, media_type) = create_test_manifest();
+        let digests = parse_manifest_digests(&content, Some(&media_type)).unwrap();
+
+        assert!(digests.subject.is_none());
+        assert_eq!(
+            digests.config.unwrap().to_string(),
+            "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        );
+        assert_eq!(
+            digests.layers[0].to_string(),
+            "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        );
+
+        // Test manifest with subject
+        let (content, media_type) = create_test_manifest_with_subject();
+        let digests = parse_manifest_digests(&content, Some(&media_type)).unwrap();
+
+        assert_eq!(
+            digests.subject.unwrap().to_string(),
+            "sha256:9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba"
+        );
+        assert_eq!(
+            digests.config.unwrap().to_string(),
+            "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        );
+        assert_eq!(
+            digests.layers[0].to_string(),
+            "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        );
+
+        // Test media type mismatch
+        let wrong_media_type = "application/wrong.media.type".to_string();
+        assert!(parse_manifest_digests(&content, Some(&wrong_media_type)).is_err());
+    }
+}
