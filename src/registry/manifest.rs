@@ -424,7 +424,12 @@ mod tests {
 
         // Test put manifest with tag
         let response = registry
-            .put_manifest(namespace, Reference::Tag(tag.to_string()), Some(&media_type), &content)
+            .put_manifest(
+                namespace,
+                Reference::Tag(tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
             .await
             .unwrap();
 
@@ -446,7 +451,12 @@ mod tests {
         // Test put manifest with digest
         let digest = response.digest.clone();
         let response = registry
-            .put_manifest(namespace, Reference::Digest(digest.clone()), Some(&media_type), &content)
+            .put_manifest(
+                namespace,
+                Reference::Digest(digest.clone()),
+                Some(&media_type),
+                &content,
+            )
             .await
             .unwrap();
 
@@ -472,7 +482,12 @@ mod tests {
 
         // Put manifest first
         let response = registry
-            .put_manifest(namespace, Reference::Tag(tag.to_string()), Some(&media_type), &content)
+            .put_manifest(
+                namespace,
+                Reference::Tag(tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
             .await
             .unwrap();
 
@@ -526,7 +541,12 @@ mod tests {
 
         // Put manifest first
         let response = registry
-            .put_manifest(namespace, Reference::Tag(tag.to_string()), Some(&media_type), &content)
+            .put_manifest(
+                namespace,
+                Reference::Tag(tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
             .await
             .unwrap();
 
@@ -580,7 +600,12 @@ mod tests {
 
         // Put manifest first
         let response = registry
-            .put_manifest(namespace, Reference::Tag(tag.to_string()), Some(&media_type), &content)
+            .put_manifest(
+                namespace,
+                Reference::Tag(tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
             .await
             .unwrap();
 

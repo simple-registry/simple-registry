@@ -178,7 +178,10 @@ mod tests {
 
         // Test starting upload with existing blob
         let digest = registry.storage_engine.create_blob(content).await.unwrap();
-        let response = registry.start_upload(namespace, Some(digest.clone())).await.unwrap();
+        let response = registry
+            .start_upload(namespace, Some(digest.clone()))
+            .await
+            .unwrap();
         match response {
             StartUploadResponse::ExistingBlob(existing_digest) => {
                 assert_eq!(existing_digest, digest);
@@ -205,7 +208,11 @@ mod tests {
         let session_id = Uuid::new_v4();
 
         // Create initial upload
-        registry.storage_engine.create_upload(namespace, &session_id.to_string()).await.unwrap();
+        registry
+            .storage_engine
+            .create_upload(namespace, &session_id.to_string())
+            .await
+            .unwrap();
 
         // Test patch upload
         let stream = Cursor::new(content);
@@ -222,7 +229,10 @@ mod tests {
             .patch_upload(namespace, session_id, Some(content.len() as u64), stream)
             .await
             .unwrap();
-        assert_eq!(bytes_written, (content.len() + additional_content.len() - 1) as u64);
+        assert_eq!(
+            bytes_written,
+            (content.len() + additional_content.len() - 1) as u64
+        );
 
         // Verify content
         let (_, size, _) = registry
@@ -251,7 +261,11 @@ mod tests {
         let session_id = Uuid::new_v4();
 
         // Create initial upload
-        registry.storage_engine.create_upload(namespace, &session_id.to_string()).await.unwrap();
+        registry
+            .storage_engine
+            .create_upload(namespace, &session_id.to_string())
+            .await
+            .unwrap();
 
         // Write content
         let stream = Cursor::new(content);
@@ -275,7 +289,11 @@ mod tests {
             .unwrap();
 
         // Verify blob exists
-        let stored_content = registry.storage_engine.read_blob(&upload_digest).await.unwrap();
+        let stored_content = registry
+            .storage_engine
+            .read_blob(&upload_digest)
+            .await
+            .unwrap();
         assert_eq!(stored_content, content);
     }
 
@@ -296,7 +314,11 @@ mod tests {
         let session_id = Uuid::new_v4();
 
         // Create upload
-        registry.storage_engine.create_upload(namespace, &session_id.to_string()).await.unwrap();
+        registry
+            .storage_engine
+            .create_upload(namespace, &session_id.to_string())
+            .await
+            .unwrap();
 
         // Verify upload exists
         assert!(registry
@@ -334,10 +356,17 @@ mod tests {
         let session_id = Uuid::new_v4();
 
         // Create upload
-        registry.storage_engine.create_upload(namespace, &session_id.to_string()).await.unwrap();
+        registry
+            .storage_engine
+            .create_upload(namespace, &session_id.to_string())
+            .await
+            .unwrap();
 
         // Test empty upload
-        let range_max = registry.get_upload_range_max(namespace, session_id).await.unwrap();
+        let range_max = registry
+            .get_upload_range_max(namespace, session_id)
+            .await
+            .unwrap();
         assert_eq!(range_max, 0);
 
         // Write content
@@ -348,7 +377,10 @@ mod tests {
             .unwrap();
 
         // Test with content
-        let range_max = registry.get_upload_range_max(namespace, session_id).await.unwrap();
+        let range_max = registry
+            .get_upload_range_max(namespace, session_id)
+            .await
+            .unwrap();
         assert_eq!(range_max, (content.len() - 1) as u64);
     }
 
