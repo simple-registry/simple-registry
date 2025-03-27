@@ -66,7 +66,7 @@ impl<D: DataStore> Registry<D> {
 
             debug!("CEL program '{policy:?}' evaluates to {evaluation_result:?}");
             match evaluation_result {
-                Value::Bool(false) => {
+                Value::Bool(true) => {
                     info!("Policy matched, denying access");
                     return Err(Self::deny());
                 }
