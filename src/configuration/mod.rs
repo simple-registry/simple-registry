@@ -166,7 +166,7 @@ pub struct IdentityConfig {
     pub password: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct RepositoryConfig {
     #[serde(default)]
     pub upstream: Vec<RepositoryUpstreamConfig>,

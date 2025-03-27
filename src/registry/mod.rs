@@ -116,12 +116,12 @@ pub(crate) mod test_utils {
         repositories.insert(
             "test-repo".to_string(),
             RepositoryConfig {
-                upstream: vec![],
                 access_policy: RepositoryAccessPolicyConfig {
                     default_allow: true,
-                    rules: vec![],
+                    ..RepositoryAccessPolicyConfig::default()
                 },
                 retention_policy: RepositoryRetentionPolicyConfig::default(),
+                ..RepositoryConfig::default()
             },
         );
         repositories
