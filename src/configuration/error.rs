@@ -1,6 +1,7 @@
 use crate::registry::{cache_store, lock_store};
 use hyper::header::InvalidHeaderValue;
-use opentelemetry::trace::TraceError;
+use opentelemetry_otlp::ExporterBuildError;
+use opentelemetry_sdk::trace::TraceError;
 use rustls_pki_types::pem;
 use std::{fmt, io};
 use tracing::debug;
@@ -16,6 +17,7 @@ pub enum Error {
     Http(String),
     Tls(String),
     TracingInit(TraceError),
+    ExporterInit(ExporterBuildError),
     CELPolicy(cel_interpreter::ParseError),
 }
 
@@ -43,6 +45,9 @@ impl fmt::Display for Error {
             }
             Error::TracingInit(error) => {
                 write!(f, "Tracing initialization error: {error}")
+            }
+            Error::ExporterInit(error) => {
+                write!(f, "Exporter initialization error: {error}")
             }
             Error::CELPolicy(error) => {
                 write!(f, "CEL policy error")?;
@@ -106,6 +111,12 @@ impl From<pem::Error> for Error {
 impl From<TraceError> for Error {
     fn from(error: TraceError) -> Self {
         Error::TracingInit(error)
+    }
+}
+
+impl From<ExporterBuildError> for Error {
+    fn from(error: ExporterBuildError) -> Self {
+        Error::ExporterInit(error)
     }
 }
 

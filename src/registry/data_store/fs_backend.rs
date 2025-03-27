@@ -143,58 +143,6 @@ impl FSBackend {
         Ok(())
     }
 
-    pub async fn blob_link_index_update<O>(
-        &self,
-        namespace: &str,
-        digest: &Digest,
-        operation: O,
-    ) -> Result<(), Error>
-    where
-        O: FnOnce(&mut HashSet<DataLink>),
-    {
-        debug!("Ensuring container directory for digest: {digest}");
-        let path = self.tree.blob_container_dir(digest);
-        fs::create_dir_all(&path)?;
-
-        debug!("Updating reference count for digest: {digest}");
-        let path = self.tree.blob_index_path(digest);
-
-        let mut reference_index = match Self::read_string(&path) {
-            Ok(content) => serde_json::from_str::<BlobEntityLinkIndex>(&content)?,
-            Err(Error::ReferenceNotFound) => BlobEntityLinkIndex::default(),
-            Err(e) => Err(e)?,
-        };
-
-        debug!("Updating reference index");
-        if let Some(index) = reference_index.namespace.get_mut(namespace) {
-            operation(index);
-            if index.is_empty() {
-                reference_index.namespace.remove(namespace);
-            }
-        } else {
-            let mut index = HashSet::new();
-            operation(&mut index);
-            if !index.is_empty() {
-                reference_index
-                    .namespace
-                    .insert(namespace.to_string(), index);
-            }
-        };
-
-        if reference_index.namespace.is_empty() {
-            debug!("Deleting no longer referenced Blob: {digest}");
-            let path = self.tree.blob_container_dir(digest);
-            let _ = self.delete_empty_parent_dirs(&path).await;
-        } else {
-            debug!("Writing reference count to path: {path}");
-            let content = serde_json::to_string(&reference_index)?;
-            Self::write_file(&path, content.as_bytes())?;
-            debug!("Reference index for {digest} updated");
-        }
-
-        Ok(())
-    }
-
     pub fn paginate<T>(
         items: &[T],
         n: u16,
@@ -639,6 +587,58 @@ impl DataStore for FSBackend {
         Ok(index)
     }
 
+    async fn update_blob_index<O>(
+        &self,
+        namespace: &str,
+        digest: &Digest,
+        operation: O,
+    ) -> Result<(), Error>
+    where
+        O: FnOnce(&mut HashSet<DataLink>) + Send,
+    {
+        debug!("Ensuring container directory for digest: {digest}");
+        let path = self.tree.blob_container_dir(digest);
+        fs::create_dir_all(&path)?;
+
+        debug!("Updating reference count for digest: {digest}");
+        let path = self.tree.blob_index_path(digest);
+
+        let mut reference_index = match Self::read_string(&path) {
+            Ok(content) => serde_json::from_str::<BlobEntityLinkIndex>(&content)?,
+            Err(Error::ReferenceNotFound) => BlobEntityLinkIndex::default(),
+            Err(e) => Err(e)?,
+        };
+
+        debug!("Updating reference index");
+        if let Some(index) = reference_index.namespace.get_mut(namespace) {
+            operation(index);
+            if index.is_empty() {
+                reference_index.namespace.remove(namespace);
+            }
+        } else {
+            let mut index = HashSet::new();
+            operation(&mut index);
+            if !index.is_empty() {
+                reference_index
+                    .namespace
+                    .insert(namespace.to_string(), index);
+            }
+        };
+
+        if reference_index.namespace.is_empty() {
+            debug!("Deleting no longer referenced Blob: {digest}");
+            let path = self.tree.blob_container_dir(digest);
+            let _ = self.delete_empty_parent_dirs(&path).await;
+        } else {
+            debug!("Writing reference count to path: {path}");
+            let content = serde_json::to_string(&reference_index)?;
+            Self::write_file(&path, content.as_bytes())?;
+            debug!("Reference index for {digest} updated");
+        }
+
+        Ok(())
+    }
+
     #[instrument(skip(self))]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
         let path = self.tree.blob_path(digest);
@@ -688,23 +688,6 @@ impl DataStore for FSBackend {
         }
 
         Ok(Box::new(file.tokio_io()))
-    }
-
-    #[instrument(skip(self))]
-    async fn delete_blob(&self, digest: &Digest) -> Result<(), Error> {
-        let _digest_guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
-
-        let path = self.tree.blob_container_dir(digest);
-        let _ = self.delete_empty_parent_dirs(&path).await;
-
-        Ok(())
     }
 
     #[instrument(skip(self))]
@@ -767,7 +750,7 @@ impl DataStore for FSBackend {
                     .acquire_write_lock(&existing_digest.to_string())
                     .await;
 
-                self.blob_link_index_update(namespace, digest, |index| {
+                self.update_blob_index(namespace, digest, |index| {
                     index.remove(reference);
                 })
                 .await?;
@@ -780,7 +763,7 @@ impl DataStore for FSBackend {
 
         debug!("Increasing reference count for digest: {digest}");
 
-        self.blob_link_index_update(namespace, digest, |index| {
+        self.update_blob_index(namespace, digest, |index| {
             index.insert(reference.clone());
         })
         .await?;
@@ -818,7 +801,7 @@ impl DataStore for FSBackend {
         let _ = self.delete_empty_parent_dirs(&path).await;
 
         debug!("Unregistering reference: {reference}");
-        self.blob_link_index_update(namespace, &digest, |index| {
+        self.update_blob_index(namespace, &digest, |index| {
             index.remove(reference);
         })
         .await?;

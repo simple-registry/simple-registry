@@ -6,7 +6,6 @@ use crate::registry::{parse_manifest_digests, Error, Registry};
 use cel_interpreter::{Context, Program, Value};
 use chrono::Utc;
 use std::collections::HashMap;
-use std::process::exit;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -265,7 +264,7 @@ impl<D: DataStore> Registry<D> {
         loop {
             let (revisions, next_marker) = self
                 .storage_engine
-                .list_revisions(namespace, 0, marker)
+                .list_revisions(namespace, 100, marker)
                 .await?;
 
             for revision in revisions {
@@ -352,21 +351,28 @@ impl<D: DataStore> Registry<D> {
         let blob_digest = self
             .storage_engine
             .read_link(namespace, link_reference)
-            .await
-            .ok();
+            .await;
 
-        if let Some(link_digest) = blob_digest {
-            if &link_digest == digest {
+        match blob_digest {
+            Ok(link_digest) if &link_digest == digest => {
                 debug!("Link {link_reference} -> {digest} is valid");
                 return Ok(());
             }
-        }
-
-        warn!("Missing or invalid link: {link_reference} -> {digest}");
-        if !self.scrub_dry_run {
-            self.storage_engine
-                .create_link(namespace, link_reference, digest)
-                .await?;
+            _ => {
+                warn!("Missing or invalid link: {link_reference} -> {digest}");
+                if !self.scrub_dry_run {
+                    if let Err(error) = self
+                        .storage_engine
+                        .delete_link(namespace, link_reference)
+                        .await
+                    {
+                        warn!("Failed to delete old link: {error}");
+                    }
+                    self.storage_engine
+                        .create_link(namespace, link_reference, digest)
+                        .await?;
+                }
+            }
         }
 
         Ok(())
@@ -379,7 +385,9 @@ impl<D: DataStore> Registry<D> {
         loop {
             let Ok((blobs, next_marker)) = self.storage_engine.list_blobs(100, marker).await else {
                 error!("Failed to list blobs");
-                exit(1);
+                return Err(Error::Internal(
+                    "Failed to list blobs while checking for orphan blobs".to_string(),
+                ));
             };
 
             for blob in blobs {
@@ -396,9 +404,9 @@ impl<D: DataStore> Registry<D> {
     }
 
     async fn check_blob(&self, blob: &Digest) -> Result<(), Error> {
-        let mut blob_index = self.storage_engine.read_blob_index(blob).await?;
+        let blob_index = self.storage_engine.read_blob_index(blob).await?;
 
-        for (namespace, references) in blob_index.namespace.clone() {
+        for (namespace, references) in blob_index.namespace {
             for link_reference in references {
                 if self
                     .storage_engine
@@ -406,31 +414,22 @@ impl<D: DataStore> Registry<D> {
                     .await
                     .is_err()
                 {
-                    let Some(index) = blob_index.namespace.get_mut(&namespace) else {
-                        error!("Failed to get namespace index: {namespace}");
-                        continue;
-                    };
-
-                    warn!("Orphan link: {namespace}/{blob} -> {link_reference}");
+                    warn!("Missing link from blob index: {namespace}/{blob} <- {link_reference}");
                     if !self.scrub_dry_run {
-                        index.remove(&link_reference);
+                        if let Err(error) = self
+                            .storage_engine
+                            .update_blob_index(&namespace, blob, |index| {
+                                index.remove(&link_reference);
+                            })
+                            .await
+                        {
+                            error!("Failed to update blob index: {error}");
+                        }
                     }
                 }
             }
         }
 
-        blob_index
-            .namespace
-            .retain(|_, references| !references.is_empty());
-
-        if blob_index.namespace.is_empty() {
-            warn!("Orphan blob: {blob}");
-            if !self.scrub_dry_run {
-                if let Err(error) = self.storage_engine.delete_blob(blob).await {
-                    error!("Failed to delete blob: {error}");
-                }
-            }
-        }
         Ok(())
     }
 }
@@ -438,6 +437,15 @@ impl<D: DataStore> Registry<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::configuration::CacheStoreConfig;
+    use crate::registry::cache_store::CacheStore;
+    use crate::registry::test_utils::{
+        create_test_fs_backend, create_test_manifest, create_test_repository_config,
+        create_test_s3_backend,
+    };
+    use crate::registry::utils::DataLink;
+    use chrono::Duration;
+    use uuid::Uuid;
 
     #[test]
     fn test_retention_policy_no_rules() {
@@ -557,5 +565,589 @@ mod tests {
             &vec!["latest".to_string()]
         )
         .unwrap());
+    }
+
+    async fn test_enforce_retention_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let (content, media_type) = create_test_manifest();
+
+        // Create a repository config with retention rules
+        let mut repositories_config = create_test_repository_config();
+        repositories_config
+            .get_mut("test-repo")
+            .unwrap()
+            .retention_policy
+            .rules = vec!["image.tag == 'latest'".to_string()];
+
+        // Create a new registry with the retention rules and dry run disabled
+        let new_registry = Registry::new(
+            repositories_config,
+            registry.storage_engine.clone(),
+            Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+        )
+        .unwrap()
+        .with_dry_run(false);
+
+        // Create multiple tags with different names
+        let tags = ["latest", "v1.0", "v2.0", "old-tag"];
+        let mut tag_digests = Vec::new();
+
+        for tag in &tags {
+            let response = new_registry
+                .put_manifest(
+                    namespace,
+                    Reference::Tag(tag.to_string()),
+                    Some(&media_type),
+                    &content,
+                )
+                .await
+                .unwrap();
+            tag_digests.push((tag.to_string(), response.digest));
+        }
+
+        // Save the first digest for later verification
+        let first_digest = tag_digests[0].1.clone();
+
+        // Test enforce retention
+        new_registry.enforce_retention(namespace).await.unwrap();
+
+        // Verify that only the 'latest' tag remains (due to retention rule)
+        for (tag, digest) in tag_digests {
+            let result = new_registry
+                .get_manifest(
+                    &new_registry.validate_namespace(namespace).unwrap(),
+                    &[media_type.clone()],
+                    namespace,
+                    Reference::Tag(tag.clone()),
+                )
+                .await;
+
+            if tag == "latest" {
+                // Latest tag should still exist
+                assert!(result.is_ok());
+                let manifest = result.unwrap();
+                assert_eq!(manifest.digest, digest);
+            } else {
+                // Other tags should be deleted
+                assert!(result.is_err());
+            }
+        }
+
+        // Verify that the manifest blob still exists (since it's referenced by the 'latest' tag)
+        assert!(new_registry
+            .storage_engine
+            .read_blob(&first_digest)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_enforce_retention_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_enforce_retention_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_enforce_retention_s3() {
+        let registry = create_test_s3_backend().await;
+        test_enforce_retention_impl(&registry).await;
+    }
+
+    async fn test_scrub_uploads_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let session_id = Uuid::new_v4().to_string();
+
+        // Create an upload
+        registry
+            .storage_engine
+            .create_upload(namespace, &session_id)
+            .await
+            .unwrap();
+
+        // Create a new registry with 0 timeout
+        let new_registry = Registry::new(
+            create_test_repository_config(),
+            registry.storage_engine.clone(),
+            Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+        )
+        .unwrap()
+        .with_upload_timeout(Duration::seconds(0))
+        .with_dry_run(false);
+
+        // Test scrub uploads
+        new_registry.scrub_uploads(namespace).await.unwrap();
+
+        // Verify upload is deleted
+        assert!(new_registry
+            .storage_engine
+            .read_upload_summary(namespace, &session_id)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_scrub_uploads_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_scrub_uploads_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_scrub_uploads_s3() {
+        let registry = create_test_s3_backend().await;
+        test_scrub_uploads_impl(&registry).await;
+    }
+
+    async fn test_scrub_tags_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let tag = "latest";
+        let (content, media_type) = create_test_manifest();
+
+        // Put manifest first
+        let response = registry
+            .put_manifest(
+                namespace,
+                Reference::Tag(tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
+            .await
+            .unwrap();
+
+        // Test scrub tags
+        registry.scrub_tags(namespace).await.unwrap();
+
+        // Verify manifest still exists
+        let manifest = registry
+            .get_manifest(
+                &registry.validate_namespace(namespace).unwrap(),
+                &[media_type.clone()],
+                namespace,
+                Reference::Tag(tag.to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(manifest.digest, response.digest);
+    }
+
+    #[tokio::test]
+    async fn test_scrub_tags_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_scrub_tags_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_scrub_tags_s3() {
+        let registry = create_test_s3_backend().await;
+        test_scrub_tags_impl(&registry).await;
+    }
+
+    async fn test_scrub_revisions_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+
+        // Create test blobs
+        let config_digest = registry
+            .storage_engine
+            .create_blob(b"test config")
+            .await
+            .unwrap();
+        let layer_digest1 = registry
+            .storage_engine
+            .create_blob(b"test layer 1")
+            .await
+            .unwrap();
+        let layer_digest2 = registry
+            .storage_engine
+            .create_blob(b"test layer 2")
+            .await
+            .unwrap();
+        let subject_digest = registry
+            .storage_engine
+            .create_blob(b"test subject")
+            .await
+            .unwrap();
+
+        // Create some incorrect blobs to test link fixing
+        let wrong_config_digest = registry
+            .storage_engine
+            .create_blob(b"wrong config")
+            .await
+            .unwrap();
+        let wrong_layer_digest = registry
+            .storage_engine
+            .create_blob(b"wrong layer")
+            .await
+            .unwrap();
+
+        // Create manifest content with correct digests
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+            "config": {
+                "mediaType": "application/vnd.docker.container.image.v1+json",
+                "digest": config_digest.to_string(),
+                "size": 1234
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                    "digest": layer_digest1.to_string(),
+                    "size": 5678
+                },
+                {
+                    "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                    "digest": layer_digest2.to_string(),
+                    "size": 5678
+                }
+            ]
+        });
+        let content = serde_json::to_vec(&manifest).unwrap();
+
+        // Create manifest with subject content
+        let manifest_with_subject = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+            "subject": {
+                "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                "digest": subject_digest.to_string(),
+                "size": 1234
+            },
+            "config": {
+                "mediaType": "application/vnd.docker.container.image.v1+json",
+                "digest": config_digest.to_string(),
+                "size": 1234
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                    "digest": layer_digest1.to_string(),
+                    "size": 5678
+                }
+            ]
+        });
+        let content_with_subject = serde_json::to_vec(&manifest_with_subject).unwrap();
+
+        // Create manifest blobs
+        let manifest_digest = registry.storage_engine.create_blob(&content).await.unwrap();
+        let manifest_with_subject_digest = registry
+            .storage_engine
+            .create_blob(&content_with_subject)
+            .await
+            .unwrap();
+
+        // Create correct config link first
+        registry
+            .storage_engine
+            .create_link(
+                namespace,
+                &DataLink::Config(config_digest.clone()),
+                &config_digest,
+            )
+            .await
+            .unwrap();
+
+        // Create manifest revision links and tag
+        registry
+            .storage_engine
+            .create_link(
+                namespace,
+                &DataLink::Digest(manifest_digest.clone()),
+                &manifest_digest,
+            )
+            .await
+            .unwrap();
+        registry
+            .storage_engine
+            .create_link(
+                namespace,
+                &DataLink::Digest(manifest_with_subject_digest.clone()),
+                &manifest_with_subject_digest,
+            )
+            .await
+            .unwrap();
+        registry
+            .storage_engine
+            .create_link(
+                namespace,
+                &DataLink::Tag("latest".to_string()),
+                &manifest_digest,
+            )
+            .await
+            .unwrap();
+
+        // Create incorrect links
+        registry
+            .storage_engine
+            .create_link(
+                namespace,
+                &DataLink::Config(wrong_config_digest.clone()),
+                &wrong_config_digest,
+            )
+            .await
+            .unwrap();
+        registry
+            .storage_engine
+            .create_link(
+                namespace,
+                &DataLink::Layer(wrong_layer_digest.clone()),
+                &wrong_layer_digest,
+            )
+            .await
+            .unwrap();
+
+        // Create a new registry with dry run disabled
+        let new_registry = Registry::new(
+            create_test_repository_config(),
+            registry.storage_engine.clone(),
+            Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+        )
+        .unwrap()
+        .with_dry_run(false);
+
+        // Test scrub revisions
+        new_registry.scrub_revisions(namespace).await.unwrap();
+
+        // Verify links point to correct digests
+        assert_eq!(
+            new_registry
+                .storage_engine
+                .read_link(namespace, &DataLink::Config(config_digest.clone()))
+                .await
+                .unwrap(),
+            config_digest,
+            "Config link should point to correct digest"
+        );
+
+        assert_eq!(
+            new_registry
+                .storage_engine
+                .read_link(namespace, &DataLink::Layer(layer_digest1.clone()))
+                .await
+                .unwrap(),
+            layer_digest1,
+            "Layer1 link should point to correct digest"
+        );
+
+        assert_eq!(
+            new_registry
+                .storage_engine
+                .read_link(namespace, &DataLink::Layer(layer_digest2.clone()))
+                .await
+                .unwrap(),
+            layer_digest2,
+            "Layer2 link should be created and point to correct digest"
+        );
+
+        assert_eq!(
+            new_registry
+                .storage_engine
+                .read_link(
+                    namespace,
+                    &DataLink::Referrer(
+                        subject_digest.clone(),
+                        manifest_with_subject_digest.clone()
+                    )
+                )
+                .await
+                .unwrap(),
+            manifest_with_subject_digest,
+            "Subject link should point to correct digest"
+        );
+
+        // Test error case with invalid manifest content
+        let invalid_content = b"invalid manifest content";
+        let invalid_digest = new_registry
+            .storage_engine
+            .create_blob(invalid_content)
+            .await
+            .unwrap();
+        new_registry
+            .storage_engine
+            .create_link(
+                namespace,
+                &DataLink::Digest(invalid_digest.clone()),
+                &invalid_digest,
+            )
+            .await
+            .unwrap();
+        assert!(new_registry.scrub_revisions(namespace).await.is_ok()); // Should handle invalid manifest gracefully
+    }
+
+    async fn test_ensure_link_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let digest = registry
+            .storage_engine
+            .create_blob(b"test content")
+            .await
+            .unwrap();
+        let link = DataLink::Tag("test-tag".to_string());
+
+        // Create a new registry with dry run disabled
+        let new_registry = Registry::new(
+            create_test_repository_config(),
+            registry.storage_engine.clone(),
+            Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+        )
+        .unwrap()
+        .with_dry_run(false);
+
+        // Test creating a new link
+        new_registry
+            .ensure_link(namespace, &link, &digest)
+            .await
+            .unwrap();
+        assert!(new_registry
+            .storage_engine
+            .read_link(namespace, &link)
+            .await
+            .is_ok());
+
+        // Test updating an existing link
+        let new_digest = registry
+            .storage_engine
+            .create_blob(b"new content")
+            .await
+            .unwrap();
+        new_registry
+            .ensure_link(namespace, &link, &new_digest)
+            .await
+            .unwrap();
+        let stored_digest = new_registry
+            .storage_engine
+            .read_link(namespace, &link)
+            .await
+            .unwrap();
+        assert_eq!(stored_digest, new_digest);
+
+        // Test with invalid link
+        let invalid_link = DataLink::Tag("invalid-tag".to_string());
+        new_registry
+            .ensure_link(namespace, &invalid_link, &digest)
+            .await
+            .unwrap();
+        assert!(new_registry
+            .storage_engine
+            .read_link(namespace, &invalid_link)
+            .await
+            .is_ok());
+    }
+
+    async fn test_cleanup_orphan_blobs_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace1 = "test-repo1";
+        let namespace2 = "test-repo2";
+        let content = b"test orphan blob content";
+
+        // Create multiple blobs
+        let digest1 = registry.storage_engine.create_blob(content).await.unwrap();
+        let digest2 = registry.storage_engine.create_blob(content).await.unwrap();
+        let digest3 = registry.storage_engine.create_blob(content).await.unwrap();
+        let digest4 = registry.storage_engine.create_blob(content).await.unwrap();
+
+        // Create valid links for blobs in different namespaces
+        let valid_link1 = DataLink::Tag("valid-tag1".to_string());
+        let valid_link2 = DataLink::Layer(digest2.clone());
+        let valid_link3 = DataLink::Config(digest3.clone());
+        let valid_link4 = DataLink::Referrer(digest1.clone(), digest4.clone());
+
+        registry
+            .storage_engine
+            .create_link(namespace1, &valid_link1, &digest1)
+            .await
+            .unwrap();
+        registry
+            .storage_engine
+            .create_link(namespace1, &valid_link2, &digest2)
+            .await
+            .unwrap();
+        registry
+            .storage_engine
+            .create_link(namespace2, &valid_link3, &digest3)
+            .await
+            .unwrap();
+        registry
+            .storage_engine
+            .create_link(namespace2, &valid_link4, &digest4)
+            .await
+            .unwrap();
+
+        // Create invalid link by adding to blob index but not creating the actual link
+        let invalid_link = DataLink::Tag("invalid-tag".to_string());
+        registry
+            .storage_engine
+            .update_blob_index(namespace1, &digest2, |index| {
+                index.insert(invalid_link.clone());
+            })
+            .await
+            .unwrap();
+
+        // Create a new registry with dry run disabled
+        let new_registry = Registry::new(
+            create_test_repository_config(),
+            registry.storage_engine.clone(),
+            Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+        )
+        .unwrap()
+        .with_dry_run(false);
+
+        // Test cleanup orphan blobs
+        new_registry.cleanup_orphan_blobs().await.unwrap();
+
+        // Verify results
+        assert!(new_registry
+            .storage_engine
+            .read_blob(&digest1)
+            .await
+            .is_ok()); // Should exist (has valid tag link)
+        assert!(new_registry
+            .storage_engine
+            .read_blob(&digest2)
+            .await
+            .is_ok()); // Should exist (has valid layer link)
+        assert!(new_registry
+            .storage_engine
+            .read_blob(&digest3)
+            .await
+            .is_ok()); // Should exist (has valid config link)
+        assert!(new_registry
+            .storage_engine
+            .read_blob(&digest4)
+            .await
+            .is_ok()); // Should exist (has valid referrer link)
+    }
+
+    #[tokio::test]
+    async fn test_scrub_revisions_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_scrub_revisions_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_scrub_revisions_s3() {
+        let registry = create_test_s3_backend().await;
+        test_scrub_revisions_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_ensure_link_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_ensure_link_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_ensure_link_s3() {
+        let registry = create_test_s3_backend().await;
+        test_ensure_link_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_orphan_blobs_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_cleanup_orphan_blobs_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_orphan_blobs_s3() {
+        let registry = create_test_s3_backend().await;
+        test_cleanup_orphan_blobs_impl(&registry).await;
     }
 }
