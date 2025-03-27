@@ -6,7 +6,6 @@ use crate::registry::{parse_manifest_digests, Error, Registry};
 use cel_interpreter::{Context, Program, Value};
 use chrono::Utc;
 use std::collections::HashMap;
-use std::process::exit;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -265,7 +264,7 @@ impl<D: DataStore> Registry<D> {
         loop {
             let (revisions, next_marker) = self
                 .storage_engine
-                .list_revisions(namespace, 0, marker)
+                .list_revisions(namespace, 100, marker)
                 .await?;
 
             for revision in revisions {
@@ -352,21 +351,28 @@ impl<D: DataStore> Registry<D> {
         let blob_digest = self
             .storage_engine
             .read_link(namespace, link_reference)
-            .await
-            .ok();
+            .await;
 
-        if let Some(link_digest) = blob_digest {
-            if &link_digest == digest {
+        match blob_digest {
+            Ok(link_digest) if &link_digest == digest => {
                 debug!("Link {link_reference} -> {digest} is valid");
                 return Ok(());
             }
-        }
-
-        warn!("Missing or invalid link: {link_reference} -> {digest}");
-        if !self.scrub_dry_run {
-            self.storage_engine
-                .create_link(namespace, link_reference, digest)
-                .await?;
+            _ => {
+                warn!("Missing or invalid link: {link_reference} -> {digest}");
+                if !self.scrub_dry_run {
+                    if let Err(error) = self
+                        .storage_engine
+                        .delete_link(namespace, link_reference)
+                        .await
+                    {
+                        warn!("Failed to delete old link: {error}");
+                    }
+                    self.storage_engine
+                        .create_link(namespace, link_reference, digest)
+                        .await?;
+                }
+            }
         }
 
         Ok(())
@@ -379,7 +385,9 @@ impl<D: DataStore> Registry<D> {
         loop {
             let Ok((blobs, next_marker)) = self.storage_engine.list_blobs(100, marker).await else {
                 error!("Failed to list blobs");
-                exit(1);
+                return Err(Error::Internal(
+                    "Failed to list blobs while checking for orphan blobs".to_string(),
+                ));
             };
 
             for blob in blobs {
@@ -396,9 +404,9 @@ impl<D: DataStore> Registry<D> {
     }
 
     async fn check_blob(&self, blob: &Digest) -> Result<(), Error> {
-        let mut blob_index = self.storage_engine.read_blob_index(blob).await?;
+        let blob_index = self.storage_engine.read_blob_index(blob).await?;
 
-        for (namespace, references) in blob_index.namespace.clone() {
+        for (namespace, references) in blob_index.namespace {
             for link_reference in references {
                 if self
                     .storage_engine
@@ -406,31 +414,22 @@ impl<D: DataStore> Registry<D> {
                     .await
                     .is_err()
                 {
-                    let Some(index) = blob_index.namespace.get_mut(&namespace) else {
-                        error!("Failed to get namespace index: {namespace}");
-                        continue;
-                    };
-
-                    warn!("Orphan link: {namespace}/{blob} -> {link_reference}");
+                    warn!("Missing link from blob index: {namespace}/{blob} <- {link_reference}");
                     if !self.scrub_dry_run {
-                        index.remove(&link_reference);
+                        if let Err(error) = self
+                            .storage_engine
+                            .update_blob_index(&namespace, blob, |index| {
+                                index.remove(&link_reference);
+                            })
+                            .await
+                        {
+                            error!("Failed to update blob index: {error}");
+                        }
                     }
                 }
             }
         }
 
-        blob_index
-            .namespace
-            .retain(|_, references| !references.is_empty());
-
-        if blob_index.namespace.is_empty() {
-            warn!("Orphan blob: {blob}");
-            if !self.scrub_dry_run {
-                if let Err(error) = self.storage_engine.delete_blob(blob).await {
-                    error!("Failed to delete blob: {error}");
-                }
-            }
-        }
         Ok(())
     }
 }

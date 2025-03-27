@@ -107,6 +107,7 @@ pub(crate) mod test_utils {
     use crate::registry::data_store::{FSBackend, S3Backend};
     use crate::registry::oci_types::Digest;
     use crate::registry::utils::DataLink;
+    use serde_json::json;
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -207,5 +208,28 @@ pub(crate) mod test_utils {
         .unwrap();
 
         (digest, repository)
+    }
+
+    pub fn create_test_manifest() -> (Vec<u8>, String) {
+        let manifest = json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+            "config": {
+                "mediaType": "application/vnd.docker.container.image.v1+json",
+                "digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                "size": 1234
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                    "digest": "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+                    "size": 5678
+                }
+            ]
+        });
+
+        let content = serde_json::to_vec(&manifest).unwrap();
+        let media_type = "application/vnd.docker.distribution.manifest.v2+json".to_string();
+        (content, media_type)
     }
 }

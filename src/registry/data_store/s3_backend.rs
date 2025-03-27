@@ -380,46 +380,6 @@ impl S3Backend {
         Ok(())
     }
 
-    #[instrument(skip(self, operation))]
-    pub async fn blob_link_index_update<O>(
-        &self,
-        namespace: &str,
-        digest: &Digest,
-        operation: O,
-    ) -> Result<(), Error>
-    where
-        O: FnOnce(&mut HashSet<DataLink>),
-    {
-        let path = self.tree.blob_index_path(digest);
-
-        let res = self.get_object_body_as_vec(&path, None).await;
-
-        let mut reference_index = match res {
-            Ok(data) => serde_json::from_slice::<BlobEntityLinkIndex>(&data)?,
-            Err(_) => BlobEntityLinkIndex::default(),
-        };
-
-        let index = reference_index
-            .namespace
-            .entry(namespace.to_string())
-            .or_insert_with(HashSet::new);
-
-        operation(index);
-        if index.is_empty() {
-            reference_index.namespace.remove(namespace);
-        }
-
-        if reference_index.namespace.is_empty() {
-            let path = self.tree.blob_container_dir(digest);
-            self.delete_object_with_prefix(&path).await?;
-        } else {
-            let content = serde_json::to_vec(&reference_index)?;
-            self.put_object(&path, content).await?;
-        }
-
-        Ok(())
-    }
-
     #[instrument(skip(self))]
     async fn search_multipart_upload_id(&self, key: &str) -> Result<Option<String>, Error> {
         let mut next_key_marker = None;
@@ -1238,6 +1198,46 @@ impl DataStore for S3Backend {
         Ok(index)
     }
 
+    #[instrument(skip(self, operation))]
+    async fn update_blob_index<O>(
+        &self,
+        namespace: &str,
+        digest: &Digest,
+        operation: O,
+    ) -> Result<(), Error>
+    where
+        O: FnOnce(&mut HashSet<DataLink>) + Send,
+    {
+        let path = self.tree.blob_index_path(digest);
+
+        let res = self.get_object_body_as_vec(&path, None).await;
+
+        let mut reference_index = match res {
+            Ok(data) => serde_json::from_slice::<BlobEntityLinkIndex>(&data)?,
+            Err(_) => BlobEntityLinkIndex::default(),
+        };
+
+        let index = reference_index
+            .namespace
+            .entry(namespace.to_string())
+            .or_insert_with(HashSet::new);
+
+        operation(index);
+        if index.is_empty() {
+            reference_index.namespace.remove(namespace);
+        }
+
+        if reference_index.namespace.is_empty() {
+            let path = self.tree.blob_container_dir(digest);
+            self.delete_object_with_prefix(&path).await?;
+        } else {
+            let content = serde_json::to_vec(&reference_index)?;
+            self.put_object(&path, content).await?;
+        }
+
+        Ok(())
+    }
+
     #[instrument(skip(self))]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
         let path = self.tree.blob_path(digest);
@@ -1286,17 +1286,6 @@ impl DataStore for S3Backend {
         let path = self.tree.blob_path(digest);
         let res = self.get_object(&path, start_offset).await?;
         Ok(Box::new(res.body.into_async_read()))
-    }
-
-    #[instrument(skip(self))]
-    async fn delete_blob(&self, digest: &Digest) -> Result<(), Error> {
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-
-        let path = self.tree.blob_container_dir(digest);
-        self.delete_object_with_prefix(&path).await
     }
 
     #[instrument(skip(self))]
@@ -1352,7 +1341,7 @@ impl DataStore for S3Backend {
 
                 self.delete_object(&link_path).await?;
 
-                self.blob_link_index_update(namespace, digest, |index| {
+                self.update_blob_index(namespace, digest, |index| {
                     index.remove(reference);
                 })
                 .await?;
@@ -1363,7 +1352,7 @@ impl DataStore for S3Backend {
         self.put_object(&link_path, digest.to_string().into_bytes())
             .await?;
 
-        self.blob_link_index_update(namespace, digest, |index| {
+        self.update_blob_index(namespace, digest, |index| {
             index.insert(reference.clone());
         })
         .await?;
@@ -1388,7 +1377,7 @@ impl DataStore for S3Backend {
 
         self.delete_object(&link_path).await?;
 
-        self.blob_link_index_update(namespace, &digest, |index| {
+        self.update_blob_index(namespace, &digest, |index| {
             index.remove(reference);
         })
         .await?;

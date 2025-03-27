@@ -103,6 +103,15 @@ pub trait DataStore: Send + Sync {
 
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error>;
 
+    async fn update_blob_index<O>(
+        &self,
+        namespace: &str,
+        digest: &Digest,
+        operation: O,
+    ) -> Result<(), Error>
+    where
+        O: FnOnce(&mut HashSet<DataLink>) + Send;
+
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error>;
 
     async fn read_reference_info(
@@ -116,8 +125,6 @@ pub trait DataStore: Send + Sync {
         digest: &Digest,
         start_offset: Option<u64>,
     ) -> Result<Box<dyn Reader>, Error>;
-
-    async fn delete_blob(&self, digest: &Digest) -> Result<(), Error>;
 
     async fn update_last_pulled(
         &self,
