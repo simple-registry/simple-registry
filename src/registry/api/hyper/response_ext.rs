@@ -3,7 +3,6 @@ use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use hyper::header::{AsHeaderName, CONTENT_TYPE, LINK};
 use hyper::{Response, StatusCode};
-use serde::de::StdError;
 use std::io;
 use std::str::FromStr;
 use tokio::io::AsyncRead;
@@ -71,7 +70,7 @@ pub trait IntoAsyncRead {
 impl<S> IntoAsyncRead for Response<S>
 where
     S: BodyExt,
-    S::Error: Sync + Send + StdError + 'static,
+    S::Error: Sync + Send + std::error::Error + 'static,
 {
     fn into_async_read(self) -> impl AsyncRead {
         let stream = self

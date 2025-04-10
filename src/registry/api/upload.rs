@@ -5,9 +5,8 @@ use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, StartUploadResponse};
-use hyper::body::Incoming;
 use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE, LOCATION, RANGE};
-use hyper::{Request, Response, StatusCode};
+use hyper::{body, Request, Response, StatusCode};
 use serde::Deserialize;
 use tracing::instrument;
 use uuid::Uuid;
@@ -24,9 +23,9 @@ pub struct QueryUploadParameters {
 }
 
 pub trait RegistryAPIUploadHandlersExt {
-    async fn handle_start_upload(
+    async fn handle_start_upload<T>(
         &self,
-        request: Request<Incoming>,
+        request: Request<T>,
         parameters: QueryNewUploadParameters,
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error>;
@@ -35,18 +34,28 @@ pub trait RegistryAPIUploadHandlersExt {
         parameters: QueryUploadParameters,
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error>;
-    async fn handle_patch_upload(
+    async fn handle_patch_upload<T>(
         &self,
-        request: Request<Incoming>,
+        request: Request<T>,
         parameters: QueryUploadParameters,
         identity: ClientIdentity,
-    ) -> Result<Response<Body>, Error>;
-    async fn handle_put_upload(
+    ) -> Result<Response<Body>, Error>
+    where
+        T: body::Body + Unpin + Sync + Send,
+        T::Data: Send + Sync,
+        T::Error: Send + Sync + std::error::Error + 'static;
+
+    async fn handle_put_upload<T>(
         &self,
-        request: Request<Incoming>,
+        request: Request<T>,
         parameters: QueryUploadParameters,
         identity: ClientIdentity,
-    ) -> Result<Response<Body>, Error>;
+    ) -> Result<Response<Body>, Error>
+    where
+        T: body::Body + Unpin + Sync + Send,
+        T::Data: Send + Sync,
+        T::Error: Send + Sync + std::error::Error + 'static;
+
     async fn handle_delete_upload(
         &self,
         parameters: QueryUploadParameters,
@@ -56,9 +65,9 @@ pub trait RegistryAPIUploadHandlersExt {
 
 impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
     #[instrument(skip(self, request))]
-    async fn handle_start_upload(
+    async fn handle_start_upload<T>(
         &self,
-        request: Request<Incoming>,
+        request: Request<T>,
         parameters: QueryNewUploadParameters,
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
@@ -128,12 +137,17 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
     }
 
     #[instrument(skip(self, request))]
-    async fn handle_patch_upload(
+    async fn handle_patch_upload<T>(
         &self,
-        request: Request<Incoming>,
+        request: Request<T>,
         parameters: QueryUploadParameters,
         identity: ClientIdentity,
-    ) -> Result<Response<Body>, Error> {
+    ) -> Result<Response<Body>, Error>
+    where
+        T: body::Body + Unpin + Sync + Send,
+        T::Data: Send + Sync,
+        T::Error: Send + Sync + std::error::Error + 'static,
+    {
         let repository = self.validate_namespace(&parameters.name)?;
         self.validate_request(
             Some(repository),
@@ -167,12 +181,17 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
     }
 
     #[instrument(skip(self, request))]
-    async fn handle_put_upload(
+    async fn handle_put_upload<T>(
         &self,
-        request: Request<Incoming>,
+        request: Request<T>,
         parameters: QueryUploadParameters,
         identity: ClientIdentity,
-    ) -> Result<Response<Body>, Error> {
+    ) -> Result<Response<Body>, Error>
+    where
+        T: body::Body + Unpin + Sync + Send,
+        T::Data: Send + Sync,
+        T::Error: Send + Sync + std::error::Error + 'static,
+    {
         #[derive(Deserialize, Default)]
         struct CompleteUploadQuery {
             digest: String,
@@ -228,5 +247,321 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
             .body(Body::empty())?;
 
         Ok(res)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::api::hyper::response_ext::ResponseExt;
+    use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
+    use http_body_util::Empty;
+    use hyper::body::Bytes;
+    use hyper::Method;
+    use hyper::Uri;
+    use uuid::Uuid;
+
+    async fn test_handle_start_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+
+        // Test start upload without digest
+        let uri = Uri::builder()
+            .path_and_query(format!("/v2/{}/blobs/uploads/", namespace))
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let parameters = QueryNewUploadParameters {
+            name: namespace.to_string(),
+        };
+
+        let response = registry
+            .handle_start_upload(request, parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let location = response.get_header(LOCATION).unwrap();
+        assert!(location.starts_with(&format!("/v2/{}/blobs/uploads/", namespace)));
+        let uuid = response.get_header(DOCKER_UPLOAD_UUID).unwrap();
+        assert!(!uuid.is_empty());
+        assert_eq!(response.get_header(RANGE), Some("0-0".to_string()));
+
+        // Test start upload with existing blob
+        let content = b"test content";
+        let digest = registry.storage_engine.create_blob(content).await.unwrap();
+
+        let uri = Uri::builder()
+            .path_and_query(format!(
+                "/v2/{}/blobs/uploads/?digest={}",
+                namespace, digest
+            ))
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let parameters = QueryNewUploadParameters {
+            name: namespace.to_string(),
+        };
+
+        let response = registry
+            .handle_start_upload(request, parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response.get_header(LOCATION),
+            Some(format!("/v2/{}/blobs/{}", namespace, digest))
+        );
+        assert_eq!(
+            response.get_header(DOCKER_CONTENT_DIGEST),
+            Some(digest.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_start_upload_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_handle_start_upload_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_start_upload_s3() {
+        let registry = create_test_s3_backend().await;
+        test_handle_start_upload_impl(&registry).await;
+    }
+
+    async fn test_handle_get_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let uuid = Uuid::new_v4();
+
+        // Create initial upload
+        registry
+            .storage_engine
+            .create_upload(namespace, &uuid.to_string())
+            .await
+            .unwrap();
+
+        let parameters = QueryUploadParameters {
+            name: namespace.to_string(),
+            uuid,
+        };
+
+        let response = registry
+            .handle_get_upload(parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response.get_header(LOCATION),
+            Some(format!("/v2/{}/blobs/uploads/{}", namespace, uuid))
+        );
+        assert_eq!(response.get_header(RANGE), Some("0-0".to_string()));
+        assert_eq!(
+            response.get_header(DOCKER_UPLOAD_UUID),
+            Some(uuid.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_upload_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_handle_get_upload_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_upload_s3() {
+        let registry = create_test_s3_backend().await;
+        test_handle_get_upload_impl(&registry).await;
+    }
+
+    async fn test_handle_patch_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let uuid = Uuid::new_v4();
+
+        // Create initial upload
+        registry
+            .storage_engine
+            .create_upload(namespace, &uuid.to_string())
+            .await
+            .unwrap();
+
+        let uri = Uri::builder()
+            .path_and_query(format!("/v2/{}/blobs/uploads/{}", namespace, uuid))
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::PATCH)
+            .uri(uri)
+            .header(CONTENT_RANGE, "0-0")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let parameters = QueryUploadParameters {
+            name: namespace.to_string(),
+            uuid,
+        };
+
+        let response = registry
+            .handle_patch_upload(request, parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            response.get_header(LOCATION),
+            Some(format!("/v2/{}/blobs/uploads/{}", namespace, uuid))
+        );
+        assert_eq!(response.get_header(RANGE), Some("0-0".to_string()));
+        assert_eq!(response.get_header(CONTENT_LENGTH), Some("0".to_string()));
+        assert_eq!(
+            response.get_header(DOCKER_UPLOAD_UUID),
+            Some(uuid.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_patch_upload_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_handle_patch_upload_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_patch_upload_s3() {
+        let registry = create_test_s3_backend().await;
+        test_handle_patch_upload_impl(&registry).await;
+    }
+
+    async fn test_handle_put_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let uuid = Uuid::new_v4();
+        let content = b"test content";
+
+        // Create initial upload
+        registry
+            .storage_engine
+            .create_upload(namespace, &uuid.to_string())
+            .await
+            .unwrap();
+
+        // Write content first
+        let stream = std::io::Cursor::new(content.to_vec());
+        registry
+            .patch_upload(namespace, uuid, None, stream)
+            .await
+            .unwrap();
+
+        // Get the upload digest
+        let (digest, _, _) = registry
+            .storage_engine
+            .read_upload_summary(namespace, &uuid.to_string())
+            .await
+            .unwrap();
+
+        let uri = Uri::builder()
+            .path_and_query(format!(
+                "/v2/{}/blobs/uploads/{}?digest={}",
+                namespace, uuid, digest
+            ))
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::PUT)
+            .uri(uri)
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let parameters = QueryUploadParameters {
+            name: namespace.to_string(),
+            uuid,
+        };
+
+        let response = registry
+            .handle_put_upload(request, parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response.get_header(LOCATION),
+            Some(format!("/v2/{}/blobs/{}", namespace, digest))
+        );
+        assert_eq!(
+            response.get_header(DOCKER_CONTENT_DIGEST),
+            Some(digest.to_string())
+        );
+
+        // Verify blob exists
+        let stored_content = registry.storage_engine.read_blob(&digest).await.unwrap();
+        assert_eq!(stored_content, content);
+    }
+
+    #[tokio::test]
+    async fn test_handle_put_upload_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_handle_put_upload_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_put_upload_s3() {
+        let registry = create_test_s3_backend().await;
+        test_handle_put_upload_impl(&registry).await;
+    }
+
+    async fn test_handle_delete_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let uuid = Uuid::new_v4();
+
+        // Create initial upload
+        registry
+            .storage_engine
+            .create_upload(namespace, &uuid.to_string())
+            .await
+            .unwrap();
+
+        let parameters = QueryUploadParameters {
+            name: namespace.to_string(),
+            uuid,
+        };
+
+        let response = registry
+            .handle_delete_upload(parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify upload is deleted
+        assert!(registry
+            .storage_engine
+            .read_upload_summary(namespace, &uuid.to_string())
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_delete_upload_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_handle_delete_upload_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_delete_upload_s3() {
+        let registry = create_test_s3_backend().await;
+        test_handle_delete_upload_impl(&registry).await;
     }
 }

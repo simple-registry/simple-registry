@@ -6,7 +6,6 @@ use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, ReferrerList};
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
-use hyper::body::Incoming;
 use hyper::header::CONTENT_TYPE;
 use hyper::{Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -24,22 +23,22 @@ pub struct TagsParameters {
 }
 
 pub trait RegistryAPIContentDiscoveryHandlersExt {
-    async fn handle_get_referrers(
+    async fn handle_get_referrers<T>(
         &self,
-        request: Request<Incoming>,
+        request: Request<T>,
         parameters: ReferrerParameters,
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error>;
 
-    async fn handle_list_catalog(
+    async fn handle_list_catalog<T>(
         &self,
-        request: Request<Incoming>,
+        request: Request<T>,
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error>;
 
-    async fn handle_list_tags(
+    async fn handle_list_tags<T>(
         &self,
-        request: Request<Incoming>,
+        request: Request<T>,
         parameters: TagsParameters,
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error>;
@@ -47,9 +46,9 @@ pub trait RegistryAPIContentDiscoveryHandlersExt {
 
 impl<D: DataStore> RegistryAPIContentDiscoveryHandlersExt for Registry<D> {
     #[instrument(skip(self, request))]
-    async fn handle_get_referrers(
+    async fn handle_get_referrers<T>(
         &self,
-        request: Request<Incoming>,
+        request: Request<T>,
         parameters: ReferrerParameters,
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
@@ -96,9 +95,9 @@ impl<D: DataStore> RegistryAPIContentDiscoveryHandlersExt for Registry<D> {
     }
 
     #[instrument(skip(self, request))]
-    async fn handle_list_catalog(
+    async fn handle_list_catalog<T>(
         &self,
-        request: Request<Incoming>,
+        request: Request<T>,
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
         #[derive(Debug, Deserialize, Default)]
@@ -125,9 +124,9 @@ impl<D: DataStore> RegistryAPIContentDiscoveryHandlersExt for Registry<D> {
     }
 
     #[instrument(skip(self, request))]
-    async fn handle_list_tags(
+    async fn handle_list_tags<T>(
         &self,
-        request: Request<Incoming>,
+        request: Request<T>,
         parameters: TagsParameters,
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
@@ -162,5 +161,288 @@ impl<D: DataStore> RegistryAPIContentDiscoveryHandlersExt for Registry<D> {
         };
         let tag_list = serde_json::to_string(&tag_list)?;
         Response::paginated(Body::fixed(tag_list.into_bytes()), link.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::api::hyper::response_ext::IntoAsyncRead;
+    use crate::registry::oci_types::Reference;
+    use crate::registry::test_utils::{
+        create_test_blob, create_test_fs_backend, create_test_s3_backend,
+    };
+    use crate::registry::utils::DataLink;
+    use http_body_util::Empty;
+    use hyper::body::Bytes;
+    use hyper::Method;
+    use hyper::Uri;
+    use tokio::io::AsyncReadExt;
+
+    async fn test_handle_get_referrers_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+
+        // Create manifest blobs
+        let manifest_content = r#"{"schemaVersion": 2, "mediaType": "application/vnd.docker.distribution.manifest.v2+json"}"#;
+        let media_type = "application/vnd.docker.distribution.manifest.v2+json".to_string();
+
+        // Put base manifest
+        let (base_manifest_digest, _) =
+            create_test_blob(registry, namespace, manifest_content.as_bytes()).await;
+        registry
+            .put_manifest(
+                namespace,
+                Reference::Digest(base_manifest_digest.clone()),
+                Some(&media_type),
+                manifest_content.as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        // Put referrer manifest
+        let (referrer_manifest_digest, _) =
+            create_test_blob(registry, namespace, manifest_content.as_bytes()).await;
+        registry
+            .put_manifest(
+                namespace,
+                Reference::Digest(referrer_manifest_digest.clone()),
+                Some(&media_type),
+                manifest_content.as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        // Create a referrer link
+        let referrer_link = DataLink::Referrer(
+            base_manifest_digest.clone(),
+            referrer_manifest_digest.clone(),
+        );
+        registry
+            .storage_engine
+            .create_link(namespace, &referrer_link, &referrer_manifest_digest)
+            .await
+            .unwrap();
+
+        // Test getting referrers
+        let uri = Uri::builder()
+            .path_and_query(format!(
+                "/v2/{}/referrers/{}",
+                namespace, base_manifest_digest
+            ))
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let parameters = ReferrerParameters {
+            name: namespace.to_string(),
+            digest: base_manifest_digest.clone(),
+        };
+
+        let response = registry
+            .handle_get_referrers(request, parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut reader = response.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        let referrers: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let manifests = referrers["manifests"].as_array().unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(
+            manifests[0]["digest"].as_str().unwrap(),
+            referrer_manifest_digest.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_referrers_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_handle_get_referrers_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_referrers_s3() {
+        let registry = create_test_s3_backend().await;
+        test_handle_get_referrers_impl(&registry).await;
+    }
+
+    async fn test_handle_list_catalog_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        // Create some test repositories
+        let namespaces = ["repo1", "repo2", "repo3"];
+        let content = b"test content";
+
+        for namespace in &namespaces {
+            let (digest, _) = create_test_blob(registry, namespace, content).await;
+            let tag_link = DataLink::Tag("latest".to_string());
+            registry
+                .storage_engine
+                .create_link(namespace, &tag_link, &digest)
+                .await
+                .unwrap();
+        }
+
+        // Test without pagination
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(Uri::from_static("/v2/_catalog"))
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let response = registry
+            .handle_list_catalog(request, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let has_link = response.get_header("Link").is_some();
+        let mut reader = response.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        let catalog: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let repositories = catalog["repositories"].as_array().unwrap();
+        assert_eq!(repositories.len(), namespaces.len());
+        for namespace in &namespaces {
+            assert!(repositories
+                .iter()
+                .any(|r| r.as_str().unwrap() == *namespace));
+        }
+        assert!(!has_link);
+
+        // Test with pagination
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(Uri::from_static("/v2/_catalog?n=2"))
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let response = registry
+            .handle_list_catalog(request, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let has_link = response.get_header("Link").is_some();
+        let mut reader = response.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        let catalog: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let repositories = catalog["repositories"].as_array().unwrap();
+        assert_eq!(repositories.len(), 2);
+        assert!(has_link);
+    }
+
+    #[tokio::test]
+    async fn test_handle_list_catalog_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_handle_list_catalog_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_list_catalog_s3() {
+        let registry = create_test_s3_backend().await;
+        test_handle_list_catalog_impl(&registry).await;
+    }
+
+    async fn test_handle_list_tags_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+        let namespace = "test-repo";
+        let content = b"test content";
+        let (digest, _) = create_test_blob(registry, namespace, content).await;
+
+        // Create some test tags
+        let tags = ["v1", "v2", "latest"];
+        for tag in &tags {
+            let tag_link = DataLink::Tag(tag.to_string());
+            registry
+                .storage_engine
+                .create_link(namespace, &tag_link, &digest)
+                .await
+                .unwrap();
+        }
+
+        // Test without pagination
+        let uri = Uri::builder()
+            .path_and_query(format!("/v2/{}/tags/list", namespace))
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let parameters = TagsParameters {
+            name: namespace.to_string(),
+        };
+
+        let response = registry
+            .handle_list_tags(request, parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let has_link = response.get_header("Link").is_some();
+        let mut reader = response.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        let tag_list: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(tag_list["name"].as_str().unwrap(), namespace);
+        let tags_list = tag_list["tags"].as_array().unwrap();
+        assert_eq!(tags_list.len(), tags.len());
+        for tag in &tags {
+            assert!(tags_list.iter().any(|t| t.as_str().unwrap() == *tag));
+        }
+        assert!(!has_link);
+
+        // Test with pagination
+        let uri = Uri::builder()
+            .path_and_query(format!("/v2/{}/tags/list?n=2", namespace))
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let parameters = TagsParameters {
+            name: namespace.to_string(),
+        };
+
+        let response = registry
+            .handle_list_tags(request, parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let has_link = response.get_header("Link").is_some();
+        let mut reader = response.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        let tag_list: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(tag_list["name"].as_str().unwrap(), namespace);
+        let tags_list = tag_list["tags"].as_array().unwrap();
+        assert_eq!(tags_list.len(), 2);
+        assert!(has_link);
+    }
+
+    #[tokio::test]
+    async fn test_handle_list_tags_fs() {
+        let (registry, _temp_dir) = create_test_fs_backend().await;
+        test_handle_list_tags_impl(&registry).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_list_tags_s3() {
+        let registry = create_test_s3_backend().await;
+        test_handle_list_tags_impl(&registry).await;
     }
 }
