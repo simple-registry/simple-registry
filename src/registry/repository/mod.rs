@@ -12,6 +12,7 @@ mod authentication_scheme;
 mod bearer_token;
 mod repository_upstream;
 
+use crate::registry::http_client::HttpClientBuilder;
 use repository_upstream::RepositoryUpstream;
 
 pub struct Repository {
@@ -54,11 +55,23 @@ impl Repository {
     ) -> Result<Vec<RepositoryUpstream>, Error> {
         let mut upstreams = Vec::new();
 
-        for upstream_config in upstreams_config {
+        for mut upstream_config in upstreams_config {
+            let server_ca_bundle = upstream_config.server_ca_bundle.take();
+            let client_certificate = upstream_config.client_certificate.take();
+            let client_private_key = upstream_config.client_private_key.take();
+
+            let client = HttpClientBuilder::new()
+                .set_server_ca_bundle(server_ca_bundle)
+                .set_client_certificate(client_certificate)
+                .set_client_private_key(client_private_key)
+                .set_max_redirect(upstream_config.max_redirect)
+                .build()?;
+
             upstreams.push(RepositoryUpstream::new(
                 upstream_config,
+                client,
                 token_cache.clone(),
-            )?);
+            ));
         }
 
         Ok(upstreams)
@@ -97,16 +110,16 @@ impl Repository {
         namespace: &str,
         reference: &Reference,
     ) -> Result<Response<Incoming>, registry::Error> {
-        let mut response = Err(registry::Error::ManifestUnknown);
         for upstream in &self.upstream {
             let location = upstream.get_manifest_path(&self.name, namespace, reference);
-            response = upstream
+            if let Ok(response) = upstream
                 .query(namespace, method, accepted_mime_types, &location)
-                .await;
-            if response.is_ok() {
-                break;
+                .await
+            {
+                return Ok(response);
             }
         }
-        response
+
+        Err(registry::Error::ManifestUnknown)
     }
 }

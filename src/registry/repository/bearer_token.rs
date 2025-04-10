@@ -22,10 +22,10 @@ impl BearerToken {
         self.expires_in
     }
 
-    pub fn token(mut self) -> Result<String, Error> {
+    pub fn token(&self) -> Result<String, Error> {
         self.token
-            .take()
-            .or(self.access_token.take())
+            .clone()
+            .or(self.access_token.clone())
             .ok_or_else(|| Error::Internal("Missing token in authentication response".to_string()))
     }
 }

@@ -1,5 +1,7 @@
 use crate::registry::oci_types;
 use crate::registry::{cache_store, data_store};
+use hyper::header::InvalidHeaderValue;
+use hyper::http::uri::InvalidUri;
 use std::cmp::PartialEq;
 use std::fmt::Display;
 use tracing::{debug, warn};
@@ -116,5 +118,19 @@ impl From<Box<dyn std::error::Error>> for Error {
     fn from(error: Box<dyn std::error::Error>) -> Self {
         debug!("STD Error: {error}");
         Error::Internal("Error during operations".to_string())
+    }
+}
+
+impl From<InvalidHeaderValue> for Error {
+    fn from(error: InvalidHeaderValue) -> Self {
+        debug!("Invalid header value: {error}");
+        Error::Internal("Invalid header value".to_string())
+    }
+}
+
+impl From<InvalidUri> for Error {
+    fn from(error: InvalidUri) -> Self {
+        debug!("Invalid URI: {error}");
+        Error::Internal("Invalid URI".to_string())
     }
 }
