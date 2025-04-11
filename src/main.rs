@@ -76,8 +76,8 @@ fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {
             );
 
             return Ok(());
-        };
-    };
+        }
+    }
 
     subscriber.init();
     Ok(())

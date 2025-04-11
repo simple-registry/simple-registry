@@ -187,7 +187,7 @@ impl RepositoryUpstream {
                             ));
                         }
                     }
-                };
+                }
 
                 self.token_cache.store(namespace, &token, ttl).await?;
                 authorization_header = Some(HeaderValue::from_str(&token)?);

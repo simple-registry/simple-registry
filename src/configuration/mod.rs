@@ -1,5 +1,3 @@
-use lazy_static::lazy_static;
-use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -11,13 +9,6 @@ mod error;
 
 pub use data_size::DataSize;
 pub use error::Error;
-
-lazy_static! {
-    // This regex is used to validate repository names.
-    // We choose to have the same constraints as namespaces initial part.
-    static ref REPOSITORY_RE: Regex =
-        Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$").unwrap();
-}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Configuration {
@@ -238,7 +229,7 @@ impl Configuration {
                     "Multipart part size must be at least 50MiB".to_string(),
                 ));
             }
-        };
+        }
         Ok(config)
     }
 }

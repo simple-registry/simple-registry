@@ -1,19 +1,18 @@
 use crate::configuration;
-use lazy_static::lazy_static;
 use opentelemetry::metrics::{Counter, Gauge, Histogram, MeterProvider};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use prometheus::{Encoder, Registry as PrometheusRegistry, TextEncoder};
 use std::sync::atomic::AtomicU64;
+use std::sync::LazyLock;
 use tracing::error;
 
-lazy_static! {
-    pub static ref IN_FLIGHT_REQUESTS: AtomicU64 = AtomicU64::new(0);
-    pub static ref METRICS_PROVIDER: MetricsProvider =
-        MetricsProvider::new().unwrap_or_else(|error| {
-            error!("Unable to create metrics provider: {error}");
-            std::process::exit(1);
-        });
-}
+pub static IN_FLIGHT_REQUESTS: AtomicU64 = AtomicU64::new(0);
+pub static METRICS_PROVIDER: LazyLock<MetricsProvider> = LazyLock::new(|| {
+    MetricsProvider::new().unwrap_or_else(|error| {
+        error!("Unable to create metrics provider: {error}");
+        std::process::exit(1);
+    })
+});
 
 pub struct MetricsProvider {
     registry: PrometheusRegistry,

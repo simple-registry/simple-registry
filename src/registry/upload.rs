@@ -57,7 +57,7 @@ impl<D: DataStore> Registry<D> {
             if start_offset != size {
                 return Err(Error::RangeNotSatisfiable);
             }
-        };
+        }
 
         self.storage_engine
             .write_upload(namespace, &session_id, stream, true)
