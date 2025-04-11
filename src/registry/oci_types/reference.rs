@@ -1,15 +1,13 @@
 use crate::registry::oci_types::Digest;
 use crate::registry::oci_types::Error;
-use lazy_static::lazy_static;
 use regex::Regex;
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer};
 use std::fmt;
 use std::fmt::{Display, Formatter};
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref TAG_REGEX: Regex = Regex::new(r"^\w[\w.-]{0,127}$").unwrap();
-}
+static TAG_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\w[\w.-]{0,127}$").unwrap());
 
 #[derive(Clone, Debug)]
 pub enum Reference {

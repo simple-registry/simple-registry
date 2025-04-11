@@ -1046,7 +1046,7 @@ impl DataStore for S3Backend {
         if let Ok(Some(upload_id)) = self.search_multipart_upload_id(&key).await {
             let (_, upload_size) = self.search_multipart_upload_parts(&key, &upload_id).await?;
             size = upload_size;
-        };
+        }
 
         let staged_path = self.tree.upload_staged_container_path(name, uuid, size);
         size += self.get_object_size(&staged_path).await.unwrap_or_default();

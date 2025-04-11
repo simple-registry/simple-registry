@@ -623,7 +623,7 @@ impl DataStore for FSBackend {
                     .namespace
                     .insert(namespace.to_string(), index);
             }
-        };
+        }
 
         if reference_index.namespace.is_empty() {
             debug!("Deleting no longer referenced Blob: {digest}");

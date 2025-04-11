@@ -1,11 +1,10 @@
 use crate::registry::Error;
-use lazy_static::lazy_static;
+use regex::Regex;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref WWW_AUTHENTICATE_HEADER_PARAMETER: regex::Regex =
-        regex::Regex::new(r#"(\w+)="([^"]+)""#).unwrap();
-}
+static WWW_AUTHENTICATE_HEADER_PARAMETER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(\w+)="([^"]+)""#).unwrap());
 
 #[derive(Debug, PartialEq)]
 pub enum AuthenticationScheme {

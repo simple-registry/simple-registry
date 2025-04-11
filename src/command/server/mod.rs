@@ -7,7 +7,6 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use lazy_static::lazy_static;
 use opentelemetry::time::now;
 use opentelemetry::trace::TraceContextExt;
 use opentelemetry::KeyValue;
@@ -17,7 +16,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::pin;
@@ -46,23 +45,24 @@ use crate::registry::data_store::DataStore;
 use crate::registry::policy_types::ClientIdentity;
 use crate::registry::Registry;
 
-lazy_static! {
-    static ref ROUTE_HEALTHZ_REGEX: Regex = Regex::new(r"^/healthz$").unwrap();
-    static ref ROUTE_METRICS_REGEX: Regex = Regex::new(r"^/metrics").unwrap();
-    static ref ROUTE_API_VERSION_REGEX: Regex = Regex::new(r"^/v2/?$").unwrap();
-    static ref ROUTE_UPLOADS_REGEX: Regex =
-        Regex::new(r"^/v2/(?P<name>.+)/blobs/uploads/?$").unwrap();
-    static ref ROUTE_UPLOAD_REGEX: Regex =
-        Regex::new(r"^/v2/(?P<name>.+)/blobs/uploads/(?P<uuid>[0-9a-fA-F-]+)$").unwrap();
-    static ref ROUTE_BLOB_REGEX: Regex =
-        Regex::new(r"^/v2/(?P<name>.+)/blobs/(?P<digest>.+)$").unwrap();
-    static ref ROUTE_MANIFEST_REGEX: Regex =
-        Regex::new(r"^/v2/(?P<name>.+)/manifests/(?P<reference>.+)$").unwrap();
-    static ref ROUTE_REFERRERS_REGEX: Regex =
-        Regex::new(r"^/v2/(?P<name>.+)/referrers/(?P<digest>.+)$").unwrap();
-    static ref ROUTE_LIST_TAGS_REGEX: Regex = Regex::new(r"^/v2/(?P<name>.+)/tags/list$").unwrap();
-    static ref ROUTE_CATALOG_REGEX: Regex = Regex::new(r"^/v2/_catalog$").unwrap();
-}
+static ROUTE_HEALTHZ_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/healthz$").unwrap());
+static ROUTE_METRICS_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/metrics").unwrap());
+static ROUTE_API_VERSION_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/v2/?$").unwrap());
+static ROUTE_UPLOADS_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^/v2/(?P<name>.+)/blobs/uploads/?$").unwrap());
+static ROUTE_UPLOAD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^/v2/(?P<name>.+)/blobs/uploads/(?P<uuid>[0-9a-fA-F-]+)$").unwrap()
+});
+static ROUTE_BLOB_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^/v2/(?P<name>.+)/blobs/(?P<digest>.+)$").unwrap());
+static ROUTE_MANIFEST_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^/v2/(?P<name>.+)/manifests/(?P<reference>.+)$").unwrap());
+static ROUTE_REFERRERS_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^/v2/(?P<name>.+)/referrers/(?P<digest>.+)$").unwrap());
+static ROUTE_LIST_TAGS_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^/v2/(?P<name>.+)/tags/list$").unwrap());
+static ROUTE_CATALOG_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^/v2/_catalog$").unwrap());
 
 pub enum ServiceListener<D> {
     Insecure(InsecureListener<D>),
@@ -163,7 +163,7 @@ async fn serve_request<D: DataStore + 'static, S>(
                 match res {
                     Ok(()) => debug!("after polling conn, no error"),
                     Err(error) =>  debug!("error serving connection: {error}"),
-                };
+                }
                 break;
             }
             () = tokio::time::sleep(*sleep_duration) => {
@@ -403,7 +403,7 @@ async fn router<'a, D: DataStore + 'static>(
             .map_err(registry::Error::from);
 
         return (Some("metrics"), response);
-    };
+    }
 
     if [Method::GET, Method::HEAD].contains(req.method()) {
         (Some("not-found"), Err(registry::Error::NotFound))

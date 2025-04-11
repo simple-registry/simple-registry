@@ -1,9 +1,8 @@
 use chrono::Duration;
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tracing::instrument;
 
 pub mod api;
@@ -33,10 +32,9 @@ pub use error::Error;
 pub use manifest::parse_manifest_digests;
 pub use upload::StartUploadResponse;
 
-lazy_static! {
-    static ref NAMESPACE_RE: Regex =
-        Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap();
-}
+static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap()
+});
 
 pub struct Registry<D> {
     storage_engine: Arc<D>,

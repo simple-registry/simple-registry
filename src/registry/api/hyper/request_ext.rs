@@ -5,17 +5,16 @@ use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use hyper::header::{AsHeaderName, HeaderName, ACCEPT, AUTHORIZATION};
 use hyper::Request;
-use lazy_static::lazy_static;
 use regex::Regex;
 use serde::de::DeserializeOwned;
 use std::io;
+use std::sync::LazyLock;
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
 
-lazy_static! {
-    static ref RANGE_RE: Regex = Regex::new(r"^(?:bytes=)?(?P<start>\d+)-(?P<end>\d+)$").unwrap();
-}
+static RANGE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:bytes=)?(?P<start>\d+)-(?P<end>\d+)$").unwrap());
 
 pub trait RequestExt {
     fn get_header<K: AsHeaderName>(&self, header: K) -> Option<String>;
