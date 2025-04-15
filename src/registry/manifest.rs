@@ -123,14 +123,6 @@ impl<D: DataStore> Registry<D> {
     ) -> Result<HeadManifestResponse, Error> {
         let link = reference.into();
         let digest = self.storage_engine.read_link(namespace, &link).await?;
-        let tag = match link {
-            DataLink::Tag(tag) => Some(tag),
-            _ => None,
-        };
-
-        self.storage_engine
-            .update_last_pulled(namespace, tag, &digest)
-            .await?;
 
         let mut reader = self
             .storage_engine
@@ -183,15 +175,6 @@ impl<D: DataStore> Registry<D> {
             self.put_manifest(namespace, reference.clone(), media_type.as_ref(), &content)
                 .await?;
 
-            let tag = match reference {
-                Reference::Tag(tag) => Some(tag),
-                Reference::Digest(_) => None,
-            };
-
-            self.storage_engine
-                .update_last_pulled(namespace, tag, &digest)
-                .await?;
-
             return Ok(GetManifestResponse {
                 media_type,
                 digest,
@@ -209,9 +192,6 @@ impl<D: DataStore> Registry<D> {
     ) -> Result<GetManifestResponse, Error> {
         let link = reference.into();
         let digest = self.storage_engine.read_link(namespace, &link).await?;
-        self.storage_engine
-            .update_last_pulled(namespace, None, &digest)
-            .await?;
 
         let content = self.storage_engine.read_blob(&digest).await?;
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|error| {

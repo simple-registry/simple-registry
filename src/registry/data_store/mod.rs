@@ -17,12 +17,12 @@ use crate::registry::utils::DataLink;
 pub use error::Error;
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub struct BlobEntityLinkIndex {
+pub struct BlobMetadata {
     pub namespace: HashMap<String, HashSet<DataLink>>,
 }
 
 #[derive(Clone, Debug)]
-pub struct ReferenceInfo {
+pub struct LinkMetadata {
     pub created_at: DateTime<Utc>,
     pub accessed_at: DateTime<Utc>,
 }
@@ -101,7 +101,7 @@ pub trait DataStore: Send + Sync {
 
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error>;
 
-    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error>;
+    async fn read_blob_metadata(&self, digest: &Digest) -> Result<BlobMetadata, Error>;
 
     async fn update_blob_index<O>(
         &self,
@@ -114,24 +114,11 @@ pub trait DataStore: Send + Sync {
 
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error>;
 
-    async fn read_reference_info(
-        &self,
-        name: &str,
-        reference: &DataLink,
-    ) -> Result<ReferenceInfo, Error>;
-
     async fn build_blob_reader(
         &self,
         digest: &Digest,
         start_offset: Option<u64>,
     ) -> Result<Box<dyn Reader>, Error>;
-
-    async fn update_last_pulled(
-        &self,
-        name: &str,
-        tag: Option<String>,
-        digest: &Digest,
-    ) -> Result<(), Error>;
 
     async fn read_link(&self, namespace: &str, reference: &DataLink) -> Result<Digest, Error>;
 
@@ -143,6 +130,12 @@ pub trait DataStore: Send + Sync {
     ) -> Result<(), Error>;
 
     async fn delete_link(&self, namespace: &str, reference: &DataLink) -> Result<(), Error>;
+
+    async fn read_link_metadata(
+        &self,
+        name: &str,
+        reference: &DataLink,
+    ) -> Result<LinkMetadata, Error>;
 }
 
 #[cfg(test)]
@@ -516,7 +509,7 @@ mod tests {
             .create_link(namespace, &tag_link, &digest)
             .await
             .unwrap();
-        let blob_index = store.read_blob_index(&digest).await.unwrap();
+        let blob_index = store.read_blob_metadata(&digest).await.unwrap();
         assert!(blob_index.namespace.contains_key(namespace));
 
         let namespace_links = blob_index.namespace.get(namespace).unwrap();
@@ -580,7 +573,7 @@ mod tests {
 
         // Test reading reference info
         let ref_info = store
-            .read_reference_info(namespace, &tag_link)
+            .read_link_metadata(namespace, &tag_link)
             .await
             .unwrap();
         assert!(Utc::now().signed_duration_since(ref_info.created_at) < Duration::hours(1));
@@ -596,7 +589,7 @@ mod tests {
         }
 
         // Verify blob index contains all links
-        let blob_index = store.read_blob_index(&digest).await.unwrap();
+        let blob_index = store.read_blob_metadata(&digest).await.unwrap();
         let namespace_links = blob_index.namespace.get(namespace).unwrap();
 
         for tag in tags {

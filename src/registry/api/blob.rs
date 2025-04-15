@@ -288,7 +288,7 @@ mod tests {
             .is_err());
 
         // Verify blob index is empty
-        let blob_index = registry.storage_engine.read_blob_index(&digest).await;
+        let blob_index = registry.storage_engine.read_blob_metadata(&digest).await;
         assert!(blob_index.is_err());
 
         // Verify blob is deleted (since all links are removed)

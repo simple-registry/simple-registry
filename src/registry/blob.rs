@@ -327,7 +327,7 @@ mod tests {
         // Verify blob index is updated
         let blob_index = registry
             .storage_engine
-            .read_blob_index(&digest)
+            .read_blob_metadata(&digest)
             .await
             .unwrap();
         assert!(blob_index.namespace.contains_key(namespace));

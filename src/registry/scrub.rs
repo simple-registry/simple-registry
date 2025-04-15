@@ -1,4 +1,4 @@
-use crate::registry::data_store::{DataStore, ReferenceInfo};
+use crate::registry::data_store::{DataStore, LinkMetadata};
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::policy_types::ManifestImage;
 use crate::registry::utils::DataLink;
@@ -99,7 +99,7 @@ impl<D: DataStore> Registry<D> {
         for tag in &tag_names {
             let info = self
                 .storage_engine
-                .read_reference_info(namespace, &DataLink::Tag(tag.to_string()))
+                .read_link_metadata(namespace, &DataLink::Tag(tag.to_string()))
                 .await?;
             tags.insert(tag.to_string(), info);
         }
@@ -112,9 +112,9 @@ impl<D: DataStore> Registry<D> {
     async fn check_tag_retention(
         &self,
         namespace: &str,
-        mut tags: HashMap<String, ReferenceInfo>,
+        mut tags: HashMap<String, LinkMetadata>,
     ) -> Result<(), Error> {
-        let tags: Vec<(String, ReferenceInfo)> = tags.drain().collect();
+        let tags: Vec<(String, LinkMetadata)> = tags.drain().collect();
 
         let mut last_pushed = tags.clone();
         last_pushed.sort_by(|a, b| b.1.created_at.cmp(&a.1.created_at));
@@ -404,7 +404,7 @@ impl<D: DataStore> Registry<D> {
     }
 
     async fn check_blob(&self, blob: &Digest) -> Result<(), Error> {
-        let blob_index = self.storage_engine.read_blob_index(blob).await?;
+        let blob_index = self.storage_engine.read_blob_metadata(blob).await?;
 
         for (namespace, references) in blob_index.namespace {
             for link_reference in references {

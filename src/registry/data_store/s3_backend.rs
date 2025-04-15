@@ -22,7 +22,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, error, instrument};
 
 use crate::configuration::StorageS3Config;
-use crate::registry::data_store::{BlobEntityLinkIndex, DataStore, Error, Reader, ReferenceInfo};
+use crate::registry::data_store::{BlobMetadata, DataStore, Error, LinkMetadata, Reader};
 use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
@@ -1189,7 +1189,7 @@ impl DataStore for S3Backend {
     }
 
     #[instrument(skip(self))]
-    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
+    async fn read_blob_metadata(&self, digest: &Digest) -> Result<BlobMetadata, Error> {
         let path = self.tree.blob_index_path(digest);
 
         let data = self.get_object_body_as_vec(&path, None).await?;
@@ -1213,8 +1213,8 @@ impl DataStore for S3Backend {
         let res = self.get_object_body_as_vec(&path, None).await;
 
         let mut reference_index = match res {
-            Ok(data) => serde_json::from_slice::<BlobEntityLinkIndex>(&data)?,
-            Err(_) => BlobEntityLinkIndex::default(),
+            Ok(data) => serde_json::from_slice::<BlobMetadata>(&data)?,
+            Err(_) => BlobMetadata::default(),
         };
 
         let index = reference_index
@@ -1247,37 +1247,6 @@ impl DataStore for S3Backend {
     }
 
     #[instrument(skip(self))]
-    async fn read_reference_info(
-        &self,
-        name: &str,
-        reference: &DataLink,
-    ) -> Result<ReferenceInfo, Error> {
-        let key = match reference {
-            DataLink::Tag(_) | DataLink::Digest(_) => self.tree.get_link_path(reference, name),
-            _ => return Err(Error::ReferenceNotFound),
-        };
-
-        let res = self.head_object(&key).await?;
-
-        let metadata = res.metadata.unwrap_or_default();
-
-        let created_at = metadata
-            .get(PUSHED_AT_METADATA_KEY)
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
-            .unwrap_or_default();
-
-        let accessed_at = metadata
-            .get(LAST_PULLED_AT_METADATA_KEY)
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
-            .unwrap_or_default();
-
-        Ok(ReferenceInfo {
-            created_at,
-            accessed_at,
-        })
-    }
-
-    #[instrument(skip(self))]
     async fn build_blob_reader(
         &self,
         digest: &Digest,
@@ -1289,29 +1258,11 @@ impl DataStore for S3Backend {
     }
 
     #[instrument(skip(self))]
-    async fn update_last_pulled(
-        &self,
-        name: &str,
-        tag: Option<String>,
-        digest: &Digest,
-    ) -> Result<(), Error> {
-        if let Some(tag) = tag {
-            let key = self.tree.get_link_path(&DataLink::Tag(tag), name);
-            self.update_last_pulled_metadata(&key).await?;
-        }
-
-        let key = self
-            .tree
-            .get_link_path(&DataLink::Digest(digest.clone()), name);
-        self.update_last_pulled_metadata(&key).await?;
-
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
     async fn read_link(&self, name: &str, reference: &DataLink) -> Result<Digest, Error> {
         let path = self.tree.get_link_path(reference, name);
         let data = self.get_object_body_as_vec(&path, None).await?;
+
+        self.update_last_pulled_metadata(&path).await?;
 
         let link = String::from_utf8(data)?;
         Ok(Digest::try_from(link.as_str())?)
@@ -1383,6 +1334,37 @@ impl DataStore for S3Backend {
         .await?;
 
         Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn read_link_metadata(
+        &self,
+        name: &str,
+        reference: &DataLink,
+    ) -> Result<LinkMetadata, Error> {
+        let key = match reference {
+            DataLink::Tag(_) | DataLink::Digest(_) => self.tree.get_link_path(reference, name),
+            _ => return Err(Error::ReferenceNotFound),
+        };
+
+        let res = self.head_object(&key).await?;
+
+        let metadata = res.metadata.unwrap_or_default();
+
+        let created_at = metadata
+            .get(PUSHED_AT_METADATA_KEY)
+            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+            .unwrap_or_default();
+
+        let accessed_at = metadata
+            .get(LAST_PULLED_AT_METADATA_KEY)
+            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+            .unwrap_or_default();
+
+        Ok(LinkMetadata {
+            created_at,
+            accessed_at,
+        })
     }
 }
 

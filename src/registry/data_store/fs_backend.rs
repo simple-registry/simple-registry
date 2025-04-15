@@ -1,5 +1,5 @@
 use crate::configuration::StorageFSConfig;
-use crate::registry::data_store::{BlobEntityLinkIndex, DataStore, Error, Reader, ReferenceInfo};
+use crate::registry::data_store::{BlobMetadata, DataStore, Error, LinkMetadata, Reader};
 use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
@@ -579,7 +579,7 @@ impl DataStore for FSBackend {
     }
 
     #[instrument(skip(self))]
-    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
+    async fn read_blob_metadata(&self, digest: &Digest) -> Result<BlobMetadata, Error> {
         let path = self.tree.blob_index_path(digest);
         let content = Self::read_string(&path)?;
 
@@ -604,8 +604,8 @@ impl DataStore for FSBackend {
         let path = self.tree.blob_index_path(digest);
 
         let mut reference_index = match Self::read_string(&path) {
-            Ok(content) => serde_json::from_str::<BlobEntityLinkIndex>(&content)?,
-            Err(Error::ReferenceNotFound) => BlobEntityLinkIndex::default(),
+            Ok(content) => serde_json::from_str::<BlobMetadata>(&content)?,
+            Err(Error::ReferenceNotFound) => BlobMetadata::default(),
             Err(e) => Err(e)?,
         };
 
@@ -646,31 +646,6 @@ impl DataStore for FSBackend {
     }
 
     #[instrument(skip(self))]
-    async fn read_reference_info(
-        &self,
-        name: &str,
-        reference: &DataLink,
-    ) -> Result<ReferenceInfo, Error> {
-        let key = match reference {
-            DataLink::Tag(_) | DataLink::Digest(_) => self.tree.get_link_path(reference, name),
-            _ => return Err(Error::ReferenceNotFound),
-        };
-
-        let metadata = fs::metadata(&key)?;
-
-        let created_at = metadata.created()?;
-        let created_at = DateTime::<Utc>::from(created_at).with_timezone(&Utc);
-
-        let accessed_at = metadata.accessed()?;
-        let accessed_at = DateTime::<Utc>::from(accessed_at).with_timezone(&Utc);
-
-        Ok(ReferenceInfo {
-            created_at,
-            accessed_at,
-        })
-    }
-
-    #[instrument(skip(self))]
     async fn build_blob_reader(
         &self,
         digest: &Digest,
@@ -691,31 +666,13 @@ impl DataStore for FSBackend {
     }
 
     #[instrument(skip(self))]
-    async fn update_last_pulled(
-        &self,
-        name: &str,
-        tag: Option<String>,
-        digest: &Digest,
-    ) -> Result<(), Error> {
-        if let Some(tag) = tag {
-            let path = self.tree.get_link_path(&DataLink::Tag(tag), name);
-            let _ = fs::metadata(&path)?;
-        }
-
-        let path = self
-            .tree
-            .get_link_path(&DataLink::Digest(digest.clone()), name);
-        let _ = fs::metadata(&path)?;
-
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
     async fn read_link(&self, name: &str, reference: &DataLink) -> Result<Digest, Error> {
         debug!("Reading link for namespace: {name}, reference: {reference}");
         let path = self.tree.get_link_path(reference, name);
         debug!("Reading link at path: {path}");
 
+        // last access time is updated when reading the link, since it's an inherent feature
+        // of filesystems
         let link = Self::read_string(path)?;
         debug!("Link content: {link}");
 
@@ -807,6 +764,31 @@ impl DataStore for FSBackend {
         .await?;
 
         Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn read_link_metadata(
+        &self,
+        name: &str,
+        reference: &DataLink,
+    ) -> Result<LinkMetadata, Error> {
+        let key = match reference {
+            DataLink::Tag(_) | DataLink::Digest(_) => self.tree.get_link_path(reference, name),
+            _ => return Err(Error::ReferenceNotFound),
+        };
+
+        let metadata = fs::metadata(&key)?;
+
+        let created_at = metadata.created()?;
+        let created_at = DateTime::<Utc>::from(created_at).with_timezone(&Utc);
+
+        let accessed_at = metadata.accessed()?;
+        let accessed_at = DateTime::<Utc>::from(accessed_at).with_timezone(&Utc);
+
+        Ok(LinkMetadata {
+            created_at,
+            accessed_at,
+        })
     }
 }
 
