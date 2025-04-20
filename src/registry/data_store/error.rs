@@ -8,7 +8,7 @@ use sha2::digest::crypto_common::hazmat::DeserializeStateError;
 use std::string::FromUtf8Error;
 use std::{fmt, io};
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     HashSerialization(String),
     JSONSerialization(String),

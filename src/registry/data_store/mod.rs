@@ -6,25 +6,52 @@ use crate::registry::oci_types::{Descriptor, Digest};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Debug;
 use tokio::io::AsyncRead;
 
 pub use fs_backend::FSBackend;
 pub use s3_backend::S3Backend;
 
-use crate::registry::utils::DataLink;
+use crate::registry::utils::{BlobLink, BlobMetadata};
 pub use error::Error;
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub struct BlobMetadata {
-    pub namespace: HashMap<String, HashSet<DataLink>>,
+pub struct LinkMetadata {
+    pub target: Digest,
+    pub created_at: Option<DateTime<Utc>>,
+    pub accessed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug)]
-pub struct LinkMetadata {
-    pub created_at: DateTime<Utc>,
-    pub accessed_at: DateTime<Utc>,
+pub struct LinkMetadataUpdate {
+    pub accessed_at: Option<DateTime<Utc>>,
+}
+
+impl LinkMetadata {
+    pub fn from_bytes(s: Vec<u8>) -> Result<Self, Error> {
+        // Try to deserialize the data as LinkMetadata, if it fails, it means
+        // the link is a simple string (probably coming from "distribution" implementation).
+        if let Ok(metadata) = serde_json::from_slice(&s) {
+            Ok(metadata)
+        } else {
+            // If the link is not a valid LinkMetadata, we create a new one
+            let target = String::from_utf8(s)?;
+            let target = Digest::try_from(target.as_str())?;
+
+            Ok(LinkMetadata {
+                target: target.clone(),
+                created_at: None,
+                accessed_at: None,
+            })
+        }
+    }
+}
+
+pub enum LinkMetadataOperation {
+    Create(LinkMetadata),
+    Read,
+    Update(LinkMetadataUpdate),
+    Delete,
 }
 
 pub trait Reader: AsyncRead + Unpin + Send {}
@@ -101,7 +128,7 @@ pub trait DataStore: Send + Sync {
 
     async fn read_blob(&self, digest: &Digest) -> Result<Vec<u8>, Error>;
 
-    async fn read_blob_metadata(&self, digest: &Digest) -> Result<BlobMetadata, Error>;
+    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobMetadata, Error>;
 
     async fn update_blob_index<O>(
         &self,
@@ -110,7 +137,7 @@ pub trait DataStore: Send + Sync {
         operation: O,
     ) -> Result<(), Error>
     where
-        O: FnOnce(&mut HashSet<DataLink>) + Send;
+        O: FnOnce(&mut HashSet<BlobLink>) + Send;
 
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error>;
 
@@ -120,21 +147,11 @@ pub trait DataStore: Send + Sync {
         start_offset: Option<u64>,
     ) -> Result<Box<dyn Reader>, Error>;
 
-    async fn read_link(&self, namespace: &str, reference: &DataLink) -> Result<Digest, Error>;
-
-    async fn create_link(
+    async fn manage_link(
         &self,
         namespace: &str,
-        reference: &DataLink,
-        digest: &Digest,
-    ) -> Result<(), Error>;
-
-    async fn delete_link(&self, namespace: &str, reference: &DataLink) -> Result<(), Error>;
-
-    async fn read_link_metadata(
-        &self,
-        name: &str,
-        reference: &DataLink,
+        link: &BlobLink,
+        operation: LinkMetadataOperation,
     ) -> Result<LinkMetadata, Error>;
 }
 
@@ -145,17 +162,69 @@ mod tests {
     use std::io::Cursor;
     use uuid::Uuid;
 
-    /// Helper function to test list_namespaces functionality on any DataStore implementation
+    pub async fn create_link(
+        store: &impl DataStore,
+        namespace: &str,
+        link: &BlobLink,
+        digest: &Digest,
+    ) -> Result<(), Error> {
+        store
+            .update_blob_index(namespace, digest, |links| {
+                links.insert(link.clone());
+            })
+            .await?;
+
+        let metadata = LinkMetadata {
+            target: digest.clone(),
+            created_at: Some(Utc::now()),
+            accessed_at: None,
+        };
+
+        store
+            .manage_link(namespace, link, LinkMetadataOperation::Create(metadata))
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn read_link(
+        store: &impl DataStore,
+        name: &str,
+        link: &BlobLink,
+    ) -> Result<LinkMetadata, Error> {
+        store
+            .manage_link(name, link, LinkMetadataOperation::Read)
+            .await
+    }
+
+    pub async fn delete_link(
+        store: &impl DataStore,
+        namespace: &str,
+        link: &BlobLink,
+    ) -> Result<(), Error> {
+        let metadata = store
+            .manage_link(namespace, link, LinkMetadataOperation::Delete)
+            .await?;
+
+        let digest = metadata.target;
+
+        store
+            .update_blob_index(namespace, &digest, |links| {
+                links.remove(link);
+            })
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn test_datastore_list_namespaces(store: &impl DataStore) {
-        // Create test data
         let namespaces = ["repo1", "repo2", "repo3/nested"];
         let test_content = b"test content";
         let digest = store.create_blob(test_content).await.unwrap();
 
         for namespace in &namespaces {
-            let tag_link = DataLink::Tag("latest".to_string());
-            store
-                .create_link(namespace, &tag_link, &digest)
+            let tag_link = BlobLink::Tag("latest".to_string());
+            create_link(store, namespace, &tag_link, &digest)
                 .await
                 .unwrap();
         }
@@ -200,9 +269,8 @@ mod tests {
 
         let tags = ["latest", "v1.0", "v2.0"];
         for tag in &tags {
-            let tag_link = DataLink::Tag(tag.to_string());
-            store
-                .create_link(namespace, &tag_link, &digest)
+            let tag_link = BlobLink::Tag(tag.to_string());
+            create_link(store, namespace, &tag_link, &digest)
                 .await
                 .unwrap();
         }
@@ -239,8 +307,8 @@ mod tests {
 
         // Test tag deletion
         let delete_tag = "v1.0";
-        let tag_link = DataLink::Tag(delete_tag.to_string());
-        store.delete_link(namespace, &tag_link).await.unwrap();
+        let tag_link = BlobLink::Tag(delete_tag.to_string());
+        delete_link(store, namespace, &tag_link).await.unwrap();
 
         let (tags_after_delete, _) = store.list_tags(namespace, 10, None).await.unwrap();
         assert_eq!(tags_after_delete.len(), tags.len() - 1);
@@ -250,46 +318,50 @@ mod tests {
     pub async fn test_datastore_list_referrers(store: &impl DataStore) {
         let namespace = "test-repo";
 
-        let base_digest = store.create_blob(b"base manifest content").await.unwrap();
+        // Create base manifest that will be referenced
+        let base_content = b"base manifest content";
+        let base_digest = store.create_blob(base_content).await.unwrap();
+        let base_link = BlobLink::Digest(base_digest.clone());
 
-        let base_link = DataLink::Digest(base_digest.clone());
-        store
-            .create_link(namespace, &base_link, &base_digest)
+        create_link(store, namespace, &base_link, &base_digest)
             .await
             .unwrap();
 
-        let artifact_manifest = r#"{
-            "schemaVersion": 2,
-            "mediaType": "application/vnd.oci.image.manifest.v1+json",
-            "artifactType": "application/vnd.example.test-artifact",
-            "subject": {
+        // Create artifacts that reference the base manifest
+        let referrer_content = format!(
+            r#"{{
+                "schemaVersion": 2,
                 "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                "digest": "%BASE_DIGEST%",
-                "size": 123
-            },
-            "config": {
-                "mediaType": "application/vnd.oci.image.config.v1+json",
-                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "size": 456
-            },
-            "layers": []
-        }"#
-        .replace("%BASE_DIGEST%", &base_digest.to_string());
+                "subject": {{ 
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": "{}",
+                    "size": 123
+                }},
+                "artifactType": "application/vnd.example.test-artifact",
+                "config": {{
+                    "mediaType": "application/vnd.oci.image.config.v1+json",
+                    "digest": "sha256:0123456789abcdef0123456789abcdef",
+                    "size": 7023
+                }},
+                "layers": []
+            }}"#,
+            base_digest
+        );
 
         let referrer_digest = store
-            .create_blob(artifact_manifest.as_bytes())
+            .create_blob(referrer_content.as_bytes())
+            .await
+            .unwrap();
+        let referrer_link = BlobLink::Digest(referrer_digest.clone());
+
+        create_link(store, namespace, &referrer_link, &referrer_digest)
             .await
             .unwrap();
 
-        let referrer_link = DataLink::Digest(referrer_digest.clone());
-        store
-            .create_link(namespace, &referrer_link, &referrer_digest)
-            .await
-            .unwrap();
+        // Also add it to the referrers index
+        let referrers_link = BlobLink::Referrer(base_digest.clone(), referrer_digest.clone());
 
-        let referrers_link = DataLink::Referrer(base_digest.clone(), referrer_digest.clone());
-        store
-            .create_link(namespace, &referrers_link, &referrer_digest)
+        create_link(store, namespace, &referrers_link, &referrer_digest)
             .await
             .unwrap();
 
@@ -444,9 +516,8 @@ mod tests {
             let digest = store.create_blob(content).await.unwrap();
             digests.push(digest.clone());
 
-            let digest_link = DataLink::Digest(digest.clone());
-            store
-                .create_link(namespace, &digest_link, &digest)
+            let digest_link = BlobLink::Digest(digest.clone());
+            create_link(store, namespace, &digest_link, &digest)
                 .await
                 .unwrap();
         }
@@ -503,19 +574,19 @@ mod tests {
         // Test blob index tracking
         let namespace = "test-namespace";
         let tag = "latest";
-        let tag_link = DataLink::Tag(tag.to_string());
+        let tag_link = BlobLink::Tag(tag.to_string());
 
-        store
-            .create_link(namespace, &tag_link, &digest)
+        create_link(store, namespace, &tag_link, &digest)
             .await
             .unwrap();
-        let blob_index = store.read_blob_metadata(&digest).await.unwrap();
+
+        let blob_index = store.read_blob_index(&digest).await.unwrap();
         assert!(blob_index.namespace.contains_key(namespace));
 
         let namespace_links = blob_index.namespace.get(namespace).unwrap();
         assert!(namespace_links.contains(&tag_link));
 
-        store.delete_link(namespace, &tag_link).await.unwrap();
+        delete_link(store, namespace, &tag_link).await.unwrap();
 
         // The blob should be deleted when all links are gone
         let blob_result = store.read_blob(&digest).await;
@@ -562,38 +633,35 @@ mod tests {
 
         // Test creating and reading tag link
         let tag = "latest";
-        let tag_link = DataLink::Tag(tag.to_string());
+        let tag_link = BlobLink::Tag(tag.to_string());
 
-        store
-            .create_link(namespace, &tag_link, &digest)
+        create_link(store, namespace, &tag_link, &digest)
             .await
             .unwrap();
-        let read_digest = store.read_link(namespace, &tag_link).await.unwrap();
-        assert_eq!(read_digest, digest);
+
+        let read_digest = read_link(store, namespace, &tag_link).await.unwrap();
+        assert_eq!(read_digest.target, digest);
 
         // Test reading reference info
-        let ref_info = store
-            .read_link_metadata(namespace, &tag_link)
-            .await
-            .unwrap();
-        assert!(Utc::now().signed_duration_since(ref_info.created_at) < Duration::hours(1));
+        let ref_info = read_link(store, namespace, &tag_link).await.unwrap();
+        let created_at = ref_info.created_at.unwrap();
+        assert!(Utc::now().signed_duration_since(created_at) < Duration::hours(1));
 
         // Create multiple links to the same blob
         let tags = ["v1", "v2", "v3"];
         for tag in tags {
-            let tag_link = DataLink::Tag(tag.to_string());
-            store
-                .create_link(namespace, &tag_link, &digest)
+            let tag_link = BlobLink::Tag(tag.to_string());
+            create_link(store, namespace, &tag_link, &digest)
                 .await
                 .unwrap();
         }
 
         // Verify blob index contains all links
-        let blob_index = store.read_blob_metadata(&digest).await.unwrap();
+        let blob_index = store.read_blob_index(&digest).await.unwrap();
         let namespace_links = blob_index.namespace.get(namespace).unwrap();
 
         for tag in tags {
-            let tag_link = DataLink::Tag(tag.to_string());
+            let tag_link = BlobLink::Tag(tag.to_string());
             assert!(namespace_links.contains(&tag_link));
         }
 
@@ -601,14 +669,14 @@ mod tests {
         // store.update_last_pulled(namespace, Some(tag.to_string()), &digest).await.unwrap();
 
         // Deleting links
-        store.delete_link(namespace, &tag_link).await.unwrap();
-        let result = store.read_link(namespace, &tag_link).await;
+        delete_link(store, namespace, &tag_link).await.unwrap();
+        let result = read_link(store, namespace, &tag_link).await;
         assert!(result.is_err());
 
         // Delete all links
         for tag in &tags {
-            let tag_link = DataLink::Tag(tag.to_string());
-            store.delete_link(namespace, &tag_link).await.unwrap();
+            let tag_link = BlobLink::Tag(tag.to_string());
+            delete_link(store, namespace, &tag_link).await.unwrap();
         }
 
         // Verify blob is deleted when all links are removed

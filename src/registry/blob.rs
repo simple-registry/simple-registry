@@ -3,7 +3,7 @@ use crate::registry::api::hyper::response_ext::ResponseExt;
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::data_store::{DataStore, Reader};
 use crate::registry::oci_types::Digest;
-use crate::registry::utils::{tee_reader, DataLink};
+use crate::registry::utils::{tee_reader, BlobLink};
 use crate::registry::{data_store, Error, Registry, Repository};
 use hyper::header::CONTENT_LENGTH;
 use hyper::Method;
@@ -172,13 +172,13 @@ impl<D: DataStore + 'static> Registry<D> {
     pub async fn delete_blob(&self, namespace: &str, digest: Digest) -> Result<(), Error> {
         self.validate_namespace(namespace)?;
 
-        let link = DataLink::Layer(digest.clone());
-        if let Err(error) = self.storage_engine.delete_link(namespace, &link).await {
+        let link = BlobLink::Layer(digest.clone());
+        if let Err(error) = self.delete_link(namespace, &link).await {
             warn!("Failed to delete layer link: {error}");
         }
 
-        let link = DataLink::Config(digest);
-        if let Err(error) = self.storage_engine.delete_link(namespace, &link).await {
+        let link = BlobLink::Config(digest);
+        if let Err(error) = self.delete_link(namespace, &link).await {
             warn!("Failed to delete config link: {error}");
         }
 
@@ -299,35 +299,25 @@ mod tests {
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
         // Create test links
-        let layer_link = DataLink::Layer(digest.clone());
-        let config_link = DataLink::Config(digest.clone());
+        let layer_link = BlobLink::Layer(digest.clone());
+        let config_link = BlobLink::Config(digest.clone());
         registry
-            .storage_engine
             .create_link(namespace, &layer_link, &digest)
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(namespace, &config_link, &digest)
             .await
             .unwrap();
 
         // Verify links exist
-        assert!(registry
-            .storage_engine
-            .read_link(namespace, &layer_link)
-            .await
-            .is_ok());
-        assert!(registry
-            .storage_engine
-            .read_link(namespace, &config_link)
-            .await
-            .is_ok());
+        assert!(registry.read_link(namespace, &layer_link).await.is_ok());
+        assert!(registry.read_link(namespace, &config_link).await.is_ok());
 
         // Verify blob index is updated
         let blob_index = registry
             .storage_engine
-            .read_blob_metadata(&digest)
+            .read_blob_index(&digest)
             .await
             .unwrap();
         assert!(blob_index.namespace.contains_key(namespace));
@@ -342,16 +332,8 @@ mod tests {
             .unwrap();
 
         // Verify links are deleted
-        assert!(registry
-            .storage_engine
-            .read_link(namespace, &layer_link)
-            .await
-            .is_err());
-        assert!(registry
-            .storage_engine
-            .read_link(namespace, &config_link)
-            .await
-            .is_err());
+        assert!(registry.read_link(namespace, &layer_link).await.is_err());
+        assert!(registry.read_link(namespace, &config_link).await.is_err());
     }
 
     #[tokio::test]

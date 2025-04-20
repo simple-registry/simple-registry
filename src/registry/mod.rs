@@ -1,4 +1,4 @@
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -27,7 +27,11 @@ use crate::configuration::RepositoryConfig;
 use crate::registry::cache_store::CacheStore;
 pub use repository::Repository;
 
-use crate::registry::data_store::DataStore;
+use crate::registry::data_store::{
+    DataStore, LinkMetadata, LinkMetadataOperation, LinkMetadataUpdate,
+};
+use crate::registry::oci_types::Digest;
+use crate::registry::utils::BlobLink;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
 pub use upload::StartUploadResponse;
@@ -39,6 +43,7 @@ static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub struct Registry<D> {
     storage_engine: Arc<D>,
     repositories: HashMap<String, Repository>,
+    update_pull_time: bool,
     scrub_dry_run: bool,
     scrub_upload_timeout: Duration,
 }
@@ -63,6 +68,7 @@ impl<D: DataStore> Registry<D> {
         }
 
         let res = Self {
+            update_pull_time: false, // TODO: expose configuration option
             storage_engine,
             repositories,
             scrub_dry_run: true,
@@ -94,6 +100,64 @@ impl<D: DataStore> Registry<D> {
             Err(Error::NameInvalid)
         }
     }
+
+    #[instrument(skip(self))]
+    async fn read_link(
+        &self,
+        name: &str,
+        link: &BlobLink,
+    ) -> Result<LinkMetadata, crate::registry::data_store::Error> {
+        if self.update_pull_time {
+            let update = LinkMetadataUpdate {
+                accessed_at: Some(Utc::now()),
+            };
+
+            self.storage_engine
+                .manage_link(name, link, LinkMetadataOperation::Update(update))
+                .await
+        } else {
+            self.storage_engine
+                .manage_link(name, link, LinkMetadataOperation::Read)
+                .await
+        }
+    }
+
+    #[instrument(skip(self))]
+    async fn create_link(
+        &self,
+        namespace: &str,
+        link: &BlobLink,
+        digest: &Digest,
+    ) -> Result<(), crate::registry::data_store::Error> {
+        let metadata = LinkMetadata {
+            target: digest.clone(),
+            created_at: Some(Utc::now()),
+            accessed_at: None,
+        };
+
+        self.storage_engine
+            .manage_link(namespace, link, LinkMetadataOperation::Create(metadata))
+            .await?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn delete_link(
+        &self,
+        namespace: &str,
+        link: &BlobLink,
+    ) -> Result<(), crate::registry::data_store::Error> {
+        let metadata = self
+            .storage_engine
+            .manage_link(namespace, link, LinkMetadataOperation::Delete)
+            .await;
+
+        match metadata {
+            Ok(_) | Err(crate::registry::data_store::Error::ReferenceNotFound) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -105,7 +169,7 @@ pub(crate) mod test_utils {
     };
     use crate::registry::data_store::{FSBackend, S3Backend};
     use crate::registry::oci_types::Digest;
-    use crate::registry::utils::DataLink;
+    use crate::registry::utils::BlobLink;
     use serde_json::json;
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -176,9 +240,8 @@ pub(crate) mod test_utils {
         let digest = registry.storage_engine.create_blob(content).await.unwrap();
 
         // Create a tag to ensure the namespace exists
-        let tag_link = DataLink::Tag("latest".to_string());
+        let tag_link = BlobLink::Tag("latest".to_string());
         registry
-            .storage_engine
             .create_link(namespace, &tag_link, &digest)
             .await
             .unwrap();
@@ -186,7 +249,7 @@ pub(crate) mod test_utils {
         // Verify the blob index is updated
         let blob_index = registry
             .storage_engine
-            .read_blob_metadata(&digest)
+            .read_blob_index(&digest)
             .await
             .unwrap();
         assert!(blob_index.namespace.contains_key(namespace));

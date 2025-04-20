@@ -9,12 +9,6 @@ You can configure Retention Policies following a set of rules expressed as [CEL 
 > Currently, this policy is enforced by the `scrub` command, which can be run as a recurrent task (e.g. a systemd timer,
 > a Kubernetes `CronJob`, etc.)
 
-> [!WARNING]
-> When using local filesystem as storage backend, last access time of manifest links is used for the retention policy
-> engine to determine the last pull time.
-> Please ensure that your host filesystem hasn't access time disabled, otherwise policies using last pull time as
-> condition may not behave as expected.
-
 ## Policy Configuration
 
 To configure Retention Policies, you need to add a `retention_policy` section to the repository configuration.

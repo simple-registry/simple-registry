@@ -1,5 +1,5 @@
 use crate::registry::oci_types::Digest;
-use crate::registry::utils::DataLink;
+use crate::registry::utils::BlobLink;
 
 #[derive(Debug)]
 pub struct DataPathBuilder {
@@ -214,25 +214,25 @@ impl DataPathBuilder {
         format!("{}/link", self.manifest_tag_link_parent_dir(namespace, tag))
     }
 
-    pub fn get_link_path(&self, reference: &DataLink, name: &str) -> String {
+    pub fn get_link_path(&self, reference: &BlobLink, name: &str) -> String {
         match reference {
-            DataLink::Tag(tag) => self.manifest_tag_link_path(name, tag),
-            DataLink::Digest(digest) => self.manifest_revisions_link_path(name, digest),
-            DataLink::Layer(digest) => self.manifest_layer_link_path(name, digest),
-            DataLink::Config(digest) => self.manifest_config_link_path(name, digest),
-            DataLink::Referrer(subject, referrer) => {
+            BlobLink::Tag(tag) => self.manifest_tag_link_path(name, tag),
+            BlobLink::Digest(digest) => self.manifest_revisions_link_path(name, digest),
+            BlobLink::Layer(digest) => self.manifest_layer_link_path(name, digest),
+            BlobLink::Config(digest) => self.manifest_config_link_path(name, digest),
+            BlobLink::Referrer(subject, referrer) => {
                 self.manifest_referrer_link_path(name, subject, referrer)
             }
         }
     }
 
-    pub fn get_link_container_path(&self, reference: &DataLink, name: &str) -> String {
+    pub fn get_link_container_path(&self, reference: &BlobLink, name: &str) -> String {
         match reference {
-            DataLink::Tag(tag) => self.manifest_tag_link_container_dir(name, tag),
-            DataLink::Digest(digest) => self.manifest_revisions_link_container_dir(name, digest),
-            DataLink::Layer(digest) => self.manifest_layer_link_container_dir(name, digest),
-            DataLink::Config(digest) => self.manifest_config_link_container_dir(name, digest),
-            DataLink::Referrer(subject, referrer) => {
+            BlobLink::Tag(tag) => self.manifest_tag_link_container_dir(name, tag),
+            BlobLink::Digest(digest) => self.manifest_revisions_link_container_dir(name, digest),
+            BlobLink::Layer(digest) => self.manifest_layer_link_container_dir(name, digest),
+            BlobLink::Config(digest) => self.manifest_config_link_container_dir(name, digest),
+            BlobLink::Referrer(subject, referrer) => {
                 self.manifest_referrer_link_container_dir(name, subject, referrer)
             }
         }
@@ -527,7 +527,7 @@ mod tests {
         let builder = DataPathBuilder::new("".to_string());
         let digest = Digest::Sha256("1234567890abcdef".to_string());
         assert_eq!(
-            builder.get_link_path(&DataLink::Digest(digest), "name"),
+            builder.get_link_path(&BlobLink::Digest(digest), "name"),
             "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef/link"
         );
     }
@@ -537,7 +537,7 @@ mod tests {
         let builder = DataPathBuilder::new("".to_string());
         let digest = Digest::Sha256("1234567890abcdef".to_string());
         assert_eq!(
-            builder.get_link_container_path(&DataLink::Digest(digest), "name"),
+            builder.get_link_container_path(&BlobLink::Digest(digest), "name"),
             "v2/repositories/name/_manifests/revisions/sha256/1234567890abcdef"
         );
     }
@@ -546,7 +546,7 @@ mod tests {
     fn test_get_link_path_tag() {
         let builder = DataPathBuilder::new("".to_string());
         assert_eq!(
-            builder.get_link_path(&DataLink::Tag("tag".to_string()), "name"),
+            builder.get_link_path(&BlobLink::Tag("tag".to_string()), "name"),
             "v2/repositories/name/_manifests/tags/tag/current/link"
         );
     }
@@ -555,7 +555,7 @@ mod tests {
     fn test_get_link_container_path_tag() {
         let builder = DataPathBuilder::new("".to_string());
         assert_eq!(
-            builder.get_link_container_path(&DataLink::Tag("tag".to_string()), "name"),
+            builder.get_link_container_path(&BlobLink::Tag("tag".to_string()), "name"),
             "v2/repositories/name/_manifests/tags/tag"
         );
     }

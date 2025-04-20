@@ -1,7 +1,7 @@
 use crate::registry::data_store::{DataStore, LinkMetadata};
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::policy_types::ManifestImage;
-use crate::registry::utils::DataLink;
+use crate::registry::utils::BlobLink;
 use crate::registry::{parse_manifest_digests, Error, Registry};
 use cel_interpreter::{Context, Program, Value};
 use chrono::Utc;
@@ -98,8 +98,7 @@ impl<D: DataStore> Registry<D> {
         let mut tags = HashMap::new();
         for tag in &tag_names {
             let info = self
-                .storage_engine
-                .read_link_metadata(namespace, &DataLink::Tag(tag.to_string()))
+                .read_link(namespace, &BlobLink::Tag(tag.to_string()))
                 .await?;
             tags.insert(tag.to_string(), info);
         }
@@ -144,8 +143,8 @@ impl<D: DataStore> Registry<D> {
 
             let manifest = ManifestImage {
                 tag: Some(tag.to_string()),
-                pushed_at: info.created_at.timestamp(),
-                last_pulled_at: info.accessed_at.timestamp(),
+                pushed_at: info.created_at.map(|t| t.timestamp()).unwrap_or_default(),
+                last_pulled_at: info.accessed_at.map(|t| t.timestamp()).unwrap_or_default(),
             };
 
             if manifest_should_be_purged(
@@ -244,12 +243,14 @@ impl<D: DataStore> Registry<D> {
     async fn check_tag(&self, namespace: &str, tag: &str) -> Result<(), Error> {
         debug!("Checking {namespace}:{tag} for revision inconsistencies");
         let digest = self
-            .storage_engine
-            .read_link(namespace, &DataLink::Tag(tag.to_string()))
+            .read_link(namespace, &BlobLink::Tag(tag.to_string()))
             .await?;
 
-        let link_reference = DataLink::Digest(digest.clone());
-        if let Err(error) = self.ensure_link(namespace, &link_reference, &digest).await {
+        let link_reference = BlobLink::Digest(digest.target.clone());
+        if let Err(error) = self
+            .ensure_link(namespace, &link_reference, &digest.target)
+            .await
+        {
             warn!("Failed to ensure link: {error}");
         }
 
@@ -300,7 +301,7 @@ impl<D: DataStore> Registry<D> {
         };
 
         debug!("Checking {namespace}/{revision} config link: {config_digest}");
-        let link_reference = DataLink::Config(config_digest.clone());
+        let link_reference = BlobLink::Config(config_digest.clone());
         self.ensure_link(namespace, &link_reference, &config_digest)
             .await?;
 
@@ -318,7 +319,7 @@ impl<D: DataStore> Registry<D> {
         };
 
         debug!("Checking {namespace}/{revision} subject link: {subject_digest}");
-        let link_reference = DataLink::Referrer(subject_digest.clone(), revision.clone());
+        let link_reference = BlobLink::Referrer(subject_digest.clone(), revision.clone());
         self.ensure_link(namespace, &link_reference, revision)
             .await?;
 
@@ -334,7 +335,7 @@ impl<D: DataStore> Registry<D> {
         for layer_digest in layers {
             debug!("Checking {namespace}/{revision} layer link: {layer_digest}",);
 
-            let link_reference = DataLink::Layer(layer_digest.clone());
+            let link_reference = BlobLink::Layer(layer_digest.clone());
             self.ensure_link(namespace, &link_reference, layer_digest)
                 .await?;
         }
@@ -345,32 +346,23 @@ impl<D: DataStore> Registry<D> {
     async fn ensure_link(
         &self,
         namespace: &str,
-        link_reference: &DataLink,
+        link_reference: &BlobLink,
         digest: &Digest,
     ) -> Result<(), Error> {
-        let blob_digest = self
-            .storage_engine
-            .read_link(namespace, link_reference)
-            .await;
+        let blob_digest = self.read_link(namespace, link_reference).await;
 
         match blob_digest {
-            Ok(link_digest) if &link_digest == digest => {
+            Ok(link) if &link.target == digest => {
                 debug!("Link {link_reference} -> {digest} is valid");
                 return Ok(());
             }
             _ => {
                 warn!("Missing or invalid link: {link_reference} -> {digest}");
                 if !self.scrub_dry_run {
-                    if let Err(error) = self
-                        .storage_engine
-                        .delete_link(namespace, link_reference)
-                        .await
-                    {
+                    if let Err(error) = self.delete_link(namespace, link_reference).await {
                         warn!("Failed to delete old link: {error}");
                     }
-                    self.storage_engine
-                        .create_link(namespace, link_reference, digest)
-                        .await?;
+                    self.create_link(namespace, link_reference, digest).await?;
                 }
             }
         }
@@ -404,16 +396,11 @@ impl<D: DataStore> Registry<D> {
     }
 
     async fn check_blob(&self, blob: &Digest) -> Result<(), Error> {
-        let blob_index = self.storage_engine.read_blob_metadata(blob).await?;
+        let blob_index = self.storage_engine.read_blob_index(blob).await?;
 
         for (namespace, references) in blob_index.namespace {
             for link_reference in references {
-                if self
-                    .storage_engine
-                    .read_link(&namespace, &link_reference)
-                    .await
-                    .is_err()
-                {
+                if self.read_link(&namespace, &link_reference).await.is_err() {
                     warn!("Missing link from blob index: {namespace}/{blob} <- {link_reference}");
                     if !self.scrub_dry_run {
                         if let Err(error) = self
@@ -443,7 +430,7 @@ mod tests {
         create_test_fs_backend, create_test_manifest, create_test_repository_config,
         create_test_s3_backend,
     };
-    use crate::registry::utils::DataLink;
+    use crate::registry::utils::BlobLink;
     use chrono::Duration;
     use uuid::Uuid;
 
@@ -837,10 +824,9 @@ mod tests {
 
         // Create correct config link first
         registry
-            .storage_engine
             .create_link(
                 namespace,
-                &DataLink::Config(config_digest.clone()),
+                &BlobLink::Config(config_digest.clone()),
                 &config_digest,
             )
             .await
@@ -848,28 +834,25 @@ mod tests {
 
         // Create manifest revision links and tag
         registry
-            .storage_engine
             .create_link(
                 namespace,
-                &DataLink::Digest(manifest_digest.clone()),
+                &BlobLink::Digest(manifest_digest.clone()),
                 &manifest_digest,
             )
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(
                 namespace,
-                &DataLink::Digest(manifest_with_subject_digest.clone()),
+                &BlobLink::Digest(manifest_with_subject_digest.clone()),
                 &manifest_with_subject_digest,
             )
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(
                 namespace,
-                &DataLink::Tag("latest".to_string()),
+                &BlobLink::Tag("latest".to_string()),
                 &manifest_digest,
             )
             .await
@@ -877,19 +860,17 @@ mod tests {
 
         // Create incorrect links
         registry
-            .storage_engine
             .create_link(
                 namespace,
-                &DataLink::Config(wrong_config_digest.clone()),
+                &BlobLink::Config(wrong_config_digest.clone()),
                 &wrong_config_digest,
             )
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(
                 namespace,
-                &DataLink::Layer(wrong_layer_digest.clone()),
+                &BlobLink::Layer(wrong_layer_digest.clone()),
                 &wrong_layer_digest,
             )
             .await
@@ -910,46 +891,46 @@ mod tests {
         // Verify links point to correct digests
         assert_eq!(
             new_registry
-                .storage_engine
-                .read_link(namespace, &DataLink::Config(config_digest.clone()))
+                .read_link(namespace, &BlobLink::Config(config_digest.clone()))
                 .await
-                .unwrap(),
+                .unwrap()
+                .target,
             config_digest,
             "Config link should point to correct digest"
         );
 
         assert_eq!(
             new_registry
-                .storage_engine
-                .read_link(namespace, &DataLink::Layer(layer_digest1.clone()))
+                .read_link(namespace, &BlobLink::Layer(layer_digest1.clone()))
                 .await
-                .unwrap(),
+                .unwrap()
+                .target,
             layer_digest1,
             "Layer1 link should point to correct digest"
         );
 
         assert_eq!(
             new_registry
-                .storage_engine
-                .read_link(namespace, &DataLink::Layer(layer_digest2.clone()))
+                .read_link(namespace, &BlobLink::Layer(layer_digest2.clone()))
                 .await
-                .unwrap(),
+                .unwrap()
+                .target,
             layer_digest2,
             "Layer2 link should be created and point to correct digest"
         );
 
         assert_eq!(
             new_registry
-                .storage_engine
                 .read_link(
                     namespace,
-                    &DataLink::Referrer(
+                    &BlobLink::Referrer(
                         subject_digest.clone(),
                         manifest_with_subject_digest.clone()
                     )
                 )
                 .await
-                .unwrap(),
+                .unwrap()
+                .target,
             manifest_with_subject_digest,
             "Subject link should point to correct digest"
         );
@@ -962,10 +943,9 @@ mod tests {
             .await
             .unwrap();
         new_registry
-            .storage_engine
             .create_link(
                 namespace,
-                &DataLink::Digest(invalid_digest.clone()),
+                &BlobLink::Digest(invalid_digest.clone()),
                 &invalid_digest,
             )
             .await
@@ -980,7 +960,7 @@ mod tests {
             .create_blob(b"test content")
             .await
             .unwrap();
-        let link = DataLink::Tag("test-tag".to_string());
+        let link = BlobLink::Tag("test-tag".to_string());
 
         // Create a new registry with dry run disabled
         let new_registry = Registry::new(
@@ -996,11 +976,7 @@ mod tests {
             .ensure_link(namespace, &link, &digest)
             .await
             .unwrap();
-        assert!(new_registry
-            .storage_engine
-            .read_link(namespace, &link)
-            .await
-            .is_ok());
+        assert!(new_registry.read_link(namespace, &link).await.is_ok());
 
         // Test updating an existing link
         let new_digest = registry
@@ -1012,21 +988,16 @@ mod tests {
             .ensure_link(namespace, &link, &new_digest)
             .await
             .unwrap();
-        let stored_digest = new_registry
-            .storage_engine
-            .read_link(namespace, &link)
-            .await
-            .unwrap();
-        assert_eq!(stored_digest, new_digest);
+        let stored_link = new_registry.read_link(namespace, &link).await.unwrap();
+        assert_eq!(stored_link.target, new_digest);
 
         // Test with invalid link
-        let invalid_link = DataLink::Tag("invalid-tag".to_string());
+        let invalid_link = BlobLink::Tag("invalid-tag".to_string());
         new_registry
             .ensure_link(namespace, &invalid_link, &digest)
             .await
             .unwrap();
         assert!(new_registry
-            .storage_engine
             .read_link(namespace, &invalid_link)
             .await
             .is_ok());
@@ -1044,34 +1015,30 @@ mod tests {
         let digest4 = registry.storage_engine.create_blob(content).await.unwrap();
 
         // Create valid links for blobs in different namespaces
-        let valid_link1 = DataLink::Tag("valid-tag1".to_string());
-        let valid_link2 = DataLink::Layer(digest2.clone());
-        let valid_link3 = DataLink::Config(digest3.clone());
-        let valid_link4 = DataLink::Referrer(digest1.clone(), digest4.clone());
+        let valid_link1 = BlobLink::Tag("valid-tag1".to_string());
+        let valid_link2 = BlobLink::Layer(digest2.clone());
+        let valid_link3 = BlobLink::Config(digest3.clone());
+        let valid_link4 = BlobLink::Referrer(digest1.clone(), digest4.clone());
 
         registry
-            .storage_engine
             .create_link(namespace1, &valid_link1, &digest1)
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(namespace1, &valid_link2, &digest2)
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(namespace2, &valid_link3, &digest3)
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(namespace2, &valid_link4, &digest4)
             .await
             .unwrap();
 
         // Create invalid link by adding to blob index but not creating the actual link
-        let invalid_link = DataLink::Tag("invalid-tag".to_string());
+        let invalid_link = BlobLink::Tag("invalid-tag".to_string());
         registry
             .storage_engine
             .update_blob_index(namespace1, &digest2, |index| {

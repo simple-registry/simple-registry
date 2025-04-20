@@ -2,7 +2,7 @@ use crate::registry::api::hyper::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, Manifest, Reference};
-use crate::registry::utils::DataLink;
+use crate::registry::utils::BlobLink;
 use crate::registry::{Error, Registry, Repository};
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::Method;
@@ -121,12 +121,12 @@ impl<D: DataStore> Registry<D> {
         namespace: &str,
         reference: Reference,
     ) -> Result<HeadManifestResponse, Error> {
-        let link = reference.into();
-        let digest = self.storage_engine.read_link(namespace, &link).await?;
+        let blob_link = reference.into();
+        let link = self.read_link(namespace, &blob_link).await?;
 
         let mut reader = self
             .storage_engine
-            .build_blob_reader(&digest, None)
+            .build_blob_reader(&link.target, None)
             .await
             .map_err(|error| {
                 error!("Failed to build blob reader: {error}");
@@ -141,7 +141,7 @@ impl<D: DataStore> Registry<D> {
 
         Ok(HeadManifestResponse {
             media_type: manifest.media_type,
-            digest,
+            digest: link.target,
             size,
         })
     }
@@ -190,10 +190,10 @@ impl<D: DataStore> Registry<D> {
         namespace: &str,
         reference: Reference,
     ) -> Result<GetManifestResponse, Error> {
-        let link = reference.into();
-        let digest = self.storage_engine.read_link(namespace, &link).await?;
+        let blob_link = reference.into();
+        let link = self.read_link(namespace, &blob_link).await?;
 
-        let content = self.storage_engine.read_blob(&digest).await?;
+        let content = self.storage_engine.read_blob(&link.target).await?;
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|error| {
             warn!("Failed to deserialize manifest (2): {error}");
             warn!("Manifest content: {:?}", String::from_utf8_lossy(&content));
@@ -202,7 +202,7 @@ impl<D: DataStore> Registry<D> {
 
         Ok(GetManifestResponse {
             media_type: manifest.media_type,
-            digest,
+            digest: link.target,
             content,
         })
     }
@@ -223,14 +223,10 @@ impl<D: DataStore> Registry<D> {
             Reference::Tag(tag) => {
                 let digest = self.storage_engine.create_blob(body).await?;
 
-                let link = DataLink::Tag(tag);
-                self.storage_engine
-                    .create_link(namespace, &link, &digest)
-                    .await?;
-                let link = DataLink::Digest(digest.clone());
-                self.storage_engine
-                    .create_link(namespace, &link, &digest)
-                    .await?;
+                let link = BlobLink::Tag(tag);
+                self.create_link(namespace, &link, &digest).await?;
+                let link = BlobLink::Digest(digest.clone());
+                self.create_link(namespace, &link, &digest).await?;
 
                 digest
             }
@@ -243,34 +239,26 @@ impl<D: DataStore> Registry<D> {
                         "Provided digest does not match calculated digest".to_string(),
                     ));
                 }
-                let link = DataLink::Digest(digest.clone());
-                self.storage_engine
-                    .create_link(namespace, &link, &digest)
-                    .await?;
+                let link = BlobLink::Digest(digest.clone());
+                self.create_link(namespace, &link, &digest).await?;
 
                 digest
             }
         };
 
         if let Some(subject) = &manifest_digests.subject {
-            let link = DataLink::Referrer(subject.clone(), digest.clone());
-            self.storage_engine
-                .create_link(namespace, &link, &digest)
-                .await?;
+            let link = BlobLink::Referrer(subject.clone(), digest.clone());
+            self.create_link(namespace, &link, &digest).await?;
         }
 
         if let Some(config_digest) = manifest_digests.config {
-            let link = DataLink::Config(config_digest.clone());
-            self.storage_engine
-                .create_link(namespace, &link, &config_digest)
-                .await?;
+            let link = BlobLink::Config(config_digest.clone());
+            self.create_link(namespace, &link, &config_digest).await?;
         }
 
         for layer_digest in manifest_digests.layers {
-            let link = DataLink::Layer(layer_digest.clone());
-            self.storage_engine
-                .create_link(namespace, &link, &layer_digest)
-                .await?;
+            let link = BlobLink::Layer(layer_digest.clone());
+            self.create_link(namespace, &link, &layer_digest).await?;
         }
 
         Ok(PutManifestResponse {
@@ -289,8 +277,8 @@ impl<D: DataStore> Registry<D> {
 
         match reference {
             Reference::Tag(tag) => {
-                let link = DataLink::Tag(tag);
-                self.storage_engine.delete_link(namespace, &link).await?;
+                let link = BlobLink::Tag(tag);
+                self.delete_link(namespace, &link).await?;
             }
             Reference::Digest(digest) => {
                 let mut marker = None;
@@ -301,31 +289,26 @@ impl<D: DataStore> Registry<D> {
                         .await?;
 
                     for tag in tags {
-                        let link_reference = DataLink::Tag(tag);
-                        if self
-                            .storage_engine
-                            .read_link(namespace, &link_reference)
-                            .await?
-                            == digest
-                        {
-                            self.storage_engine
-                                .delete_link(namespace, &link_reference)
-                                .await?;
+                        let link_reference = BlobLink::Tag(tag);
+                        let link = self.read_link(namespace, &link_reference).await?;
+
+                        if link.target == digest {
+                            self.delete_link(namespace, &link_reference).await?;
                         }
                     }
 
-                    let link = DataLink::Digest(digest.clone());
+                    let blob_link = BlobLink::Digest(digest.clone());
+                    let link = self.read_link(namespace, &blob_link).await?;
 
-                    let digest = self.storage_engine.read_link(namespace, &link).await?;
-                    let content = self.storage_engine.read_blob(&digest).await?;
+                    let content = self.storage_engine.read_blob(&link.target).await?;
                     let manifest_digests = parse_manifest_digests(&content, None)?;
 
                     if let Some(subject_digest) = manifest_digests.subject {
-                        let link = DataLink::Referrer(subject_digest, digest);
-                        self.storage_engine.delete_link(namespace, &link).await?;
+                        let link = BlobLink::Referrer(subject_digest, link.target);
+                        self.delete_link(namespace, &link).await?;
                     }
 
-                    self.storage_engine.delete_link(namespace, &link).await?;
+                    self.delete_link(namespace, &blob_link).await?;
 
                     if next_marker.is_none() {
                         break;

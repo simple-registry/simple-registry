@@ -16,7 +16,7 @@ async-trait = "0.1.88"
 aws-sdk-s3 = "1.82.0"
 base64 = "0.22.1"
 cel-interpreter = "0.9.0"
-chrono = "0.4.40"
+chrono = { version = "0.4.40", features = ["serde"] }
 fs4 = { version = "0.13.1", features = ["sync"] }
 futures-util = { version = "0.3.31", default-features = false }
 hex = "0.4.3"

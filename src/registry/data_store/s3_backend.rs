@@ -8,7 +8,7 @@ use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::builders::{CompletedMultipartUploadBuilder, CompletedPartBuilder};
-use aws_sdk_s3::types::{CompletedPart, MetadataDirective};
+use aws_sdk_s3::types::CompletedPart;
 use aws_sdk_s3::{
     config::timeout::TimeoutConfig,
     config::{BehaviorVersion, Credentials, Region},
@@ -22,14 +22,11 @@ use tokio::sync::Semaphore;
 use tracing::{debug, error, instrument};
 
 use crate::configuration::StorageS3Config;
-use crate::registry::data_store::{BlobMetadata, DataStore, Error, LinkMetadata, Reader};
+use crate::registry::data_store::{DataStore, Error, LinkMetadata, LinkMetadataOperation, Reader};
 use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
-use crate::registry::utils::{DataLink, DataPathBuilder};
-
-const PUSHED_AT_METADATA_KEY: &str = "pushed";
-const LAST_PULLED_AT_METADATA_KEY: &str = "last-pulled";
+use crate::registry::utils::{BlobLink, BlobMetadata, DataPathBuilder};
 
 #[derive(Clone)]
 pub struct S3Backend {
@@ -160,7 +157,6 @@ impl S3Backend {
             .put_object()
             .bucket(&self.bucket)
             .key(key)
-            .metadata(PUSHED_AT_METADATA_KEY, Utc::now().to_rfc3339())
             .body(ByteStream::from(data))
             .send()
             .await?;
@@ -510,31 +506,6 @@ impl S3Backend {
                 .send()
                 .await?;
         }
-
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
-    async fn update_last_pulled_metadata(&self, key: &str) -> Result<(), Error> {
-        let res = self.head_object(key).await?;
-
-        let pushed_at = res
-            .metadata
-            .unwrap_or_default()
-            .get(PUSHED_AT_METADATA_KEY)
-            .cloned()
-            .unwrap_or(Utc::now().to_rfc3339());
-
-        self.s3_client
-            .copy_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .copy_source(format!("{}/{key}", self.bucket))
-            .metadata_directive(MetadataDirective::Replace)
-            .metadata(PUSHED_AT_METADATA_KEY, pushed_at)
-            .metadata(LAST_PULLED_AT_METADATA_KEY, Utc::now().to_rfc3339())
-            .send()
-            .await?;
 
         Ok(())
     }
@@ -1189,7 +1160,7 @@ impl DataStore for S3Backend {
     }
 
     #[instrument(skip(self))]
-    async fn read_blob_metadata(&self, digest: &Digest) -> Result<BlobMetadata, Error> {
+    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobMetadata, Error> {
         let path = self.tree.blob_index_path(digest);
 
         let data = self.get_object_body_as_vec(&path, None).await?;
@@ -1206,7 +1177,7 @@ impl DataStore for S3Backend {
         operation: O,
     ) -> Result<(), Error>
     where
-        O: FnOnce(&mut HashSet<DataLink>) + Send,
+        O: FnOnce(&mut HashSet<BlobLink>) + Send,
     {
         let path = self.tree.blob_index_path(digest);
 
@@ -1257,114 +1228,66 @@ impl DataStore for S3Backend {
         Ok(Box::new(res.body.into_async_read()))
     }
 
-    #[instrument(skip(self))]
-    async fn read_link(&self, name: &str, reference: &DataLink) -> Result<Digest, Error> {
-        let path = self.tree.get_link_path(reference, name);
-        let data = self.get_object_body_as_vec(&path, None).await?;
-
-        self.update_last_pulled_metadata(&path).await?;
-
-        let link = String::from_utf8(data)?;
-        Ok(Digest::try_from(link.as_str())?)
-    }
-
-    #[instrument(skip(self))]
-    async fn create_link(
+    #[instrument(skip(self, operation))]
+    async fn manage_link(
         &self,
         namespace: &str,
-        reference: &DataLink,
-        digest: &Digest,
-    ) -> Result<(), Error> {
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
+        link: &BlobLink,
+        operation: LinkMetadataOperation,
+    ) -> Result<LinkMetadata, Error> {
+        let link_path = self.tree.get_link_path(link, namespace);
+        let _guard = self.lock_store.acquire_write_lock(&link.to_string()).await;
 
-        let link_path = self.tree.get_link_path(reference, namespace);
+        let link_metadata = self
+            .get_object_body_as_vec(&link_path, None)
+            .await
+            .and_then(LinkMetadata::from_bytes);
 
-        match self.read_link(namespace, reference).await.ok() {
-            Some(existing_digest) if existing_digest == *digest => return Ok(()),
-            Some(existing_digest) if existing_digest != *digest => {
-                let _existing_digest_guard = self
-                    .lock_store
-                    .acquire_write_lock(&existing_digest.to_string())
-                    .await;
+        match operation {
+            LinkMetadataOperation::Read => link_metadata,
+            LinkMetadataOperation::Create(new_metadata) => {
+                if let Ok(link_metadata) = &link_metadata {
+                    if link_metadata.target != new_metadata.target {
+                        self.update_blob_index(namespace, &link_metadata.target, |index| {
+                            index.remove(link);
+                        })
+                        .await?;
+                        self.update_blob_index(namespace, &new_metadata.target, |index| {
+                            index.insert(link.clone());
+                        })
+                        .await?;
+                    }
+                } else {
+                    self.update_blob_index(namespace, &new_metadata.target, |index| {
+                        index.insert(link.clone());
+                    })
+                    .await?;
+                }
+
+                let serialized_metadata = serde_json::to_vec(&new_metadata)?;
+                self.put_object(&link_path, serialized_metadata).await?;
+                Ok(new_metadata)
+            }
+            LinkMetadataOperation::Update(update_metadata) => {
+                let mut link_metadata = link_metadata?;
+                link_metadata.accessed_at = update_metadata.accessed_at;
+
+                let serialized_metadata = serde_json::to_vec(&link_metadata)?;
+                self.put_object(&link_path, serialized_metadata).await?;
+                Ok(link_metadata)
+            }
+            LinkMetadataOperation::Delete => {
+                if let Ok(link_metadata) = &link_metadata {
+                    self.update_blob_index(namespace, &link_metadata.target, |index| {
+                        index.remove(link);
+                    })
+                    .await?;
+                }
 
                 self.delete_object(&link_path).await?;
-
-                self.update_blob_index(namespace, digest, |index| {
-                    index.remove(reference);
-                })
-                .await?;
+                link_metadata
             }
-            _ => {}
         }
-
-        self.put_object(&link_path, digest.to_string().into_bytes())
-            .await?;
-
-        self.update_blob_index(namespace, digest, |index| {
-            index.insert(reference.clone());
-        })
-        .await?;
-
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
-    async fn delete_link(&self, namespace: &str, reference: &DataLink) -> Result<(), Error> {
-        let digest = match self.read_link(namespace, reference).await {
-            Ok(digest) => digest,
-            Err(Error::ReferenceNotFound) => return Ok(()),
-            Err(e) => return Err(e),
-        };
-
-        let link_path = self.tree.get_link_path(reference, namespace);
-
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-
-        self.delete_object(&link_path).await?;
-
-        self.update_blob_index(namespace, &digest, |index| {
-            index.remove(reference);
-        })
-        .await?;
-
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
-    async fn read_link_metadata(
-        &self,
-        name: &str,
-        reference: &DataLink,
-    ) -> Result<LinkMetadata, Error> {
-        let key = match reference {
-            DataLink::Tag(_) | DataLink::Digest(_) => self.tree.get_link_path(reference, name),
-            _ => return Err(Error::ReferenceNotFound),
-        };
-
-        let res = self.head_object(&key).await?;
-
-        let metadata = res.metadata.unwrap_or_default();
-
-        let created_at = metadata
-            .get(PUSHED_AT_METADATA_KEY)
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
-            .unwrap_or_default();
-
-        let accessed_at = metadata
-            .get(LAST_PULLED_AT_METADATA_KEY)
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
-            .unwrap_or_default();
-
-        Ok(LinkMetadata {
-            created_at,
-            accessed_at,
-        })
     }
 }
 

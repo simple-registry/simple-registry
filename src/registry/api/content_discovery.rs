@@ -172,7 +172,7 @@ mod tests {
     use crate::registry::test_utils::{
         create_test_blob, create_test_fs_backend, create_test_s3_backend,
     };
-    use crate::registry::utils::DataLink;
+    use crate::registry::utils::BlobLink;
     use http_body_util::Empty;
     use hyper::body::Bytes;
     use hyper::Method;
@@ -213,12 +213,11 @@ mod tests {
             .unwrap();
 
         // Create a referrer link
-        let referrer_link = DataLink::Referrer(
+        let referrer_link = BlobLink::Referrer(
             base_manifest_digest.clone(),
             referrer_manifest_digest.clone(),
         );
         registry
-            .storage_engine
             .create_link(namespace, &referrer_link, &referrer_manifest_digest)
             .await
             .unwrap();
@@ -280,9 +279,8 @@ mod tests {
 
         for namespace in &namespaces {
             let (digest, _) = create_test_blob(registry, namespace, content).await;
-            let tag_link = DataLink::Tag("latest".to_string());
+            let tag_link = BlobLink::Tag("latest".to_string());
             registry
-                .storage_engine
                 .create_link(namespace, &tag_link, &digest)
                 .await
                 .unwrap();
@@ -358,9 +356,8 @@ mod tests {
         // Create some test tags
         let tags = ["v1", "v2", "latest"];
         for tag in &tags {
-            let tag_link = DataLink::Tag(tag.to_string());
+            let tag_link = BlobLink::Tag(tag.to_string());
             registry
-                .storage_engine
                 .create_link(namespace, &tag_link, &digest)
                 .await
                 .unwrap();

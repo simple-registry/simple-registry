@@ -65,7 +65,7 @@ impl<D: DataStore> Registry<D> {
 mod tests {
     use super::*;
     use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
-    use crate::registry::utils::DataLink;
+    use crate::registry::utils::BlobLink;
     use std::str::FromStr;
 
     #[tokio::test]
@@ -94,9 +94,8 @@ mod tests {
             .create_blob(test_content)
             .await
             .unwrap();
-        let tag_link = DataLink::Tag("latest".to_string());
+        let tag_link = BlobLink::Tag("latest".to_string());
         registry
-            .storage_engine
             .create_link(namespace, &tag_link, &test_digest)
             .await
             .unwrap();
@@ -172,9 +171,8 @@ mod tests {
             .unwrap();
         let tags = ["latest", "v1.0", "v2.0"];
         for tag in &tags {
-            let tag_link = DataLink::Tag(tag.to_string());
+            let tag_link = BlobLink::Tag(tag.to_string());
             registry
-                .storage_engine
                 .create_link(namespace, &tag_link, &test_digest)
                 .await
                 .unwrap();
