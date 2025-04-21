@@ -112,7 +112,7 @@ pub mod tests {
         let manifest = demo_manifest();
         let expected_descriptor = Descriptor {
             media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
-            digest: "".to_string(),
+            digest: String::new(),
             size: 0,
             annotations: HashMap::new(),
             artifact_type: Some("oci.image.index.v1".to_string()),

@@ -168,7 +168,7 @@ mod tests {
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/blobs/{}", namespace, digest))
+            .path_and_query(format!("/v2/{namespace}/blobs/{digest}"))
             .build()
             .unwrap();
 
@@ -283,7 +283,7 @@ mod tests {
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/blobs/{}", namespace, digest))
+            .path_and_query(format!("/v2/{namespace}/blobs/{digest}"))
             .build()
             .unwrap();
 
@@ -338,7 +338,7 @@ mod tests {
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/blobs/{}", namespace, digest))
+            .path_and_query(format!("/v2/{namespace}/blobs/{digest}"))
             .build()
             .unwrap();
 

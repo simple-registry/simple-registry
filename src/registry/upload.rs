@@ -173,7 +173,7 @@ mod tests {
                 assert!(location.starts_with(&format!("/v2/{namespace}/blobs/uploads/")));
                 assert!(!session_id.is_empty());
             }
-            _ => panic!("Expected Session response"),
+            StartUploadResponse::ExistingBlob(_) => panic!("Expected Session response"),
         }
 
         // Test starting upload with existing blob
@@ -186,7 +186,7 @@ mod tests {
             StartUploadResponse::ExistingBlob(existing_digest) => {
                 assert_eq!(existing_digest, digest);
             }
-            _ => panic!("Expected ExistingBlob response"),
+            StartUploadResponse::Session(..) => panic!("Expected ExistingBlob response"),
         }
     }
 

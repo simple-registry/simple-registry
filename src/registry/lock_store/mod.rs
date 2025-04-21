@@ -106,8 +106,7 @@ mod tests {
         let lock_store = LockStore::new(config).expect("Failed to create lock store");
 
         let Backend::Memory(_) = lock_store.backend else {
-            assert!(false);
-            return;
+            panic!("Expected Memory backend");
         };
 
         let config = LockStoreConfig {
@@ -119,8 +118,7 @@ mod tests {
         };
         let lock_store = LockStore::new(config).expect("Failed to create lock store");
         let Backend::Redis(_) = lock_store.backend else {
-            assert!(false);
-            return;
+            panic!("Expected Redis backend");
         };
     }
 }

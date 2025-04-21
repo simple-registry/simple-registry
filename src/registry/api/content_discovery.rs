@@ -225,8 +225,7 @@ mod tests {
         // Test getting referrers
         let uri = Uri::builder()
             .path_and_query(format!(
-                "/v2/{}/referrers/{}",
-                namespace, base_manifest_digest
+                "/v2/{namespace}/referrers/{base_manifest_digest}"
             ))
             .build()
             .unwrap();
@@ -365,7 +364,7 @@ mod tests {
 
         // Test without pagination
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/tags/list", namespace))
+            .path_and_query(format!("/v2/{namespace}/tags/list"))
             .build()
             .unwrap();
 
@@ -389,18 +388,23 @@ mod tests {
         let mut reader = response.into_async_read();
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
+
         let tag_list: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(tag_list["name"].as_str().unwrap(), namespace);
-        let tags_list = tag_list["tags"].as_array().unwrap();
-        assert_eq!(tags_list.len(), tags.len());
+
+        let name = tag_list["name"].as_str().unwrap();
+        let returned_tags = tag_list["tags"].as_array().unwrap();
+
+        assert_eq!(name, namespace);
+        assert_eq!(returned_tags.len(), tags.len());
+
         for tag in &tags {
-            assert!(tags_list.iter().any(|t| t.as_str().unwrap() == *tag));
+            assert!(returned_tags.iter().any(|t| t.as_str().unwrap() == *tag));
         }
         assert!(!has_link);
 
         // Test with pagination
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/tags/list?n=2", namespace))
+            .path_and_query(format!("/v2/{namespace}/tags/list?n=2"))
             .build()
             .unwrap();
 
@@ -425,9 +429,12 @@ mod tests {
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         let tag_list: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(tag_list["name"].as_str().unwrap(), namespace);
-        let tags_list = tag_list["tags"].as_array().unwrap();
-        assert_eq!(tags_list.len(), 2);
+
+        let name = tag_list["name"].as_str().unwrap();
+        let tags = tag_list["tags"].as_array().unwrap();
+
+        assert_eq!(name, namespace);
+        assert_eq!(tags.len(), 2);
         assert!(has_link);
     }
 

@@ -105,8 +105,7 @@ mod tests {
         let cache = CacheStore::new(config).expect("Failed to create cache");
 
         let Backend::Memory(_) = cache.backend else {
-            assert!(false);
-            return;
+            panic!("Expected Memory backend");
         };
 
         let config = CacheStoreConfig {
@@ -118,8 +117,7 @@ mod tests {
         let cache = CacheStore::new(config).unwrap();
 
         let Backend::Redis(_) = cache.backend else {
-            assert!(false);
-            return;
+            panic!("Expected Redis backend");
         };
     }
 }

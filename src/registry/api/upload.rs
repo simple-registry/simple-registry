@@ -266,7 +266,7 @@ mod tests {
 
         // Test start upload without digest
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/blobs/uploads/", namespace))
+            .path_and_query(format!("/v2/{namespace}/blobs/uploads/"))
             .build()
             .unwrap();
 
@@ -287,7 +287,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let location = response.get_header(LOCATION).unwrap();
-        assert!(location.starts_with(&format!("/v2/{}/blobs/uploads/", namespace)));
+        assert!(location.starts_with(&format!("/v2/{namespace}/blobs/uploads/")));
         let uuid = response.get_header(DOCKER_UPLOAD_UUID).unwrap();
         assert!(!uuid.is_empty());
         assert_eq!(response.get_header(RANGE), Some("0-0".to_string()));
@@ -298,8 +298,7 @@ mod tests {
 
         let uri = Uri::builder()
             .path_and_query(format!(
-                "/v2/{}/blobs/uploads/?digest={}",
-                namespace, digest
+                "/v2/{namespace}/blobs/uploads/?digest={digest}"
             ))
             .build()
             .unwrap();
@@ -322,7 +321,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(
             response.get_header(LOCATION),
-            Some(format!("/v2/{}/blobs/{}", namespace, digest))
+            Some(format!("/v2/{namespace}/blobs/{digest}"))
         );
         assert_eq!(
             response.get_header(DOCKER_CONTENT_DIGEST),
@@ -366,7 +365,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             response.get_header(LOCATION),
-            Some(format!("/v2/{}/blobs/uploads/{}", namespace, uuid))
+            Some(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
         );
         assert_eq!(response.get_header(RANGE), Some("0-0".to_string()));
         assert_eq!(
@@ -399,7 +398,7 @@ mod tests {
             .unwrap();
 
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/blobs/uploads/{}", namespace, uuid))
+            .path_and_query(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
             .build()
             .unwrap();
 
@@ -423,7 +422,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         assert_eq!(
             response.get_header(LOCATION),
-            Some(format!("/v2/{}/blobs/uploads/{}", namespace, uuid))
+            Some(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
         );
         assert_eq!(response.get_header(RANGE), Some("0-0".to_string()));
         assert_eq!(response.get_header(CONTENT_LENGTH), Some("0".to_string()));
@@ -473,8 +472,7 @@ mod tests {
 
         let uri = Uri::builder()
             .path_and_query(format!(
-                "/v2/{}/blobs/uploads/{}?digest={}",
-                namespace, uuid, digest
+                "/v2/{namespace}/blobs/uploads/{uuid}?digest={digest}"
             ))
             .build()
             .unwrap();
@@ -498,7 +496,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(
             response.get_header(LOCATION),
-            Some(format!("/v2/{}/blobs/{}", namespace, digest))
+            Some(format!("/v2/{namespace}/blobs/{digest}"))
         );
         assert_eq!(
             response.get_header(DOCKER_CONTENT_DIGEST),

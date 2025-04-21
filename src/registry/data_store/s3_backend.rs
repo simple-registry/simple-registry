@@ -1304,7 +1304,7 @@ mod tests {
     use uuid::Uuid;
 
     // Helper function to create a test S3Backend
-    async fn create_test_backend() -> S3Backend {
+    fn create_test_backend() -> S3Backend {
         let config = StorageS3Config {
             endpoint: "http://127.0.0.1:9000".to_string(),
             region: "region".to_string(),
@@ -1329,70 +1329,70 @@ mod tests {
             .delete_object_with_prefix(&backend.tree.prefix)
             .await
         {
-            println!("Warning: Failed to clean up test data: {:?}", e);
+            println!("Warning: Failed to clean up test data: {e:?}");
         }
     }
 
     // Generic DataStore trait tests
     #[tokio::test]
     async fn test_list_namespaces() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_list_namespaces(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_list_tags() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_list_tags(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_list_referrers() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_list_referrers(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_list_uploads() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_list_uploads(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_list_blobs() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_list_blobs(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_list_revisions() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_list_revisions(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_blob_operations() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_blob_operations(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_upload_operations() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_upload_operations(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_link_operations() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_link_operations(&backend).await;
         cleanup_test_prefix(&backend).await;
     }

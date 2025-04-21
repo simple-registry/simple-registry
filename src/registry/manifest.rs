@@ -399,7 +399,7 @@ mod tests {
         // Verify manifest was stored
         let stored_manifest = registry
             .get_manifest(
-                &registry.validate_namespace(namespace).unwrap(),
+                registry.validate_namespace(namespace).unwrap(),
                 &[media_type.clone()],
                 namespace,
                 Reference::Tag(tag.to_string()),
@@ -457,7 +457,7 @@ mod tests {
         // Test get manifest by tag
         let manifest = registry
             .get_manifest(
-                &registry.validate_namespace(namespace).unwrap(),
+                registry.validate_namespace(namespace).unwrap(),
                 &[media_type.clone()],
                 namespace,
                 Reference::Tag(tag.to_string()),
@@ -472,7 +472,7 @@ mod tests {
         // Test get manifest by digest
         let manifest = registry
             .get_manifest(
-                &registry.validate_namespace(namespace).unwrap(),
+                registry.validate_namespace(namespace).unwrap(),
                 &[media_type.clone()],
                 namespace,
                 Reference::Digest(response.digest.clone()),
@@ -516,7 +516,7 @@ mod tests {
         // Test head manifest by tag
         let manifest = registry
             .head_manifest(
-                &registry.validate_namespace(namespace).unwrap(),
+                registry.validate_namespace(namespace).unwrap(),
                 &[media_type.clone()],
                 namespace,
                 Reference::Tag(tag.to_string()),
@@ -531,7 +531,7 @@ mod tests {
         // Test head manifest by digest
         let manifest = registry
             .head_manifest(
-                &registry.validate_namespace(namespace).unwrap(),
+                registry.validate_namespace(namespace).unwrap(),
                 &[media_type.clone()],
                 namespace,
                 Reference::Digest(response.digest.clone()),
@@ -581,7 +581,7 @@ mod tests {
         // Verify tag is deleted
         assert!(registry
             .get_manifest(
-                &registry.validate_namespace(namespace).unwrap(),
+                registry.validate_namespace(namespace).unwrap(),
                 &[media_type.clone()],
                 namespace,
                 Reference::Tag(tag.to_string()),
@@ -598,7 +598,7 @@ mod tests {
         // Verify digest is deleted
         assert!(registry
             .get_manifest(
-                &registry.validate_namespace(namespace).unwrap(),
+                registry.validate_namespace(namespace).unwrap(),
                 &[media_type.clone()],
                 namespace,
                 Reference::Digest(response.digest),

@@ -439,8 +439,8 @@ mod tests {
         let policies = vec![];
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
-            pushed_at: 1710441600,
-            last_pulled_at: 1710441600,
+            pushed_at: 1_710_441_600,
+            last_pulled_at: 1_710_441_600,
         };
         assert!(!manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
     }
@@ -450,8 +450,8 @@ mod tests {
         let policies = vec![Program::compile("image.tag == 'latest'").unwrap()];
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
-            pushed_at: 1710441600,
-            last_pulled_at: 1710441600,
+            pushed_at: 1_710_441_600,
+            last_pulled_at: 1_710_441_600,
         };
         assert!(!manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
     }
@@ -461,8 +461,8 @@ mod tests {
         let policies = vec![Program::compile("image.tag == 'latest'").unwrap()];
         let manifest = ManifestImage {
             tag: Some("x".to_string()),
-            pushed_at: 1710441600,
-            last_pulled_at: 1710441600,
+            pushed_at: 1_710_441_600,
+            last_pulled_at: 1_710_441_600,
         };
         assert!(manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
     }
@@ -472,8 +472,8 @@ mod tests {
         let policies = vec![Program::compile("image.tag").unwrap()];
         let manifest = ManifestImage {
             tag: None,
-            pushed_at: 1710441600,
-            last_pulled_at: 1710441600,
+            pushed_at: 1_710_441_600,
+            last_pulled_at: 1_710_441_600,
         };
         assert!(!manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
     }
@@ -483,8 +483,8 @@ mod tests {
         let policies = vec![Program::compile("now() + days(15) == now() + 86400 * 15").unwrap()];
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
-            pushed_at: 1710441600,
-            last_pulled_at: 1710441600,
+            pushed_at: 1_710_441_600,
+            last_pulled_at: 1_710_441_600,
         };
 
         assert!(!manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
@@ -496,8 +496,8 @@ mod tests {
 
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
-            pushed_at: 1710441600,
-            last_pulled_at: 1710441600,
+            pushed_at: 1_710_441_600,
+            last_pulled_at: 1_710_441_600,
         };
 
         assert!(!manifest_should_be_purged(
@@ -510,8 +510,8 @@ mod tests {
 
         let manifest = ManifestImage {
             tag: Some("x".to_string()),
-            pushed_at: 1710441600,
-            last_pulled_at: 1710441600,
+            pushed_at: 1_710_441_600,
+            last_pulled_at: 1_710_441_600,
         };
         assert!(manifest_should_be_purged(
             &policies,
@@ -528,8 +528,8 @@ mod tests {
 
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
-            pushed_at: 1710441600,
-            last_pulled_at: 1710441600,
+            pushed_at: 1_710_441_600,
+            last_pulled_at: 1_710_441_600,
         };
 
         assert!(!manifest_should_be_purged(
@@ -542,8 +542,8 @@ mod tests {
 
         let manifest = ManifestImage {
             tag: Some("x".to_string()),
-            pushed_at: 1710441600,
-            last_pulled_at: 1710441600,
+            pushed_at: 1_710_441_600,
+            last_pulled_at: 1_710_441_600,
         };
         assert!(manifest_should_be_purged(
             &policies,
@@ -602,7 +602,7 @@ mod tests {
         for (tag, digest) in tag_digests {
             let result = new_registry
                 .get_manifest(
-                    &new_registry.validate_namespace(namespace).unwrap(),
+                    new_registry.validate_namespace(namespace).unwrap(),
                     &[media_type.clone()],
                     namespace,
                     Reference::Tag(tag.clone()),
@@ -706,7 +706,7 @@ mod tests {
         // Verify manifest still exists
         let manifest = registry
             .get_manifest(
-                &registry.validate_namespace(namespace).unwrap(),
+                registry.validate_namespace(namespace).unwrap(),
                 &[media_type.clone()],
                 namespace,
                 Reference::Tag(tag.to_string()),
