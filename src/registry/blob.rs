@@ -302,10 +302,12 @@ mod tests {
         let layer_link = BlobLink::Layer(digest.clone());
         let config_link = BlobLink::Config(digest.clone());
         registry
+            .storage_engine
             .create_link(namespace, &layer_link, &digest)
             .await
             .unwrap();
         registry
+            .storage_engine
             .create_link(namespace, &config_link, &digest)
             .await
             .unwrap();

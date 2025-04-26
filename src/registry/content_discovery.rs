@@ -96,6 +96,7 @@ mod tests {
             .unwrap();
         let tag_link = BlobLink::Tag("latest".to_string());
         registry
+            .storage_engine
             .create_link(namespace, &tag_link, &test_digest)
             .await
             .unwrap();
@@ -173,6 +174,7 @@ mod tests {
         for tag in &tags {
             let tag_link = BlobLink::Tag(tag.to_string());
             registry
+                .storage_engine
                 .create_link(namespace, &tag_link, &test_digest)
                 .await
                 .unwrap();

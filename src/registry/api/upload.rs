@@ -297,9 +297,7 @@ mod tests {
         let digest = registry.storage_engine.create_blob(content).await.unwrap();
 
         let uri = Uri::builder()
-            .path_and_query(format!(
-                "/v2/{namespace}/blobs/uploads/?digest={digest}"
-            ))
+            .path_and_query(format!("/v2/{namespace}/blobs/uploads/?digest={digest}"))
             .build()
             .unwrap();
 

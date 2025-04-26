@@ -221,10 +221,12 @@ mod tests {
         let config_link = BlobLink::Config(digest.clone());
         let latest_link = BlobLink::Tag("latest".to_string());
         registry
+            .storage_engine
             .create_link(namespace, &layer_link, &digest)
             .await
             .unwrap();
         registry
+            .storage_engine
             .create_link(namespace, &config_link, &digest)
             .await
             .unwrap();

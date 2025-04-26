@@ -72,10 +72,16 @@ impl LockStore {
     ///
     /// * `Error::BackendError` if the lock could not be acquired
     #[instrument(skip(self))]
-    pub async fn acquire_write_lock(&self, key: &str) -> Result<WriteLockGuard, Error> {
+    pub async fn acquire_write_lock<S>(&self, key: S) -> Result<WriteLockGuard, Error>
+    where
+        S: AsRef<str> + Debug,
+    {
         match &self.backend {
             Backend::Redis(lock) => {
-                let guard = lock.acquire_lock(key).await.map(WriteLockGuard::Redis)?;
+                let guard = lock
+                    .acquire_lock(key.as_ref())
+                    .await
+                    .map(WriteLockGuard::Redis)?;
                 if let WriteLockGuard::Redis(_redis_guard) = &guard {
                     debug!("Acquired write lock for key");
                 }
@@ -83,7 +89,7 @@ impl LockStore {
                 Ok(guard)
             }
             Backend::Memory(lock) => {
-                let guard = WriteLockGuard::Memory(lock.acquire_lock(key).await);
+                let guard = WriteLockGuard::Memory(lock.acquire_lock(key.as_ref()).await);
                 if let WriteLockGuard::Memory(_in_memory_guard) = &guard {
                     debug!("Acquired write lock for key");
                 }

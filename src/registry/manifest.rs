@@ -224,9 +224,13 @@ impl<D: DataStore> Registry<D> {
                 let digest = self.storage_engine.create_blob(body).await?;
 
                 let link = BlobLink::Tag(tag);
-                self.create_link(namespace, &link, &digest).await?;
+                self.storage_engine
+                    .create_link(namespace, &link, &digest)
+                    .await?;
                 let link = BlobLink::Digest(digest.clone());
-                self.create_link(namespace, &link, &digest).await?;
+                self.storage_engine
+                    .create_link(namespace, &link, &digest)
+                    .await?;
 
                 digest
             }
@@ -240,7 +244,9 @@ impl<D: DataStore> Registry<D> {
                     ));
                 }
                 let link = BlobLink::Digest(digest.clone());
-                self.create_link(namespace, &link, &digest).await?;
+                self.storage_engine
+                    .create_link(namespace, &link, &digest)
+                    .await?;
 
                 digest
             }
@@ -248,17 +254,23 @@ impl<D: DataStore> Registry<D> {
 
         if let Some(subject) = &manifest_digests.subject {
             let link = BlobLink::Referrer(subject.clone(), digest.clone());
-            self.create_link(namespace, &link, &digest).await?;
+            self.storage_engine
+                .create_link(namespace, &link, &digest)
+                .await?;
         }
 
         if let Some(config_digest) = manifest_digests.config {
             let link = BlobLink::Config(config_digest.clone());
-            self.create_link(namespace, &link, &config_digest).await?;
+            self.storage_engine
+                .create_link(namespace, &link, &config_digest)
+                .await?;
         }
 
         for layer_digest in manifest_digests.layers {
             let link = BlobLink::Layer(layer_digest.clone());
-            self.create_link(namespace, &link, &layer_digest).await?;
+            self.storage_engine
+                .create_link(namespace, &link, &layer_digest)
+                .await?;
         }
 
         Ok(PutManifestResponse {

@@ -1,12 +1,11 @@
 use crate::configuration::StorageFSConfig;
-use crate::registry::data_store::{DataStore, Error, LinkMetadata, LinkMetadataOperation, Reader};
+use crate::registry::data_store::{DataStore, Error, LinkMetadata, Reader};
 use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
 use crate::registry::utils::{BlobLink, BlobMetadata, DataPathBuilder};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use fs4::fs_std::FileExt;
 use sha2::{Digest as Sha256Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
@@ -180,14 +179,7 @@ impl FSBackend {
         }
 
         let mut file = File::create(&path)?;
-        file.lock_exclusive()?;
-
-        let result = file.write_all(contents);
-
-        #[allow(unstable_name_collisions)]
-        let unlock_result = file.unlock();
-
-        result.and(unlock_result)?;
+        file.write_all(contents)?;
 
         Ok(())
     }
@@ -196,50 +188,14 @@ impl FSBackend {
     where
         P: AsRef<Path>,
     {
-        let file = File::open(&path)?;
-        #[allow(unstable_name_collisions)]
-        file.lock_shared()?;
-
-        let result = fs::read(&path);
-
-        #[allow(unstable_name_collisions)]
-        let unlock_result = file.unlock();
-
-        match result {
-            Ok(content) => {
-                unlock_result?;
-                Ok(content)
-            }
-            Err(e) => {
-                let _ = unlock_result;
-                Err(e.into())
-            }
-        }
+        Ok(fs::read(&path)?)
     }
 
     fn read_string<P>(path: P) -> Result<String, Error>
     where
         P: AsRef<Path>,
     {
-        let file = File::open(&path)?;
-        #[allow(unstable_name_collisions)]
-        file.lock_shared()?;
-
-        let result = fs::read_to_string(&path);
-
-        #[allow(unstable_name_collisions)]
-        let unlock_result = file.unlock();
-
-        match result {
-            Ok(content) => {
-                unlock_result?;
-                Ok(content)
-            }
-            Err(e) => {
-                let _ = unlock_result;
-                Err(e.into())
-            }
-        }
+        Ok(fs::read_to_string(&path)?)
     }
 }
 
@@ -427,8 +383,6 @@ impl DataStore for FSBackend {
                     _ => error.into(),
                 }
             })?;
-
-        file.lock_exclusive()?;
         file.seek(SeekFrom::Start(upload_size))?;
 
         let path = self
@@ -441,24 +395,14 @@ impl DataStore for FSBackend {
         let mut buffer = vec![0; 8192];
         let mut wrote_size = 0;
 
-        let result = async {
-            while let Ok(size) = stream.read(&mut buffer).await {
-                if size == 0 {
-                    break;
-                }
-                file.write_all(&buffer[..size])?;
-                hash.update(&buffer[..size]);
-                wrote_size += size as u64;
+        while let Ok(size) = stream.read(&mut buffer).await {
+            if size == 0 {
+                break;
             }
-            Ok::<_, Error>(())
+            file.write_all(&buffer[..size])?;
+            hash.update(&buffer[..size]);
+            wrote_size += size as u64;
         }
-        .await;
-
-        #[allow(unstable_name_collisions)]
-        let unlock_result = file.unlock();
-
-        result?;
-        unlock_result?;
 
         let path =
             self.tree
@@ -665,76 +609,105 @@ impl DataStore for FSBackend {
         Ok(Box::new(file.tokio_io()))
     }
 
-    #[instrument(skip(self, operation))]
-    async fn manage_link(
+    async fn read_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
+        let _link_guard = self.lock_store.acquire_write_lock(link.to_string()); // XXX: read lock?
+        let link_path = self.tree.get_link_path(link, namespace);
+        Self::read_file(&link_path).and_then(LinkMetadata::from_bytes)
+    }
+
+    async fn create_link(
         &self,
         namespace: &str,
         link: &BlobLink,
-        operation: LinkMetadataOperation,
+        digest: &Digest,
     ) -> Result<LinkMetadata, Error> {
+        let _link_guard = self.lock_store.acquire_write_lock(link.to_string());
         let link_path = self.tree.get_link_path(link, namespace);
-        let _guard = self.lock_store.acquire_write_lock(&link.to_string()).await;
-
         let link_metadata = Self::read_file(&link_path).and_then(LinkMetadata::from_bytes);
 
-        match operation {
-            LinkMetadataOperation::Read => link_metadata,
-            LinkMetadataOperation::Create(new_metadata) => {
-                if let Ok(link_metadata) = &link_metadata {
-                    if link_metadata.target != new_metadata.target {
-                        self.update_blob_index(namespace, &link_metadata.target, |index| {
-                            index.remove(link);
-                        })
-                        .await?;
-                        self.update_blob_index(namespace, &new_metadata.target, |index| {
-                            index.insert(link.clone());
-                        })
-                        .await?;
-                    }
-                } else {
-                    self.update_blob_index(namespace, &new_metadata.target, |index| {
-                        index.insert(link.clone());
-                    })
-                    .await?;
-                }
-
-                let serialized_metadata = serde_json::to_vec(&new_metadata)?;
-                Self::write_file(&link_path, &serialized_metadata)?;
-                Ok(new_metadata)
-            }
-            LinkMetadataOperation::Update(update_metadata) => {
-                let mut link_metadata = link_metadata?;
-                link_metadata.accessed_at = update_metadata.accessed_at;
-
-                let serialized_metadata = serde_json::to_vec(&link_metadata)?;
-                Self::write_file(&link_path, &serialized_metadata)?;
-                Ok(link_metadata)
-            }
-            LinkMetadataOperation::Delete => {
-                if let Ok(link_metadata) = &link_metadata {
-                    self.update_blob_index(namespace, &link_metadata.target, |index| {
-                        index.remove(link);
-                    })
-                    .await?;
-                }
-
-                let _guard = self
+        // overwriting an existing link!
+        if let Ok(link_metadata) = &link_metadata {
+            if &link_metadata.target != digest {
+                let _old_blob_guard = self
                     .lock_store
-                    .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
+                    .acquire_write_lock(link_metadata.target.as_str())
                     .await;
-
-                if fs::metadata(&link_path).is_err() {
-                    return link_metadata;
-                }
-
-                let path = self.tree.get_link_container_path(link, namespace);
-                debug!("Deleting link at path: {path}");
-
-                let _ = self.delete_empty_parent_dirs(&path).await;
-
-                link_metadata
+                let _new_blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await;
+                self.update_blob_index(namespace, &link_metadata.target, |index| {
+                    index.remove(link);
+                })
+                .await?;
+                self.update_blob_index(namespace, digest, |index| {
+                    index.insert(link.clone());
+                })
+                .await?;
             }
+        } else {
+            let _new_blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await;
+            self.update_blob_index(namespace, digest, |index| {
+                index.insert(link.clone());
+            })
+            .await?;
         }
+
+        let metadata = LinkMetadata {
+            target: digest.clone(),
+            created_at: Some(Utc::now()),
+            accessed_at: None,
+        };
+
+        let serialized_metadata = serde_json::to_vec(&metadata)?;
+        Self::write_file(&link_path, &serialized_metadata)?;
+        Ok(metadata)
+    }
+
+    async fn update_link(
+        &self,
+        namespace: &str,
+        link: &BlobLink,
+        accessed_at: Option<DateTime<Utc>>,
+    ) -> Result<LinkMetadata, Error> {
+        let _link_guard = self.lock_store.acquire_write_lock(link.to_string());
+        let link_path = self.tree.get_link_path(link, namespace);
+        let mut link_metadata = Self::read_file(&link_path).and_then(LinkMetadata::from_bytes)?;
+
+        link_metadata.accessed_at = accessed_at;
+
+        let serialized_metadata = serde_json::to_vec(&link_metadata)?;
+        Self::write_file(&link_path, &serialized_metadata)?;
+        Ok(link_metadata)
+    }
+
+    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
+        let _link_guard = self.lock_store.acquire_write_lock(link.to_string());
+        let link_path = self.tree.get_link_path(link, namespace);
+        let link_metadata = Self::read_file(&link_path).and_then(LinkMetadata::from_bytes)?;
+
+        let _blob_guard = self
+            .lock_store
+            .acquire_write_lock(link_metadata.target.as_str())
+            .await;
+
+        self.update_blob_index(namespace, &link_metadata.target, |index| {
+            index.remove(link);
+        })
+        .await?;
+
+        let _guard = self
+            .lock_store
+            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
+            .await;
+
+        if fs::metadata(&link_path).is_err() {
+            return Ok(link_metadata);
+        }
+
+        let path = self.tree.get_link_container_path(link, namespace);
+        debug!("Deleting link at path: {path}");
+
+        let _ = self.delete_empty_parent_dirs(&path).await;
+
+        Ok(link_metadata)
     }
 }
 
@@ -742,7 +715,6 @@ impl DataStore for FSBackend {
 mod tests {
     use super::*;
     use crate::configuration::{LockStoreConfig, StorageFSConfig};
-    use crate::registry::data_store::tests::create_link;
     use crate::registry::data_store::tests::{
         test_datastore_blob_operations, test_datastore_link_operations, test_datastore_list_blobs,
         test_datastore_list_namespaces, test_datastore_list_referrers,
@@ -832,22 +804,14 @@ mod tests {
         let digest1 = backend.create_blob(b"content1").await.unwrap();
         let digest2 = backend.create_blob(b"content2").await.unwrap();
 
-        create_link(
-            &backend,
-            namespace,
-            &BlobLink::Tag("file1.txt".to_string()),
-            &digest1,
-        )
-        .await
-        .unwrap();
-        create_link(
-            &backend,
-            namespace,
-            &BlobLink::Tag("file2.txt".to_string()),
-            &digest2,
-        )
-        .await
-        .unwrap();
+        backend
+            .create_link(namespace, &BlobLink::Tag("file1.txt".to_string()), &digest1)
+            .await
+            .unwrap();
+        backend
+            .create_link(namespace, &BlobLink::Tag("file2.txt".to_string()), &digest2)
+            .await
+            .unwrap();
 
         let tags_dir = backend.tree.manifest_tags_dir(namespace);
 

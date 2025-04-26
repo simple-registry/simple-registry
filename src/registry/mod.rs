@@ -27,10 +27,7 @@ use crate::configuration::RepositoryConfig;
 use crate::registry::cache_store::CacheStore;
 pub use repository::Repository;
 
-use crate::registry::data_store::{
-    DataStore, LinkMetadata, LinkMetadataOperation, LinkMetadataUpdate,
-};
-use crate::registry::oci_types::Digest;
+use crate::registry::data_store::{DataStore, LinkMetadata};
 use crate::registry::utils::BlobLink;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
@@ -102,60 +99,24 @@ impl<D: DataStore> Registry<D> {
     }
 
     #[instrument(skip(self))]
-    async fn read_link(
-        &self,
-        name: &str,
-        link: &BlobLink,
-    ) -> Result<LinkMetadata, crate::registry::data_store::Error> {
+    async fn read_link(&self, name: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
         if self.update_pull_time {
-            let update = LinkMetadataUpdate {
-                accessed_at: Some(Utc::now()),
-            };
-
-            self.storage_engine
-                .manage_link(name, link, LinkMetadataOperation::Update(update))
-                .await
+            Ok(self
+                .storage_engine
+                .update_link(name, link, Some(Utc::now()))
+                .await?)
         } else {
-            self.storage_engine
-                .manage_link(name, link, LinkMetadataOperation::Read)
-                .await
+            Ok(self.storage_engine.read_link(name, link).await?)
         }
     }
 
     #[instrument(skip(self))]
-    async fn create_link(
-        &self,
-        namespace: &str,
-        link: &BlobLink,
-        digest: &Digest,
-    ) -> Result<(), crate::registry::data_store::Error> {
-        let metadata = LinkMetadata {
-            target: digest.clone(),
-            created_at: Some(Utc::now()),
-            accessed_at: None,
-        };
-
-        self.storage_engine
-            .manage_link(namespace, link, LinkMetadataOperation::Create(metadata))
-            .await?;
-
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
-    async fn delete_link(
-        &self,
-        namespace: &str,
-        link: &BlobLink,
-    ) -> Result<(), crate::registry::data_store::Error> {
-        let metadata = self
-            .storage_engine
-            .manage_link(namespace, link, LinkMetadataOperation::Delete)
-            .await;
+    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
+        let metadata = self.storage_engine.delete_link(namespace, link).await;
 
         match metadata {
-            Ok(_) | Err(crate::registry::data_store::Error::ReferenceNotFound) => Ok(()),
-            Err(e) => Err(e),
+            Ok(_) | Err(data_store::Error::ReferenceNotFound) => Ok(()),
+            Err(e) => Err(e.into()),
         }
     }
 }
@@ -242,6 +203,7 @@ pub(crate) mod test_utils {
         // Create a tag to ensure the namespace exists
         let tag_link = BlobLink::Tag("latest".to_string());
         registry
+            .storage_engine
             .create_link(namespace, &tag_link, &digest)
             .await
             .unwrap();

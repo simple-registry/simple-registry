@@ -22,7 +22,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, error, instrument};
 
 use crate::configuration::StorageS3Config;
-use crate::registry::data_store::{DataStore, Error, LinkMetadata, LinkMetadataOperation, Reader};
+use crate::registry::data_store::{DataStore, Error, LinkMetadata, Reader};
 use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
@@ -1228,66 +1228,103 @@ impl DataStore for S3Backend {
         Ok(Box::new(res.body.into_async_read()))
     }
 
-    #[instrument(skip(self, operation))]
-    async fn manage_link(
+    async fn read_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
+        let _link_guard = self.lock_store.acquire_write_lock(link.to_string()); // XXX: read lock?
+        let link_path = self.tree.get_link_path(link, namespace);
+        self.get_object_body_as_vec(&link_path, None)
+            .await
+            .and_then(LinkMetadata::from_bytes)
+    }
+
+    async fn create_link(
         &self,
         namespace: &str,
         link: &BlobLink,
-        operation: LinkMetadataOperation,
+        digest: &Digest,
     ) -> Result<LinkMetadata, Error> {
+        let _link_guard = self.lock_store.acquire_write_lock(link.to_string());
         let link_path = self.tree.get_link_path(link, namespace);
-        let _guard = self.lock_store.acquire_write_lock(&link.to_string()).await;
-
         let link_metadata = self
             .get_object_body_as_vec(&link_path, None)
             .await
             .and_then(LinkMetadata::from_bytes);
 
-        match operation {
-            LinkMetadataOperation::Read => link_metadata,
-            LinkMetadataOperation::Create(new_metadata) => {
-                if let Ok(link_metadata) = &link_metadata {
-                    if link_metadata.target != new_metadata.target {
-                        self.update_blob_index(namespace, &link_metadata.target, |index| {
-                            index.remove(link);
-                        })
-                        .await?;
-                        self.update_blob_index(namespace, &new_metadata.target, |index| {
-                            index.insert(link.clone());
-                        })
-                        .await?;
-                    }
-                } else {
-                    self.update_blob_index(namespace, &new_metadata.target, |index| {
-                        index.insert(link.clone());
-                    })
-                    .await?;
-                }
-
-                let serialized_metadata = serde_json::to_vec(&new_metadata)?;
-                self.put_object(&link_path, serialized_metadata).await?;
-                Ok(new_metadata)
+        // overwriting an existing link!
+        if let Ok(link_metadata) = &link_metadata {
+            if &link_metadata.target != digest {
+                let _old_blob_guard = self
+                    .lock_store
+                    .acquire_write_lock(link_metadata.target.as_str())
+                    .await;
+                let _new_blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await;
+                self.update_blob_index(namespace, &link_metadata.target, |index| {
+                    index.remove(link);
+                })
+                .await?;
+                self.update_blob_index(namespace, digest, |index| {
+                    index.insert(link.clone());
+                })
+                .await?;
             }
-            LinkMetadataOperation::Update(update_metadata) => {
-                let mut link_metadata = link_metadata?;
-                link_metadata.accessed_at = update_metadata.accessed_at;
-
-                let serialized_metadata = serde_json::to_vec(&link_metadata)?;
-                self.put_object(&link_path, serialized_metadata).await?;
-                Ok(link_metadata)
-            }
-            LinkMetadataOperation::Delete => {
-                if let Ok(link_metadata) = &link_metadata {
-                    self.update_blob_index(namespace, &link_metadata.target, |index| {
-                        index.remove(link);
-                    })
-                    .await?;
-                }
-
-                self.delete_object(&link_path).await?;
-                link_metadata
-            }
+        } else {
+            let _new_blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await;
+            self.update_blob_index(namespace, digest, |index| {
+                index.insert(link.clone());
+            })
+            .await?;
         }
+
+        let metadata = LinkMetadata {
+            target: digest.clone(),
+            created_at: Some(Utc::now()),
+            accessed_at: None,
+        };
+
+        let serialized_metadata = serde_json::to_vec(&metadata)?;
+        self.put_object(&link_path, serialized_metadata).await?;
+        Ok(metadata)
+    }
+
+    async fn update_link(
+        &self,
+        namespace: &str,
+        link: &BlobLink,
+        accessed_at: Option<DateTime<Utc>>,
+    ) -> Result<LinkMetadata, Error> {
+        let _link_guard = self.lock_store.acquire_write_lock(link.to_string());
+        let link_path = self.tree.get_link_path(link, namespace);
+        let mut link_metadata = self
+            .get_object_body_as_vec(&link_path, None)
+            .await
+            .and_then(LinkMetadata::from_bytes)?;
+
+        link_metadata.accessed_at = accessed_at;
+
+        let serialized_metadata = serde_json::to_vec(&link_metadata)?;
+        self.put_object(&link_path, serialized_metadata).await?;
+        Ok(link_metadata)
+    }
+
+    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
+        let _link_guard = self.lock_store.acquire_write_lock(link.to_string());
+        let link_path = self.tree.get_link_path(link, namespace);
+        let link_metadata = self
+            .get_object_body_as_vec(&link_path, None)
+            .await
+            .and_then(LinkMetadata::from_bytes)?;
+
+        let _blob_guard = self
+            .lock_store
+            .acquire_write_lock(link_metadata.target.as_str())
+            .await;
+
+        self.update_blob_index(namespace, &link_metadata.target, |index| {
+            index.remove(link);
+        })
+        .await?;
+
+        self.delete_object(&link_path).await?;
+        Ok(link_metadata)
     }
 }
 

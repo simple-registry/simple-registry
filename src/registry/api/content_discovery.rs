@@ -218,15 +218,14 @@ mod tests {
             referrer_manifest_digest.clone(),
         );
         registry
+            .storage_engine
             .create_link(namespace, &referrer_link, &referrer_manifest_digest)
             .await
             .unwrap();
 
         // Test getting referrers
         let uri = Uri::builder()
-            .path_and_query(format!(
-                "/v2/{namespace}/referrers/{base_manifest_digest}"
-            ))
+            .path_and_query(format!("/v2/{namespace}/referrers/{base_manifest_digest}"))
             .build()
             .unwrap();
 
@@ -280,6 +279,7 @@ mod tests {
             let (digest, _) = create_test_blob(registry, namespace, content).await;
             let tag_link = BlobLink::Tag("latest".to_string());
             registry
+                .storage_engine
                 .create_link(namespace, &tag_link, &digest)
                 .await
                 .unwrap();
@@ -357,6 +357,7 @@ mod tests {
         for tag in &tags {
             let tag_link = BlobLink::Tag(tag.to_string());
             registry
+                .storage_engine
                 .create_link(namespace, &tag_link, &digest)
                 .await
                 .unwrap();
