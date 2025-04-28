@@ -362,9 +362,7 @@ impl<D: DataStore> Registry<D> {
                     if let Err(error) = self.delete_link(namespace, link_reference).await {
                         warn!("Failed to delete old link: {error}");
                     }
-                    self.storage_engine
-                        .create_link(namespace, link_reference, digest)
-                        .await?;
+                    self.create_link(namespace, link_reference, digest).await?;
                 }
             }
         }
@@ -426,8 +424,9 @@ impl<D: DataStore> Registry<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::CacheStoreConfig;
+    use crate::configuration::{CacheStoreConfig, LockStoreConfig};
     use crate::registry::cache_store::CacheStore;
+    use crate::registry::lock_store::LockStore;
     use crate::registry::test_utils::{
         create_test_fs_backend, create_test_manifest, create_test_repository_config,
         create_test_s3_backend,
@@ -573,6 +572,7 @@ mod tests {
             repositories_config,
             registry.storage_engine.clone(),
             Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+            Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
         )
         .unwrap()
         .with_dry_run(false);
@@ -658,6 +658,7 @@ mod tests {
             create_test_repository_config(),
             registry.storage_engine.clone(),
             Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+            Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
         )
         .unwrap()
         .with_upload_timeout(Duration::seconds(0))
@@ -826,7 +827,6 @@ mod tests {
 
         // Create correct config link first
         registry
-            .storage_engine
             .create_link(
                 namespace,
                 &BlobLink::Config(config_digest.clone()),
@@ -837,7 +837,6 @@ mod tests {
 
         // Create manifest revision links and tag
         registry
-            .storage_engine
             .create_link(
                 namespace,
                 &BlobLink::Digest(manifest_digest.clone()),
@@ -846,7 +845,6 @@ mod tests {
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(
                 namespace,
                 &BlobLink::Digest(manifest_with_subject_digest.clone()),
@@ -855,7 +853,6 @@ mod tests {
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(
                 namespace,
                 &BlobLink::Tag("latest".to_string()),
@@ -866,7 +863,6 @@ mod tests {
 
         // Create incorrect links
         registry
-            .storage_engine
             .create_link(
                 namespace,
                 &BlobLink::Config(wrong_config_digest.clone()),
@@ -875,7 +871,6 @@ mod tests {
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(
                 namespace,
                 &BlobLink::Layer(wrong_layer_digest.clone()),
@@ -889,6 +884,7 @@ mod tests {
             create_test_repository_config(),
             registry.storage_engine.clone(),
             Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+            Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
         )
         .unwrap()
         .with_dry_run(false);
@@ -951,7 +947,6 @@ mod tests {
             .await
             .unwrap();
         new_registry
-            .storage_engine
             .create_link(
                 namespace,
                 &BlobLink::Digest(invalid_digest.clone()),
@@ -976,6 +971,7 @@ mod tests {
             create_test_repository_config(),
             registry.storage_engine.clone(),
             Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+            Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
         )
         .unwrap()
         .with_dry_run(false);
@@ -1030,22 +1026,18 @@ mod tests {
         let valid_link4 = BlobLink::Referrer(digest1.clone(), digest4.clone());
 
         registry
-            .storage_engine
             .create_link(namespace1, &valid_link1, &digest1)
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(namespace1, &valid_link2, &digest2)
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(namespace2, &valid_link3, &digest3)
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(namespace2, &valid_link4, &digest4)
             .await
             .unwrap();
@@ -1065,6 +1057,7 @@ mod tests {
             create_test_repository_config(),
             registry.storage_engine.clone(),
             Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+            Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
         )
         .unwrap()
         .with_dry_run(false);

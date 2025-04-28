@@ -28,6 +28,8 @@ use crate::registry::cache_store::CacheStore;
 pub use repository::Repository;
 
 use crate::registry::data_store::{DataStore, LinkMetadata};
+use crate::registry::lock_store::LockStore;
+use crate::registry::oci_types::Digest;
 use crate::registry::utils::BlobLink;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
@@ -39,6 +41,7 @@ static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 pub struct Registry<D> {
     storage_engine: Arc<D>,
+    lock_store: Arc<LockStore>,
     repositories: HashMap<String, Repository>,
     update_pull_time: bool,
     scrub_dry_run: bool,
@@ -57,6 +60,7 @@ impl<D: DataStore> Registry<D> {
         repositories_config: HashMap<String, RepositoryConfig>,
         storage_engine: Arc<D>,
         token_cache: Arc<CacheStore>,
+        lock_store: Arc<LockStore>,
     ) -> Result<Self, configuration::Error> {
         let mut repositories = HashMap::new();
         for (repository_name, repository_config) in repositories_config {
@@ -67,6 +71,7 @@ impl<D: DataStore> Registry<D> {
         let res = Self {
             update_pull_time: false, // TODO: expose configuration option
             storage_engine,
+            lock_store,
             repositories,
             scrub_dry_run: true,
             scrub_upload_timeout: Duration::days(1),
@@ -98,13 +103,68 @@ impl<D: DataStore> Registry<D> {
         }
     }
 
+    async fn create_link(
+        &self,
+        namespace: &str,
+        link: &BlobLink,
+        digest: &Digest,
+    ) -> Result<LinkMetadata, Error> {
+        let _guard = self.lock_store.acquire_write_lock(link.to_string()).await?;
+        let link_data = self.storage_engine.read_link(namespace, link).await;
+
+        // overwriting an existing link!
+        if let Ok(link_data) = link_data {
+            if &link_data.target != digest {
+                let _blob_guard = self
+                    .lock_store
+                    .acquire_write_lock(link_data.target.as_str())
+                    .await?;
+
+                self.storage_engine
+                    .update_blob_index(namespace, &link_data.target, |index| {
+                        index.remove(link);
+                    })
+                    .await?;
+
+                let _blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await?;
+                self.storage_engine
+                    .update_blob_index(namespace, digest, |index| {
+                        index.insert(link.clone());
+                    })
+                    .await?;
+            }
+        } else {
+            let _blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await?;
+            self.storage_engine
+                .update_blob_index(namespace, digest, |index| {
+                    index.insert(link.clone());
+                })
+                .await?;
+        }
+
+        let link_data = LinkMetadata {
+            target: digest.clone(),
+            created_at: Some(Utc::now()),
+            accessed_at: None,
+        };
+        self.storage_engine
+            .write_link(namespace, link, &link_data)
+            .await?;
+        Ok(link_data)
+    }
+
     #[instrument(skip(self))]
     async fn read_link(&self, name: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
+        let _guard = self.lock_store.acquire_write_lock(link.to_string()).await?;
+
         if self.update_pull_time {
-            Ok(self
-                .storage_engine
-                .update_link(name, link, Some(Utc::now()))
-                .await?)
+            let mut link_data = self.storage_engine.read_link(name, link).await?;
+            link_data.accessed_at = Some(Utc::now());
+
+            self.storage_engine
+                .write_link(name, link, &link_data)
+                .await?;
+            Ok(link_data)
         } else {
             Ok(self.storage_engine.read_link(name, link).await?)
         }
@@ -112,12 +172,24 @@ impl<D: DataStore> Registry<D> {
 
     #[instrument(skip(self))]
     async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
-        let metadata = self.storage_engine.delete_link(namespace, link).await;
+        let _guard = self.lock_store.acquire_write_lock(link.to_string()).await?;
+        let metadata = self.storage_engine.read_link(namespace, link).await;
 
-        match metadata {
-            Ok(_) | Err(data_store::Error::ReferenceNotFound) => Ok(()),
-            Err(e) => Err(e.into()),
-        }
+        let digest = match metadata {
+            Ok(link_data) => link_data.target,
+            Err(data_store::Error::ReferenceNotFound) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+
+        let _blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await?;
+
+        self.storage_engine.delete_link(namespace, link).await?;
+        self.storage_engine
+            .update_blob_index(namespace, &digest, |index| {
+                index.remove(link);
+            })
+            .await?;
+        Ok(())
     }
 }
 
@@ -156,14 +228,14 @@ pub(crate) mod test_utils {
         let root_dir = temp_dir.path().to_str().unwrap().to_string();
 
         let config = StorageFSConfig { root_dir };
-        let lock_store = lock_store::LockStore::new(LockStoreConfig::default()).unwrap();
-        let backend = FSBackend::new(config, lock_store);
-        let backend = Arc::new(backend);
+        let lock_store = Arc::new(LockStore::new(LockStoreConfig::default()).unwrap());
+        let backend = Arc::new(FSBackend::new(config, lock_store.clone()));
 
         let repositories_config = create_test_repository_config();
         let token_cache = Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap());
 
-        let registry = Registry::new(repositories_config, backend, token_cache).unwrap();
+        let registry =
+            Registry::new(repositories_config, backend, token_cache, lock_store).unwrap();
 
         (registry, temp_dir)
     }
@@ -182,14 +254,13 @@ pub(crate) mod test_utils {
             multipart_part_size: DataSize::WithUnit(5, "MB".to_string()),
         };
 
-        let lock_store = lock_store::LockStore::new(LockStoreConfig::default()).unwrap();
-        let backend = S3Backend::new(config, lock_store);
-        let backend = Arc::new(backend);
+        let lock_store = Arc::new(LockStore::new(LockStoreConfig::default()).unwrap());
+        let backend = Arc::new(S3Backend::new(config));
 
         let repositories_config = create_test_repository_config();
         let token_cache = Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap());
 
-        Registry::new(repositories_config, backend, token_cache).unwrap()
+        Registry::new(repositories_config, backend, token_cache, lock_store).unwrap()
     }
 
     pub async fn create_test_blob<D: DataStore>(
@@ -203,7 +274,6 @@ pub(crate) mod test_utils {
         // Create a tag to ensure the namespace exists
         let tag_link = BlobLink::Tag("latest".to_string());
         registry
-            .storage_engine
             .create_link(namespace, &tag_link, &digest)
             .await
             .unwrap();

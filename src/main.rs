@@ -3,8 +3,8 @@
 
 use crate::command::{argon, scrub, server};
 use crate::configuration::{
-    CacheStoreConfig, Configuration, DataStoreConfig, Error, ObservabilityConfig, RepositoryConfig,
-    ServerTlsConfig,
+    CacheStoreConfig, Configuration, DataStoreConfig, Error, LockStoreConfig, ObservabilityConfig,
+    RepositoryConfig, ServerTlsConfig,
 };
 use crate::registry::cache_store::CacheStore;
 use crate::registry::data_store::{DataStore, FSBackend, S3Backend};
@@ -20,7 +20,6 @@ use opentelemetry_sdk::Resource;
 use opentelemetry_semantic_conventions::attribute::SERVICE_VERSION;
 use opentelemetry_stdout as stdout;
 use std::collections::HashMap;
-use std::mem;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -110,14 +109,18 @@ fn set_fs_watcher<D: DataStore + 'static>(
                 }
             };
 
-            let registry =
-                match build_registry(config.cache_store, config.repository, data_store.clone()) {
-                    Ok(registry) => registry,
-                    Err(error) => {
-                        error!("Failed to create registry with new configuration: {error}");
-                        return;
-                    }
-                };
+            let registry = match build_registry(
+                config.cache_store,
+                config.lock_store,
+                config.repository,
+                data_store.clone(),
+            ) {
+                Ok(registry) => registry,
+                Err(error) => {
+                    error!("Failed to create registry with new configuration: {error}");
+                    return;
+                }
+            };
 
             if let Err(error) =
                 server.notify_config_change(config.server, &config.identity, registry)
@@ -150,12 +153,14 @@ fn set_fs_watcher<D: DataStore + 'static>(
 
 fn build_registry<D: DataStore>(
     cache_config: CacheStoreConfig,
+    lock_config: LockStoreConfig,
     repository_config: HashMap<String, RepositoryConfig>,
     data_store: Arc<D>,
 ) -> Result<Registry<D>, Error> {
+    let lock_store = Arc::new(LockStore::new(lock_config)?);
     let cache_store = Arc::new(CacheStore::new(cache_config)?);
 
-    Registry::new(repository_config, data_store, cache_store)
+    Registry::new(repository_config, data_store, cache_store, lock_store)
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -189,8 +194,7 @@ enum SubCommand {
 
 fn main() -> Result<(), command::Error> {
     let arguments: GlobalArguments = argh::from_env();
-
-    let mut config = Configuration::load(&arguments.config)?;
+    let config = Configuration::load(&arguments.config)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.max_concurrent_requests)
@@ -198,18 +202,18 @@ fn main() -> Result<(), command::Error> {
         .build()?;
 
     runtime.block_on(async move {
-        set_tracing(mem::take(&mut config.observability))?;
-        let lock_store = LockStore::new(mem::take(&mut config.lock_store))?;
+        set_tracing(config.observability.clone())?;
 
-        match mem::take(&mut config.storage) {
+        match config.storage.clone() {
             DataStoreConfig::FS(storage_config) => {
                 info!("Using filesystem backend");
+                let lock_store = Arc::new(LockStore::new(config.lock_store.clone())?);
                 let data_store = Arc::new(FSBackend::new(storage_config, lock_store));
                 handle_command(config, arguments, data_store).await
             }
             DataStoreConfig::S3(storage_config) => {
                 info!("Using S3 backend");
-                let data_store = Arc::new(S3Backend::new(storage_config, lock_store));
+                let data_store = Arc::new(S3Backend::new(storage_config));
                 handle_command(config, arguments, data_store).await
             }
         }
@@ -221,7 +225,12 @@ async fn handle_command<D: DataStore + 'static>(
     arguments: GlobalArguments,
     data_store: Arc<D>,
 ) -> Result<(), command::Error> {
-    let registry = build_registry(config.cache_store, config.repository, data_store.clone())?;
+    let registry = build_registry(
+        config.cache_store,
+        config.lock_store,
+        config.repository,
+        data_store.clone(),
+    )?;
 
     match arguments.nested {
         SubCommand::Argon(_) => argon::Command::run(),

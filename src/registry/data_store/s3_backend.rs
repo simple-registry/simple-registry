@@ -23,7 +23,6 @@ use tracing::{debug, error, instrument};
 
 use crate::configuration::StorageS3Config;
 use crate::registry::data_store::{DataStore, Error, LinkMetadata, Reader};
-use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
 use crate::registry::utils::{BlobLink, BlobMetadata, DataPathBuilder};
@@ -33,7 +32,6 @@ pub struct S3Backend {
     s3_client: S3Client,
     tree: Arc<DataPathBuilder>,
     bucket: String,
-    lock_store: Arc<LockStore>,
     multipart_copy_threshold: u64,
     multipart_copy_chunk_size: u64,
     multipart_copy_jobs: usize,
@@ -47,7 +45,7 @@ impl Debug for S3Backend {
 }
 
 impl S3Backend {
-    pub fn new(config: StorageS3Config, lock_store: LockStore) -> Self {
+    pub fn new(config: StorageS3Config) -> Self {
         let credentials = Credentials::new(
             config.access_key_id,
             config.secret_key,
@@ -76,7 +74,6 @@ impl S3Backend {
             s3_client,
             tree: Arc::new(DataPathBuilder::new(config.key_prefix.unwrap_or_default())),
             bucket: config.bucket,
-            lock_store: Arc::new(lock_store),
             multipart_copy_threshold: config.multipart_copy_threshold.to_u64(),
             multipart_copy_chunk_size: config.multipart_copy_chunk_size.to_u64(),
             multipart_copy_jobs: config.multipart_copy_jobs,
@@ -1084,11 +1081,6 @@ impl DataStore for S3Backend {
             hasher.to_digest()
         };
 
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-
         let parts = parts
             .iter()
             .enumerate()
@@ -1140,11 +1132,6 @@ impl DataStore for S3Backend {
         let mut hasher = Sha256::new();
         hasher.update(content);
         let digest = hasher.to_digest();
-
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
 
         let blob_path = self.tree.blob_path(&digest);
         self.put_object(&blob_path, content.to_vec()).await?;
@@ -1229,109 +1216,33 @@ impl DataStore for S3Backend {
     }
 
     async fn read_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
-        let _link_guard = self.lock_store.acquire_write_lock(link.to_string()); // XXX: read lock?
         let link_path = self.tree.get_link_path(link, namespace);
         self.get_object_body_as_vec(&link_path, None)
             .await
             .and_then(LinkMetadata::from_bytes)
     }
 
-    async fn create_link(
+    async fn write_link(
         &self,
         namespace: &str,
         link: &BlobLink,
-        digest: &Digest,
-    ) -> Result<LinkMetadata, Error> {
-        let _link_guard = self.lock_store.acquire_write_lock(link.to_string());
+        metadata: &LinkMetadata,
+    ) -> Result<(), Error> {
         let link_path = self.tree.get_link_path(link, namespace);
-        let link_metadata = self
-            .get_object_body_as_vec(&link_path, None)
-            .await
-            .and_then(LinkMetadata::from_bytes);
-
-        // overwriting an existing link!
-        if let Ok(link_metadata) = &link_metadata {
-            if &link_metadata.target != digest {
-                let _old_blob_guard = self
-                    .lock_store
-                    .acquire_write_lock(link_metadata.target.as_str())
-                    .await;
-                let _new_blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await;
-                self.update_blob_index(namespace, &link_metadata.target, |index| {
-                    index.remove(link);
-                })
-                .await?;
-                self.update_blob_index(namespace, digest, |index| {
-                    index.insert(link.clone());
-                })
-                .await?;
-            }
-        } else {
-            let _new_blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await;
-            self.update_blob_index(namespace, digest, |index| {
-                index.insert(link.clone());
-            })
-            .await?;
-        }
-
-        let metadata = LinkMetadata {
-            target: digest.clone(),
-            created_at: Some(Utc::now()),
-            accessed_at: None,
-        };
-
-        let serialized_metadata = serde_json::to_vec(&metadata)?;
-        self.put_object(&link_path, serialized_metadata).await?;
-        Ok(metadata)
+        let serialized_link_data = serde_json::to_vec(metadata)?;
+        self.put_object(&link_path, serialized_link_data).await
     }
 
-    async fn update_link(
-        &self,
-        namespace: &str,
-        link: &BlobLink,
-        accessed_at: Option<DateTime<Utc>>,
-    ) -> Result<LinkMetadata, Error> {
-        let _link_guard = self.lock_store.acquire_write_lock(link.to_string());
+    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
         let link_path = self.tree.get_link_path(link, namespace);
-        let mut link_metadata = self
-            .get_object_body_as_vec(&link_path, None)
-            .await
-            .and_then(LinkMetadata::from_bytes)?;
-
-        link_metadata.accessed_at = accessed_at;
-
-        let serialized_metadata = serde_json::to_vec(&link_metadata)?;
-        self.put_object(&link_path, serialized_metadata).await?;
-        Ok(link_metadata)
-    }
-
-    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
-        let _link_guard = self.lock_store.acquire_write_lock(link.to_string());
-        let link_path = self.tree.get_link_path(link, namespace);
-        let link_metadata = self
-            .get_object_body_as_vec(&link_path, None)
-            .await
-            .and_then(LinkMetadata::from_bytes)?;
-
-        let _blob_guard = self
-            .lock_store
-            .acquire_write_lock(link_metadata.target.as_str())
-            .await;
-
-        self.update_blob_index(namespace, &link_metadata.target, |index| {
-            index.remove(link);
-        })
-        .await?;
-
-        self.delete_object(&link_path).await?;
-        Ok(link_metadata)
+        self.delete_object(&link_path).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::{DataSize, LockStoreConfig, StorageS3Config};
+    use crate::configuration::{DataSize, StorageS3Config};
     use crate::registry::data_store::tests::{
         test_datastore_blob_operations, test_datastore_link_operations, test_datastore_list_blobs,
         test_datastore_list_namespaces, test_datastore_list_referrers,
@@ -1355,9 +1266,7 @@ mod tests {
             multipart_part_size: DataSize::WithoutUnit(5 * 1024 * 1024), // 5MB
         };
 
-        let lock_store = LockStore::new(LockStoreConfig::default()).unwrap();
-
-        S3Backend::new(config, lock_store)
+        S3Backend::new(config)
     }
 
     // Helper to clean up test data

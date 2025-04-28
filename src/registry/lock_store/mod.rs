@@ -91,7 +91,7 @@ impl LockStore {
             Backend::Memory(lock) => {
                 let guard = WriteLockGuard::Memory(lock.acquire_lock(key.as_ref()).await);
                 if let WriteLockGuard::Memory(_in_memory_guard) = &guard {
-                    debug!("Acquired write lock for key");
+                    debug!("Acquired write lock for key {key:?}");
                 }
 
                 Ok(guard)

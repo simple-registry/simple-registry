@@ -169,9 +169,6 @@ impl<D: DataStore> Registry<D> {
             let mut content = Vec::new();
             res.into_async_read().read_to_end(&mut content).await?;
 
-            // NOTE: a side effect of storing the manifest locally at this stage is that blobs indexes
-            // are also created locally even though the blob itself may not yet be available locally.
-            // This behavior is specific to pull-through repositories.
             self.put_manifest(namespace, reference.clone(), media_type.as_ref(), &content)
                 .await?;
 
@@ -195,8 +192,7 @@ impl<D: DataStore> Registry<D> {
 
         let content = self.storage_engine.read_blob(&link.target).await?;
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|error| {
-            warn!("Failed to deserialize manifest (2): {error}");
-            warn!("Manifest content: {:?}", String::from_utf8_lossy(&content));
+            warn!("Failed to deserialize manifest: {error}");
             Error::ManifestInvalid("Failed to deserialize manifest".to_string())
         })?;
 
@@ -224,13 +220,10 @@ impl<D: DataStore> Registry<D> {
                 let digest = self.storage_engine.create_blob(body).await?;
 
                 let link = BlobLink::Tag(tag);
-                self.storage_engine
-                    .create_link(namespace, &link, &digest)
-                    .await?;
+                self.create_link(namespace, &link, &digest).await?;
+
                 let link = BlobLink::Digest(digest.clone());
-                self.storage_engine
-                    .create_link(namespace, &link, &digest)
-                    .await?;
+                self.create_link(namespace, &link, &digest).await?;
 
                 digest
             }
@@ -243,10 +236,9 @@ impl<D: DataStore> Registry<D> {
                         "Provided digest does not match calculated digest".to_string(),
                     ));
                 }
+
                 let link = BlobLink::Digest(digest.clone());
-                self.storage_engine
-                    .create_link(namespace, &link, &digest)
-                    .await?;
+                self.create_link(namespace, &link, &digest).await?;
 
                 digest
             }
@@ -254,23 +246,17 @@ impl<D: DataStore> Registry<D> {
 
         if let Some(subject) = &manifest_digests.subject {
             let link = BlobLink::Referrer(subject.clone(), digest.clone());
-            self.storage_engine
-                .create_link(namespace, &link, &digest)
-                .await?;
+            self.create_link(namespace, &link, &digest).await?;
         }
 
         if let Some(config_digest) = manifest_digests.config {
             let link = BlobLink::Config(config_digest.clone());
-            self.storage_engine
-                .create_link(namespace, &link, &config_digest)
-                .await?;
+            self.create_link(namespace, &link, &config_digest).await?;
         }
 
         for layer_digest in manifest_digests.layers {
             let link = BlobLink::Layer(layer_digest.clone());
-            self.storage_engine
-                .create_link(namespace, &link, &layer_digest)
-                .await?;
+            self.create_link(namespace, &link, &layer_digest).await?;
         }
 
         Ok(PutManifestResponse {

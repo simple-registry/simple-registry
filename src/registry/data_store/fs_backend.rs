@@ -38,10 +38,10 @@ impl Debug for FSBackend {
 const DIR_MANAGEMENT_LOCK_KEY: &str = "dir_management";
 
 impl FSBackend {
-    pub fn new(config: StorageFSConfig, lock_store: LockStore) -> Self {
+    pub fn new(config: StorageFSConfig, lock_store: Arc<LockStore>) -> Self {
         Self {
             tree: Arc::new(DataPathBuilder::new(config.root_dir)),
-            lock_store: Arc::new(lock_store),
+            lock_store,
         }
     }
 
@@ -180,6 +180,7 @@ impl FSBackend {
 
         let mut file = File::create(&path)?;
         file.write_all(contents)?;
+        file.sync_all()?;
 
         Ok(())
     }
@@ -373,7 +374,7 @@ impl DataStore for FSBackend {
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
-            .append(false)
+            .append(append)
             .write(true)
             .open(&file_path)
             .map_err(|error| {
@@ -459,11 +460,6 @@ impl DataStore for FSBackend {
             hasher.to_digest()
         };
 
-        let _digest_guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-
         let _guard = self
             .lock_store
             .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
@@ -499,11 +495,6 @@ impl DataStore for FSBackend {
         let mut hasher = Sha256::new();
         hasher.update(content);
         let digest = hasher.to_digest();
-
-        let _digest_guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
 
         let _guard = self
             .lock_store
@@ -610,104 +601,33 @@ impl DataStore for FSBackend {
     }
 
     async fn read_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
-        let _link_guard = self.lock_store.acquire_write_lock(link.to_string()); // XXX: read lock?
         let link_path = self.tree.get_link_path(link, namespace);
         Self::read_file(&link_path).and_then(LinkMetadata::from_bytes)
     }
 
-    async fn create_link(
+    async fn write_link(
         &self,
         namespace: &str,
         link: &BlobLink,
-        digest: &Digest,
-    ) -> Result<LinkMetadata, Error> {
-        let _link_guard = self.lock_store.acquire_write_lock(link.to_string());
+        metadata: &LinkMetadata,
+    ) -> Result<(), Error> {
         let link_path = self.tree.get_link_path(link, namespace);
-        let link_metadata = Self::read_file(&link_path).and_then(LinkMetadata::from_bytes);
-
-        // overwriting an existing link!
-        if let Ok(link_metadata) = &link_metadata {
-            if &link_metadata.target != digest {
-                let _old_blob_guard = self
-                    .lock_store
-                    .acquire_write_lock(link_metadata.target.as_str())
-                    .await;
-                let _new_blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await;
-                self.update_blob_index(namespace, &link_metadata.target, |index| {
-                    index.remove(link);
-                })
-                .await?;
-                self.update_blob_index(namespace, digest, |index| {
-                    index.insert(link.clone());
-                })
-                .await?;
-            }
-        } else {
-            let _new_blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await;
-            self.update_blob_index(namespace, digest, |index| {
-                index.insert(link.clone());
-            })
-            .await?;
-        }
-
-        let metadata = LinkMetadata {
-            target: digest.clone(),
-            created_at: Some(Utc::now()),
-            accessed_at: None,
-        };
-
-        let serialized_metadata = serde_json::to_vec(&metadata)?;
-        Self::write_file(&link_path, &serialized_metadata)?;
-        Ok(metadata)
+        let serialized_link_data = serde_json::to_vec(metadata)?;
+        Self::write_file(&link_path, &serialized_link_data)
     }
 
-    async fn update_link(
-        &self,
-        namespace: &str,
-        link: &BlobLink,
-        accessed_at: Option<DateTime<Utc>>,
-    ) -> Result<LinkMetadata, Error> {
-        let _link_guard = self.lock_store.acquire_write_lock(link.to_string());
-        let link_path = self.tree.get_link_path(link, namespace);
-        let mut link_metadata = Self::read_file(&link_path).and_then(LinkMetadata::from_bytes)?;
-
-        link_metadata.accessed_at = accessed_at;
-
-        let serialized_metadata = serde_json::to_vec(&link_metadata)?;
-        Self::write_file(&link_path, &serialized_metadata)?;
-        Ok(link_metadata)
-    }
-
-    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
-        let _link_guard = self.lock_store.acquire_write_lock(link.to_string());
-        let link_path = self.tree.get_link_path(link, namespace);
-        let link_metadata = Self::read_file(&link_path).and_then(LinkMetadata::from_bytes)?;
-
-        let _blob_guard = self
-            .lock_store
-            .acquire_write_lock(link_metadata.target.as_str())
-            .await;
-
-        self.update_blob_index(namespace, &link_metadata.target, |index| {
-            index.remove(link);
-        })
-        .await?;
-
+    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
         let _guard = self
             .lock_store
             .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
             .await;
-
-        if fs::metadata(&link_path).is_err() {
-            return Ok(link_metadata);
-        }
 
         let path = self.tree.get_link_container_path(link, namespace);
         debug!("Deleting link at path: {path}");
 
         let _ = self.delete_empty_parent_dirs(&path).await;
 
-        Ok(link_metadata)
+        Ok(())
     }
 }
 
@@ -730,7 +650,7 @@ mod tests {
         let config = StorageFSConfig { root_dir };
 
         let lock_store = LockStore::new(LockStoreConfig::default()).unwrap();
-        let backend = FSBackend::new(config, lock_store);
+        let backend = FSBackend::new(config, Arc::new(lock_store));
 
         (backend, temp_dir)
     }
@@ -805,11 +725,25 @@ mod tests {
         let digest2 = backend.create_blob(b"content2").await.unwrap();
 
         backend
-            .create_link(namespace, &BlobLink::Tag("file1.txt".to_string()), &digest1)
+            .write_link(
+                namespace,
+                &BlobLink::Tag("file1.txt".to_string()),
+                &LinkMetadata {
+                    target: digest1,
+                    ..LinkMetadata::default()
+                },
+            )
             .await
             .unwrap();
         backend
-            .create_link(namespace, &BlobLink::Tag("file2.txt".to_string()), &digest2)
+            .write_link(
+                namespace,
+                &BlobLink::Tag("file2.txt".to_string()),
+                &LinkMetadata {
+                    target: digest2,
+                    ..LinkMetadata::default()
+                },
+            )
             .await
             .unwrap();
 

@@ -1,5 +1,5 @@
-use crate::registry::oci_types;
 use crate::registry::{cache_store, data_store};
+use crate::registry::{lock_store, oci_types};
 use hyper::header::InvalidHeaderValue;
 use hyper::http::uri::InvalidUri;
 use std::cmp::PartialEq;
@@ -82,6 +82,13 @@ impl From<data_store::Error> for Error {
                 Error::Internal("Data store error during operations".to_string())
             }
         }
+    }
+}
+
+impl From<lock_store::Error> for Error {
+    fn from(error: lock_store::Error) -> Self {
+        warn!("Lock store error: {error}");
+        Error::Internal("Error acquiring lock during operations".to_string())
     }
 }
 

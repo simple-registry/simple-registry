@@ -57,7 +57,7 @@ impl<D: DataStore + 'static> Registry<D> {
         stream: S,
         namespace: String,
         digest: Digest,
-    ) -> Result<(), data_store::Error>
+    ) -> Result<(), Error>
     where
         E: DataStore,
         S: AsyncRead + Send + Sync + Unpin,
@@ -77,10 +77,10 @@ impl<D: DataStore + 'static> Registry<D> {
             .await
         {
             debug!("Failed to complete upload: {error}");
-            return Err(error);
+            return Err(error.into());
         }
 
-        Ok::<(), data_store::Error>(())
+        Ok::<(), Error>(())
     }
 
     #[instrument(skip(repository))]
@@ -302,12 +302,10 @@ mod tests {
         let layer_link = BlobLink::Layer(digest.clone());
         let config_link = BlobLink::Config(digest.clone());
         registry
-            .storage_engine
             .create_link(namespace, &layer_link, &digest)
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(namespace, &config_link, &digest)
             .await
             .unwrap();
