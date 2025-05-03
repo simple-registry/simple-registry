@@ -55,16 +55,16 @@ impl<D> Debug for Registry<D> {
 }
 
 impl<D: DataStore> Registry<D> {
-    #[instrument(skip(repositories_config, storage_engine, token_cache))]
+    #[instrument(skip(repositories_config, storage_engine, cache_store, lock_store))]
     pub fn new(
         repositories_config: HashMap<String, RepositoryConfig>,
         storage_engine: Arc<D>,
-        token_cache: Arc<CacheStore>,
+        cache_store: Arc<CacheStore>,
         lock_store: Arc<LockStore>,
     ) -> Result<Self, configuration::Error> {
         let mut repositories = HashMap::new();
         for (repository_name, repository_config) in repositories_config {
-            let res = Repository::new(repository_config, repository_name.clone(), &token_cache)?;
+            let res = Repository::new(repository_config, repository_name.clone(), &cache_store)?;
             repositories.insert(repository_name, res);
         }
 
@@ -228,11 +228,11 @@ pub(crate) mod test_utils {
         let root_dir = temp_dir.path().to_str().unwrap().to_string();
 
         let config = StorageFSConfig { root_dir };
-        let lock_store = Arc::new(LockStore::new(LockStoreConfig::default()).unwrap());
-        let backend = Arc::new(FSBackend::new(config, lock_store.clone()));
+        let backend = Arc::new(FSBackend::new(config));
 
         let repositories_config = create_test_repository_config();
         let token_cache = Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap());
+        let lock_store = Arc::new(LockStore::new(LockStoreConfig::default()).unwrap());
 
         let registry =
             Registry::new(repositories_config, backend, token_cache, lock_store).unwrap();

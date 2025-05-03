@@ -207,8 +207,7 @@ fn main() -> Result<(), command::Error> {
         match config.storage.clone() {
             DataStoreConfig::FS(storage_config) => {
                 info!("Using filesystem backend");
-                let lock_store = Arc::new(LockStore::new(config.lock_store.clone())?);
-                let data_store = Arc::new(FSBackend::new(storage_config, lock_store));
+                let data_store = Arc::new(FSBackend::new(storage_config));
                 handle_command(config, arguments, data_store).await
             }
             DataStoreConfig::S3(storage_config) => {

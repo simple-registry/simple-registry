@@ -1,6 +1,5 @@
 use crate::configuration::StorageFSConfig;
 use crate::registry::data_store::{DataStore, Error, LinkMetadata, Reader};
-use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
 use crate::registry::utils::{BlobLink, BlobMetadata, DataPathBuilder};
@@ -25,7 +24,6 @@ use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
 pub struct FSBackend {
-    lock_store: Arc<LockStore>,
     pub tree: Arc<DataPathBuilder>,
 }
 
@@ -35,13 +33,10 @@ impl Debug for FSBackend {
     }
 }
 
-const DIR_MANAGEMENT_LOCK_KEY: &str = "dir_management";
-
 impl FSBackend {
-    pub fn new(config: StorageFSConfig, lock_store: Arc<LockStore>) -> Self {
+    pub fn new(config: StorageFSConfig) -> Self {
         Self {
             tree: Arc::new(DataPathBuilder::new(config.root_dir)),
-            lock_store,
         }
     }
 
@@ -339,10 +334,6 @@ impl DataStore for FSBackend {
 
     #[instrument(skip(self))]
     async fn create_upload(&self, name: &str, uuid: &str) -> Result<String, Error> {
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
         let content_path = self.tree.upload_path(name, uuid);
         Self::write_file(&content_path, &[])?;
 
@@ -460,10 +451,6 @@ impl DataStore for FSBackend {
             hasher.to_digest()
         };
 
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
         let blob_root = self.tree.blob_container_dir(&digest);
         fs::create_dir_all(&blob_root)?;
 
@@ -479,11 +466,6 @@ impl DataStore for FSBackend {
 
     #[instrument(skip(self))]
     async fn delete_upload(&self, name: &str, uuid: &str) -> Result<(), Error> {
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
-
         let path = self.tree.upload_container_path(name, uuid);
         let _ = self.delete_empty_parent_dirs(&path).await;
 
@@ -495,11 +477,6 @@ impl DataStore for FSBackend {
         let mut hasher = Sha256::new();
         hasher.update(content);
         let digest = hasher.to_digest();
-
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
 
         let blob_path = self.tree.blob_path(&digest);
         Self::write_file(blob_path, content)?;
@@ -617,11 +594,6 @@ impl DataStore for FSBackend {
     }
 
     async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
-
         let path = self.tree.get_link_container_path(link, namespace);
         debug!("Deleting link at path: {path}");
 
@@ -649,8 +621,7 @@ mod tests {
 
         let config = StorageFSConfig { root_dir };
 
-        let lock_store = LockStore::new(LockStoreConfig::default()).unwrap();
-        let backend = FSBackend::new(config, Arc::new(lock_store));
+        let backend = FSBackend::new(config);
 
         (backend, temp_dir)
     }
