@@ -40,7 +40,7 @@ static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub struct Registry<D> {
-    storage_engine: Arc<D>,
+    store: Arc<D>,
     lock_store: Arc<LockStore>,
     repositories: HashMap<String, Repository>,
     update_pull_time: bool,
@@ -70,7 +70,7 @@ impl<D: DataStore> Registry<D> {
 
         let res = Self {
             update_pull_time: false, // TODO: expose configuration option
-            storage_engine,
+            store: storage_engine,
             lock_store,
             repositories,
             scrub_dry_run: true,
@@ -109,33 +109,33 @@ impl<D: DataStore> Registry<D> {
         link: &BlobLink,
         digest: &Digest,
     ) -> Result<LinkMetadata, Error> {
-        let _guard = self.lock_store.acquire_write_lock(link.to_string()).await?;
-        let link_data = self.storage_engine.read_link(namespace, link).await;
+        let _guard = self.lock_store.acquire_lock(link.to_string()).await?;
+        let link_data = self.store.read_link(namespace, link).await;
 
         // overwriting an existing link!
         if let Ok(link_data) = link_data {
             if &link_data.target != digest {
                 let _blob_guard = self
                     .lock_store
-                    .acquire_write_lock(link_data.target.as_str())
+                    .acquire_lock(link_data.target.as_str())
                     .await?;
 
-                self.storage_engine
+                self.store
                     .update_blob_index(namespace, &link_data.target, |index| {
                         index.remove(link);
                     })
                     .await?;
 
-                let _blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await?;
-                self.storage_engine
+                let _blob_guard = self.lock_store.acquire_lock(digest.as_str()).await?;
+                self.store
                     .update_blob_index(namespace, digest, |index| {
                         index.insert(link.clone());
                     })
                     .await?;
             }
         } else {
-            let _blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await?;
-            self.storage_engine
+            let _blob_guard = self.lock_store.acquire_lock(digest.as_str()).await?;
+            self.store
                 .update_blob_index(namespace, digest, |index| {
                     index.insert(link.clone());
                 })
@@ -147,33 +147,29 @@ impl<D: DataStore> Registry<D> {
             created_at: Some(Utc::now()),
             accessed_at: None,
         };
-        self.storage_engine
-            .write_link(namespace, link, &link_data)
-            .await?;
+        self.store.write_link(namespace, link, &link_data).await?;
         Ok(link_data)
     }
 
     #[instrument(skip(self))]
     async fn read_link(&self, name: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
-        let _guard = self.lock_store.acquire_write_lock(link.to_string()).await?;
+        let _guard = self.lock_store.acquire_lock(link.to_string()).await?;
 
         if self.update_pull_time {
-            let mut link_data = self.storage_engine.read_link(name, link).await?;
+            let mut link_data = self.store.read_link(name, link).await?;
             link_data.accessed_at = Some(Utc::now());
 
-            self.storage_engine
-                .write_link(name, link, &link_data)
-                .await?;
+            self.store.write_link(name, link, &link_data).await?;
             Ok(link_data)
         } else {
-            Ok(self.storage_engine.read_link(name, link).await?)
+            Ok(self.store.read_link(name, link).await?)
         }
     }
 
     #[instrument(skip(self))]
     async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
-        let _guard = self.lock_store.acquire_write_lock(link.to_string()).await?;
-        let metadata = self.storage_engine.read_link(namespace, link).await;
+        let _guard = self.lock_store.acquire_lock(link.to_string()).await?;
+        let metadata = self.store.read_link(namespace, link).await;
 
         let digest = match metadata {
             Ok(link_data) => link_data.target,
@@ -181,10 +177,10 @@ impl<D: DataStore> Registry<D> {
             Err(e) => return Err(e.into()),
         };
 
-        let _blob_guard = self.lock_store.acquire_write_lock(digest.as_str()).await?;
+        let _blob_guard = self.lock_store.acquire_lock(digest.as_str()).await?;
 
-        self.storage_engine.delete_link(namespace, link).await?;
-        self.storage_engine
+        self.store.delete_link(namespace, link).await?;
+        self.store
             .update_blob_index(namespace, &digest, |index| {
                 index.remove(link);
             })
@@ -269,7 +265,7 @@ pub(crate) mod test_utils {
         content: &[u8],
     ) -> (Digest, Repository) {
         // Create a test blob
-        let digest = registry.storage_engine.create_blob(content).await.unwrap();
+        let digest = registry.store.create_blob(content).await.unwrap();
 
         // Create a tag to ensure the namespace exists
         let tag_link = BlobLink::Tag("latest".to_string());
@@ -279,11 +275,7 @@ pub(crate) mod test_utils {
             .unwrap();
 
         // Verify the blob index is updated
-        let blob_index = registry
-            .storage_engine
-            .read_blob_index(&digest)
-            .await
-            .unwrap();
+        let blob_index = registry.store.read_blob_index(&digest).await.unwrap();
         assert!(blob_index.namespace.contains_key(namespace));
         let namespace_links = blob_index.namespace.get(namespace).unwrap();
         assert!(namespace_links.contains(&tag_link));

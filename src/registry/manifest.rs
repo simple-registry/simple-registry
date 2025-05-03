@@ -125,7 +125,7 @@ impl<D: DataStore> Registry<D> {
         let link = self.read_link(namespace, &blob_link).await?;
 
         let mut reader = self
-            .storage_engine
+            .store
             .build_blob_reader(&link.target, None)
             .await
             .map_err(|error| {
@@ -190,7 +190,7 @@ impl<D: DataStore> Registry<D> {
         let blob_link = reference.into();
         let link = self.read_link(namespace, &blob_link).await?;
 
-        let content = self.storage_engine.read_blob(&link.target).await?;
+        let content = self.store.read_blob(&link.target).await?;
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|error| {
             warn!("Failed to deserialize manifest: {error}");
             Error::ManifestInvalid("Failed to deserialize manifest".to_string())
@@ -217,7 +217,7 @@ impl<D: DataStore> Registry<D> {
 
         let digest = match reference {
             Reference::Tag(tag) => {
-                let digest = self.storage_engine.create_blob(body).await?;
+                let digest = self.store.create_blob(body).await?;
 
                 let link = BlobLink::Tag(tag);
                 self.create_link(namespace, &link, &digest).await?;
@@ -228,7 +228,7 @@ impl<D: DataStore> Registry<D> {
                 digest
             }
             Reference::Digest(provided_digest) => {
-                let digest = self.storage_engine.create_blob(body).await?;
+                let digest = self.store.create_blob(body).await?;
 
                 if provided_digest != digest {
                     warn!("Provided digest does not match calculated digest: {provided_digest} != {digest}");
@@ -281,10 +281,7 @@ impl<D: DataStore> Registry<D> {
             Reference::Digest(digest) => {
                 let mut marker = None;
                 loop {
-                    let (tags, next_marker) = self
-                        .storage_engine
-                        .list_tags(namespace, 100, marker)
-                        .await?;
+                    let (tags, next_marker) = self.store.list_tags(namespace, 100, marker).await?;
 
                     for tag in tags {
                         let link_reference = BlobLink::Tag(tag);
@@ -298,7 +295,7 @@ impl<D: DataStore> Registry<D> {
                     let blob_link = BlobLink::Digest(digest.clone());
                     let link = self.read_link(namespace, &blob_link).await?;
 
-                    let content = self.storage_engine.read_blob(&link.target).await?;
+                    let content = self.store.read_blob(&link.target).await?;
                     let manifest_digests = parse_manifest_digests(&content, None)?;
 
                     if let Some(subject_digest) = manifest_digests.subject {

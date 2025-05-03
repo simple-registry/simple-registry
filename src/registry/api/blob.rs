@@ -235,7 +235,7 @@ mod tests {
         assert!(registry.read_link(namespace, &latest_link).await.is_ok());
 
         // Verify blob exists
-        assert!(registry.storage_engine.read_blob(&digest).await.is_ok());
+        assert!(registry.store.read_blob(&digest).await.is_ok());
 
         let parameters = QueryBlobParameters {
             name: namespace.to_string(),
@@ -258,11 +258,11 @@ mod tests {
         assert!(registry.read_link(namespace, &latest_link).await.is_err());
 
         // Verify blob index is empty
-        let blob_index = registry.storage_engine.read_blob_index(&digest).await;
+        let blob_index = registry.store.read_blob_index(&digest).await;
         assert!(blob_index.is_err());
 
         // Verify blob is deleted (since all links are removed)
-        assert!(registry.storage_engine.read_blob(&digest).await.is_err());
+        assert!(registry.store.read_blob(&digest).await.is_err());
     }
 
     #[tokio::test]

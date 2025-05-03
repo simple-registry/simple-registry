@@ -46,7 +46,7 @@ impl<D: DataStore + 'static> Registry<D> {
             return Ok(HeadBlobResponse { digest, size });
         }
 
-        let size = self.storage_engine.get_blob_size(&digest).await?;
+        let size = self.store.get_blob_size(&digest).await?;
 
         Ok(HeadBlobResponse { digest, size })
     }
@@ -118,7 +118,7 @@ impl<D: DataStore + 'static> Registry<D> {
             let (response_reader, copy_reader) = tee_reader(stream).await?;
 
             tokio::spawn(Self::copy_blob(
-                self.storage_engine.clone(),
+                self.store.clone(),
                 copy_reader,
                 namespace.to_string(),
                 digest.to_owned(),
@@ -136,7 +136,7 @@ impl<D: DataStore + 'static> Registry<D> {
         digest: &Digest,
         range: Option<(u64, u64)>,
     ) -> Result<GetBlobResponse<Box<dyn Reader>>, Error> {
-        let total_length = self.storage_engine.get_blob_size(digest).await?;
+        let total_length = self.store.get_blob_size(digest).await?;
 
         let start = if let Some((start, _)) = range {
             if start > total_length {
@@ -148,7 +148,7 @@ impl<D: DataStore + 'static> Registry<D> {
             None
         };
 
-        let reader = match self.storage_engine.build_blob_reader(digest, start).await {
+        let reader = match self.store.build_blob_reader(digest, start).await {
             Ok(reader) => reader,
             Err(data_store::Error::BlobNotFound) => return Ok(GetBlobResponse::Empty),
             Err(err) => Err(err)?,
@@ -315,11 +315,7 @@ mod tests {
         assert!(registry.read_link(namespace, &config_link).await.is_ok());
 
         // Verify blob index is updated
-        let blob_index = registry
-            .storage_engine
-            .read_blob_index(&digest)
-            .await
-            .unwrap();
+        let blob_index = registry.store.read_blob_index(&digest).await.unwrap();
         assert!(blob_index.namespace.contains_key(namespace));
         let namespace_links = blob_index.namespace.get(namespace).unwrap();
         assert!(namespace_links.contains(&layer_link));
@@ -356,7 +352,7 @@ mod tests {
 
         // Create a test stream
         let stream = Cursor::new(content.to_vec());
-        let storage_engine = registry.storage_engine.clone();
+        let storage_engine = registry.store.clone();
 
         // Test copy_blob
         Registry::<D>::copy_blob(
@@ -369,7 +365,7 @@ mod tests {
         .unwrap();
 
         // Verify the blob was copied correctly
-        let stored_content = registry.storage_engine.read_blob(&digest).await.unwrap();
+        let stored_content = registry.store.read_blob(&digest).await.unwrap();
         assert_eq!(stored_content, content);
     }
 

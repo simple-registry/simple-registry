@@ -72,7 +72,7 @@ impl LockStore {
     ///
     /// * `Error::BackendError` if the lock could not be acquired
     #[instrument(skip(self))]
-    pub async fn acquire_write_lock<S>(&self, key: S) -> Result<WriteLockGuard, Error>
+    pub async fn acquire_lock<S>(&self, key: S) -> Result<WriteLockGuard, Error>
     where
         S: AsRef<str> + Debug,
     {

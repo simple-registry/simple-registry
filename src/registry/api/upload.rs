@@ -294,7 +294,7 @@ mod tests {
 
         // Test start upload with existing blob
         let content = b"test content";
-        let digest = registry.storage_engine.create_blob(content).await.unwrap();
+        let digest = registry.store.create_blob(content).await.unwrap();
 
         let uri = Uri::builder()
             .path_and_query(format!("/v2/{namespace}/blobs/uploads/?digest={digest}"))
@@ -345,7 +345,7 @@ mod tests {
 
         // Create initial upload
         registry
-            .storage_engine
+            .store
             .create_upload(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -390,7 +390,7 @@ mod tests {
 
         // Create initial upload
         registry
-            .storage_engine
+            .store
             .create_upload(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -449,7 +449,7 @@ mod tests {
 
         // Create initial upload
         registry
-            .storage_engine
+            .store
             .create_upload(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -463,7 +463,7 @@ mod tests {
 
         // Get the upload digest
         let (digest, _, _) = registry
-            .storage_engine
+            .store
             .read_upload_summary(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -502,7 +502,7 @@ mod tests {
         );
 
         // Verify blob exists
-        let stored_content = registry.storage_engine.read_blob(&digest).await.unwrap();
+        let stored_content = registry.store.read_blob(&digest).await.unwrap();
         assert_eq!(stored_content, content);
     }
 
@@ -524,7 +524,7 @@ mod tests {
 
         // Create initial upload
         registry
-            .storage_engine
+            .store
             .create_upload(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -543,7 +543,7 @@ mod tests {
 
         // Verify upload is deleted
         assert!(registry
-            .storage_engine
+            .store
             .read_upload_summary(namespace, &uuid.to_string())
             .await
             .is_err());
