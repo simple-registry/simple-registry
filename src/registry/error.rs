@@ -1,5 +1,6 @@
 use crate::registry::{cache_store, data_store};
 use crate::registry::{lock_store, oci_types};
+use cel_interpreter::SerializationError;
 use hyper::header::InvalidHeaderValue;
 use hyper::http::uri::InvalidUri;
 use std::cmp::PartialEq;
@@ -139,5 +140,12 @@ impl From<InvalidUri> for Error {
     fn from(error: InvalidUri) -> Self {
         debug!("Invalid URI: {error}");
         Error::Internal("Invalid URI".to_string())
+    }
+}
+
+impl From<SerializationError> for Error {
+    fn from(error: SerializationError) -> Self {
+        debug!("Serialization error: {error}");
+        Error::Internal("Serialization error during operations".to_string())
     }
 }

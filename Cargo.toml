@@ -45,7 +45,7 @@ tokio = { version = "1.44.2", features = ["full", "tracing"] }
 tokio-rustls = "0.26.2"
 tokio-util = { version = "0.7.14", features = ["io-util"] }
 tokio-io-compat = "0.1.1"
-toml = "0.8.21"
+toml = "0.8.22"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tracing-opentelemetry = "0.30.0"
