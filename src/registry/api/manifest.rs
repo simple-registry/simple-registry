@@ -240,7 +240,7 @@ mod tests {
             .unwrap();
 
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/manifests/{}", namespace, tag))
+            .path_and_query(format!("/v2/{namespace}/manifests/{tag}"))
             .build()
             .unwrap();
 
@@ -301,7 +301,7 @@ mod tests {
             .unwrap();
 
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/manifests/{}", namespace, tag))
+            .path_and_query(format!("/v2/{namespace}/manifests/{tag}"))
             .build()
             .unwrap();
 
@@ -355,7 +355,7 @@ mod tests {
         let (content, media_type) = create_test_manifest();
 
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/manifests/{}", namespace, tag))
+            .path_and_query(format!("/v2/{namespace}/manifests/{tag}"))
             .build()
             .unwrap();
 
@@ -379,13 +379,13 @@ mod tests {
         let digest = response.get_header(DOCKER_CONTENT_DIGEST).unwrap();
         assert_eq!(
             response.get_header(LOCATION),
-            Some(format!("/v2/{}/manifests/{}", namespace, tag))
+            Some(format!("/v2/{namespace}/manifests/{tag}"))
         );
 
         // Verify manifest was stored
         let stored_manifest = registry
             .get_manifest(
-                &registry.validate_namespace(namespace).unwrap(),
+                registry.validate_namespace(namespace).unwrap(),
                 &[media_type.clone()],
                 namespace,
                 Reference::Tag(tag.to_string()),
@@ -443,7 +443,7 @@ mod tests {
         // Verify manifest is deleted
         assert!(registry
             .get_manifest(
-                &registry.validate_namespace(namespace).unwrap(),
+                registry.validate_namespace(namespace).unwrap(),
                 &[media_type.clone()],
                 namespace,
                 Reference::Tag(tag.to_string()),

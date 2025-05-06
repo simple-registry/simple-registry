@@ -1,12 +1,10 @@
 use crate::configuration::StorageFSConfig;
-use crate::registry::data_store::{BlobEntityLinkIndex, DataStore, Error, Reader, ReferenceInfo};
-use crate::registry::lock_store::LockStore;
+use crate::registry::data_store::{DataStore, Error, LinkMetadata, Reader};
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
-use crate::registry::utils::{DataLink, DataPathBuilder};
+use crate::registry::utils::{BlobLink, BlobMetadata, DataPathBuilder};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use fs4::fs_std::FileExt;
 use sha2::{Digest as Sha256Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
@@ -26,7 +24,6 @@ use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
 pub struct FSBackend {
-    lock_store: Arc<LockStore>,
     pub tree: Arc<DataPathBuilder>,
 }
 
@@ -36,13 +33,10 @@ impl Debug for FSBackend {
     }
 }
 
-const DIR_MANAGEMENT_LOCK_KEY: &str = "dir_management";
-
 impl FSBackend {
-    pub fn new(config: StorageFSConfig, lock_store: LockStore) -> Self {
+    pub fn new(config: StorageFSConfig) -> Self {
         Self {
             tree: Arc::new(DataPathBuilder::new(config.root_dir)),
-            lock_store: Arc::new(lock_store),
         }
     }
 
@@ -180,14 +174,8 @@ impl FSBackend {
         }
 
         let mut file = File::create(&path)?;
-        file.lock_exclusive()?;
-
-        let result = file.write_all(contents);
-
-        #[allow(unstable_name_collisions)]
-        let unlock_result = file.unlock();
-
-        result.and(unlock_result)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
 
         Ok(())
     }
@@ -196,50 +184,14 @@ impl FSBackend {
     where
         P: AsRef<Path>,
     {
-        let file = File::open(&path)?;
-        #[allow(unstable_name_collisions)]
-        file.lock_shared()?;
-
-        let result = fs::read(&path);
-
-        #[allow(unstable_name_collisions)]
-        let unlock_result = file.unlock();
-
-        match result {
-            Ok(content) => {
-                unlock_result?;
-                Ok(content)
-            }
-            Err(e) => {
-                let _ = unlock_result;
-                Err(e.into())
-            }
-        }
+        Ok(fs::read(&path)?)
     }
 
     fn read_string<P>(path: P) -> Result<String, Error>
     where
         P: AsRef<Path>,
     {
-        let file = File::open(&path)?;
-        #[allow(unstable_name_collisions)]
-        file.lock_shared()?;
-
-        let result = fs::read_to_string(&path);
-
-        #[allow(unstable_name_collisions)]
-        let unlock_result = file.unlock();
-
-        match result {
-            Ok(content) => {
-                unlock_result?;
-                Ok(content)
-            }
-            Err(e) => {
-                let _ = unlock_result;
-                Err(e.into())
-            }
-        }
+        Ok(fs::read_to_string(&path)?)
     }
 }
 
@@ -382,10 +334,6 @@ impl DataStore for FSBackend {
 
     #[instrument(skip(self))]
     async fn create_upload(&self, name: &str, uuid: &str) -> Result<String, Error> {
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
         let content_path = self.tree.upload_path(name, uuid);
         Self::write_file(&content_path, &[])?;
 
@@ -417,7 +365,7 @@ impl DataStore for FSBackend {
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(false)
-            .append(false)
+            .append(append)
             .write(true)
             .open(&file_path)
             .map_err(|error| {
@@ -427,8 +375,6 @@ impl DataStore for FSBackend {
                     _ => error.into(),
                 }
             })?;
-
-        file.lock_exclusive()?;
         file.seek(SeekFrom::Start(upload_size))?;
 
         let path = self
@@ -441,24 +387,14 @@ impl DataStore for FSBackend {
         let mut buffer = vec![0; 8192];
         let mut wrote_size = 0;
 
-        let result = async {
-            while let Ok(size) = stream.read(&mut buffer).await {
-                if size == 0 {
-                    break;
-                }
-                file.write_all(&buffer[..size])?;
-                hash.update(&buffer[..size]);
-                wrote_size += size as u64;
+        while let Ok(size) = stream.read(&mut buffer).await {
+            if size == 0 {
+                break;
             }
-            Ok::<_, Error>(())
+            file.write_all(&buffer[..size])?;
+            hash.update(&buffer[..size]);
+            wrote_size += size as u64;
         }
-        .await;
-
-        #[allow(unstable_name_collisions)]
-        let unlock_result = file.unlock();
-
-        result?;
-        unlock_result?;
 
         let path =
             self.tree
@@ -515,15 +451,6 @@ impl DataStore for FSBackend {
             hasher.to_digest()
         };
 
-        let _digest_guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
         let blob_root = self.tree.blob_container_dir(&digest);
         fs::create_dir_all(&blob_root)?;
 
@@ -539,11 +466,6 @@ impl DataStore for FSBackend {
 
     #[instrument(skip(self))]
     async fn delete_upload(&self, name: &str, uuid: &str) -> Result<(), Error> {
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
-
         let path = self.tree.upload_container_path(name, uuid);
         let _ = self.delete_empty_parent_dirs(&path).await;
 
@@ -555,16 +477,6 @@ impl DataStore for FSBackend {
         let mut hasher = Sha256::new();
         hasher.update(content);
         let digest = hasher.to_digest();
-
-        let _digest_guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
 
         let blob_path = self.tree.blob_path(&digest);
         Self::write_file(blob_path, content)?;
@@ -579,7 +491,7 @@ impl DataStore for FSBackend {
     }
 
     #[instrument(skip(self))]
-    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
+    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobMetadata, Error> {
         let path = self.tree.blob_index_path(digest);
         let content = Self::read_string(&path)?;
 
@@ -594,7 +506,7 @@ impl DataStore for FSBackend {
         operation: O,
     ) -> Result<(), Error>
     where
-        O: FnOnce(&mut HashSet<DataLink>) + Send,
+        O: FnOnce(&mut HashSet<BlobLink>) + Send,
     {
         debug!("Ensuring container directory for digest: {digest}");
         let path = self.tree.blob_container_dir(digest);
@@ -604,8 +516,8 @@ impl DataStore for FSBackend {
         let path = self.tree.blob_index_path(digest);
 
         let mut reference_index = match Self::read_string(&path) {
-            Ok(content) => serde_json::from_str::<BlobEntityLinkIndex>(&content)?,
-            Err(Error::ReferenceNotFound) => BlobEntityLinkIndex::default(),
+            Ok(content) => serde_json::from_str::<BlobMetadata>(&content)?,
+            Err(Error::ReferenceNotFound) => BlobMetadata::default(),
             Err(e) => Err(e)?,
         };
 
@@ -646,31 +558,6 @@ impl DataStore for FSBackend {
     }
 
     #[instrument(skip(self))]
-    async fn read_reference_info(
-        &self,
-        name: &str,
-        reference: &DataLink,
-    ) -> Result<ReferenceInfo, Error> {
-        let key = match reference {
-            DataLink::Tag(_) | DataLink::Digest(_) => self.tree.get_link_path(reference, name),
-            _ => return Err(Error::ReferenceNotFound),
-        };
-
-        let metadata = fs::metadata(&key)?;
-
-        let created_at = metadata.created()?;
-        let created_at = DateTime::<Utc>::from(created_at).with_timezone(&Utc);
-
-        let accessed_at = metadata.accessed()?;
-        let accessed_at = DateTime::<Utc>::from(accessed_at).with_timezone(&Utc);
-
-        Ok(ReferenceInfo {
-            created_at,
-            accessed_at,
-        })
-    }
-
-    #[instrument(skip(self))]
     async fn build_blob_reader(
         &self,
         digest: &Digest,
@@ -690,121 +577,27 @@ impl DataStore for FSBackend {
         Ok(Box::new(file.tokio_io()))
     }
 
-    #[instrument(skip(self))]
-    async fn update_last_pulled(
-        &self,
-        name: &str,
-        tag: Option<String>,
-        digest: &Digest,
-    ) -> Result<(), Error> {
-        if let Some(tag) = tag {
-            let path = self.tree.get_link_path(&DataLink::Tag(tag), name);
-            let _ = fs::metadata(&path)?;
-        }
-
-        let path = self
-            .tree
-            .get_link_path(&DataLink::Digest(digest.clone()), name);
-        let _ = fs::metadata(&path)?;
-
-        Ok(())
+    async fn read_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
+        let link_path = self.tree.get_link_path(link, namespace);
+        Self::read_file(&link_path).and_then(LinkMetadata::from_bytes)
     }
 
-    #[instrument(skip(self))]
-    async fn read_link(&self, name: &str, reference: &DataLink) -> Result<Digest, Error> {
-        debug!("Reading link for namespace: {name}, reference: {reference}");
-        let path = self.tree.get_link_path(reference, name);
-        debug!("Reading link at path: {path}");
-
-        let link = Self::read_string(path)?;
-        debug!("Link content: {link}");
-
-        Ok(Digest::try_from(link.as_str())?)
-    }
-
-    #[instrument(skip(self))]
-    async fn create_link(
+    async fn write_link(
         &self,
         namespace: &str,
-        reference: &DataLink,
-        digest: &Digest,
+        link: &BlobLink,
+        metadata: &LinkMetadata,
     ) -> Result<(), Error> {
-        debug!("Creating or updating link for namespace: {namespace}, reference: {reference}");
-
-        let _digest_guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
-
-        let link_path = self.tree.get_link_path(reference, namespace);
-
-        match self.read_link(namespace, reference).await.ok() {
-            Some(existing_digest) if &existing_digest == digest => return Ok(()),
-            Some(existing_digest) if &existing_digest != digest => {
-                let _existing_digest_guard = self
-                    .lock_store
-                    .acquire_write_lock(&existing_digest.to_string())
-                    .await;
-
-                self.update_blob_index(namespace, digest, |index| {
-                    index.remove(reference);
-                })
-                .await?;
-            }
-            _ => {}
-        }
-
-        debug!("Creating link at path: {link_path}");
-        Self::write_file(&link_path, digest.to_string().as_bytes())?;
-
-        debug!("Increasing reference count for digest: {digest}");
-
-        self.update_blob_index(namespace, digest, |index| {
-            index.insert(reference.clone());
-        })
-        .await?;
-
-        Ok(())
+        let link_path = self.tree.get_link_path(link, namespace);
+        let serialized_link_data = serde_json::to_vec(metadata)?;
+        Self::write_file(&link_path, &serialized_link_data)
     }
 
-    #[instrument(skip(self))]
-    async fn delete_link(&self, namespace: &str, reference: &DataLink) -> Result<(), Error> {
-        debug!("Deleting link for namespace: {namespace}, reference: {reference}");
-
-        let digest = match self.read_link(namespace, reference).await {
-            Ok(digest) => digest,
-            Err(Error::ReferenceNotFound) => return Ok(()),
-            Err(e) => return Err(e),
-        };
-
-        let _digest_guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(DIR_MANAGEMENT_LOCK_KEY)
-            .await;
-
-        let link_path = self.tree.get_link_path(reference, namespace);
-        if fs::metadata(&link_path).is_err() {
-            return Ok(());
-        }
-
-        let path = self.tree.get_link_container_path(reference, namespace);
+    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
+        let path = self.tree.get_link_container_path(link, namespace);
         debug!("Deleting link at path: {path}");
 
         let _ = self.delete_empty_parent_dirs(&path).await;
-
-        debug!("Unregistering reference: {reference}");
-        self.update_blob_index(namespace, &digest, |index| {
-            index.remove(reference);
-        })
-        .await?;
 
         Ok(())
     }
@@ -828,8 +621,7 @@ mod tests {
 
         let config = StorageFSConfig { root_dir };
 
-        let lock_store = LockStore::new(LockStoreConfig::default()).unwrap();
-        let backend = FSBackend::new(config, lock_store);
+        let backend = FSBackend::new(config);
 
         (backend, temp_dir)
     }
@@ -897,18 +689,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_directory_entries() {
-        let (backend, _temp_dir) = create_test_backend();
+        let (backend, _) = create_test_backend();
         let namespace = "test-repo";
 
         let digest1 = backend.create_blob(b"content1").await.unwrap();
         let digest2 = backend.create_blob(b"content2").await.unwrap();
 
         backend
-            .create_link(namespace, &DataLink::Tag("file1.txt".to_string()), &digest1)
+            .write_link(
+                namespace,
+                &BlobLink::Tag("file1.txt".to_string()),
+                &LinkMetadata {
+                    target: digest1,
+                    ..LinkMetadata::default()
+                },
+            )
             .await
             .unwrap();
         backend
-            .create_link(namespace, &DataLink::Tag("file2.txt".to_string()), &digest2)
+            .write_link(
+                namespace,
+                &BlobLink::Tag("file2.txt".to_string()),
+                &LinkMetadata {
+                    target: digest2,
+                    ..LinkMetadata::default()
+                },
+            )
             .await
             .unwrap();
 

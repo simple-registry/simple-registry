@@ -14,7 +14,7 @@ impl<D: DataStore> Registry<D> {
         self.validate_namespace(namespace)?;
 
         match self
-            .storage_engine
+            .store
             .list_referrers(namespace, &digest, artifact_type)
             .await
         {
@@ -32,7 +32,7 @@ impl<D: DataStore> Registry<D> {
     ) -> Result<(Vec<String>, Option<String>), Error> {
         let n = n.unwrap_or(100);
 
-        let (namespaces, next_last) = self.storage_engine.list_namespaces(n, last).await?;
+        let (namespaces, next_last) = self.store.list_namespaces(n, last).await?;
         let link = next_last.map(|next_last| format!("/v2/_catalog?n={n}&last={next_last}"));
 
         let namespaces = namespaces
@@ -53,7 +53,7 @@ impl<D: DataStore> Registry<D> {
 
         let n = n.unwrap_or(100);
 
-        let (tags, next_last) = self.storage_engine.list_tags(namespace, n, last).await?;
+        let (tags, next_last) = self.store.list_tags(namespace, n, last).await?;
         let link =
             next_last.map(|next_last| format!("/v2/{namespace}/tags/list?n={n}&last={next_last}"));
 
@@ -65,7 +65,7 @@ impl<D: DataStore> Registry<D> {
 mod tests {
     use super::*;
     use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
-    use crate::registry::utils::DataLink;
+    use crate::registry::utils::BlobLink;
     use std::str::FromStr;
 
     #[tokio::test]
@@ -89,14 +89,9 @@ mod tests {
 
         // Create a link to make the namespace valid
         let test_content = b"test content";
-        let test_digest = registry
-            .storage_engine
-            .create_blob(test_content)
-            .await
-            .unwrap();
-        let tag_link = DataLink::Tag("latest".to_string());
+        let test_digest = registry.store.create_blob(test_content).await.unwrap();
+        let tag_link = BlobLink::Tag("latest".to_string());
         registry
-            .storage_engine
             .create_link(namespace, &tag_link, &test_digest)
             .await
             .unwrap();
@@ -165,16 +160,11 @@ mod tests {
 
         // Create some tags first
         let test_content = b"test content";
-        let test_digest = registry
-            .storage_engine
-            .create_blob(test_content)
-            .await
-            .unwrap();
+        let test_digest = registry.store.create_blob(test_content).await.unwrap();
         let tags = ["latest", "v1.0", "v2.0"];
         for tag in &tags {
-            let tag_link = DataLink::Tag(tag.to_string());
+            let tag_link = BlobLink::Tag(tag.to_string());
             registry
-                .storage_engine
                 .create_link(namespace, &tag_link, &test_digest)
                 .await
                 .unwrap();

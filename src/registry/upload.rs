@@ -20,15 +20,13 @@ impl<D: DataStore> Registry<D> {
         self.validate_namespace(namespace)?;
 
         if let Some(digest) = digest {
-            if self.storage_engine.get_blob_size(&digest).await.is_ok() {
+            if self.store.get_blob_size(&digest).await.is_ok() {
                 return Ok(StartUploadResponse::ExistingBlob(digest));
             }
         }
 
         let session_uuid = Uuid::new_v4().to_string();
-        self.storage_engine
-            .create_upload(namespace, &session_uuid)
-            .await?;
+        self.store.create_upload(namespace, &session_uuid).await?;
 
         let location = format!("/v2/{namespace}/blobs/uploads/{session_uuid}");
         Ok(StartUploadResponse::Session(location, session_uuid))
@@ -50,7 +48,7 @@ impl<D: DataStore> Registry<D> {
         let session_id = session_id.to_string();
         if let Some(start_offset) = start_offset {
             let (_, size, _) = self
-                .storage_engine
+                .store
                 .read_upload_summary(namespace, &session_id)
                 .await?;
 
@@ -59,12 +57,12 @@ impl<D: DataStore> Registry<D> {
             }
         }
 
-        self.storage_engine
+        self.store
             .write_upload(namespace, &session_id, stream, true)
             .await?;
 
         let (_, size, _) = self
-            .storage_engine
+            .store
             .read_upload_summary(namespace, &session_id)
             .await
             .map_err(|error| {
@@ -95,17 +93,17 @@ impl<D: DataStore> Registry<D> {
         let session_id = session_id.to_string();
 
         let append = self
-            .storage_engine
+            .store
             .read_upload_summary(namespace, &session_id)
             .await
             .is_ok();
 
-        self.storage_engine
+        self.store
             .write_upload(namespace, &session_id, stream, append)
             .await?;
 
         let (upload_digest, _, _) = self
-            .storage_engine
+            .store
             .read_upload_summary(namespace, &session_id)
             .await?;
 
@@ -114,12 +112,10 @@ impl<D: DataStore> Registry<D> {
             return Err(Error::DigestInvalid);
         }
 
-        self.storage_engine
+        self.store
             .complete_upload(namespace, &session_id, Some(digest))
             .await?;
-        self.storage_engine
-            .delete_upload(namespace, &session_id)
-            .await?;
+        self.store.delete_upload(namespace, &session_id).await?;
 
         Ok(())
     }
@@ -129,7 +125,7 @@ impl<D: DataStore> Registry<D> {
         self.validate_namespace(namespace)?;
 
         let uuid = session_id.to_string();
-        self.storage_engine.delete_upload(namespace, &uuid).await?;
+        self.store.delete_upload(namespace, &uuid).await?;
 
         Ok(())
     }
@@ -143,10 +139,7 @@ impl<D: DataStore> Registry<D> {
         self.validate_namespace(namespace)?;
 
         let uuid = session_id.to_string();
-        let (_, size, _) = self
-            .storage_engine
-            .read_upload_summary(namespace, &uuid)
-            .await?;
+        let (_, size, _) = self.store.read_upload_summary(namespace, &uuid).await?;
 
         if size < 1 {
             return Ok(0);
@@ -173,11 +166,11 @@ mod tests {
                 assert!(location.starts_with(&format!("/v2/{namespace}/blobs/uploads/")));
                 assert!(!session_id.is_empty());
             }
-            _ => panic!("Expected Session response"),
+            StartUploadResponse::ExistingBlob(_) => panic!("Expected Session response"),
         }
 
         // Test starting upload with existing blob
-        let digest = registry.storage_engine.create_blob(content).await.unwrap();
+        let digest = registry.store.create_blob(content).await.unwrap();
         let response = registry
             .start_upload(namespace, Some(digest.clone()))
             .await
@@ -186,7 +179,7 @@ mod tests {
             StartUploadResponse::ExistingBlob(existing_digest) => {
                 assert_eq!(existing_digest, digest);
             }
-            _ => panic!("Expected ExistingBlob response"),
+            StartUploadResponse::Session(..) => panic!("Expected ExistingBlob response"),
         }
     }
 
@@ -209,7 +202,7 @@ mod tests {
 
         // Create initial upload
         registry
-            .storage_engine
+            .store
             .create_upload(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -236,7 +229,7 @@ mod tests {
 
         // Verify content
         let (_, size, _) = registry
-            .storage_engine
+            .store
             .read_upload_summary(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -262,7 +255,7 @@ mod tests {
 
         // Create initial upload
         registry
-            .storage_engine
+            .store
             .create_upload(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -276,7 +269,7 @@ mod tests {
 
         // Get the upload digest
         let (upload_digest, _, _) = registry
-            .storage_engine
+            .store
             .read_upload_summary(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -289,11 +282,7 @@ mod tests {
             .unwrap();
 
         // Verify blob exists
-        let stored_content = registry
-            .storage_engine
-            .read_blob(&upload_digest)
-            .await
-            .unwrap();
+        let stored_content = registry.store.read_blob(&upload_digest).await.unwrap();
         assert_eq!(stored_content, content);
     }
 
@@ -315,14 +304,14 @@ mod tests {
 
         // Create upload
         registry
-            .storage_engine
+            .store
             .create_upload(namespace, &session_id.to_string())
             .await
             .unwrap();
 
         // Verify upload exists
         assert!(registry
-            .storage_engine
+            .store
             .read_upload_summary(namespace, &session_id.to_string())
             .await
             .is_ok());
@@ -332,7 +321,7 @@ mod tests {
 
         // Verify upload is deleted
         assert!(registry
-            .storage_engine
+            .store
             .read_upload_summary(namespace, &session_id.to_string())
             .await
             .is_err());
@@ -357,7 +346,7 @@ mod tests {
 
         // Create upload
         registry
-            .storage_engine
+            .store
             .create_upload(namespace, &session_id.to_string())
             .await
             .unwrap();

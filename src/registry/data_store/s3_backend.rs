@@ -8,7 +8,7 @@ use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::builders::{CompletedMultipartUploadBuilder, CompletedPartBuilder};
-use aws_sdk_s3::types::{CompletedPart, MetadataDirective};
+use aws_sdk_s3::types::CompletedPart;
 use aws_sdk_s3::{
     config::timeout::TimeoutConfig,
     config::{BehaviorVersion, Credentials, Region},
@@ -22,21 +22,16 @@ use tokio::sync::Semaphore;
 use tracing::{debug, error, instrument};
 
 use crate::configuration::StorageS3Config;
-use crate::registry::data_store::{BlobEntityLinkIndex, DataStore, Error, Reader, ReferenceInfo};
-use crate::registry::lock_store::LockStore;
+use crate::registry::data_store::{DataStore, Error, LinkMetadata, Reader};
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::sha256_ext::Sha256Ext;
-use crate::registry::utils::{DataLink, DataPathBuilder};
-
-const PUSHED_AT_METADATA_KEY: &str = "pushed";
-const LAST_PULLED_AT_METADATA_KEY: &str = "last-pulled";
+use crate::registry::utils::{BlobLink, BlobMetadata, DataPathBuilder};
 
 #[derive(Clone)]
 pub struct S3Backend {
     s3_client: S3Client,
     tree: Arc<DataPathBuilder>,
     bucket: String,
-    lock_store: Arc<LockStore>,
     multipart_copy_threshold: u64,
     multipart_copy_chunk_size: u64,
     multipart_copy_jobs: usize,
@@ -50,7 +45,7 @@ impl Debug for S3Backend {
 }
 
 impl S3Backend {
-    pub fn new(config: StorageS3Config, lock_store: LockStore) -> Self {
+    pub fn new(config: StorageS3Config) -> Self {
         let credentials = Credentials::new(
             config.access_key_id,
             config.secret_key,
@@ -79,7 +74,6 @@ impl S3Backend {
             s3_client,
             tree: Arc::new(DataPathBuilder::new(config.key_prefix.unwrap_or_default())),
             bucket: config.bucket,
-            lock_store: Arc::new(lock_store),
             multipart_copy_threshold: config.multipart_copy_threshold.to_u64(),
             multipart_copy_chunk_size: config.multipart_copy_chunk_size.to_u64(),
             multipart_copy_jobs: config.multipart_copy_jobs,
@@ -160,7 +154,6 @@ impl S3Backend {
             .put_object()
             .bucket(&self.bucket)
             .key(key)
-            .metadata(PUSHED_AT_METADATA_KEY, Utc::now().to_rfc3339())
             .body(ByteStream::from(data))
             .send()
             .await?;
@@ -510,31 +503,6 @@ impl S3Backend {
                 .send()
                 .await?;
         }
-
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
-    async fn update_last_pulled_metadata(&self, key: &str) -> Result<(), Error> {
-        let res = self.head_object(key).await?;
-
-        let pushed_at = res
-            .metadata
-            .unwrap_or_default()
-            .get(PUSHED_AT_METADATA_KEY)
-            .cloned()
-            .unwrap_or(Utc::now().to_rfc3339());
-
-        self.s3_client
-            .copy_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .copy_source(format!("{}/{key}", self.bucket))
-            .metadata_directive(MetadataDirective::Replace)
-            .metadata(PUSHED_AT_METADATA_KEY, pushed_at)
-            .metadata(LAST_PULLED_AT_METADATA_KEY, Utc::now().to_rfc3339())
-            .send()
-            .await?;
 
         Ok(())
     }
@@ -1113,11 +1081,6 @@ impl DataStore for S3Backend {
             hasher.to_digest()
         };
 
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-
         let parts = parts
             .iter()
             .enumerate()
@@ -1170,11 +1133,6 @@ impl DataStore for S3Backend {
         hasher.update(content);
         let digest = hasher.to_digest();
 
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-
         let blob_path = self.tree.blob_path(&digest);
         self.put_object(&blob_path, content.to_vec()).await?;
 
@@ -1189,7 +1147,7 @@ impl DataStore for S3Backend {
     }
 
     #[instrument(skip(self))]
-    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobEntityLinkIndex, Error> {
+    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobMetadata, Error> {
         let path = self.tree.blob_index_path(digest);
 
         let data = self.get_object_body_as_vec(&path, None).await?;
@@ -1206,15 +1164,15 @@ impl DataStore for S3Backend {
         operation: O,
     ) -> Result<(), Error>
     where
-        O: FnOnce(&mut HashSet<DataLink>) + Send,
+        O: FnOnce(&mut HashSet<BlobLink>) + Send,
     {
         let path = self.tree.blob_index_path(digest);
 
         let res = self.get_object_body_as_vec(&path, None).await;
 
         let mut reference_index = match res {
-            Ok(data) => serde_json::from_slice::<BlobEntityLinkIndex>(&data)?,
-            Err(_) => BlobEntityLinkIndex::default(),
+            Ok(data) => serde_json::from_slice::<BlobMetadata>(&data)?,
+            Err(_) => BlobMetadata::default(),
         };
 
         let index = reference_index
@@ -1247,37 +1205,6 @@ impl DataStore for S3Backend {
     }
 
     #[instrument(skip(self))]
-    async fn read_reference_info(
-        &self,
-        name: &str,
-        reference: &DataLink,
-    ) -> Result<ReferenceInfo, Error> {
-        let key = match reference {
-            DataLink::Tag(_) | DataLink::Digest(_) => self.tree.get_link_path(reference, name),
-            _ => return Err(Error::ReferenceNotFound),
-        };
-
-        let res = self.head_object(&key).await?;
-
-        let metadata = res.metadata.unwrap_or_default();
-
-        let created_at = metadata
-            .get(PUSHED_AT_METADATA_KEY)
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
-            .unwrap_or_default();
-
-        let accessed_at = metadata
-            .get(LAST_PULLED_AT_METADATA_KEY)
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
-            .unwrap_or_default();
-
-        Ok(ReferenceInfo {
-            created_at,
-            accessed_at,
-        })
-    }
-
-    #[instrument(skip(self))]
     async fn build_blob_reader(
         &self,
         digest: &Digest,
@@ -1288,108 +1215,34 @@ impl DataStore for S3Backend {
         Ok(Box::new(res.body.into_async_read()))
     }
 
-    #[instrument(skip(self))]
-    async fn update_last_pulled(
-        &self,
-        name: &str,
-        tag: Option<String>,
-        digest: &Digest,
-    ) -> Result<(), Error> {
-        if let Some(tag) = tag {
-            let key = self.tree.get_link_path(&DataLink::Tag(tag), name);
-            self.update_last_pulled_metadata(&key).await?;
-        }
-
-        let key = self
-            .tree
-            .get_link_path(&DataLink::Digest(digest.clone()), name);
-        self.update_last_pulled_metadata(&key).await?;
-
-        Ok(())
+    async fn read_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
+        let link_path = self.tree.get_link_path(link, namespace);
+        self.get_object_body_as_vec(&link_path, None)
+            .await
+            .and_then(LinkMetadata::from_bytes)
     }
 
-    #[instrument(skip(self))]
-    async fn read_link(&self, name: &str, reference: &DataLink) -> Result<Digest, Error> {
-        let path = self.tree.get_link_path(reference, name);
-        let data = self.get_object_body_as_vec(&path, None).await?;
-
-        let link = String::from_utf8(data)?;
-        Ok(Digest::try_from(link.as_str())?)
-    }
-
-    #[instrument(skip(self))]
-    async fn create_link(
+    async fn write_link(
         &self,
         namespace: &str,
-        reference: &DataLink,
-        digest: &Digest,
+        link: &BlobLink,
+        metadata: &LinkMetadata,
     ) -> Result<(), Error> {
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-
-        let link_path = self.tree.get_link_path(reference, namespace);
-
-        match self.read_link(namespace, reference).await.ok() {
-            Some(existing_digest) if existing_digest == *digest => return Ok(()),
-            Some(existing_digest) if existing_digest != *digest => {
-                let _existing_digest_guard = self
-                    .lock_store
-                    .acquire_write_lock(&existing_digest.to_string())
-                    .await;
-
-                self.delete_object(&link_path).await?;
-
-                self.update_blob_index(namespace, digest, |index| {
-                    index.remove(reference);
-                })
-                .await?;
-            }
-            _ => {}
-        }
-
-        self.put_object(&link_path, digest.to_string().into_bytes())
-            .await?;
-
-        self.update_blob_index(namespace, digest, |index| {
-            index.insert(reference.clone());
-        })
-        .await?;
-
-        Ok(())
+        let link_path = self.tree.get_link_path(link, namespace);
+        let serialized_link_data = serde_json::to_vec(metadata)?;
+        self.put_object(&link_path, serialized_link_data).await
     }
 
-    #[instrument(skip(self))]
-    async fn delete_link(&self, namespace: &str, reference: &DataLink) -> Result<(), Error> {
-        let digest = match self.read_link(namespace, reference).await {
-            Ok(digest) => digest,
-            Err(Error::ReferenceNotFound) => return Ok(()),
-            Err(e) => return Err(e),
-        };
-
-        let link_path = self.tree.get_link_path(reference, namespace);
-
-        let _guard = self
-            .lock_store
-            .acquire_write_lock(&digest.to_string())
-            .await;
-
-        self.delete_object(&link_path).await?;
-
-        self.update_blob_index(namespace, &digest, |index| {
-            index.remove(reference);
-        })
-        .await?;
-
-        Ok(())
+    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
+        let link_path = self.tree.get_link_path(link, namespace);
+        self.delete_object(&link_path).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::{DataSize, LockStoreConfig, StorageS3Config};
+    use crate::configuration::{DataSize, StorageS3Config};
     use crate::registry::data_store::tests::{
         test_datastore_blob_operations, test_datastore_link_operations, test_datastore_list_blobs,
         test_datastore_list_namespaces, test_datastore_list_referrers,
@@ -1399,7 +1252,7 @@ mod tests {
     use uuid::Uuid;
 
     // Helper function to create a test S3Backend
-    async fn create_test_backend() -> S3Backend {
+    fn create_test_backend() -> S3Backend {
         let config = StorageS3Config {
             endpoint: "http://127.0.0.1:9000".to_string(),
             region: "region".to_string(),
@@ -1413,9 +1266,7 @@ mod tests {
             multipart_part_size: DataSize::WithoutUnit(5 * 1024 * 1024), // 5MB
         };
 
-        let lock_store = LockStore::new(LockStoreConfig::default()).unwrap();
-
-        S3Backend::new(config, lock_store)
+        S3Backend::new(config)
     }
 
     // Helper to clean up test data
@@ -1424,70 +1275,70 @@ mod tests {
             .delete_object_with_prefix(&backend.tree.prefix)
             .await
         {
-            println!("Warning: Failed to clean up test data: {:?}", e);
+            println!("Warning: Failed to clean up test data: {e:?}");
         }
     }
 
     // Generic DataStore trait tests
     #[tokio::test]
     async fn test_list_namespaces() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_list_namespaces(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_list_tags() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_list_tags(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_list_referrers() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_list_referrers(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_list_uploads() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_list_uploads(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_list_blobs() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_list_blobs(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_list_revisions() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_list_revisions(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_blob_operations() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_blob_operations(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_upload_operations() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_upload_operations(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 
     #[tokio::test]
     async fn test_link_operations() {
-        let backend = create_test_backend().await;
+        let backend = create_test_backend();
         test_datastore_link_operations(&backend).await;
         cleanup_test_prefix(&backend).await;
     }

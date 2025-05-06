@@ -156,7 +156,7 @@ mod tests {
     use crate::registry::test_utils::{
         create_test_blob, create_test_fs_backend, create_test_s3_backend,
     };
-    use crate::registry::utils::DataLink;
+    use crate::registry::utils::BlobLink;
     use http_body_util::Empty;
     use hyper::body::Bytes;
     use hyper::Method;
@@ -168,7 +168,7 @@ mod tests {
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/blobs/{}", namespace, digest))
+            .path_and_query(format!("/v2/{namespace}/blobs/{digest}"))
             .build()
             .unwrap();
 
@@ -217,39 +217,25 @@ mod tests {
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
         // Create test links
-        let layer_link = DataLink::Layer(digest.clone());
-        let config_link = DataLink::Config(digest.clone());
-        let latest_link = DataLink::Tag("latest".to_string());
+        let layer_link = BlobLink::Layer(digest.clone());
+        let config_link = BlobLink::Config(digest.clone());
+        let latest_link = BlobLink::Tag("latest".to_string());
         registry
-            .storage_engine
             .create_link(namespace, &layer_link, &digest)
             .await
             .unwrap();
         registry
-            .storage_engine
             .create_link(namespace, &config_link, &digest)
             .await
             .unwrap();
 
         // Verify links exist
-        assert!(registry
-            .storage_engine
-            .read_link(namespace, &layer_link)
-            .await
-            .is_ok());
-        assert!(registry
-            .storage_engine
-            .read_link(namespace, &config_link)
-            .await
-            .is_ok());
-        assert!(registry
-            .storage_engine
-            .read_link(namespace, &latest_link)
-            .await
-            .is_ok());
+        assert!(registry.read_link(namespace, &layer_link).await.is_ok());
+        assert!(registry.read_link(namespace, &config_link).await.is_ok());
+        assert!(registry.read_link(namespace, &latest_link).await.is_ok());
 
         // Verify blob exists
-        assert!(registry.storage_engine.read_blob(&digest).await.is_ok());
+        assert!(registry.store.read_blob(&digest).await.is_ok());
 
         let parameters = QueryBlobParameters {
             name: namespace.to_string(),
@@ -264,35 +250,19 @@ mod tests {
         assert_eq!(response.status(), StatusCode::ACCEPTED);
 
         // Delete the latest tag link
-        registry
-            .storage_engine
-            .delete_link(namespace, &latest_link)
-            .await
-            .unwrap();
+        registry.delete_link(namespace, &latest_link).await.unwrap();
 
         // Verify links are deleted
-        assert!(registry
-            .storage_engine
-            .read_link(namespace, &layer_link)
-            .await
-            .is_err());
-        assert!(registry
-            .storage_engine
-            .read_link(namespace, &config_link)
-            .await
-            .is_err());
-        assert!(registry
-            .storage_engine
-            .read_link(namespace, &latest_link)
-            .await
-            .is_err());
+        assert!(registry.read_link(namespace, &layer_link).await.is_err());
+        assert!(registry.read_link(namespace, &config_link).await.is_err());
+        assert!(registry.read_link(namespace, &latest_link).await.is_err());
 
         // Verify blob index is empty
-        let blob_index = registry.storage_engine.read_blob_index(&digest).await;
+        let blob_index = registry.store.read_blob_index(&digest).await;
         assert!(blob_index.is_err());
 
         // Verify blob is deleted (since all links are removed)
-        assert!(registry.storage_engine.read_blob(&digest).await.is_err());
+        assert!(registry.store.read_blob(&digest).await.is_err());
     }
 
     #[tokio::test]
@@ -313,7 +283,7 @@ mod tests {
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/blobs/{}", namespace, digest))
+            .path_and_query(format!("/v2/{namespace}/blobs/{digest}"))
             .build()
             .unwrap();
 
@@ -368,7 +338,7 @@ mod tests {
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/blobs/{}", namespace, digest))
+            .path_and_query(format!("/v2/{namespace}/blobs/{digest}"))
             .build()
             .unwrap();
 

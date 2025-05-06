@@ -172,7 +172,7 @@ mod tests {
     use crate::registry::test_utils::{
         create_test_blob, create_test_fs_backend, create_test_s3_backend,
     };
-    use crate::registry::utils::DataLink;
+    use crate::registry::utils::BlobLink;
     use http_body_util::Empty;
     use hyper::body::Bytes;
     use hyper::Method;
@@ -213,22 +213,18 @@ mod tests {
             .unwrap();
 
         // Create a referrer link
-        let referrer_link = DataLink::Referrer(
+        let referrer_link = BlobLink::Referrer(
             base_manifest_digest.clone(),
             referrer_manifest_digest.clone(),
         );
         registry
-            .storage_engine
             .create_link(namespace, &referrer_link, &referrer_manifest_digest)
             .await
             .unwrap();
 
         // Test getting referrers
         let uri = Uri::builder()
-            .path_and_query(format!(
-                "/v2/{}/referrers/{}",
-                namespace, base_manifest_digest
-            ))
+            .path_and_query(format!("/v2/{namespace}/referrers/{base_manifest_digest}"))
             .build()
             .unwrap();
 
@@ -280,9 +276,8 @@ mod tests {
 
         for namespace in &namespaces {
             let (digest, _) = create_test_blob(registry, namespace, content).await;
-            let tag_link = DataLink::Tag("latest".to_string());
+            let tag_link = BlobLink::Tag("latest".to_string());
             registry
-                .storage_engine
                 .create_link(namespace, &tag_link, &digest)
                 .await
                 .unwrap();
@@ -358,9 +353,8 @@ mod tests {
         // Create some test tags
         let tags = ["v1", "v2", "latest"];
         for tag in &tags {
-            let tag_link = DataLink::Tag(tag.to_string());
+            let tag_link = BlobLink::Tag(tag.to_string());
             registry
-                .storage_engine
                 .create_link(namespace, &tag_link, &digest)
                 .await
                 .unwrap();
@@ -368,7 +362,7 @@ mod tests {
 
         // Test without pagination
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/tags/list", namespace))
+            .path_and_query(format!("/v2/{namespace}/tags/list"))
             .build()
             .unwrap();
 
@@ -392,18 +386,23 @@ mod tests {
         let mut reader = response.into_async_read();
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
+
         let tag_list: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(tag_list["name"].as_str().unwrap(), namespace);
-        let tags_list = tag_list["tags"].as_array().unwrap();
-        assert_eq!(tags_list.len(), tags.len());
+
+        let name = tag_list["name"].as_str().unwrap();
+        let returned_tags = tag_list["tags"].as_array().unwrap();
+
+        assert_eq!(name, namespace);
+        assert_eq!(returned_tags.len(), tags.len());
+
         for tag in &tags {
-            assert!(tags_list.iter().any(|t| t.as_str().unwrap() == *tag));
+            assert!(returned_tags.iter().any(|t| t.as_str().unwrap() == *tag));
         }
         assert!(!has_link);
 
         // Test with pagination
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/tags/list?n=2", namespace))
+            .path_and_query(format!("/v2/{namespace}/tags/list?n=2"))
             .build()
             .unwrap();
 
@@ -428,9 +427,12 @@ mod tests {
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         let tag_list: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(tag_list["name"].as_str().unwrap(), namespace);
-        let tags_list = tag_list["tags"].as_array().unwrap();
-        assert_eq!(tags_list.len(), 2);
+
+        let name = tag_list["name"].as_str().unwrap();
+        let tags = tag_list["tags"].as_array().unwrap();
+
+        assert_eq!(name, namespace);
+        assert_eq!(tags.len(), 2);
         assert!(has_link);
     }
 

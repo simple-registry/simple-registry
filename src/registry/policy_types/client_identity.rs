@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn test_client_identity_from_cert() {
-        let cert_pem = r#"-----BEGIN CERTIFICATE-----
+        let cert_pem = r"-----BEGIN CERTIFICATE-----
 MIIDfjCCAmagAwIBAgIUaW13SK9b9NpqZDdhlUOm1PbFPfwwDQYJKoZIhvcNAQEL
 BQAwXDELMAkGA1UEBhMCVVMxCzAJBgNVBAgMAkNBMRcwFQYDVQQHDA5TYW4gRnJh
 bmNpc2NvczETMBEGA1UECgwKTXkgQ29tcGFueTESMBAGA1UEAwwJQ2xpZW50IENB
@@ -72,7 +72,7 @@ TpN8PBMfl7Mhd0YhPjsebVuG+yLXO5wFi1K81En8FOCRL/CjHB1ZzufLdTrmnl+2
 LIoJPrvP5ZvHr/s1ygf2MapkbvEGUp8r52oY6lQ9wElD5d4JuIrDj3cofd+iVaMj
 rpdFlMhx4o4OfMqZ/iyi+tDJmBY750FtJRjY4uUKgEW0vdTExlJL9PqmedGtRegO
 BgnxbMXuvf2GlDDhbWOs3/ColqqwqUrkQXH1XxX47a0GCQ==
------END CERTIFICATE-----"#;
+-----END CERTIFICATE-----";
 
         let pem = Pem::iter_from_buffer(cert_pem.as_bytes())
             .next()

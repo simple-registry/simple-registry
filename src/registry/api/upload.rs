@@ -266,7 +266,7 @@ mod tests {
 
         // Test start upload without digest
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/blobs/uploads/", namespace))
+            .path_and_query(format!("/v2/{namespace}/blobs/uploads/"))
             .build()
             .unwrap();
 
@@ -287,20 +287,17 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let location = response.get_header(LOCATION).unwrap();
-        assert!(location.starts_with(&format!("/v2/{}/blobs/uploads/", namespace)));
+        assert!(location.starts_with(&format!("/v2/{namespace}/blobs/uploads/")));
         let uuid = response.get_header(DOCKER_UPLOAD_UUID).unwrap();
         assert!(!uuid.is_empty());
         assert_eq!(response.get_header(RANGE), Some("0-0".to_string()));
 
         // Test start upload with existing blob
         let content = b"test content";
-        let digest = registry.storage_engine.create_blob(content).await.unwrap();
+        let digest = registry.store.create_blob(content).await.unwrap();
 
         let uri = Uri::builder()
-            .path_and_query(format!(
-                "/v2/{}/blobs/uploads/?digest={}",
-                namespace, digest
-            ))
+            .path_and_query(format!("/v2/{namespace}/blobs/uploads/?digest={digest}"))
             .build()
             .unwrap();
 
@@ -322,7 +319,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(
             response.get_header(LOCATION),
-            Some(format!("/v2/{}/blobs/{}", namespace, digest))
+            Some(format!("/v2/{namespace}/blobs/{digest}"))
         );
         assert_eq!(
             response.get_header(DOCKER_CONTENT_DIGEST),
@@ -348,7 +345,7 @@ mod tests {
 
         // Create initial upload
         registry
-            .storage_engine
+            .store
             .create_upload(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -366,7 +363,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             response.get_header(LOCATION),
-            Some(format!("/v2/{}/blobs/uploads/{}", namespace, uuid))
+            Some(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
         );
         assert_eq!(response.get_header(RANGE), Some("0-0".to_string()));
         assert_eq!(
@@ -393,13 +390,13 @@ mod tests {
 
         // Create initial upload
         registry
-            .storage_engine
+            .store
             .create_upload(namespace, &uuid.to_string())
             .await
             .unwrap();
 
         let uri = Uri::builder()
-            .path_and_query(format!("/v2/{}/blobs/uploads/{}", namespace, uuid))
+            .path_and_query(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
             .build()
             .unwrap();
 
@@ -423,7 +420,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         assert_eq!(
             response.get_header(LOCATION),
-            Some(format!("/v2/{}/blobs/uploads/{}", namespace, uuid))
+            Some(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
         );
         assert_eq!(response.get_header(RANGE), Some("0-0".to_string()));
         assert_eq!(response.get_header(CONTENT_LENGTH), Some("0".to_string()));
@@ -452,7 +449,7 @@ mod tests {
 
         // Create initial upload
         registry
-            .storage_engine
+            .store
             .create_upload(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -466,15 +463,14 @@ mod tests {
 
         // Get the upload digest
         let (digest, _, _) = registry
-            .storage_engine
+            .store
             .read_upload_summary(namespace, &uuid.to_string())
             .await
             .unwrap();
 
         let uri = Uri::builder()
             .path_and_query(format!(
-                "/v2/{}/blobs/uploads/{}?digest={}",
-                namespace, uuid, digest
+                "/v2/{namespace}/blobs/uploads/{uuid}?digest={digest}"
             ))
             .build()
             .unwrap();
@@ -498,7 +494,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(
             response.get_header(LOCATION),
-            Some(format!("/v2/{}/blobs/{}", namespace, digest))
+            Some(format!("/v2/{namespace}/blobs/{digest}"))
         );
         assert_eq!(
             response.get_header(DOCKER_CONTENT_DIGEST),
@@ -506,7 +502,7 @@ mod tests {
         );
 
         // Verify blob exists
-        let stored_content = registry.storage_engine.read_blob(&digest).await.unwrap();
+        let stored_content = registry.store.read_blob(&digest).await.unwrap();
         assert_eq!(stored_content, content);
     }
 
@@ -528,7 +524,7 @@ mod tests {
 
         // Create initial upload
         registry
-            .storage_engine
+            .store
             .create_upload(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -547,7 +543,7 @@ mod tests {
 
         // Verify upload is deleted
         assert!(registry
-            .storage_engine
+            .store
             .read_upload_summary(namespace, &uuid.to_string())
             .await
             .is_err());
