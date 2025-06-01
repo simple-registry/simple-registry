@@ -90,7 +90,7 @@ impl<D: DataStore + 'static> Registry<D> {
         accepted_mime_types: &[String],
         namespace: &str,
         digest: &Digest,
-        range: Option<(u64, u64)>,
+        range: Option<(u64, Option<u64>)>,
     ) -> Result<GetBlobResponse<impl Reader>, Error> {
         if repository.is_pull_through() {
             if range.is_some() {
@@ -134,7 +134,7 @@ impl<D: DataStore + 'static> Registry<D> {
     async fn get_local_blob(
         &self,
         digest: &Digest,
-        range: Option<(u64, u64)>,
+        range: Option<(u64, Option<u64>)>,
     ) -> Result<GetBlobResponse<Box<dyn Reader>>, Error> {
         let total_length = self.store.get_blob_size(digest).await?;
 
@@ -156,6 +156,7 @@ impl<D: DataStore + 'static> Registry<D> {
 
         match range {
             Some((start, end)) => {
+                let end = end.unwrap_or(total_length);
                 let reader = Box::new(reader.take(end - start + 1));
 
                 Ok(GetBlobResponse::RangedReader(
@@ -259,7 +260,7 @@ mod tests {
         let content = b"test blob content";
 
         let (digest, repository) = create_test_blob(registry, namespace, content).await;
-        let range = Some((5, 10)); // Get bytes 5-10 (inclusive)
+        let range = Some((5, Some(10))); // Get bytes 5-10 (inclusive)
         let response = registry
             .get_blob(&repository, &[], namespace, &digest, range)
             .await
