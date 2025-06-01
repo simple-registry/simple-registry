@@ -24,7 +24,7 @@ pub trait RequestExt {
 
     fn accepted_content_types(&self) -> Vec<String>;
 
-    fn range(&self, header: HeaderName) -> Result<Option<(u64, u64)>, Error>;
+    fn range(&self, header: HeaderName) -> Result<Option<(u64, Option<u64>)>, Error>;
 }
 
 impl<T> RequestExt for Request<T> {
@@ -72,7 +72,7 @@ impl<T> RequestExt for Request<T> {
             .collect()
     }
 
-    fn range(&self, header: HeaderName) -> Result<Option<(u64, u64)>, Error> {
+    fn range(&self, header: HeaderName) -> Result<Option<(u64, Option<u64>)>, Error> {
         let Some(range_header) = self.get_header(header) else {
             return Ok(None);
         };
@@ -102,9 +102,9 @@ impl<T> RequestExt for Request<T> {
                 return Err(Error::RangeNotSatisfiable);
             }
 
-            Ok(Some((start, end)))
+            Ok(Some((start, Some(end))))
         } else {
-            Ok(Some((start, u64::MAX)))
+            Ok(Some((start, None)))
         }
     }
 }
@@ -231,7 +231,7 @@ mod tests {
             .unwrap();
 
         let range = request.range(RANGE).unwrap().unwrap();
-        assert_eq!(range, (0, 499));
+        assert_eq!(range, (0, Some(499)));
     }
 
     #[test]
@@ -242,7 +242,7 @@ mod tests {
             .unwrap();
 
         let range = request.range(RANGE).unwrap().unwrap();
-        assert_eq!(range, (0, u64::MAX));
+        assert_eq!(range, (0, None));
     }
 
     #[test]
