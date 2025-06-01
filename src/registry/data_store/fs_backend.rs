@@ -606,7 +606,7 @@ impl DataStore for FSBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::{LockStoreConfig, StorageFSConfig};
+    use crate::configuration::StorageFSConfig;
     use crate::registry::data_store::tests::{
         test_datastore_blob_operations, test_datastore_link_operations, test_datastore_list_blobs,
         test_datastore_list_namespaces, test_datastore_list_referrers,
