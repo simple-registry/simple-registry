@@ -44,9 +44,7 @@ impl hyper::body::Body for Body {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         match self.get_mut() {
             Body::Empty => Poll::Ready(None),
-            Body::Fixed(body) => Pin::new(body)
-                .poll_frame(cx)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e)),
+            Body::Fixed(body) => Pin::new(body).poll_frame(cx).map_err(io::Error::other),
             Body::Streaming(body) => Pin::new(body).poll_frame(cx),
         }
     }

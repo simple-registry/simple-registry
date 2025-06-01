@@ -14,7 +14,7 @@ use tokio_util::io::StreamReader;
 use tracing::{debug, warn};
 
 static RANGE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(?:bytes=)?(?P<start>\d+)-(?P<end>\d+)$").unwrap());
+    LazyLock::new(|| Regex::new(r"^(?:bytes=)?(?P<start>\d+)-(?P<end>\d+)?$").unwrap());
 
 pub trait RequestExt {
     fn get_header<K: AsHeaderName>(&self, header: K) -> Option<String>;
@@ -24,7 +24,7 @@ pub trait RequestExt {
 
     fn accepted_content_types(&self) -> Vec<String>;
 
-    fn range(&self, header_name: HeaderName) -> Result<Option<(u64, u64)>, Error>;
+    fn range(&self, header: HeaderName) -> Result<Option<(u64, u64)>, Error>;
 }
 
 impl<T> RequestExt for Request<T> {
@@ -82,7 +82,7 @@ impl<T> RequestExt for Request<T> {
             Error::RangeNotSatisfiable
         })?;
 
-        let (Some(start), Some(end)) = (captures.name("start"), captures.name("end")) else {
+        let (Some(start), end) = (captures.name("start"), captures.name("end")) else {
             return Err(Error::RangeNotSatisfiable);
         };
 
@@ -91,17 +91,21 @@ impl<T> RequestExt for Request<T> {
             Error::RangeNotSatisfiable
         })?;
 
-        let end = end.as_str().parse::<u64>().map_err(|error| {
-            warn!("Error parsing 'end' in Range header: {error}");
-            Error::RangeNotSatisfiable
-        })?;
+        if let Some(end) = end {
+            let end = end.as_str().parse::<u64>().map_err(|error| {
+                warn!("Error parsing 'end' in Range header: {error}");
+                Error::RangeNotSatisfiable
+            })?;
 
-        if start > end {
-            warn!("Range start ({start}) is greater than range end ({end})");
-            return Err(Error::RangeNotSatisfiable);
+            if start > end {
+                warn!("Range start ({start}) is greater than range end ({end})");
+                return Err(Error::RangeNotSatisfiable);
+            }
+
+            Ok(Some((start, end)))
+        } else {
+            Ok(Some((start, u64::MAX)))
         }
-
-        Ok(Some((start, end)))
     }
 }
 
@@ -115,9 +119,7 @@ where
     S::Error: Sync + Send + std::error::Error + 'static,
 {
     fn into_async_read(self) -> impl AsyncRead {
-        let stream = self
-            .into_data_stream()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+        let stream = self.into_data_stream().map_err(io::Error::other);
         StreamReader::new(stream)
     }
 }
@@ -233,17 +235,20 @@ mod tests {
     }
 
     #[test]
-    fn test_range_invalid() {
+    fn test_range_no_end() {
         let request = Request::builder()
-            .header(RANGE, "bytes=500-499")
+            .header(RANGE, "bytes=0-")
             .body(())
             .unwrap();
 
-        let range = request.range(RANGE);
-        assert!(range.is_err());
+        let range = request.range(RANGE).unwrap().unwrap();
+        assert_eq!(range, (0, u64::MAX));
+    }
 
+    #[test]
+    fn test_range_invalid() {
         let request = Request::builder()
-            .header(RANGE, "bytes=0-")
+            .header(RANGE, "bytes=500-499")
             .body(())
             .unwrap();
 

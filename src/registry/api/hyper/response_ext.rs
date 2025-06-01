@@ -73,9 +73,7 @@ where
     S::Error: Sync + Send + std::error::Error + 'static,
 {
     fn into_async_read(self) -> impl AsyncRead {
-        let stream = self
-            .into_data_stream()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+        let stream = self.into_data_stream().map_err(io::Error::other);
         StreamReader::new(stream)
     }
 }
