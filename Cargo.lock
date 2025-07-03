@@ -653,6 +653,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytesize"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3c8f83209414aacf0eeae3cf730b18d6981697fba62f200fcfb92b9f082acba"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3108,6 +3117,7 @@ dependencies = [
  "async-trait",
  "aws-sdk-s3",
  "base64 0.22.1",
+ "bytesize",
  "cel-interpreter",
  "chrono",
  "futures-util",

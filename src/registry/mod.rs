@@ -191,9 +191,10 @@ impl<D: DataStore> Registry<D> {
 
 #[cfg(test)]
 pub(crate) mod test_utils {
+    use bytesize::ByteSize;
     use super::*;
     use crate::configuration::{
-        CacheStoreConfig, DataSize, LockStoreConfig, RepositoryAccessPolicyConfig,
+        CacheStoreConfig, LockStoreConfig, RepositoryAccessPolicyConfig,
         RepositoryRetentionPolicyConfig, StorageFSConfig, StorageS3Config,
     };
     use crate::registry::data_store::{FSBackend, S3Backend};
@@ -244,10 +245,10 @@ pub(crate) mod test_utils {
             access_key_id: "root".to_string(),
             secret_key: "roottoor".to_string(),
             key_prefix: Some(format!("test-{}", Uuid::new_v4())),
-            multipart_copy_threshold: DataSize::WithUnit(100, "MB".to_string()),
-            multipart_copy_chunk_size: DataSize::WithUnit(10, "MB".to_string()),
+            multipart_copy_threshold: ByteSize::mb(100),
+            multipart_copy_chunk_size: ByteSize::mb(10),
             multipart_copy_jobs: 4,
-            multipart_part_size: DataSize::WithUnit(5, "MB".to_string()),
+            multipart_part_size: ByteSize::mb(5),
         };
 
         let lock_store = Arc::new(LockStore::new(LockStoreConfig::default()).unwrap());

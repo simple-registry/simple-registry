@@ -15,6 +15,7 @@ argon2 = "0.5.3"
 async-trait = "0.1.88"
 aws-sdk-s3 = "1.82.0"
 base64 = "0.22.1"
+bytesize = { version = "2.0", features = ["serde"] }
 cel-interpreter = "0.9.0"
 chrono = { version = "0.4.40", features = ["serde"] }
 futures-util = { version = "0.3.31", default-features = false }

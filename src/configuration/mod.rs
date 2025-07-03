@@ -1,13 +1,12 @@
+use bytesize::ByteSize;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::net::IpAddr;
 use std::path::Path;
 
-mod data_size;
 mod error;
 
-pub use data_size::DataSize;
 pub use error::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -124,30 +123,30 @@ pub struct StorageS3Config {
     #[serde(default)]
     pub key_prefix: Option<String>,
     #[serde(default = "StorageS3Config::default_multipart_copy_threshold")]
-    pub multipart_copy_threshold: DataSize,
+    pub multipart_copy_threshold: ByteSize,
     #[serde(default = "StorageS3Config::default_multipart_copy_chunk_size")]
-    pub multipart_copy_chunk_size: DataSize,
+    pub multipart_copy_chunk_size: ByteSize,
     #[serde(default = "StorageS3Config::default_multipart_copy_jobs")]
     pub multipart_copy_jobs: usize,
     #[serde(default = "StorageS3Config::default_multipart_part_size")]
-    pub multipart_part_size: DataSize,
+    pub multipart_part_size: ByteSize,
 }
 
 impl StorageS3Config {
-    fn default_multipart_copy_threshold() -> DataSize {
-        DataSize::WithUnit(5, "GB".to_string())
+    fn default_multipart_copy_threshold() -> ByteSize {
+        ByteSize::gb(5)
     }
 
-    fn default_multipart_copy_chunk_size() -> DataSize {
-        DataSize::WithUnit(100, "MB".to_string())
+    fn default_multipart_copy_chunk_size() -> ByteSize {
+        ByteSize::mb(100)
     }
 
     fn default_multipart_copy_jobs() -> usize {
         4
     }
 
-    fn default_multipart_part_size() -> DataSize {
-        DataSize::WithUnit(100, "MIB".to_string())
+    fn default_multipart_part_size() -> ByteSize {
+        ByteSize::mb(100)
     }
 }
 
@@ -224,7 +223,7 @@ impl Configuration {
         })?;
 
         if let DataStoreConfig::S3(storage) = &config.storage {
-            if storage.multipart_part_size.to_usize() < 50 * 1024 * 1024 {
+            if storage.multipart_part_size.as_u64() < 50 * 1024 * 1024 {
                 return Err(Error::StreamingChunkSize(
                     "Multipart part size must be at least 50MiB".to_string(),
                 ));
@@ -260,7 +259,7 @@ mod tests {
         assert_eq!(
             config.storage,
             DataStoreConfig::FS(StorageFSConfig {
-                root_dir: "".to_string()
+                root_dir: String::new()
             })
         );
         assert!(config.identity.is_empty());

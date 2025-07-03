@@ -20,7 +20,7 @@ use sha2::{Digest as ShaDigestTrait, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Semaphore;
 use tracing::{debug, error, instrument};
-
+use x509_parser::nom::ToUsize;
 use crate::configuration::StorageS3Config;
 use crate::registry::data_store::{DataStore, Error, LinkMetadata, Reader};
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
@@ -74,10 +74,10 @@ impl S3Backend {
             s3_client,
             tree: Arc::new(DataPathBuilder::new(config.key_prefix.unwrap_or_default())),
             bucket: config.bucket,
-            multipart_copy_threshold: config.multipart_copy_threshold.to_u64(),
-            multipart_copy_chunk_size: config.multipart_copy_chunk_size.to_u64(),
+            multipart_copy_threshold: config.multipart_copy_threshold.as_u64(),
+            multipart_copy_chunk_size: config.multipart_copy_chunk_size.as_u64(),
             multipart_copy_jobs: config.multipart_copy_jobs,
-            multipart_part_size: config.multipart_part_size.to_usize(),
+            multipart_part_size: config.multipart_part_size.as_u64().to_usize(),
         }
     }
 
@@ -1241,8 +1241,9 @@ impl DataStore for S3Backend {
 
 #[cfg(test)]
 mod tests {
+    use bytesize::ByteSize;
     use super::*;
-    use crate::configuration::{DataSize, StorageS3Config};
+    use crate::configuration::StorageS3Config;
     use crate::registry::data_store::tests::{
         test_datastore_blob_operations, test_datastore_link_operations, test_datastore_list_blobs,
         test_datastore_list_namespaces, test_datastore_list_referrers,
@@ -1260,10 +1261,10 @@ mod tests {
             access_key_id: "root".to_string(),
             secret_key: "roottoor".to_string(),
             key_prefix: Some(format!("test-{}", Uuid::new_v4())),
-            multipart_copy_threshold: DataSize::WithoutUnit(5 * 1024 * 1024), // 5MB
-            multipart_copy_chunk_size: DataSize::WithoutUnit(5 * 1024 * 1024), // 5MB
+            multipart_copy_threshold: ByteSize::mb(5),
+            multipart_copy_chunk_size: ByteSize::mb(5),
             multipart_copy_jobs: 4,
-            multipart_part_size: DataSize::WithoutUnit(5 * 1024 * 1024), // 5MB
+            multipart_part_size: ByteSize::mb(5),
         };
 
         S3Backend::new(config)
