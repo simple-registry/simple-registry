@@ -341,7 +341,7 @@ impl DataStore for FSBackend {
         Self::write_file(&date_path, Utc::now().to_rfc3339().as_bytes())?;
 
         let path = self.tree.upload_hash_context_path(name, uuid, "sha256", 0);
-        Self::write_file(&path, &Sha256::serialized_empty_state())?;
+        Self::write_file(&path, &Sha256::new().serialized_state())?;
 
         Ok(uuid.to_string())
     }
@@ -381,7 +381,7 @@ impl DataStore for FSBackend {
             .tree
             .upload_hash_context_path(name, uuid, "sha256", upload_size);
         let hash_state = Self::read_file(&path)?;
-        let mut hash = Sha256::deserialize_state(&hash_state)?;
+        let mut hash = Sha256::from_state(&hash_state)?;
 
         // poll the stream asynchronously and synchronously write to the file
         let mut buffer = vec![0; 8192];
@@ -399,7 +399,7 @@ impl DataStore for FSBackend {
         let path =
             self.tree
                 .upload_hash_context_path(name, uuid, "sha256", upload_size + wrote_size);
-        Self::write_file(&path, &hash.serialize_state())?;
+        Self::write_file(&path, &hash.serialized_state())?;
         Ok(())
     }
 
@@ -417,8 +417,8 @@ impl DataStore for FSBackend {
             .upload_hash_context_path(name, uuid, "sha256", size);
         let state = Self::read_file(&path)?;
 
-        let hasher = Sha256::deserialize_state(&state)?;
-        let digest = hasher.to_digest();
+        let hasher = Sha256::from_state(&state)?;
+        let digest = hasher.digest();
 
         let date = self.tree.upload_start_date_path(name, uuid);
         let date_str = Self::read_string(&date).unwrap_or_default();
@@ -447,8 +447,8 @@ impl DataStore for FSBackend {
                 .tree
                 .upload_hash_context_path(name, uuid, "sha256", size);
             let state = Self::read_file(&path)?;
-            let hasher = Sha256::deserialize_state(&state)?;
-            hasher.to_digest()
+            let hasher = Sha256::from_state(&state)?;
+            hasher.digest()
         };
 
         let blob_root = self.tree.blob_container_dir(&digest);
@@ -476,7 +476,7 @@ impl DataStore for FSBackend {
     async fn create_blob(&self, content: &[u8]) -> Result<Digest, Error> {
         let mut hasher = Sha256::new();
         hasher.update(content);
-        let digest = hasher.to_digest();
+        let digest = hasher.digest();
 
         let blob_path = self.tree.blob_path(&digest);
         Self::write_file(blob_path, content)?;

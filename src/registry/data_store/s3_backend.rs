@@ -890,7 +890,7 @@ impl DataStore for S3Backend {
         self.put_object(&date_path, date.into_bytes()).await?;
 
         let hash_state_path = self.tree.upload_hash_context_path(name, uuid, "sha256", 0);
-        let state = Sha256::serialized_empty_state();
+        let state = Sha256::new().serialized_state();
         self.put_object(&hash_state_path, state).await?;
 
         Ok(uuid.to_string())
@@ -946,7 +946,7 @@ impl DataStore for S3Backend {
         // we store it in as a staging blob.
         // First, we load the staged chunk if any and append the new data
         let mut chunk = self.load_staged_chunk(name, uuid, uploaded_size).await?;
-        let mut hasher = Sha256::deserialize_state(&state)?;
+        let mut hasher = Sha256::from_state(&state)?;
 
         let mut stream_chunk = vec![0; self.multipart_part_size];
         loop {
@@ -970,7 +970,7 @@ impl DataStore for S3Backend {
                     "sha256",
                     uploaded_size + chunk_len,
                 );
-                self.put_object(&hash_state_path, hasher.serialize_state())
+                self.put_object(&hash_state_path, hasher.serialized_state())
                     .await?;
 
                 self.upload_part(&upload_path, &upload_id, uploaded_parts, chunk)
@@ -992,7 +992,7 @@ impl DataStore for S3Backend {
                 "sha256",
                 uploaded_size + (chunk.len() as u64),
             );
-            self.put_object(&hash_state_path, hasher.serialize_state())
+            self.put_object(&hash_state_path, hasher.serialized_state())
                 .await?;
 
             self.store_staged_chunk(name, uuid, chunk, uploaded_size)
@@ -1024,8 +1024,8 @@ impl DataStore for S3Backend {
             .upload_hash_context_path(name, uuid, "sha256", size);
         let state = self.get_object_body_as_vec(&hash_state_path, None).await?;
 
-        let hasher = Sha256::deserialize_state(&state)?;
-        let digest = hasher.to_digest();
+        let hasher = Sha256::from_state(&state)?;
+        let digest = hasher.digest();
 
         let date_path = self.tree.upload_start_date_path(name, uuid);
         let date = self.get_object_body_as_vec(&date_path, None).await?;
@@ -1077,8 +1077,8 @@ impl DataStore for S3Backend {
 
             let state = self.get_object_body_as_vec(&hash_state_path, None).await?;
 
-            let hasher = Sha256::deserialize_state(&state)?;
-            hasher.to_digest()
+            let hasher = Sha256::from_state(&state)?;
+            hasher.digest()
         };
 
         let parts = parts
@@ -1131,7 +1131,7 @@ impl DataStore for S3Backend {
     async fn create_blob(&self, content: &[u8]) -> Result<Digest, Error> {
         let mut hasher = Sha256::new();
         hasher.update(content);
-        let digest = hasher.to_digest();
+        let digest = hasher.digest();
 
         let blob_path = self.tree.blob_path(&digest);
         self.put_object(&blob_path, content.to_vec()).await?;
