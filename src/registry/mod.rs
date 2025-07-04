@@ -191,7 +191,6 @@ impl<D: DataStore> Registry<D> {
 
 #[cfg(test)]
 pub(crate) mod test_utils {
-    use bytesize::ByteSize;
     use super::*;
     use crate::configuration::{
         CacheStoreConfig, LockStoreConfig, RepositoryAccessPolicyConfig,
@@ -200,6 +199,7 @@ pub(crate) mod test_utils {
     use crate::registry::data_store::{FSBackend, S3Backend};
     use crate::registry::oci_types::Digest;
     use crate::registry::utils::BlobLink;
+    use bytesize::ByteSize;
     use serde_json::json;
     use tempfile::TempDir;
     use uuid::Uuid;
