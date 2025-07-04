@@ -17,6 +17,7 @@ mod manifest;
 pub mod oci_types;
 mod policy;
 pub mod policy_types;
+mod reader;
 mod repository;
 mod scrub;
 mod upload;
