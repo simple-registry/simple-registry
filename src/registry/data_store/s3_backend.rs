@@ -1,8 +1,15 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
+use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::configuration::StorageS3Config;
+use crate::registry::data_store::{DataStore, Error, LinkMetadata, Reader};
+use crate::registry::oci_types::{Descriptor, Digest, Manifest};
+use crate::registry::reader::{ChunkedReader, HashingReader};
+use crate::registry::utils::sha256_ext::Sha256Ext;
+use crate::registry::utils::{BlobLink, BlobMetadata, DataPathBuilder};
 use async_trait::async_trait;
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
@@ -14,6 +21,7 @@ use aws_sdk_s3::{
     config::{BehaviorVersion, Credentials, Region},
     Client as S3Client, Config as S3Config,
 };
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
 use sha2::{Digest as ShaDigestTrait, Sha256};
@@ -21,11 +29,6 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Semaphore;
 use tracing::{debug, error, instrument};
 use x509_parser::nom::ToUsize;
-use crate::configuration::StorageS3Config;
-use crate::registry::data_store::{DataStore, Error, LinkMetadata, Reader};
-use crate::registry::oci_types::{Descriptor, Digest, Manifest};
-use crate::registry::utils::sha256_ext::Sha256Ext;
-use crate::registry::utils::{BlobLink, BlobMetadata, DataPathBuilder};
 
 #[derive(Clone)]
 pub struct S3Backend {
@@ -72,7 +75,7 @@ impl S3Backend {
 
         Self {
             s3_client,
-            tree: Arc::new(DataPathBuilder::new(config.key_prefix.unwrap_or_default())),
+            tree: Arc::new(DataPathBuilder::new(config.key_prefix)),
             bucket: config.bucket,
             multipart_copy_threshold: config.multipart_copy_threshold.as_u64(),
             multipart_copy_chunk_size: config.multipart_copy_chunk_size.as_u64(),
@@ -109,8 +112,10 @@ impl S3Backend {
 
         let content_length = res
             .content_length()
-            .and_then(|content_length| u64::try_from(content_length).ok())
-            .unwrap_or_default();
+            .and_then(|content_length| content_length.try_into().ok())
+            .ok_or(Error::InvalidFormat(
+                "Content length not provided".to_string(),
+            ))?;
 
         Ok(content_length)
     }
@@ -149,12 +154,15 @@ impl S3Backend {
     }
 
     #[instrument(skip(self, data))]
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), Error> {
+    async fn put_object<T>(&self, key: &str, data: T) -> Result<(), Error>
+    where
+        T: Into<Bytes>,
+    {
         self.s3_client
             .put_object()
             .bucket(&self.bucket)
             .key(key)
-            .body(ByteStream::from(data))
+            .body(ByteStream::from(data.into()))
             .send()
             .await?;
 
@@ -177,19 +185,17 @@ impl S3Backend {
     async fn delete_object_with_prefix(&self, prefix: &str) -> Result<(), Error> {
         debug!("Deleting objects with prefix: {prefix}");
 
-        let mut next_continuation_token = None;
+        let mut continuation_token = None;
         loop {
             let res = self
                 .s3_client
                 .list_objects_v2()
                 .bucket(&self.bucket)
                 .prefix(prefix)
-                .max_keys(1000);
-
-            let res = match next_continuation_token {
-                Some(token) => res.continuation_token(token).send().await,
-                None => res.send().await,
-            }?;
+                .max_keys(1000)
+                .set_continuation_token(continuation_token)
+                .send()
+                .await?;
 
             for object in res.contents.unwrap_or_default() {
                 if let Some(key) = object.key {
@@ -199,7 +205,7 @@ impl S3Backend {
             }
 
             if res.is_truncated.unwrap_or_default() {
-                next_continuation_token = res.next_continuation_token;
+                continuation_token = res.next_continuation_token;
             } else {
                 break;
             }
@@ -213,13 +219,13 @@ impl S3Backend {
         &self,
         namespace: &str,
         upload_id: &str,
-        chunk: Vec<u8>,
+        chunk: Bytes,
         offset: u64,
     ) -> Result<(), Error> {
         let key = self
             .tree
             .upload_staged_container_path(namespace, upload_id, offset);
-        self.put_object(&key, chunk.clone()).await
+        self.put_object(&key, chunk).await
     }
 
     #[instrument(skip(self))]
@@ -233,13 +239,33 @@ impl S3Backend {
             .tree
             .upload_staged_container_path(namespace, upload_id, offset);
         match self.get_object_body_as_vec(&key, None).await {
-            Ok(data) => {
-                self.delete_object(&key).await?;
-                Ok(data)
-            }
+            Ok(data) => Ok(data),
             Err(Error::ReferenceNotFound) => Ok(Vec::new()),
             Err(e) => Err(e),
         }
+    }
+
+    async fn save_hasher(
+        &self,
+        name: &str,
+        uuid: &str,
+        offset: u64,
+        state: Vec<u8>,
+    ) -> Result<(), Error> {
+        let hash_state_path = self
+            .tree
+            .upload_hash_context_path(name, uuid, "sha256", offset);
+
+        self.put_object(&hash_state_path, state).await
+    }
+
+    async fn load_hasher(&self, name: &str, uuid: &str, offset: u64) -> Result<Sha256, Error> {
+        let hash_state_path = self
+            .tree
+            .upload_hash_context_path(name, uuid, "sha256", offset);
+
+        let state = self.get_object_body_as_vec(&hash_state_path, None).await?;
+        Sha256::from_state(&state)
     }
 
     async fn multipart_copy_object(
@@ -282,12 +308,10 @@ impl S3Backend {
         let mut tasks = Vec::new();
 
         for (part_number, (start_offset, part_size)) in offsets.into_iter().enumerate() {
-            let Ok(part_number) = i32::try_from(part_number + 1) else {
-                error!("Error copying parts: too many parts");
-                return Err(Error::StorageBackend("Error copying parts".to_string()));
-            };
+            let part_number = (part_number + 1).try_into()?;
             let end_offset = start_offset + part_size - 1;
 
+            // TODO: implement a true task queue!
             let semaphore = semaphore.clone();
             let source = source.to_string();
             let destination = destination.to_string();
@@ -303,7 +327,7 @@ impl S3Backend {
                 .copy_source_range(format!("bytes={start_offset}-{end_offset}"));
 
             let task = tokio::spawn(async move {
-                let _permit = semaphore.acquire().await.unwrap(); // TODO: fix unwrap()
+                let _permit = semaphore.acquire().await.unwrap();
                 debug!("Copying part {part_number} ({start_offset}-{end_offset}) from '{source}' to '{destination}'");
 
                 let res = query.send().await?;
@@ -375,31 +399,28 @@ impl S3Backend {
 
     #[instrument(skip(self))]
     async fn search_multipart_upload_id(&self, key: &str) -> Result<Option<String>, Error> {
-        let mut next_key_marker = None;
+        let mut key_marker = None;
 
         loop {
-            let mut res = self
+            let res = self
                 .s3_client
                 .list_multipart_uploads()
                 .bucket(&self.bucket)
-                .prefix(key);
+                .prefix(key)
+                .set_key_marker(key_marker)
+                .send()
+                .await?;
 
-            if let Some(key_marker) = next_key_marker {
-                res = res.key_marker(key_marker);
-            }
-
-            let res = res.send().await?;
             if let Some(uploads) = res.uploads {
                 for upload in uploads {
-                    let s = upload.key.unwrap_or_default();
-                    if s.as_str() == key {
+                    if upload.key.is_some_and(|s| s == key) {
                         return Ok(upload.upload_id);
                     }
                 }
             }
 
             if res.is_truncated.unwrap_or_default() {
-                next_key_marker = res.next_key_marker;
+                key_marker = res.next_key_marker;
             } else {
                 break;
             }
@@ -443,8 +464,7 @@ impl S3Backend {
             }
         }
 
-        let parts_size = u64::try_from(parts_size).unwrap_or_default();
-        Ok((all_parts, parts_size))
+        Ok((all_parts, parts_size.try_into()?))
     }
 
     #[instrument(skip(self))]
@@ -473,7 +493,7 @@ impl S3Backend {
         key: &str,
         upload_id: &str,
         part_number: i32,
-        body: Vec<u8>,
+        body: Bytes,
     ) -> Result<String, Error> {
         let body = ByteStream::from(body);
 
@@ -489,6 +509,55 @@ impl S3Backend {
             .await?;
 
         Ok(res.e_tag.unwrap_or_default())
+    }
+
+    async fn upload_part_copy(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: i32,
+        source: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<Option<(String, u64)>, Error> {
+        let Ok(source_object) = self
+            .s3_client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(source)
+            .send()
+            .await
+        else {
+            return Ok(None);
+        };
+
+        let copied_size = source_object
+            .content_length
+            .unwrap_or_default()
+            .try_into()?;
+
+        let res = self
+            .s3_client
+            .upload_part_copy()
+            .bucket(&self.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .part_number(part_number)
+            .copy_source(format!("{}/{source}", self.bucket));
+
+        let res = if let Some((start, end)) = range {
+            res.copy_source_range(format!("bytes={start}-{end}"))
+        } else {
+            res
+        };
+
+        let res = res.send().await?;
+
+        let e_tag = res
+            .copy_part_result
+            .and_then(|res| res.e_tag)
+            .unwrap_or_default();
+
+        Ok(Some((e_tag, copied_size)))
     }
 
     #[instrument(skip(self))]
@@ -886,12 +955,10 @@ impl DataStore for S3Backend {
     #[instrument(skip(self))]
     async fn create_upload(&self, name: &str, uuid: &str) -> Result<String, Error> {
         let date_path = self.tree.upload_start_date_path(name, uuid);
-        let date = Utc::now().to_rfc3339();
-        self.put_object(&date_path, date.into_bytes()).await?;
+        self.put_object(&date_path, Utc::now().to_rfc3339()).await?;
 
-        let hash_state_path = self.tree.upload_hash_context_path(name, uuid, "sha256", 0);
         let state = Sha256::new().serialized_state();
-        self.put_object(&hash_state_path, state).await?;
+        self.save_hasher(name, uuid, 0, state).await?;
 
         Ok(uuid.to_string())
     }
@@ -901,7 +968,7 @@ impl DataStore for S3Backend {
         &self,
         name: &str,
         uuid: &str,
-        mut stream: S,
+        stream: S,
         append: bool,
     ) -> Result<(), Error> {
         let upload_path = self.tree.upload_path(name, uuid);
@@ -921,7 +988,7 @@ impl DataStore for S3Backend {
                 .await?;
 
             uploaded_size = parts_size;
-            uploaded_parts = i32::try_from(parts.len()).unwrap_or_default() + 1;
+            uploaded_parts = (parts.len() + 1).try_into()?;
         } else {
             self.abort_pending_uploads(&upload_path).await?;
 
@@ -930,73 +997,42 @@ impl DataStore for S3Backend {
             uploaded_parts = 1;
         }
 
-        let staged_path = self
-            .tree
-            .upload_staged_container_path(name, uuid, uploaded_size);
-        let staged_size = self.get_object_size(&staged_path).await.unwrap_or_default();
-
-        let hasher_state_path =
-            self.tree
-                .upload_hash_context_path(name, uuid, "sha256", uploaded_size + staged_size);
-        let state = self
-            .get_object_body_as_vec(&hasher_state_path, None)
-            .await?;
-
         // NOTE: if the part is not big enough (at least 5M, as per the S3 protocol),
         // we store it in as a staging blob.
         // First, we load the staged chunk if any and append the new data
-        let mut chunk = self.load_staged_chunk(name, uuid, uploaded_size).await?;
-        let mut hasher = Sha256::from_state(&state)?;
+        let chunk = self.load_staged_chunk(name, uuid, uploaded_size).await?;
+        let hasher = self.load_hasher(name, uuid, uploaded_size).await?;
 
-        let mut stream_chunk = vec![0; self.multipart_part_size];
-        loop {
-            let bytes_read = stream.read(&mut stream_chunk).await?;
-            if bytes_read == 0 {
-                break;
-            }
+        let reader = Cursor::new(chunk).chain(stream);
+        let reader = HashingReader::with_hasher(reader, hasher);
+        let mut reader = ChunkedReader::new(reader, self.multipart_part_size as u64);
 
-            let stream_chunk = &stream_chunk[..bytes_read];
-            chunk.extend(stream_chunk);
-            hasher.update(stream_chunk);
+        while let Some(mut chunk_reader) = reader.next_chunk() {
+            let mut chunk = Vec::with_capacity(self.multipart_part_size);
+            chunk_reader.read_to_end(&mut chunk).await?;
+            let chunk = Bytes::from(chunk);
+            let chunk_len = chunk.len() as u64;
 
-            if chunk.len() >= self.multipart_part_size {
-                let chunk_len = chunk.len() as u64;
-                // The hash computation must take into account:
-                // - completed parts
-                // - current staged chunk if any + source: chunk.len()
-                let hash_state_path = self.tree.upload_hash_context_path(
-                    name,
-                    uuid,
-                    "sha256",
-                    uploaded_size + chunk_len,
-                );
-                self.put_object(&hash_state_path, hasher.serialized_state())
-                    .await?;
-
-                self.upload_part(&upload_path, &upload_id, uploaded_parts, chunk)
-                    .await?;
-
-                uploaded_parts += 1;
-                uploaded_size += chunk_len;
-                chunk = Vec::new();
-            }
-        }
-
-        // If the chunk is still too small, store it again and return.
-        // If there is no subsequent calls to this method, the chunk will be loaded back and stored
-        // as last part in the complete_upload() method.
-        if !chunk.is_empty() {
-            let hash_state_path = self.tree.upload_hash_context_path(
+            // We always need the full hash state for the upload summary
+            self.save_hasher(
                 name,
                 uuid,
-                "sha256",
-                uploaded_size + (chunk.len() as u64),
-            );
-            self.put_object(&hash_state_path, hasher.serialized_state())
-                .await?;
+                uploaded_size + chunk_len,
+                reader.serialized_state(),
+            )
+            .await?;
 
-            self.store_staged_chunk(name, uuid, chunk, uploaded_size)
-                .await?;
+            // Last chunk for this write(), store remaining data in staging
+            if chunk.len() < self.multipart_part_size {
+                reader.mark_finished();
+                self.store_staged_chunk(name, uuid, chunk, uploaded_size)
+                    .await?;
+            } else {
+                self.upload_part(&upload_path, &upload_id, uploaded_parts, chunk)
+                    .await?;
+                uploaded_size += chunk_len;
+                uploaded_parts += 1;
+            }
         }
 
         Ok(())
@@ -1012,20 +1048,13 @@ impl DataStore for S3Backend {
 
         let mut size = 0;
         if let Ok(Some(upload_id)) = self.search_multipart_upload_id(&key).await {
-            let (_, upload_size) = self.search_multipart_upload_parts(&key, &upload_id).await?;
-            size = upload_size;
+            (_, size) = self.search_multipart_upload_parts(&key, &upload_id).await?;
         }
 
         let staged_path = self.tree.upload_staged_container_path(name, uuid, size);
         size += self.get_object_size(&staged_path).await.unwrap_or_default();
 
-        let hash_state_path = self
-            .tree
-            .upload_hash_context_path(name, uuid, "sha256", size);
-        let state = self.get_object_body_as_vec(&hash_state_path, None).await?;
-
-        let hasher = Sha256::from_state(&state)?;
-        let digest = hasher.digest();
+        let digest = self.load_hasher(name, uuid, size).await?.digest();
 
         let date_path = self.tree.upload_start_date_path(name, uuid);
         let date = self.get_object_body_as_vec(&date_path, None).await?;
@@ -1054,45 +1083,40 @@ impl DataStore for S3Backend {
 
         let (mut parts, mut size) = self.search_multipart_upload_parts(&key, &upload_id).await?;
 
-        // load the staged chunk if any and create the last part
-        let chunk = self.load_staged_chunk(name, uuid, size).await?;
-        if !chunk.is_empty() {
-            size += chunk.len() as u64;
+        let source_key = self.tree.upload_staged_container_path(name, uuid, size);
 
-            let part_number = i32::try_from(parts.len()).unwrap_or_default() + 1; // Safe unwrap, max parts is 10000
+        let last_part = self
+            .upload_part_copy(
+                &key,
+                &upload_id,
+                (parts.len() + 1).try_into()?,
+                &source_key,
+                None,
+            )
+            .await?;
 
-            let e_tag = self
-                .upload_part(&key, &upload_id, part_number, chunk)
-                .await?;
-
+        if let Some((e_tag, part_size)) = last_part {
             parts.push(e_tag);
+            size += part_size;
         }
 
         let digest = if let Some(digest) = digest {
             digest
         } else {
-            let hash_state_path = self
-                .tree
-                .upload_hash_context_path(name, uuid, "sha256", size);
-
-            let state = self.get_object_body_as_vec(&hash_state_path, None).await?;
-
-            let hasher = Sha256::from_state(&state)?;
-            hasher.digest()
+            self.load_hasher(name, uuid, size).await?.digest()
         };
 
         let parts = parts
-            .iter()
+            .into_iter()
             .enumerate()
-            .map(|(i, e_tag)| {
-                let part_number = i32::try_from(i).unwrap_or_default() + 1; // Safe unwrap, max parts is 10000
-
-                CompletedPartBuilder::default()
+            .map(|(i, e_tag)| -> Result<_, Error> {
+                let part_number = (i + 1).try_into()?;
+                Ok(CompletedPartBuilder::default()
                     .part_number(part_number)
                     .e_tag(e_tag)
-                    .build()
+                    .build())
             })
-            .collect::<Vec<CompletedPart>>();
+            .collect::<Result<Vec<CompletedPart>, Error>>()?;
 
         let _res = self
             .s3_client
@@ -1133,8 +1157,9 @@ impl DataStore for S3Backend {
         hasher.update(content);
         let digest = hasher.digest();
 
+        let content = Bytes::from(content.to_vec());
         let blob_path = self.tree.blob_path(&digest);
-        self.put_object(&blob_path, content.to_vec()).await?;
+        self.put_object(&blob_path, content).await?;
 
         Ok(digest)
     }
@@ -1189,7 +1214,7 @@ impl DataStore for S3Backend {
             let path = self.tree.blob_container_dir(digest);
             self.delete_object_with_prefix(&path).await?;
         } else {
-            let content = serde_json::to_vec(&reference_index)?;
+            let content = Bytes::from(serde_json::to_vec(&reference_index)?);
             self.put_object(&path, content).await?;
         }
 
@@ -1229,7 +1254,7 @@ impl DataStore for S3Backend {
         metadata: &LinkMetadata,
     ) -> Result<(), Error> {
         let link_path = self.tree.get_link_path(link, namespace);
-        let serialized_link_data = serde_json::to_vec(metadata)?;
+        let serialized_link_data = Bytes::from(serde_json::to_vec(metadata)?);
         self.put_object(&link_path, serialized_link_data).await
     }
 
@@ -1241,7 +1266,6 @@ impl DataStore for S3Backend {
 
 #[cfg(test)]
 mod tests {
-    use bytesize::ByteSize;
     use super::*;
     use crate::configuration::StorageS3Config;
     use crate::registry::data_store::tests::{
@@ -1250,6 +1274,7 @@ mod tests {
         test_datastore_list_revisions, test_datastore_list_tags, test_datastore_list_uploads,
         test_datastore_upload_operations,
     };
+    use bytesize::ByteSize;
     use uuid::Uuid;
 
     // Helper function to create a test S3Backend
@@ -1260,7 +1285,7 @@ mod tests {
             bucket: "registry".to_string(),
             access_key_id: "root".to_string(),
             secret_key: "roottoor".to_string(),
-            key_prefix: Some(format!("test-{}", Uuid::new_v4())),
+            key_prefix: format!("test-{}", Uuid::new_v4()),
             multipart_copy_threshold: ByteSize::mb(5),
             multipart_copy_chunk_size: ByteSize::mb(5),
             multipart_copy_jobs: 4,

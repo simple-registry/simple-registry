@@ -245,7 +245,7 @@ pub(crate) mod test_utils {
             bucket: "registry".to_string(),
             access_key_id: "root".to_string(),
             secret_key: "roottoor".to_string(),
-            key_prefix: Some(format!("test-{}", Uuid::new_v4())),
+            key_prefix: format!("test-{}", Uuid::new_v4()),
             multipart_copy_threshold: ByteSize::mb(100),
             multipart_copy_chunk_size: ByteSize::mb(10),
             multipart_copy_jobs: 4,

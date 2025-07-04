@@ -151,7 +151,9 @@ pub trait DataStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::utils::sha256_ext::Sha256Ext;
     use chrono::Duration;
+    use sha2::{Digest, Sha256};
     use std::io::Cursor;
     use uuid::Uuid;
 
@@ -565,6 +567,11 @@ mod tests {
         assert_eq!(upload_id, uuid);
 
         let test_content = b"Test upload content";
+
+        let mut hasher = Sha256::new();
+        hasher.update(test_content);
+        let expected_digest = hasher.digest();
+
         store
             .write_upload(namespace, &uuid, Cursor::new(test_content.to_vec()), false)
             .await
@@ -573,6 +580,7 @@ mod tests {
         let (digest, size, start_date) = store.read_upload_summary(namespace, &uuid).await.unwrap();
         assert_eq!(size, test_content.len() as u64);
         assert!(Utc::now().signed_duration_since(start_date) < Duration::hours(1));
+        assert_eq!(expected_digest, digest);
 
         let final_digest = store.complete_upload(namespace, &uuid, None).await.unwrap();
         assert_eq!(final_digest, digest);

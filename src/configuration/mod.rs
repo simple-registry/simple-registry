@@ -121,7 +121,7 @@ pub struct StorageS3Config {
     pub bucket: String,
     pub region: String,
     #[serde(default)]
-    pub key_prefix: Option<String>,
+    pub key_prefix: String,
     #[serde(default = "StorageS3Config::default_multipart_copy_threshold")]
     pub multipart_copy_threshold: ByteSize,
     #[serde(default = "StorageS3Config::default_multipart_copy_chunk_size")]

@@ -5,8 +5,11 @@ use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::head_object::HeadObjectError;
 use aws_sdk_s3::primitives::ByteStreamError;
 use sha2::digest::crypto_common::hazmat::DeserializeStateError;
+use std::fmt::Debug;
+use std::num::TryFromIntError;
 use std::string::FromUtf8Error;
 use std::{fmt, io};
+use tracing::error;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
@@ -58,8 +61,16 @@ impl From<io::Error> for Error {
         if e.kind() == io::ErrorKind::NotFound {
             Error::ReferenceNotFound
         } else {
+            error!("IO error: {e:?}");
             Error::StorageBackend(e.to_string())
         }
+    }
+}
+
+impl From<TryFromIntError> for Error {
+    fn from(e: TryFromIntError) -> Self {
+        error!("TryFromIntError: {e:?}");
+        Error::InvalidFormat(e.to_string())
     }
 }
 
@@ -67,25 +78,38 @@ impl From<io::Error> for Error {
 
 impl From<HeadObjectError> for Error {
     fn from(e: HeadObjectError) -> Self {
-        Error::StorageBackend(e.to_string())
+        error!("HeadObjectError: {e:?}");
+        Error::StorageBackend(format!("HeadObjectError: {e:?}"))
     }
 }
 
 impl From<GetObjectError> for Error {
     fn from(e: GetObjectError) -> Self {
-        Error::StorageBackend(e.to_string())
+        error!("GetObjectError: {e:?}");
+        Error::StorageBackend(format!("GetObjectError: {e:?}"))
     }
 }
 
-impl<T> From<SdkError<T, HttpResponse>> for Error {
+impl<T> From<SdkError<T, HttpResponse>> for Error
+where
+    T: Debug,
+{
     fn from(e: SdkError<T, HttpResponse>) -> Self {
-        Error::StorageBackend(e.to_string())
+        error!("SdkError: {e:?}");
+        Error::StorageBackend(format!("SdkError: {e:?}"))
     }
 }
 
 impl From<ByteStreamError> for Error {
     fn from(e: ByteStreamError) -> Self {
-        Error::StorageBackend(e.to_string())
+        error!("ByteStreamError: {e:?}");
+        Error::StorageBackend(format!("ByteStreamError: {e:?}"))
+    }
+}
+
+impl From<chrono::format::ParseError> for Error {
+    fn from(e: chrono::format::ParseError) -> Self {
+        Error::InvalidFormat(e.to_string())
     }
 }
 
