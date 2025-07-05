@@ -17,6 +17,7 @@ mod manifest;
 pub mod oci_types;
 mod policy;
 pub mod policy_types;
+mod reader;
 mod repository;
 mod scrub;
 mod upload;
@@ -193,12 +194,13 @@ impl<D: DataStore> Registry<D> {
 pub(crate) mod test_utils {
     use super::*;
     use crate::configuration::{
-        CacheStoreConfig, DataSize, LockStoreConfig, RepositoryAccessPolicyConfig,
+        CacheStoreConfig, LockStoreConfig, RepositoryAccessPolicyConfig,
         RepositoryRetentionPolicyConfig, StorageFSConfig, StorageS3Config,
     };
     use crate::registry::data_store::{FSBackend, S3Backend};
     use crate::registry::oci_types::Digest;
     use crate::registry::utils::BlobLink;
+    use bytesize::ByteSize;
     use serde_json::json;
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -243,11 +245,11 @@ pub(crate) mod test_utils {
             bucket: "registry".to_string(),
             access_key_id: "root".to_string(),
             secret_key: "roottoor".to_string(),
-            key_prefix: Some(format!("test-{}", Uuid::new_v4())),
-            multipart_copy_threshold: DataSize::WithUnit(100, "MB".to_string()),
-            multipart_copy_chunk_size: DataSize::WithUnit(10, "MB".to_string()),
+            key_prefix: format!("test-{}", Uuid::new_v4()),
+            multipart_copy_threshold: ByteSize::mb(100),
+            multipart_copy_chunk_size: ByteSize::mb(10),
             multipart_copy_jobs: 4,
-            multipart_part_size: DataSize::WithUnit(5, "MB".to_string()),
+            multipart_part_size: ByteSize::mb(5),
         };
 
         let lock_store = Arc::new(LockStore::new(LockStoreConfig::default()).unwrap());

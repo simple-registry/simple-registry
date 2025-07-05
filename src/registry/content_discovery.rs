@@ -162,7 +162,7 @@ mod tests {
         let test_content = b"test content";
         let test_digest = registry.store.create_blob(test_content).await.unwrap();
         let tags = ["latest", "v1.0", "v2.0"];
-        for tag in &tags {
+        for tag in tags {
             let tag_link = BlobLink::Tag(tag.to_string());
             registry
                 .create_link(namespace, &tag_link, &test_digest)

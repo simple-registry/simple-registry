@@ -352,7 +352,7 @@ mod tests {
 
         // Create some test tags
         let tags = ["v1", "v2", "latest"];
-        for tag in &tags {
+        for tag in tags {
             let tag_link = BlobLink::Tag(tag.to_string());
             registry
                 .create_link(namespace, &tag_link, &digest)

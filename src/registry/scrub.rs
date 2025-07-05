@@ -567,7 +567,7 @@ mod tests {
         let tags = ["latest", "v1.0", "v2.0", "old-tag"];
         let mut tag_digests = Vec::new();
 
-        for tag in &tags {
+        for tag in tags {
             let response = new_registry
                 .put_manifest(
                     namespace,

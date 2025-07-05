@@ -151,7 +151,9 @@ pub trait DataStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::utils::sha256_ext::Sha256Ext;
     use chrono::Duration;
+    use sha2::{Digest, Sha256};
     use std::io::Cursor;
     use uuid::Uuid;
 
@@ -214,7 +216,7 @@ mod tests {
         let digest = store.create_blob(b"manifest content").await.unwrap();
 
         let tags = ["latest", "v1.0", "v2.0"];
-        for tag in &tags {
+        for tag in tags {
             let tag_link = BlobLink::Tag(tag.to_string());
             store
                 .write_link(
@@ -232,7 +234,7 @@ mod tests {
         // Test listing all tags
         let (all_tags, token) = store.list_tags(namespace, 10, None).await.unwrap();
         assert_eq!(all_tags.len(), tags.len());
-        for tag in &tags {
+        for tag in tags {
             assert!(all_tags.contains(&tag.to_string()));
         }
         assert!(token.is_none());
@@ -379,7 +381,7 @@ mod tests {
         let namespace = "test-repo";
 
         let upload_ids = ["upload1", "upload2", "upload3"];
-        for id in &upload_ids {
+        for id in upload_ids {
             store.create_upload(namespace, id).await.unwrap();
 
             let content = format!("Content for upload {id}");
@@ -392,7 +394,7 @@ mod tests {
         // Verify we can list all uploads
         let (uploads, _token) = store.list_uploads(namespace, 10, None).await.unwrap();
         assert_eq!(uploads.len(), upload_ids.len());
-        for id in &upload_ids {
+        for id in upload_ids {
             assert!(uploads.contains(&id.to_string()));
         }
 
@@ -565,6 +567,11 @@ mod tests {
         assert_eq!(upload_id, uuid);
 
         let test_content = b"Test upload content";
+
+        let mut hasher = Sha256::new();
+        hasher.update(test_content);
+        let expected_digest = hasher.digest();
+
         store
             .write_upload(namespace, &uuid, Cursor::new(test_content.to_vec()), false)
             .await
@@ -573,6 +580,7 @@ mod tests {
         let (digest, size, start_date) = store.read_upload_summary(namespace, &uuid).await.unwrap();
         assert_eq!(size, test_content.len() as u64);
         assert!(Utc::now().signed_duration_since(start_date) < Duration::hours(1));
+        assert_eq!(expected_digest, digest);
 
         let final_digest = store.complete_upload(namespace, &uuid, None).await.unwrap();
         assert_eq!(final_digest, digest);
