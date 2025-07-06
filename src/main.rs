@@ -44,7 +44,7 @@ fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {
 
     let subscriber = tracing_subscriber::registry()
         .with(EnvFilter::from_default_env())
-        .with(tracing_subscriber::fmt::layer());
+        .with(tracing_subscriber::fmt::layer().json());
 
     if let Some(observability_config) = config {
         if let Some(tracing_config) = observability_config.tracing {
