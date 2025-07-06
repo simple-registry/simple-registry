@@ -30,7 +30,7 @@ pub struct Configuration {
 
 impl Configuration {
     fn default_max_concurrent_requests() -> usize {
-        50
+        4
     }
 }
 
@@ -246,7 +246,7 @@ mod tests {
 
         let config = Configuration::load_from_str(config).unwrap();
 
-        assert_eq!(config.max_concurrent_requests, 50);
+        assert_eq!(config.max_concurrent_requests, 1);
         assert_eq!(
             config.server.bind_address.to_string(),
             "0.0.0.0".to_string()
