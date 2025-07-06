@@ -13,9 +13,10 @@ use crate::registry::utils::{BlobLink, BlobMetadata, DataPathBuilder};
 use async_trait::async_trait;
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
+use aws_sdk_s3::operation::upload_part_copy::UploadPartCopyOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::builders::{CompletedMultipartUploadBuilder, CompletedPartBuilder};
-use aws_sdk_s3::types::CompletedPart;
+use aws_sdk_s3::types::{CompletedPart, CopyPartResult};
 use aws_sdk_s3::{
     config::timeout::TimeoutConfig,
     config::{BehaviorVersion, Credentials, Region},
@@ -23,10 +24,9 @@ use aws_sdk_s3::{
 };
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures_util::future::try_join_all;
+use futures_util::{stream, StreamExt, TryFutureExt, TryStreamExt};
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::sync::Semaphore;
 use tracing::{debug, error, instrument};
 use x509_parser::nom::ToUsize;
 
@@ -304,59 +304,54 @@ impl S3Backend {
             offset += part_size;
         }
 
-        let semaphore = Arc::new(Semaphore::new(self.multipart_copy_jobs));
-        let mut tasks = Vec::new();
+        let copy_jobs = offsets.into_iter()
+            .enumerate()
+            .map(|(part_number, (start_offset, part_size))| {
+                let part_number = (part_number + 1).try_into()?;
+                let end_offset = start_offset + part_size - 1;
 
-        for (part_number, (start_offset, part_size)) in offsets.into_iter().enumerate() {
-            let part_number = (part_number + 1).try_into()?;
-            let end_offset = start_offset + part_size - 1;
+                debug!("Preparing to copy part {part_number} ({start_offset}-{end_offset}) from '{source}' to '{destination}'");
 
-            // TODO: implement a true task queue!
-            let semaphore = semaphore.clone();
-            let source = source.to_string();
-            let destination = destination.to_string();
+                Ok(self.s3_client
+                    .upload_part_copy()
+                    .bucket(&self.bucket)
+                    .key(destination)
+                    .part_number(part_number)
+                    .upload_id(&upload_id)
+                    .copy_source(format!("{}/{source}", self.bucket))
+                    .copy_source_range(format!("bytes={start_offset}-{end_offset}"))
+                    .send()
+                    .map_ok(move |res| (part_number, res))
+                )
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
 
-            let query = self
-                .s3_client
-                .upload_part_copy()
-                .bucket(&self.bucket)
-                .key(&destination)
-                .part_number(part_number)
-                .upload_id(&upload_id)
-                .copy_source(format!("{}/{source}", self.bucket))
-                .copy_source_range(format!("bytes={start_offset}-{end_offset}"));
+        let copy_jobs: Vec<(i32, UploadPartCopyOutput)> = stream::iter(copy_jobs)
+            .buffered(self.multipart_copy_jobs)
+            .try_collect()
+            .await?;
 
-            let task = tokio::spawn(async move {
-                let _permit = semaphore.acquire().await.unwrap();
-                debug!("Copying part {part_number} ({start_offset}-{end_offset}) from '{source}' to '{destination}'");
-
-                let res = query.send().await?;
-                let res = res.copy_part_result.ok_or_else(|| {
-                    error!("Error copying part: copy part result not found");
-                    Error::StorageBackend("Error copying part".to_string())
-                })?;
-
-                let e_tag = res.e_tag.ok_or_else(|| {
+        let parts: Vec<CompletedPart> = copy_jobs
+            .into_iter()
+            .map(|(part_number, res)| {
+                let UploadPartCopyOutput {
+                    copy_part_result:
+                        Some(CopyPartResult {
+                            e_tag: Some(e_tag), ..
+                        }),
+                    ..
+                } = res
+                else {
                     error!("Error copying part: e_tag not found");
-                    Error::StorageBackend("Error copying part".to_string())
-                })?;
+                    return Err(Error::StorageBackend("Error copying part".to_string()));
+                };
 
                 Ok(CompletedPartBuilder::default()
                     .part_number(part_number)
                     .e_tag(e_tag)
                     .build())
-            });
-
-            tasks.push(task);
-        }
-
-        let parts = try_join_all(tasks).await.map_err(|error| {
-            error!("Error copying parts: {error}");
-            Error::StorageBackend("Error copying parts".to_string())
-        })?;
-        let parts = parts
-            .into_iter()
-            .collect::<Result<Vec<CompletedPart>, Error>>()?;
+            })
+            .collect::<Result<_, Error>>()?;
 
         let _ = self
             .s3_client
