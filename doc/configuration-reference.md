@@ -109,6 +109,10 @@ When pull-through cache is enabled:
 - read operations are forwarded to the first upstream repository
 - if the first upstream repository is not available, the registry will try the next one in the list
 
+On a cache hit, the repository serves the blob directly from its local store without reaching out to upstream servers.
+On a cache miss, the registry initiates a background copy task to fetch and locally cache the content from the upstream
+repository, while providing each client with its own temporary stream until caching is complete.
+
 Example:
 
 ```toml

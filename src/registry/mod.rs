@@ -31,7 +31,7 @@ pub use repository::Repository;
 use crate::registry::data_store::{DataStore, LinkMetadata};
 use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::Digest;
-use crate::registry::utils::BlobLink;
+use crate::registry::utils::{BlobLink, TaskQueue};
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
 pub use upload::StartUploadResponse;
@@ -47,6 +47,7 @@ pub struct Registry<D> {
     update_pull_time: bool,
     scrub_dry_run: bool,
     scrub_upload_timeout: Duration,
+    task_pool: TaskQueue,
 }
 
 impl<D> Debug for Registry<D> {
@@ -76,6 +77,7 @@ impl<D: DataStore> Registry<D> {
             repositories,
             scrub_dry_run: true,
             scrub_upload_timeout: Duration::days(1),
+            task_pool: TaskQueue::new(4).expect("OK"), // TODO: make configurable
         };
 
         Ok(res)

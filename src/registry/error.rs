@@ -1,13 +1,14 @@
+use crate::registry::utils::task_pool;
 use crate::registry::{cache_store, data_store};
 use crate::registry::{lock_store, oci_types};
 use cel_interpreter::SerializationError;
 use hyper::header::InvalidHeaderValue;
 use hyper::http::uri::InvalidUri;
 use std::cmp::PartialEq;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use tracing::{debug, warn};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     BlobUnknown,
     // BlobUploadInvalid,
@@ -90,6 +91,13 @@ impl From<lock_store::Error> for Error {
     fn from(error: lock_store::Error) -> Self {
         warn!("Lock store error: {error}");
         Error::Internal("Error acquiring lock during operations".to_string())
+    }
+}
+
+impl From<task_pool::Error> for Error {
+    fn from(error: task_pool::Error) -> Self {
+        warn!("Task pool error: {error}");
+        Error::Internal("Task pool error during operations".to_string())
     }
 }
 

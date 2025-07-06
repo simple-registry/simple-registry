@@ -3,14 +3,14 @@ use crate::registry::api::hyper::response_ext::ResponseExt;
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::data_store::{DataStore, Reader};
 use crate::registry::oci_types::Digest;
-use crate::registry::utils::{tee_reader, BlobLink};
+use crate::registry::utils::{task_pool, BlobLink};
 use crate::registry::{data_store, Error, Registry, Repository};
 use hyper::header::CONTENT_LENGTH;
 use hyper::Method;
 use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 pub enum GetBlobResponse<R>
@@ -36,18 +36,21 @@ impl<D: DataStore + 'static> Registry<D> {
         namespace: &str,
         digest: Digest,
     ) -> Result<HeadBlobResponse, Error> {
-        if repository.is_pull_through() {
-            let res = repository
-                .query_upstream_blob(&Method::HEAD, accepted_mime_types, namespace, &digest)
-                .await?;
+        let local_blob = self.store.get_blob_size(&digest).await;
 
-            let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
-            let size = res.parse_header(CONTENT_LENGTH)?;
+        if let Ok(size) = local_blob {
             return Ok(HeadBlobResponse { digest, size });
+        } else if !repository.is_pull_through() {
+            warn!("Blob not found locally: {}", digest);
+            return Err(Error::BlobUnknown);
         }
 
-        let size = self.store.get_blob_size(&digest).await?;
+        let res = repository
+            .query_upstream_blob(&Method::HEAD, accepted_mime_types, namespace, &digest)
+            .await?;
 
+        let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
+        let size = res.parse_header(CONTENT_LENGTH)?;
         Ok(HeadBlobResponse { digest, size })
     }
 
@@ -92,43 +95,52 @@ impl<D: DataStore + 'static> Registry<D> {
         digest: &Digest,
         range: Option<(u64, Option<u64>)>,
     ) -> Result<GetBlobResponse<impl Reader>, Error> {
-        if repository.is_pull_through() {
-            if range.is_some() {
-                warn!("Range requests are not supported for pull-through repositories");
-                return Err(Error::RangeNotSatisfiable);
-            }
+        let local_blob = self.get_local_blob(digest, range).await;
 
-            match self.get_local_blob(digest, range).await {
-                Ok(local_blob) => {
-                    debug!("Returning blob from local store: {digest}");
-                    return Ok(local_blob);
-                }
-                Err(error) => {
-                    debug!("Failed to get blob from local store, pulling from upstream {digest}: {error}");
-                }
-            }
-
-            let res = repository
-                .query_upstream_blob(&Method::GET, accepted_mime_types, namespace, digest)
-                .await?;
-
-            let total_length = res.parse_header(CONTENT_LENGTH)?;
-
-            let stream = res.into_async_read();
-            let (response_reader, copy_reader) = tee_reader(stream).await?;
-
-            tokio::spawn(Self::copy_blob(
-                self.store.clone(),
-                copy_reader,
-                namespace.to_string(),
-                digest.to_owned(),
-            ));
-
-            let reader: Box<dyn Reader> = Box::new(response_reader);
-            return Ok(GetBlobResponse::Reader(reader, total_length));
+        if let Ok(response) = local_blob {
+            return Ok(response);
+        } else if !repository.is_pull_through() {
+            warn!("Blob not found locally: {}", digest);
+            return Err(Error::BlobUnknown);
         }
 
-        self.get_local_blob(digest, range).await
+        if range.is_some() {
+            warn!("Range requests are not supported for pull-through repositories");
+            return Err(Error::RangeNotSatisfiable);
+        }
+
+        // Proxying stream
+        let client_stream = repository
+            .query_upstream_blob(&Method::GET, accepted_mime_types, namespace, digest)
+            .await?;
+        let total_length = client_stream.parse_header(CONTENT_LENGTH)?;
+        let client_stream = client_stream.into_async_read();
+        let client_stream: Box<dyn Reader> = Box::new(client_stream);
+
+        // Caching stream
+        let store = self.store.clone();
+        let cache_reader = repository
+            .query_upstream_blob(&Method::GET, accepted_mime_types, namespace, digest)
+            .await?
+            .into_async_read();
+        let cache_namespace = namespace.to_string();
+        let cache_digest = digest.clone();
+
+        let task_key = format!("{cache_namespace}/{cache_digest}");
+        self.task_pool.submit(&task_key, async {
+            let digest_string = cache_digest.to_string();
+            debug!("Fetching blob: {digest_string}");
+            Self::copy_blob(store, cache_reader, cache_namespace, cache_digest)
+                .await
+                .map_err(|e| task_pool::Error::TaskExecution(e.to_string()))?;
+
+            info!("Caching of {digest_string} completed");
+            Ok(())
+        })?;
+        info!("Scheduled blob copy task '{task_key}'");
+        //
+
+        Ok(GetBlobResponse::Reader(client_stream, total_length))
     }
 
     async fn get_local_blob(
