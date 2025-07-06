@@ -2,10 +2,10 @@ use crate::command;
 use crate::registry::data_store::DataStore;
 use crate::registry::Registry;
 use argh::FromArgs;
+use humantime::Duration;
 use std::collections::HashSet;
 use std::process::exit;
 use std::sync::Arc;
-use humantime::Duration;
 use std::time::Duration as StdDuration;
 use tracing::{error, info};
 
@@ -58,12 +58,15 @@ impl<D: DataStore> Command<D> {
     pub fn new(options: &Options, registry: Registry<D>) -> Self {
         let upload_timeout = options
             .upload_timeout
-            .map_or(StdDuration::from_secs(86400), |s| s.into());
+            .map_or(StdDuration::from_secs(86400), Into::into);
 
-        let upload_timeout = chrono::Duration::from_std(upload_timeout)
-            .expect("Upload timeout must be valid");
+        let upload_timeout =
+            chrono::Duration::from_std(upload_timeout).expect("Upload timeout must be valid");
 
-        info!("Upload timeout set to {} second(s)", upload_timeout.num_seconds());
+        info!(
+            "Upload timeout set to {} second(s)",
+            upload_timeout.num_seconds()
+        );
 
         let registry = registry
             .with_dry_run(options.dry_mode)
