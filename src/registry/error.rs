@@ -1,4 +1,4 @@
-use crate::registry::utils::task_pool;
+use crate::registry::utils::task_queue;
 use crate::registry::{cache_store, data_store};
 use crate::registry::{lock_store, oci_types};
 use cel_interpreter::SerializationError;
@@ -94,8 +94,8 @@ impl From<lock_store::Error> for Error {
     }
 }
 
-impl From<task_pool::Error> for Error {
-    fn from(error: task_pool::Error) -> Self {
+impl From<task_queue::Error> for Error {
+    fn from(error: task_queue::Error) -> Self {
         warn!("Task pool error: {error}");
         Error::Internal("Task pool error during operations".to_string())
     }

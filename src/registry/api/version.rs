@@ -19,7 +19,7 @@ impl<D: DataStore> RegistryAPIVersionHandlerExt for Registry<D> {
         &self,
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
-        self.validate_request(None, ClientRequest::get_api_version(), identity)?;
+        Self::validate_request(None, &ClientRequest::get_api_version(), &identity)?;
 
         let res = Response::builder()
             .status(StatusCode::OK)

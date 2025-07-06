@@ -13,6 +13,12 @@ pub use error::Error;
 pub struct Configuration {
     #[serde(default = "Configuration::default_max_concurrent_requests")]
     pub max_concurrent_requests: usize,
+    /*
+    #[serde(default = "Configuration::default_max_concurrent_cache_jobs")]
+    pub max_concurrent_cache_jobs: usize,
+    #[serde(default = "Configuration::default_update_pull_time")]
+    update_pull_time: bool,
+     */
     pub server: ServerConfig,
     #[serde(default)]
     pub lock_store: LockStoreConfig,
@@ -32,6 +38,16 @@ impl Configuration {
     fn default_max_concurrent_requests() -> usize {
         4
     }
+
+    /*
+    fn default_max_concurrent_cache_jobs() -> usize {
+        4
+    }
+
+    fn default_update_pull_time() -> bool {
+        false
+    }
+     */
 }
 
 #[derive(Clone, Debug, Deserialize)]

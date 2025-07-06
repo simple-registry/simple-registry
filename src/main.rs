@@ -160,7 +160,7 @@ fn build_registry<D: DataStore>(
     let lock_store = Arc::new(LockStore::new(lock_config)?);
     let cache_store = Arc::new(CacheStore::new(cache_config)?);
 
-    Registry::new(repository_config, data_store, cache_store, lock_store)
+    Registry::new(repository_config, data_store, &cache_store, lock_store)
 }
 
 #[derive(FromArgs, PartialEq, Debug)]

@@ -261,8 +261,9 @@ async fn handle_request<D: DataStore + 'static>(
     Ok(response)
 }
 
+#[allow(clippy::too_many_lines)]
 #[instrument(skip(context, req))]
-async fn router<'a, D: DataStore + 'static>(
+async fn router<D: DataStore + 'static>(
     context: Arc<ServerContext<D>>,
     req: Request<Incoming>,
     mut id: ClientIdentity,
@@ -280,22 +281,20 @@ async fn router<'a, D: DataStore + 'static>(
         id.username = Some(username);
     }
 
-    if ROUTE_API_VERSION_REGEX.is_match(&path) {
-        if req.method() == Method::GET {
-            // TODO: make this part customizable
-            if !context.credentials.is_empty() && id.username.is_none() {
-                return (
-                    Some("api-version"),
-                    Err(registry::Error::Unauthorized(
-                        "Access denied (requires credentials)".to_string(),
-                    )),
-                );
-            }
+    if ROUTE_API_VERSION_REGEX.is_match(&path) && req.method() == Method::GET {
+        // TODO: make this part customizable
+        if !context.credentials.is_empty() && id.username.is_none() {
             return (
                 Some("api-version"),
-                context.registry.handle_get_api_version(id).await,
+                Err(registry::Error::Unauthorized(
+                    "Access denied (requires credentials)".to_string(),
+                )),
             );
         }
+        return (
+            Some("api-version"),
+            context.registry.handle_get_api_version(id).await,
+        );
     } else if let Some(params) = QueryNewUploadParameters::from_regex(&path, &ROUTE_UPLOADS_REGEX) {
         if req.method() == Method::POST {
             return (

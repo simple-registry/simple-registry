@@ -47,10 +47,10 @@ impl<D: DataStore + 'static> RegistryAPIBlobHandlersExt for Registry<D> {
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::get_blob(&parameters.name, &parameters.digest),
-            identity,
+            &ClientRequest::get_blob(&parameters.name, &parameters.digest),
+            &identity,
         )?;
 
         let blob = self
@@ -78,10 +78,10 @@ impl<D: DataStore + 'static> RegistryAPIBlobHandlersExt for Registry<D> {
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::delete_blob(&parameters.name, &parameters.digest),
-            identity,
+            &ClientRequest::delete_blob(&parameters.name, &parameters.digest),
+            &identity,
         )?;
 
         self.delete_blob(&parameters.name, parameters.digest)
@@ -102,10 +102,10 @@ impl<D: DataStore + 'static> RegistryAPIBlobHandlersExt for Registry<D> {
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::get_blob(&parameters.name, &parameters.digest),
-            identity,
+            &ClientRequest::get_blob(&parameters.name, &parameters.digest),
+            &identity,
         )?;
 
         let res = match self

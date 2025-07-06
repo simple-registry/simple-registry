@@ -77,10 +77,10 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
         }
 
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::start_upload(&parameters.name),
-            identity,
+            &ClientRequest::start_upload(&parameters.name),
+            &identity,
         )?;
 
         let query: UploadQuery = request.query_parameters()?;
@@ -113,10 +113,10 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::get_upload(&parameters.name),
-            identity,
+            &ClientRequest::get_upload(&parameters.name),
+            &identity,
         )?;
 
         let location = format!("/v2/{}/blobs/uploads/{}", parameters.name, parameters.uuid);
@@ -149,10 +149,10 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
         T::Error: Send + Sync + std::error::Error + 'static,
     {
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::update_upload(&parameters.name),
-            identity,
+            &ClientRequest::update_upload(&parameters.name),
+            &identity,
         )?;
 
         let start_offset = request.range(CONTENT_RANGE)?.map(|(start, _)| start);
@@ -198,10 +198,10 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
         }
 
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::complete_upload(&parameters.name),
-            identity,
+            &ClientRequest::complete_upload(&parameters.name),
+            &identity,
         )?;
 
         let query: CompleteUploadQuery = request.query_parameters()?;
@@ -233,10 +233,10 @@ impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::cancel_upload(&parameters.name),
-            identity,
+            &ClientRequest::cancel_upload(&parameters.name),
+            &identity,
         )?;
 
         self.delete_upload(&parameters.name, parameters.uuid)

@@ -557,7 +557,7 @@ mod tests {
         let new_registry = Registry::new(
             repositories_config,
             registry.store.clone(),
-            Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+            &Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
             Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
         )
         .unwrap()
@@ -639,7 +639,7 @@ mod tests {
         let new_registry = Registry::new(
             create_test_repository_config(),
             registry.store.clone(),
-            Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+            &Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
             Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
         )
         .unwrap()
@@ -714,6 +714,7 @@ mod tests {
         test_scrub_tags_impl(&registry).await;
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn test_scrub_revisions_impl<D: DataStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
 
@@ -841,7 +842,7 @@ mod tests {
         let new_registry = Registry::new(
             create_test_repository_config(),
             registry.store.clone(),
-            Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+            &Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
             Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
         )
         .unwrap()
@@ -924,7 +925,7 @@ mod tests {
         let new_registry = Registry::new(
             create_test_repository_config(),
             registry.store.clone(),
-            Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+            &Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
             Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
         )
         .unwrap()
@@ -1006,7 +1007,7 @@ mod tests {
         let new_registry = Registry::new(
             create_test_repository_config(),
             registry.store.clone(),
-            Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
+            &Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
             Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
         )
         .unwrap()

@@ -59,10 +59,10 @@ impl<D: DataStore> RegistryAPIContentDiscoveryHandlersExt for Registry<D> {
         }
 
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::get_referrers(&parameters.name, &parameters.digest),
-            identity,
+            &ClientRequest::get_referrers(&parameters.name, &parameters.digest),
+            &identity,
         )?;
 
         let query: GetReferrersQuery = request.query_parameters()?;
@@ -111,7 +111,7 @@ impl<D: DataStore> RegistryAPIContentDiscoveryHandlersExt for Registry<D> {
             repositories: Vec<String>,
         }
 
-        self.validate_request(None, ClientRequest::list_catalog(), identity)?;
+        Self::validate_request(None, &ClientRequest::list_catalog(), &identity)?;
 
         let query: CatalogQuery = request.query_parameters()?;
 
@@ -143,10 +143,10 @@ impl<D: DataStore> RegistryAPIContentDiscoveryHandlersExt for Registry<D> {
         }
 
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::list_tags(&parameters.name),
-            identity,
+            &ClientRequest::list_tags(&parameters.name),
+            &identity,
         )?;
 
         let query: TagsQuery = request.query_parameters()?;

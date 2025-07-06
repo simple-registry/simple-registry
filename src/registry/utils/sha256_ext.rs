@@ -19,8 +19,7 @@ impl Sha256Ext for Sha256 {
         let state = state
             .try_into()
             .map_err(|_| Error::HashSerialization("Unable to resume hash state".to_string()))?;
-        let state = Sha256::deserialize(state)?;
-        let hasher = Sha256::from(state);
+        let hasher = Sha256::deserialize(state)?;
 
         Ok(hasher)
     }

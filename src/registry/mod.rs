@@ -21,7 +21,7 @@ mod reader;
 mod repository;
 mod scrub;
 mod upload;
-mod utils;
+pub mod utils;
 
 use crate::configuration;
 use crate::configuration::RepositoryConfig;
@@ -31,7 +31,7 @@ pub use repository::Repository;
 use crate::registry::data_store::{DataStore, LinkMetadata};
 use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::Digest;
-use crate::registry::utils::{BlobLink, TaskQueue};
+pub use crate::registry::utils::{BlobLink, TaskQueue};
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
 pub use upload::StartUploadResponse;
@@ -47,7 +47,7 @@ pub struct Registry<D> {
     update_pull_time: bool,
     scrub_dry_run: bool,
     scrub_upload_timeout: Duration,
-    task_pool: TaskQueue,
+    task_queue: TaskQueue,
 }
 
 impl<D> Debug for Registry<D> {
@@ -61,12 +61,12 @@ impl<D: DataStore> Registry<D> {
     pub fn new(
         repositories_config: HashMap<String, RepositoryConfig>,
         storage_engine: Arc<D>,
-        cache_store: Arc<CacheStore>,
+        cache_store: &Arc<CacheStore>,
         lock_store: Arc<LockStore>,
     ) -> Result<Self, configuration::Error> {
         let mut repositories = HashMap::new();
         for (repository_name, repository_config) in repositories_config {
-            let res = Repository::new(repository_config, repository_name.clone(), &cache_store)?;
+            let res = Repository::new(repository_config, repository_name.clone(), cache_store)?;
             repositories.insert(repository_name, res);
         }
 
@@ -77,7 +77,7 @@ impl<D: DataStore> Registry<D> {
             repositories,
             scrub_dry_run: true,
             scrub_upload_timeout: Duration::days(1),
-            task_pool: TaskQueue::new(4).expect("OK"), // TODO: make configurable
+            task_queue: TaskQueue::new(4).expect("OK"), // TODO: make configurable
         };
 
         Ok(res)
@@ -235,7 +235,7 @@ pub(crate) mod test_utils {
         let lock_store = Arc::new(LockStore::new(LockStoreConfig::default()).unwrap());
 
         let registry =
-            Registry::new(repositories_config, backend, token_cache, lock_store).unwrap();
+            Registry::new(repositories_config, backend, &token_cache, lock_store).unwrap();
 
         (registry, temp_dir)
     }
@@ -260,7 +260,7 @@ pub(crate) mod test_utils {
         let repositories_config = create_test_repository_config();
         let token_cache = Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap());
 
-        Registry::new(repositories_config, backend, token_cache, lock_store).unwrap()
+        Registry::new(repositories_config, backend, &token_cache, lock_store).unwrap()
     }
 
     pub async fn create_test_blob<D: DataStore>(

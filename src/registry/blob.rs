@@ -3,7 +3,7 @@ use crate::registry::api::hyper::response_ext::ResponseExt;
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::data_store::{DataStore, Reader};
 use crate::registry::oci_types::Digest;
-use crate::registry::utils::{task_pool, BlobLink};
+use crate::registry::utils::{task_queue, BlobLink};
 use crate::registry::{data_store, Error, Registry, Repository};
 use hyper::header::CONTENT_LENGTH;
 use hyper::Method;
@@ -127,12 +127,12 @@ impl<D: DataStore + 'static> Registry<D> {
         let cache_digest = digest.clone();
 
         let task_key = format!("{cache_namespace}/{cache_digest}");
-        self.task_pool.submit(&task_key, async {
+        self.task_queue.submit(&task_key, async {
             let digest_string = cache_digest.to_string();
             debug!("Fetching blob: {digest_string}");
             Self::copy_blob(store, cache_reader, cache_namespace, cache_digest)
                 .await
-                .map_err(|e| task_pool::Error::TaskExecution(e.to_string()))?;
+                .map_err(|e| task_queue::Error::TaskExecution(e.to_string()))?;
 
             info!("Caching of {digest_string} completed");
             Ok(())
