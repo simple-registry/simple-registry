@@ -140,6 +140,12 @@ jobs:
             --name minio-server \
             quay.io/minio/minio \
             minio server /data
+  
+          # Ensure minio service is running
+          while ! nc -z localhost 9000; do
+            echo "Waiting for minio to start..."
+            sleep 1;
+          done
 
           docker run --rm -d \
             -v ./conformance/config-s3.toml:/config.toml \

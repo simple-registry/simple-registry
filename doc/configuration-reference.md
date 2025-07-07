@@ -13,10 +13,6 @@ However, certain options cannot be changed during runtime:
 
 TLS files are also automatically reloaded on changes if they are valid.
 
-## Global configuration
-
-- `max_concurrent_requests` (usize): The maximum number of concurrent requests the server can handle (default: 50)
-
 ## Server parameters (`server`)
 
 - `bind_address` (string) :The address to bind the server to
@@ -33,6 +29,14 @@ If not provided, the server will run on top of an _insecure_ plaintext socket.
 - `client_ca_bundle` (optional string): The path to the trusted client CA bundle for mTLS
 
 Please refer to the [mTLS documentation](configure-mtls.md) for more information.
+
+### Global options (`global`)
+
+- `max_concurrent_requests` (usize): The maximum number of concurrent requests the server can handle (default: 4).
+This should be set according to the number of CPU cores available on the server.
+- `max_concurrent_cache_jobs` (usize): The maximum number of concurrent cache jobs the server can handle (default: 4).
+- `update_pull_time` (bool): When set to true, the registry will update the pull time metadata for blobs, 
+  which is useful for garbage collection and retention policies (default: false).
 
 ## Lock Store (`lock_store`)
 
@@ -108,6 +112,10 @@ When pull-through cache is enabled:
 - write operations are disabled for the namespace.
 - read operations are forwarded to the first upstream repository
 - if the first upstream repository is not available, the registry will try the next one in the list
+
+On a cache hit, the repository serves the blob directly from its local store without reaching out to upstream servers.
+On a cache miss, the registry initiates a background copy task to fetch and locally cache the content from the upstream
+repository, while providing each client with its own temporary stream until caching is complete.
 
 Example:
 

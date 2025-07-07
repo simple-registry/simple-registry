@@ -1,3 +1,4 @@
+use crate::registry::utils::task_queue;
 use crate::registry::{cache_store, lock_store};
 use hyper::header::InvalidHeaderValue;
 use opentelemetry_otlp::ExporterBuildError;
@@ -15,6 +16,7 @@ pub enum Error {
     ConfigurationFileFormat(String),
     StreamingChunkSize(String),
     Http(String),
+    TaskQueue(task_queue::Error),
     Tls(String),
     TracingInit(TraceError),
     ExporterInit(ExporterBuildError),
@@ -39,6 +41,9 @@ impl fmt::Display for Error {
             }
             Error::Http(error) => {
                 write!(f, "HTTP error: {error}")
+            }
+            Error::TaskQueue(error) => {
+                write!(f, "Task queue error: {error}")
             }
             Error::Tls(error) => {
                 write!(f, "TLS error: {error}")
@@ -68,6 +73,13 @@ impl From<lock_store::Error> for Error {
     fn from(error: lock_store::Error) -> Self {
         debug!("Lock error: {error}");
         Error::Lock(error)
+    }
+}
+
+impl From<task_queue::Error> for Error {
+    fn from(error: task_queue::Error) -> Self {
+        debug!("Task queue error: {error}");
+        Error::TaskQueue(error)
     }
 }
 

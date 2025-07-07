@@ -56,10 +56,10 @@ impl<D: DataStore> RegistryAPIManifestHandlersExt for Registry<D> {
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::get_manifest(&parameters.name, &parameters.reference),
-            identity,
+            &ClientRequest::get_manifest(&parameters.name, &parameters.reference),
+            &identity,
         )?;
 
         let manifest = self
@@ -97,10 +97,10 @@ impl<D: DataStore> RegistryAPIManifestHandlersExt for Registry<D> {
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::get_manifest(&parameters.name, &parameters.reference),
-            identity,
+            &ClientRequest::get_manifest(&parameters.name, &parameters.reference),
+            &identity,
         )?;
 
         let manifest = self
@@ -139,10 +139,10 @@ impl<D: DataStore> RegistryAPIManifestHandlersExt for Registry<D> {
         T: body::Body,
     {
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::put_manifest(&parameters.name, &parameters.reference),
-            identity,
+            &ClientRequest::put_manifest(&parameters.name, &parameters.reference),
+            &identity,
         )?;
 
         let content_type = request
@@ -191,10 +191,10 @@ impl<D: DataStore> RegistryAPIManifestHandlersExt for Registry<D> {
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
+        Self::validate_request(
             Some(repository),
-            ClientRequest::delete_manifest(&parameters.name, &parameters.reference),
-            identity,
+            &ClientRequest::delete_manifest(&parameters.name, &parameters.reference),
+            &identity,
         )?;
 
         self.delete_manifest(&parameters.name, parameters.reference)

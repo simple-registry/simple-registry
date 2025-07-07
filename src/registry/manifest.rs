@@ -83,37 +83,44 @@ impl<D: DataStore> Registry<D> {
         namespace: &str,
         reference: Reference,
     ) -> Result<HeadManifestResponse, Error> {
-        if repository.is_pull_through() {
-            if let Ok(response) = self.head_local_manifest(namespace, reference.clone()).await {
-                return Ok(response);
-            }
+        let local_manifest = self.head_local_manifest(namespace, reference.clone()).await;
 
-            let res = repository
-                .query_upstream_manifest(&Method::HEAD, accepted_mime_types, namespace, &reference)
-                .await?;
-
-            let media_type = res.get_header(CONTENT_TYPE);
-            let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
-            let size = res.parse_header(CONTENT_LENGTH)?;
-
-            // Store locally before returning
-            let _ = self
-                .get_manifest(
-                    repository,
-                    accepted_mime_types,
-                    namespace,
-                    reference.clone(),
-                )
-                .await?;
-
-            return Ok(HeadManifestResponse {
-                media_type,
-                digest,
-                size,
-            });
+        if let Ok(response) = local_manifest {
+            return Ok(response);
+        } else if !repository.is_pull_through() {
+            error!("Failed to head local manifest: {namespace}:{reference}");
+            return Err(Error::ManifestUnknown);
         }
 
-        self.head_local_manifest(namespace, reference).await
+        let res = repository
+            .query_upstream_manifest(
+                &self.auth_token_cache,
+                &Method::HEAD,
+                accepted_mime_types,
+                namespace,
+                &reference,
+            )
+            .await?;
+
+        let media_type = res.get_header(CONTENT_TYPE);
+        let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
+        let size = res.parse_header(CONTENT_LENGTH)?;
+
+        // Store locally before returning
+        let _ = self
+            .get_manifest(
+                repository,
+                accepted_mime_types,
+                namespace,
+                reference.clone(),
+            )
+            .await?;
+
+        Ok(HeadManifestResponse {
+            media_type,
+            digest,
+            size,
+        })
     }
 
     async fn head_local_manifest(
@@ -154,40 +161,48 @@ impl<D: DataStore> Registry<D> {
         namespace: &str,
         reference: Reference,
     ) -> Result<GetManifestResponse, Error> {
-        if repository.is_pull_through() {
-            if let Ok(response) = self.get_local_manifest(namespace, reference.clone()).await {
-                return Ok(response);
-            }
+        let local_manifest = self.get_local_manifest(namespace, &reference).await;
 
-            let res = repository
-                .query_upstream_manifest(&Method::GET, accepted_mime_types, namespace, &reference)
-                .await?;
-
-            let media_type = res.get_header(CONTENT_TYPE);
-            let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
-
-            let mut content = Vec::new();
-            res.into_async_read().read_to_end(&mut content).await?;
-
-            self.put_manifest(namespace, reference.clone(), media_type.as_ref(), &content)
-                .await?;
-
-            return Ok(GetManifestResponse {
-                media_type,
-                digest,
-                content,
-            });
+        if let Ok(response) = local_manifest {
+            return Ok(response);
+        } else if !repository.is_pull_through() {
+            error!("Failed to get local manifest: {namespace}:{reference}");
+            return Err(Error::ManifestUnknown);
         }
 
-        self.get_local_manifest(namespace, reference).await
+        // TODO: test if upstream manifest has changed or not (if reference is a Reference::Tag)
+        let res = repository
+            .query_upstream_manifest(
+                &self.auth_token_cache,
+                &Method::GET,
+                accepted_mime_types,
+                namespace,
+                &reference,
+            )
+            .await?;
+
+        let media_type = res.get_header(CONTENT_TYPE);
+        let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
+
+        let mut content = Vec::new();
+        res.into_async_read().read_to_end(&mut content).await?;
+
+        self.put_manifest(namespace, reference.clone(), media_type.as_ref(), &content)
+            .await?;
+
+        Ok(GetManifestResponse {
+            media_type,
+            digest,
+            content,
+        })
     }
 
     async fn get_local_manifest(
         &self,
         namespace: &str,
-        reference: Reference,
+        reference: &Reference,
     ) -> Result<GetManifestResponse, Error> {
-        let blob_link = reference.into();
+        let blob_link = reference.clone().into();
         let link = self.read_link(namespace, &blob_link).await?;
 
         let content = self.store.read_blob(&link.target).await?;

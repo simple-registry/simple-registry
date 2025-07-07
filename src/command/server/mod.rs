@@ -20,7 +20,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::pin;
-use tracing::{debug, error, info, instrument, warn, Span};
+use tracing::{debug, error, info, instrument, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 mod insecure_listener;
@@ -191,12 +191,27 @@ async fn handle_request<D: DataStore + 'static>(
     let start_time = now();
     let method = request.method().to_owned();
     let path = request.uri().path().to_owned();
-    let trace_id = Span::current().context().span().span_context().trace_id();
+
+    let trace_id = if Span::current().context().span().span_context().is_valid() {
+        Some(
+            Span::current()
+                .context()
+                .span()
+                .span_context()
+                .trace_id()
+                .to_string(),
+        )
+    } else {
+        None
+    };
 
     let (handler, response) = match router(context.clone(), request, identity).await {
         (handler, Ok(response)) => (handler, response),
         (handler, Err(error)) => {
-            let details = json!({"trace_id": trace_id.to_string()});
+            let details = trace_id
+                .clone()
+                .map(|trace_id| json!({"trace_id": trace_id}))
+                .unwrap_or(json!({}));
             let response = registry_error_to_response_raw(&error, details);
             (handler, response)
         }
@@ -233,19 +248,22 @@ async fn handle_request<D: DataStore + 'static>(
             .record(elapsed, handler_specific);
     }
 
+    let log = trace_id
+        .map(|trace_id| format!("{trace_id} {elapsed:?} - {status} {method} {path}"))
+        .unwrap_or(format!("{elapsed:?} - {status} {method} {path}"));
+
     if status.is_server_error() {
-        error!("{trace_id} {elapsed:?} - {status} {method} {path}");
-    } else if status.is_client_error() {
-        warn!("{trace_id} {elapsed:?} - {status} {method} {path}");
+        error!("{log}");
     } else {
-        info!("{trace_id} {elapsed:?} - {status} {method} {path}");
+        info!("{log}");
     }
 
     Ok(response)
 }
 
+#[allow(clippy::too_many_lines)]
 #[instrument(skip(context, req))]
-async fn router<'a, D: DataStore + 'static>(
+async fn router<D: DataStore + 'static>(
     context: Arc<ServerContext<D>>,
     req: Request<Incoming>,
     mut id: ClientIdentity,
@@ -263,22 +281,20 @@ async fn router<'a, D: DataStore + 'static>(
         id.username = Some(username);
     }
 
-    if ROUTE_API_VERSION_REGEX.is_match(&path) {
-        if req.method() == Method::GET {
-            // TODO: make this part customizable
-            if !context.credentials.is_empty() && id.username.is_none() {
-                return (
-                    Some("api-version"),
-                    Err(registry::Error::Unauthorized(
-                        "Access denied (requires credentials)".to_string(),
-                    )),
-                );
-            }
+    if ROUTE_API_VERSION_REGEX.is_match(&path) && req.method() == Method::GET {
+        // TODO: make this part customizable
+        if !context.credentials.is_empty() && id.username.is_none() {
             return (
                 Some("api-version"),
-                context.registry.handle_get_api_version(id).await,
+                Err(registry::Error::Unauthorized(
+                    "Access denied (requires credentials)".to_string(),
+                )),
             );
         }
+        return (
+            Some("api-version"),
+            context.registry.handle_get_api_version(id).await,
+        );
     } else if let Some(params) = QueryNewUploadParameters::from_regex(&path, &ROUTE_UPLOADS_REGEX) {
         if req.method() == Method::POST {
             return (

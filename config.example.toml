@@ -1,7 +1,6 @@
 [server]
 bind_address = "0.0.0.0"
 port = 8000
-streaming_chunk_size = "5MiB"
 
 [server.tls]
 server_certificate_bundle = "tls.d/server-ca-bundle.pem"
