@@ -46,7 +46,13 @@ impl<D: DataStore + 'static> Registry<D> {
         }
 
         let res = repository
-            .query_upstream_blob(&Method::HEAD, accepted_mime_types, namespace, &digest)
+            .query_upstream_blob(
+                &self.auth_token_cache,
+                &Method::HEAD,
+                accepted_mime_types,
+                namespace,
+                &digest,
+            )
             .await?;
 
         let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
@@ -111,7 +117,13 @@ impl<D: DataStore + 'static> Registry<D> {
 
         // Proxying stream
         let client_stream = repository
-            .query_upstream_blob(&Method::GET, accepted_mime_types, namespace, digest)
+            .query_upstream_blob(
+                &self.auth_token_cache,
+                &Method::GET,
+                accepted_mime_types,
+                namespace,
+                digest,
+            )
             .await?;
         let total_length = client_stream.parse_header(CONTENT_LENGTH)?;
         let client_stream = client_stream.into_async_read();
@@ -120,7 +132,13 @@ impl<D: DataStore + 'static> Registry<D> {
         // Caching stream
         let store = self.store.clone();
         let cache_reader = repository
-            .query_upstream_blob(&Method::GET, accepted_mime_types, namespace, digest)
+            .query_upstream_blob(
+                &self.auth_token_cache,
+                &Method::GET,
+                accepted_mime_types,
+                namespace,
+                digest,
+            )
             .await?
             .into_async_read();
         let cache_namespace = namespace.to_string();

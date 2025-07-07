@@ -15,26 +15,19 @@ use hyper::http::request;
 use hyper::{HeaderMap, Method, Response, StatusCode};
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 pub struct RepositoryUpstream {
-    token_cache: Arc<CacheStore>,
     pub url: String,
     pub client: Box<dyn HttpClient>,
     pub basic_auth_header: Option<String>,
 }
 
 impl RepositoryUpstream {
-    pub fn new(
-        config: RepositoryUpstreamConfig,
-        client: Box<dyn HttpClient>,
-        token_cache: Arc<CacheStore>,
-    ) -> Self {
+    pub fn new(config: RepositoryUpstreamConfig, client: Box<dyn HttpClient>) -> Self {
         let mut upstream = Self {
-            token_cache,
             url: config.url,
             client,
             basic_auth_header: None,
@@ -60,10 +53,11 @@ impl RepositoryUpstream {
 
     async fn get_auth_token_from_cache(
         &self,
+        cache: &CacheStore,
         namespace: &str,
     ) -> Result<Option<HeaderValue>, registry::Error> {
         debug!("Checking bearer token in cache for namespace: {namespace}");
-        let Ok(token) = self.token_cache.retrieve(namespace).await else {
+        let Ok(token) = cache.retrieve(namespace).await else {
             return Ok(None);
         };
 
@@ -112,9 +106,9 @@ impl RepositoryUpstream {
             }
             Err(error) => {
                 error!("Failed to authenticate with upstream: {error}");
-                return Err(registry::Error::Unauthorized(
+                Err(registry::Error::Unauthorized(
                     "Failed to authenticate with upstream".to_string(),
-                ));
+                ))
             }
         }
     }
@@ -122,6 +116,7 @@ impl RepositoryUpstream {
     #[tracing::instrument(skip(self))]
     pub async fn query(
         &self,
+        cache: &CacheStore,
         namespace: &str,
         method: &Method,
         accepted_mime_types: &[String],
@@ -134,7 +129,7 @@ impl RepositoryUpstream {
             }
         }
 
-        let mut authorization_header = self.get_auth_token_from_cache(namespace).await?;
+        let mut authorization_header = self.get_auth_token_from_cache(cache, namespace).await?;
 
         loop {
             info!("Requesting manifest from upstream: {location}");
@@ -189,7 +184,7 @@ impl RepositoryUpstream {
                     }
                 }
 
-                self.token_cache.store(namespace, &token, ttl).await?;
+                cache.store(namespace, &token, ttl).await?;
                 authorization_header = Some(HeaderValue::from_str(&token)?);
             } else if response.status() == StatusCode::FORBIDDEN {
                 return Err(registry::Error::Denied(
@@ -250,8 +245,6 @@ mod tests {
     }
 
     fn build_upstream(with_password: bool) -> RepositoryUpstream {
-        let token_cache = CacheStore::new(CacheStoreConfig::default()).unwrap();
-
         let mut username = None;
         let mut password = None;
         if with_password {
@@ -270,7 +263,6 @@ mod tests {
                 password,
             },
             Box::new(MockHttpClientMock::new()),
-            Arc::new(token_cache),
         )
     }
 
@@ -318,18 +310,23 @@ mod tests {
     async fn test_get_auth_token_from_cache_success() {
         const TEST_NAMESPACE: &str = "test-namespace";
 
+        let cache = CacheStore::new(CacheStoreConfig::default()).unwrap();
+
         let upstream = build_upstream(false);
-        let result = upstream.get_auth_token_from_cache(TEST_NAMESPACE).await;
+        let result = upstream
+            .get_auth_token_from_cache(&cache, TEST_NAMESPACE)
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
 
-        upstream
-            .token_cache
+        cache
             .store(TEST_NAMESPACE, "test-token", 3600)
             .await
             .unwrap();
 
-        let result = upstream.get_auth_token_from_cache(TEST_NAMESPACE).await;
+        let result = upstream
+            .get_auth_token_from_cache(&cache, TEST_NAMESPACE)
+            .await;
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap(),

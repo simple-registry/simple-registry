@@ -145,13 +145,10 @@ impl<T> Registry<T> {
 mod tests {
     use super::*;
     use crate::configuration::{
-        CacheStoreConfig, RepositoryAccessPolicyConfig, RepositoryConfig,
-        RepositoryRetentionPolicyConfig,
+        RepositoryAccessPolicyConfig, RepositoryConfig, RepositoryRetentionPolicyConfig,
     };
-    use crate::registry::cache_store::CacheStore;
     use crate::registry::oci_types::Reference;
     use crate::registry::test_utils::create_test_fs_backend;
-    use std::sync::Arc;
 
     fn create_default_deny_repo(rules: Vec<String>) -> Repository {
         let config = RepositoryConfig {
@@ -163,8 +160,7 @@ mod tests {
             ..RepositoryConfig::default()
         };
 
-        let token_cache = Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap());
-        Repository::new(config, "policy-deny-repo".to_string(), &token_cache).unwrap()
+        Repository::new(config, "policy-deny-repo".to_string()).unwrap()
     }
 
     fn create_default_allow_repo(rules: Vec<String>) -> Repository {
@@ -177,8 +173,7 @@ mod tests {
             ..RepositoryConfig::default()
         };
 
-        let token_cache = Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap());
-        Repository::new(config, "policy-allow-repo".to_string(), &token_cache).unwrap()
+        Repository::new(config, "policy-allow-repo".to_string()).unwrap()
     }
 
     #[tokio::test]

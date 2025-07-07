@@ -11,15 +11,9 @@ pub use error::Error;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Configuration {
-    #[serde(default = "Configuration::default_max_concurrent_requests")]
-    pub max_concurrent_requests: usize,
-    /*
-    #[serde(default = "Configuration::default_max_concurrent_cache_jobs")]
-    pub max_concurrent_cache_jobs: usize,
-    #[serde(default = "Configuration::default_update_pull_time")]
-    update_pull_time: bool,
-     */
     pub server: ServerConfig,
+    #[serde(default)]
+    pub global: GlobalConfig,
     #[serde(default)]
     pub lock_store: LockStoreConfig,
     #[serde(default)]
@@ -34,12 +28,31 @@ pub struct Configuration {
     pub observability: Option<ObservabilityConfig>,
 }
 
-impl Configuration {
+#[derive(Clone, Debug, Deserialize)]
+pub struct GlobalConfig {
+    #[serde(default = "GlobalConfig::default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+    #[serde(default = "GlobalConfig::default_max_concurrent_cache_jobs")]
+    pub max_concurrent_cache_jobs: usize,
+    #[serde(default = "GlobalConfig::default_update_pull_time")]
+    pub update_pull_time: bool,
+}
+
+impl Default for GlobalConfig {
+    fn default() -> Self {
+        GlobalConfig {
+            max_concurrent_requests: GlobalConfig::default_max_concurrent_requests(),
+            max_concurrent_cache_jobs: GlobalConfig::default_max_concurrent_cache_jobs(),
+            update_pull_time: GlobalConfig::default_update_pull_time(),
+        }
+    }
+}
+
+impl GlobalConfig {
     fn default_max_concurrent_requests() -> usize {
         4
     }
 
-    /*
     fn default_max_concurrent_cache_jobs() -> usize {
         4
     }
@@ -47,7 +60,6 @@ impl Configuration {
     fn default_update_pull_time() -> bool {
         false
     }
-     */
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -262,7 +274,9 @@ mod tests {
 
         let config = Configuration::load_from_str(config).unwrap();
 
-        assert_eq!(config.max_concurrent_requests, 4);
+        assert_eq!(config.global.max_concurrent_requests, 4);
+        assert_eq!(config.global.max_concurrent_cache_jobs, 4);
+        assert!(!config.global.update_pull_time);
         assert_eq!(
             config.server.bind_address.to_string(),
             "0.0.0.0".to_string()

@@ -1,3 +1,4 @@
+use crate::configuration;
 use crate::registry::utils::task_queue;
 use crate::registry::{cache_store, data_store};
 use crate::registry::{lock_store, oci_types};
@@ -56,6 +57,13 @@ impl Display for Error {
             Error::NotFound => write!(f, "resource not found"),
             Error::Internal(s) => write!(f, "internal server error: {s}"),
         }
+    }
+}
+
+impl From<configuration::Error> for Error {
+    fn from(error: configuration::Error) -> Self {
+        warn!("Configuration error: {error}");
+        Error::Internal("Configuration error during operations".to_string())
     }
 }
 

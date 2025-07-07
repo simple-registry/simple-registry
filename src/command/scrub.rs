@@ -69,7 +69,7 @@ impl<D: DataStore> Command<D> {
         );
 
         let registry = registry
-            .with_dry_run(options.dry_mode)
+            .with_scrub_dry_run(options.dry_mode)
             .with_upload_timeout(upload_timeout);
 
         let registry = Arc::new(registry);

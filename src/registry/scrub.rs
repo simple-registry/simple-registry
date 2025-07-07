@@ -192,7 +192,7 @@ impl<D: DataStore> Registry<D> {
         let now = Utc::now();
         let duration = now.signed_duration_since(start_date);
 
-        if duration <= self.scrub_upload_timeout {
+        if duration <= self.upload_timeout {
             return Ok(());
         }
 
@@ -410,9 +410,7 @@ impl<D: DataStore> Registry<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::{CacheStoreConfig, LockStoreConfig};
-    use crate::registry::cache_store::CacheStore;
-    use crate::registry::lock_store::LockStore;
+    use crate::configuration::{CacheStoreConfig, GlobalConfig, LockStoreConfig};
     use crate::registry::test_utils::{
         create_test_fs_backend, create_test_manifest, create_test_repository_config,
         create_test_s3_backend,
@@ -541,7 +539,7 @@ mod tests {
         .unwrap());
     }
 
-    async fn test_enforce_retention_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_enforce_retention_impl<D: DataStore + 'static>(registry: Registry<D>) {
         let namespace = "test-repo";
         let (content, media_type) = create_test_manifest();
 
@@ -554,21 +552,17 @@ mod tests {
             .rules = vec!["image.tag == 'latest'".to_string()];
 
         // Create a new registry with the retention rules and dry run disabled
-        let new_registry = Registry::new(
-            repositories_config,
-            registry.store.clone(),
-            &Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
-            Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
-        )
-        .unwrap()
-        .with_dry_run(false);
+        let registry = registry
+            .with_repositories_config(repositories_config)
+            .unwrap()
+            .with_scrub_dry_run(false);
 
         // Create multiple tags with different names
         let tags = ["latest", "v1.0", "v2.0", "old-tag"];
         let mut tag_digests = Vec::new();
 
         for tag in tags {
-            let response = new_registry
+            let response = registry
                 .put_manifest(
                     namespace,
                     Reference::Tag(tag.to_string()),
@@ -584,13 +578,13 @@ mod tests {
         let first_digest = tag_digests[0].1.clone();
 
         // Test enforce retention
-        new_registry.enforce_retention(namespace).await.unwrap();
+        registry.enforce_retention(namespace).await.unwrap();
 
         // Verify that only the 'latest' tag remains (due to retention rule)
         for (tag, digest) in tag_digests {
-            let result = new_registry
+            let result = registry
                 .get_manifest(
-                    new_registry.validate_namespace(namespace).unwrap(),
+                    registry.validate_namespace(namespace).unwrap(),
                     &[media_type.clone()],
                     namespace,
                     Reference::Tag(tag.clone()),
@@ -609,22 +603,22 @@ mod tests {
         }
 
         // Verify that the manifest blob still exists (since it's referenced by the 'latest' tag)
-        assert!(new_registry.store.read_blob(&first_digest).await.is_ok());
+        assert!(registry.store.read_blob(&first_digest).await.is_ok());
     }
 
     #[tokio::test]
     async fn test_enforce_retention_fs() {
         let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_enforce_retention_impl(&registry).await;
+        test_enforce_retention_impl(registry).await;
     }
 
     #[tokio::test]
     async fn test_enforce_retention_s3() {
         let registry = create_test_s3_backend().await;
-        test_enforce_retention_impl(&registry).await;
+        test_enforce_retention_impl(registry).await;
     }
 
-    async fn test_scrub_uploads_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_scrub_uploads_impl<D: DataStore + 'static>(registry: Registry<D>) {
         let namespace = "test-repo";
         let session_id = Uuid::new_v4().to_string();
 
@@ -636,21 +630,15 @@ mod tests {
             .unwrap();
 
         // Create a new registry with 0 timeout
-        let new_registry = Registry::new(
-            create_test_repository_config(),
-            registry.store.clone(),
-            &Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
-            Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
-        )
-        .unwrap()
-        .with_upload_timeout(Duration::seconds(0))
-        .with_dry_run(false);
+        let registry = registry
+            .with_upload_timeout(Duration::seconds(0))
+            .with_scrub_dry_run(false);
 
         // Test scrub uploads
-        new_registry.scrub_uploads(namespace).await.unwrap();
+        registry.scrub_uploads(namespace).await.unwrap();
 
         // Verify upload is deleted
-        assert!(new_registry
+        assert!(registry
             .store
             .read_upload_summary(namespace, &session_id)
             .await
@@ -660,13 +648,13 @@ mod tests {
     #[tokio::test]
     async fn test_scrub_uploads_fs() {
         let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_scrub_uploads_impl(&registry).await;
+        test_scrub_uploads_impl(registry).await;
     }
 
     #[tokio::test]
     async fn test_scrub_uploads_s3() {
         let registry = create_test_s3_backend().await;
-        test_scrub_uploads_impl(&registry).await;
+        test_scrub_uploads_impl(registry).await;
     }
 
     async fn test_scrub_tags_impl<D: DataStore + 'static>(registry: &Registry<D>) {
@@ -840,13 +828,14 @@ mod tests {
 
         // Create a new registry with dry run disabled
         let new_registry = Registry::new(
-            create_test_repository_config(),
             registry.store.clone(),
-            &Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
-            Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
+            create_test_repository_config(),
+            &GlobalConfig::default(),
+            CacheStoreConfig::default(),
+            LockStoreConfig::default(),
         )
         .unwrap()
-        .with_dry_run(false);
+        .with_scrub_dry_run(false);
 
         // Test scrub revisions
         new_registry.scrub_revisions(namespace).await.unwrap();
@@ -916,47 +905,36 @@ mod tests {
         assert!(new_registry.scrub_revisions(namespace).await.is_ok()); // Should handle invalid manifest gracefully
     }
 
-    async fn test_ensure_link_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_ensure_link_impl<D: DataStore + 'static>(registry: Registry<D>) {
         let namespace = "test-repo";
         let digest = registry.store.create_blob(b"test content").await.unwrap();
         let link = BlobLink::Tag("test-tag".to_string());
 
-        // Create a new registry with dry run disabled
-        let new_registry = Registry::new(
-            create_test_repository_config(),
-            registry.store.clone(),
-            &Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
-            Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
-        )
-        .unwrap()
-        .with_dry_run(false);
+        let registry = registry.with_scrub_dry_run(false);
 
         // Test creating a new link
-        new_registry
+        registry
             .ensure_link(namespace, &link, &digest)
             .await
             .unwrap();
-        assert!(new_registry.read_link(namespace, &link).await.is_ok());
+        assert!(registry.read_link(namespace, &link).await.is_ok());
 
         // Test updating an existing link
         let new_digest = registry.store.create_blob(b"new content").await.unwrap();
-        new_registry
+        registry
             .ensure_link(namespace, &link, &new_digest)
             .await
             .unwrap();
-        let stored_link = new_registry.read_link(namespace, &link).await.unwrap();
+        let stored_link = registry.read_link(namespace, &link).await.unwrap();
         assert_eq!(stored_link.target, new_digest);
 
         // Test with invalid link
         let invalid_link = BlobLink::Tag("invalid-tag".to_string());
-        new_registry
+        registry
             .ensure_link(namespace, &invalid_link, &digest)
             .await
             .unwrap();
-        assert!(new_registry
-            .read_link(namespace, &invalid_link)
-            .await
-            .is_ok());
+        assert!(registry.read_link(namespace, &invalid_link).await.is_ok());
     }
 
     async fn test_cleanup_orphan_blobs_impl<D: DataStore + 'static>(registry: &Registry<D>) {
@@ -1005,13 +983,14 @@ mod tests {
 
         // Create a new registry with dry run disabled
         let new_registry = Registry::new(
-            create_test_repository_config(),
             registry.store.clone(),
-            &Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap()),
-            Arc::new(LockStore::new(LockStoreConfig::default()).unwrap()),
+            create_test_repository_config(),
+            &GlobalConfig::default(),
+            CacheStoreConfig::default(),
+            LockStoreConfig::default(),
         )
         .unwrap()
-        .with_dry_run(false);
+        .with_scrub_dry_run(false);
 
         // Test cleanup orphan blobs
         new_registry.cleanup_orphan_blobs().await.unwrap();
@@ -1038,13 +1017,13 @@ mod tests {
     #[tokio::test]
     async fn test_ensure_link_fs() {
         let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_ensure_link_impl(&registry).await;
+        test_ensure_link_impl(registry).await;
     }
 
     #[tokio::test]
     async fn test_ensure_link_s3() {
         let registry = create_test_s3_backend().await;
-        test_ensure_link_impl(&registry).await;
+        test_ensure_link_impl(registry).await;
     }
 
     #[tokio::test]

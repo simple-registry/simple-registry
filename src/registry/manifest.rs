@@ -93,7 +93,13 @@ impl<D: DataStore> Registry<D> {
         }
 
         let res = repository
-            .query_upstream_manifest(&Method::HEAD, accepted_mime_types, namespace, &reference)
+            .query_upstream_manifest(
+                &self.auth_token_cache,
+                &Method::HEAD,
+                accepted_mime_types,
+                namespace,
+                &reference,
+            )
             .await?;
 
         let media_type = res.get_header(CONTENT_TYPE);
@@ -166,7 +172,13 @@ impl<D: DataStore> Registry<D> {
 
         // TODO: test if upstream manifest has changed or not (if reference is a Reference::Tag)
         let res = repository
-            .query_upstream_manifest(&Method::GET, accepted_mime_types, namespace, &reference)
+            .query_upstream_manifest(
+                &self.auth_token_cache,
+                &Method::GET,
+                accepted_mime_types,
+                namespace,
+                &reference,
+            )
             .await?;
 
         let media_type = res.get_header(CONTENT_TYPE);

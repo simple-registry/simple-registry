@@ -3,12 +3,9 @@
 
 use crate::command::{argon, scrub, server};
 use crate::configuration::{
-    CacheStoreConfig, Configuration, DataStoreConfig, Error, LockStoreConfig, ObservabilityConfig,
-    RepositoryConfig, ServerTlsConfig,
+    Configuration, DataStoreConfig, Error, ObservabilityConfig, ServerTlsConfig,
 };
-use crate::registry::cache_store::CacheStore;
 use crate::registry::data_store::{DataStore, FSBackend, S3Backend};
-use crate::registry::lock_store::LockStore;
 use crate::registry::Registry;
 use argh::FromArgs;
 use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -19,7 +16,6 @@ use opentelemetry_sdk::trace::{RandomIdGenerator, Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use opentelemetry_semantic_conventions::attribute::SERVICE_VERSION;
 use opentelemetry_stdout as stdout;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -82,7 +78,7 @@ fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {
     Ok(())
 }
 
-fn set_fs_watcher<D: DataStore + 'static>(
+fn set_config_watcher<D: DataStore + 'static>(
     data_store: Arc<D>,
     config_path: &str,
     tls_config: Option<ServerTlsConfig>,
@@ -109,11 +105,12 @@ fn set_fs_watcher<D: DataStore + 'static>(
                 }
             };
 
-            let registry = match build_registry(
+            let registry = match Registry::new(
+                data_store.clone(),
+                config.repository,
+                &config.global,
                 config.cache_store,
                 config.lock_store,
-                config.repository,
-                data_store.clone(),
             ) {
                 Ok(registry) => registry,
                 Err(error) => {
@@ -151,18 +148,6 @@ fn set_fs_watcher<D: DataStore + 'static>(
     Ok(config_watcher)
 }
 
-fn build_registry<D: DataStore>(
-    cache_config: CacheStoreConfig,
-    lock_config: LockStoreConfig,
-    repository_config: HashMap<String, RepositoryConfig>,
-    data_store: Arc<D>,
-) -> Result<Registry<D>, Error> {
-    let lock_store = Arc::new(LockStore::new(lock_config)?);
-    let cache_store = Arc::new(CacheStore::new(cache_config)?);
-
-    Registry::new(repository_config, data_store, &cache_store, lock_store)
-}
-
 #[derive(FromArgs, PartialEq, Debug)]
 /// An OCI-compliant and docker-compatible registry service
 struct GlobalArguments {
@@ -197,7 +182,7 @@ fn main() -> Result<(), command::Error> {
     let config = Configuration::load(&arguments.config)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.max_concurrent_requests)
+        .worker_threads(config.global.max_concurrent_requests)
         .enable_all()
         .build()?;
 
@@ -224,11 +209,12 @@ async fn handle_command<D: DataStore + 'static>(
     arguments: GlobalArguments,
     data_store: Arc<D>,
 ) -> Result<(), command::Error> {
-    let registry = build_registry(
+    let registry = Registry::new(
+        data_store.clone(),
+        config.repository,
+        &config.global,
         config.cache_store,
         config.lock_store,
-        config.repository,
-        data_store.clone(),
     )?;
 
     match arguments.nested {
@@ -244,8 +230,7 @@ async fn handle_command<D: DataStore + 'static>(
                 registry,
             )?);
 
-            let _watcher =
-                set_fs_watcher(data_store, &arguments.config, config.server.tls, &server)?;
+            let _ = set_config_watcher(data_store, &arguments.config, config.server.tls, &server)?;
             server.run().await
         }
     }

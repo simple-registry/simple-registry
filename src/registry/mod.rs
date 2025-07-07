@@ -24,7 +24,7 @@ mod upload;
 pub mod utils;
 
 use crate::configuration;
-use crate::configuration::RepositoryConfig;
+use crate::configuration::{CacheStoreConfig, GlobalConfig, LockStoreConfig, RepositoryConfig};
 use crate::registry::cache_store::CacheStore;
 pub use repository::Repository;
 
@@ -42,11 +42,12 @@ static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 pub struct Registry<D> {
     store: Arc<D>,
-    lock_store: Arc<LockStore>,
+    lock_store: LockStore,
+    auth_token_cache: CacheStore,
     repositories: HashMap<String, Repository>,
     update_pull_time: bool,
     scrub_dry_run: bool,
-    scrub_upload_timeout: Duration,
+    upload_timeout: Duration,
     task_queue: TaskQueue,
 }
 
@@ -57,39 +58,59 @@ impl<D> Debug for Registry<D> {
 }
 
 impl<D: DataStore> Registry<D> {
-    #[instrument(skip(repositories_config, storage_engine, cache_store, lock_store))]
+    #[instrument(skip(repositories_config, store, auth_token_cache, lock_store))]
     pub fn new(
+        store: Arc<D>,
         repositories_config: HashMap<String, RepositoryConfig>,
-        storage_engine: Arc<D>,
-        cache_store: &Arc<CacheStore>,
-        lock_store: Arc<LockStore>,
+        global_config: &GlobalConfig,
+        auth_token_cache: CacheStoreConfig,
+        lock_store: LockStoreConfig,
     ) -> Result<Self, configuration::Error> {
+        let lock_store = LockStore::new(lock_store)?;
+        let auth_token_cache = CacheStore::new(auth_token_cache)?;
+
         let mut repositories = HashMap::new();
         for (repository_name, repository_config) in repositories_config {
-            let res = Repository::new(repository_config, repository_name.clone(), cache_store)?;
+            let res = Repository::new(repository_config, repository_name.clone())?;
             repositories.insert(repository_name, res);
         }
 
         let res = Self {
-            update_pull_time: false, // TODO: expose configuration option
-            store: storage_engine,
+            update_pull_time: global_config.update_pull_time,
+            store,
             lock_store,
+            auth_token_cache,
             repositories,
             scrub_dry_run: true,
-            scrub_upload_timeout: Duration::days(1),
-            task_queue: TaskQueue::new(4).expect("OK"), // TODO: make configurable
+            upload_timeout: Duration::days(1),
+            task_queue: TaskQueue::new(global_config.max_concurrent_cache_jobs)?,
         };
 
         Ok(res)
     }
 
-    pub fn with_dry_run(mut self, scrub_dry_run: bool) -> Self {
+    #[cfg(test)]
+    pub fn with_repositories_config(
+        mut self,
+        repositories_config: HashMap<String, RepositoryConfig>,
+    ) -> Result<Self, Error> {
+        let mut repositories = HashMap::new();
+        for (repository_name, repository_config) in repositories_config {
+            let res = Repository::new(repository_config, repository_name.clone())?;
+            repositories.insert(repository_name, res);
+        }
+
+        self.repositories = repositories;
+        Ok(self)
+    }
+
+    pub fn with_scrub_dry_run(mut self, scrub_dry_run: bool) -> Self {
         self.scrub_dry_run = scrub_dry_run;
         self
     }
 
     pub fn with_upload_timeout(mut self, scrub_upload_timeout: Duration) -> Self {
-        self.scrub_upload_timeout = scrub_upload_timeout;
+        self.upload_timeout = scrub_upload_timeout;
         self
     }
 
@@ -231,11 +252,18 @@ pub(crate) mod test_utils {
         let backend = Arc::new(FSBackend::new(config));
 
         let repositories_config = create_test_repository_config();
-        let token_cache = Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap());
-        let lock_store = Arc::new(LockStore::new(LockStoreConfig::default()).unwrap());
+        let global = GlobalConfig::default();
+        let token_cache = CacheStoreConfig::default();
+        let lock_store = LockStoreConfig::default();
 
-        let registry =
-            Registry::new(repositories_config, backend, &token_cache, lock_store).unwrap();
+        let registry = Registry::new(
+            backend,
+            repositories_config,
+            &global,
+            token_cache,
+            lock_store,
+        )
+        .unwrap();
 
         (registry, temp_dir)
     }
@@ -254,13 +282,20 @@ pub(crate) mod test_utils {
             multipart_part_size: ByteSize::mb(5),
         };
 
-        let lock_store = Arc::new(LockStore::new(LockStoreConfig::default()).unwrap());
         let backend = Arc::new(S3Backend::new(config));
-
         let repositories_config = create_test_repository_config();
-        let token_cache = Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap());
+        let global = GlobalConfig::default();
+        let token_cache = CacheStoreConfig::default();
+        let lock_store = LockStoreConfig::default();
 
-        Registry::new(repositories_config, backend, &token_cache, lock_store).unwrap()
+        Registry::new(
+            backend,
+            repositories_config,
+            &global,
+            token_cache,
+            lock_store,
+        )
+        .unwrap()
     }
 
     pub async fn create_test_blob<D: DataStore>(
@@ -285,7 +320,6 @@ pub(crate) mod test_utils {
         assert!(namespace_links.contains(&tag_link));
 
         // Create a non-pull-through repository
-        let token_cache = Arc::new(CacheStore::new(CacheStoreConfig::default()).unwrap());
         let repository = Repository::new(
             RepositoryConfig {
                 upstream: Vec::new(),
@@ -293,7 +327,6 @@ pub(crate) mod test_utils {
                 retention_policy: RepositoryRetentionPolicyConfig { rules: Vec::new() },
             },
             "test-repo".to_string(),
-            &token_cache,
         )
         .unwrap();
 

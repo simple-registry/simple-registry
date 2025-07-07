@@ -5,7 +5,6 @@ use crate::registry::oci_types::{Digest, Reference};
 use cel_interpreter::Program;
 use hyper::body::Incoming;
 use hyper::{Method, Response};
-use std::sync::Arc;
 use tracing::instrument;
 
 mod authentication_scheme;
@@ -24,13 +23,9 @@ pub struct Repository {
 }
 
 impl Repository {
-    pub fn new(
-        config: RepositoryConfig,
-        name: String,
-        token_cache: &Arc<CacheStore>,
-    ) -> Result<Self, Error> {
+    pub fn new(config: RepositoryConfig, name: String) -> Result<Self, Error> {
         let access_rules = Self::compile_program_vec(&config.access_policy.rules)?;
-        let upstream = Self::build_upstreams(config.upstream, token_cache)?;
+        let upstream = Self::build_upstreams(config.upstream)?;
         let retention_rules = Self::compile_program_vec(&config.retention_policy.rules)?;
 
         Ok(Self {
@@ -51,7 +46,6 @@ impl Repository {
 
     fn build_upstreams(
         upstreams_config: Vec<RepositoryUpstreamConfig>,
-        token_cache: &Arc<CacheStore>,
     ) -> Result<Vec<RepositoryUpstream>, Error> {
         let mut upstreams = Vec::new();
 
@@ -67,11 +61,7 @@ impl Repository {
                 .set_max_redirect(upstream_config.max_redirect)
                 .build()?;
 
-            upstreams.push(RepositoryUpstream::new(
-                upstream_config,
-                client,
-                token_cache.clone(),
-            ));
+            upstreams.push(RepositoryUpstream::new(upstream_config, client));
         }
 
         Ok(upstreams)
@@ -84,6 +74,7 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn query_upstream_blob(
         &self,
+        auth_token_cache: &CacheStore,
         method: &Method,
         accepted_mime_types: &[String],
         namespace: &str,
@@ -93,7 +84,13 @@ impl Repository {
         for upstream in &self.upstream {
             let location = upstream.get_blob_path(&self.name, namespace, digest);
             response = upstream
-                .query(namespace, method, accepted_mime_types, &location)
+                .query(
+                    auth_token_cache,
+                    namespace,
+                    method,
+                    accepted_mime_types,
+                    &location,
+                )
                 .await;
             if response.is_ok() {
                 break;
@@ -105,6 +102,7 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn query_upstream_manifest(
         &self,
+        auth_token_cache: &CacheStore,
         method: &Method,
         accepted_mime_types: &[String],
         namespace: &str,
@@ -113,7 +111,13 @@ impl Repository {
         for upstream in &self.upstream {
             let location = upstream.get_manifest_path(&self.name, namespace, reference);
             if let Ok(response) = upstream
-                .query(namespace, method, accepted_mime_types, &location)
+                .query(
+                    auth_token_cache,
+                    namespace,
+                    method,
+                    accepted_mime_types,
+                    &location,
+                )
                 .await
             {
                 return Ok(response);
