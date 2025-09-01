@@ -1,4 +1,4 @@
-use crate::registry::data_store::{DataStore, LinkMetadata};
+use crate::registry::blob_store::{BlobStore, LinkMetadata};
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::policy_types::ManifestImage;
 use crate::registry::utils::BlobLink;
@@ -77,7 +77,7 @@ pub fn manifest_should_be_purged(
     Ok(!rules.is_empty())
 }
 
-impl<D: DataStore> Registry<D> {
+impl<D: BlobStore> Registry<D> {
     pub async fn enforce_retention(&self, namespace: &str) -> Result<(), Error> {
         info!("'{namespace}': Enforcing retention policy");
 
@@ -539,7 +539,7 @@ mod tests {
         .unwrap());
     }
 
-    async fn test_enforce_retention_impl<D: DataStore + 'static>(registry: Registry<D>) {
+    async fn test_enforce_retention_impl<D: BlobStore + 'static>(registry: Registry<D>) {
         let namespace = "test-repo";
         let (content, media_type) = create_test_manifest();
 
@@ -618,7 +618,7 @@ mod tests {
         test_enforce_retention_impl(registry).await;
     }
 
-    async fn test_scrub_uploads_impl<D: DataStore + 'static>(registry: Registry<D>) {
+    async fn test_scrub_uploads_impl<D: BlobStore + 'static>(registry: Registry<D>) {
         let namespace = "test-repo";
         let session_id = Uuid::new_v4().to_string();
 
@@ -657,7 +657,7 @@ mod tests {
         test_scrub_uploads_impl(registry).await;
     }
 
-    async fn test_scrub_tags_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_scrub_tags_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -703,7 +703,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn test_scrub_revisions_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_scrub_revisions_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
 
         // Create test blobs
@@ -905,7 +905,7 @@ mod tests {
         assert!(new_registry.scrub_revisions(namespace).await.is_ok()); // Should handle invalid manifest gracefully
     }
 
-    async fn test_ensure_link_impl<D: DataStore + 'static>(registry: Registry<D>) {
+    async fn test_ensure_link_impl<D: BlobStore + 'static>(registry: Registry<D>) {
         let namespace = "test-repo";
         let digest = registry.store.create_blob(b"test content").await.unwrap();
         let link = BlobLink::Tag("test-tag".to_string());
@@ -937,7 +937,7 @@ mod tests {
         assert!(registry.read_link(namespace, &invalid_link).await.is_ok());
     }
 
-    async fn test_cleanup_orphan_blobs_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_cleanup_orphan_blobs_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace1 = "test-repo1";
         let namespace2 = "test-repo2";
         let content = b"test orphan blob content";

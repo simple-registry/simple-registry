@@ -47,7 +47,7 @@ pub trait Reader: AsyncRead + Unpin + Send {}
 impl<T> Reader for T where T: AsyncRead + Unpin + Send {}
 
 #[async_trait]
-pub trait DataStore: Send + Sync {
+pub trait BlobStore: Send + Sync {
     async fn list_namespaces(
         &self,
         n: u16,
@@ -157,7 +157,7 @@ mod tests {
     use std::io::Cursor;
     use uuid::Uuid;
 
-    pub async fn test_datastore_list_namespaces(store: &impl DataStore) {
+    pub async fn test_datastore_list_namespaces(store: &impl BlobStore) {
         let namespaces = ["repo1", "repo2", "repo3/nested"];
         let test_content = b"test content";
         let digest = store.create_blob(test_content).await.unwrap();
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(all_namespaces, namespaces);
     }
 
-    pub async fn test_datastore_list_tags(store: &impl DataStore) {
+    pub async fn test_datastore_list_tags(store: &impl BlobStore) {
         let namespace = "test-repo";
 
         let digest = store.create_blob(b"manifest content").await.unwrap();
@@ -271,7 +271,7 @@ mod tests {
         assert!(!tags_after_delete.contains(&delete_tag.to_string()));
     }
 
-    pub async fn test_datastore_list_referrers(store: &impl DataStore) {
+    pub async fn test_datastore_list_referrers(store: &impl BlobStore) {
         let namespace = "test-repo";
 
         // Create base manifest that will be referenced
@@ -377,7 +377,7 @@ mod tests {
         assert!(non_matching_referrers.is_empty());
     }
 
-    pub async fn test_datastore_list_uploads(store: &impl DataStore) {
+    pub async fn test_datastore_list_uploads(store: &impl BlobStore) {
         let namespace = "test-repo";
 
         let upload_ids = ["upload1", "upload2", "upload3"];
@@ -438,7 +438,7 @@ mod tests {
         assert!(!uploads_after_complete.contains(&upload_to_complete.to_string()));
     }
 
-    pub async fn test_datastore_list_blobs(store: &impl DataStore) {
+    pub async fn test_datastore_list_blobs(store: &impl BlobStore) {
         let blob_contents = [
             b"aaa_content_1".to_vec(),
             b"bbb_content_2".to_vec(),
@@ -481,7 +481,7 @@ mod tests {
         assert!(token3.is_none());
     }
 
-    pub async fn test_datastore_list_revisions(store: &impl DataStore) {
+    pub async fn test_datastore_list_revisions(store: &impl BlobStore) {
         let namespace = "test-repo";
 
         let manifest_contents = [
@@ -540,7 +540,7 @@ mod tests {
         assert!(token3.is_none());
     }
 
-    pub async fn test_datastore_blob_operations(store: &impl DataStore) {
+    pub async fn test_datastore_blob_operations(store: &impl BlobStore) {
         let test_content = b"Test blob content";
         let digest = store.create_blob(test_content).await.unwrap();
 
@@ -559,7 +559,7 @@ mod tests {
         assert_eq!(buffer, test_content);
     }
 
-    pub async fn test_datastore_upload_operations(store: &impl DataStore) {
+    pub async fn test_datastore_upload_operations(store: &impl BlobStore) {
         let namespace = "test-namespace";
         let uuid = Uuid::new_v4().to_string();
 
@@ -593,7 +593,7 @@ mod tests {
         assert!(upload_result.is_err());
     }
 
-    pub async fn test_datastore_link_operations(store: &impl DataStore) {
+    pub async fn test_datastore_link_operations(store: &impl BlobStore) {
         let namespace = "test-namespace";
         let test_content = b"Test content for linking";
         let digest = store.create_blob(test_content).await.unwrap();

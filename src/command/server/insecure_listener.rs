@@ -1,7 +1,7 @@
 use crate::command;
 use crate::command::server::{serve_request, ServerContext};
 use crate::configuration::ServerConfig;
-use crate::registry::data_store::DataStore;
+use crate::registry::blob_store::BlobStore;
 use crate::registry::policy_types::ClientIdentity;
 use arc_swap::ArcSwap;
 use hyper_util::rt::TokioIo;
@@ -15,7 +15,7 @@ pub struct InsecureListener<D> {
     context: ArcSwap<ServerContext<D>>,
 }
 
-impl<D: DataStore + 'static> InsecureListener<D> {
+impl<D: BlobStore + 'static> InsecureListener<D> {
     pub fn new(server_config: &ServerConfig, context: ServerContext<D>) -> Self {
         let binding_address = SocketAddr::new(server_config.bind_address, server_config.port);
 

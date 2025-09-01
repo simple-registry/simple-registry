@@ -1,6 +1,6 @@
 use crate::configuration;
 use crate::registry::utils::task_queue;
-use crate::registry::{cache_store, data_store};
+use crate::registry::{blob_store, cache_store};
 use crate::registry::{lock_store, oci_types};
 use cel_interpreter::SerializationError;
 use hyper::header::InvalidHeaderValue;
@@ -81,12 +81,12 @@ impl From<oci_types::Error> for Error {
     }
 }
 
-impl From<data_store::Error> for Error {
-    fn from(error: data_store::Error) -> Self {
+impl From<blob_store::Error> for Error {
+    fn from(error: blob_store::Error) -> Self {
         match error {
-            data_store::Error::UploadNotFound => Error::BlobUploadUnknown,
-            data_store::Error::BlobNotFound => Error::BlobUnknown,
-            data_store::Error::ReferenceNotFound => Error::ManifestBlobUnknown,
+            blob_store::Error::UploadNotFound => Error::BlobUploadUnknown,
+            blob_store::Error::BlobNotFound => Error::BlobUnknown,
+            blob_store::Error::ReferenceNotFound => Error::ManifestBlobUnknown,
             _ => {
                 warn!("Data store error: {error}");
                 Error::Internal("Data store error during operations".to_string())

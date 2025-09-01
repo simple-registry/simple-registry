@@ -1,4 +1,4 @@
-use crate::registry::data_store::Error;
+use crate::registry::blob_store::Error;
 use crate::registry::oci_types;
 use sha2::digest::crypto_common::hazmat::SerializableState;
 use sha2::{Digest, Sha256};

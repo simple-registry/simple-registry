@@ -7,9 +7,9 @@ use tracing::instrument;
 
 pub mod api;
 mod blob;
+pub mod blob_store;
 pub mod cache_store;
 mod content_discovery;
-pub mod data_store;
 mod error;
 mod http_client;
 pub mod lock_store;
@@ -28,7 +28,7 @@ use crate::configuration::{CacheStoreConfig, GlobalConfig, LockStoreConfig, Repo
 use crate::registry::cache_store::CacheStore;
 pub use repository::Repository;
 
-use crate::registry::data_store::{DataStore, LinkMetadata};
+use crate::registry::blob_store::{BlobStore, LinkMetadata};
 use crate::registry::lock_store::LockStore;
 use crate::registry::oci_types::Digest;
 pub use crate::registry::utils::{BlobLink, TaskQueue};
@@ -57,7 +57,7 @@ impl<D> Debug for Registry<D> {
     }
 }
 
-impl<D: DataStore> Registry<D> {
+impl<D: BlobStore> Registry<D> {
     #[instrument(skip(repositories_config, store, auth_token_cache, lock_store))]
     pub fn new(
         store: Arc<D>,
@@ -197,7 +197,7 @@ impl<D: DataStore> Registry<D> {
 
         let digest = match metadata {
             Ok(link_data) => link_data.target,
-            Err(data_store::Error::ReferenceNotFound) => return Ok(()),
+            Err(blob_store::Error::ReferenceNotFound) => return Ok(()),
             Err(e) => return Err(e.into()),
         };
 
@@ -220,7 +220,7 @@ pub(crate) mod test_utils {
         CacheStoreConfig, LockStoreConfig, RepositoryAccessPolicyConfig,
         RepositoryRetentionPolicyConfig, StorageFSConfig, StorageS3Config,
     };
-    use crate::registry::data_store::{FSBackend, S3Backend};
+    use crate::registry::blob_store::{FSBackend, S3Backend};
     use crate::registry::oci_types::Digest;
     use crate::registry::utils::BlobLink;
     use bytesize::ByteSize;
@@ -298,7 +298,7 @@ pub(crate) mod test_utils {
         .unwrap()
     }
 
-    pub async fn create_test_blob<D: DataStore>(
+    pub async fn create_test_blob<D: BlobStore>(
         registry: &Registry<D>,
         namespace: &str,
         content: &[u8],

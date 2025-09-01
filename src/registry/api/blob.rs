@@ -2,7 +2,7 @@ use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::RequestExt;
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::blob::GetBlobResponse;
-use crate::registry::data_store::DataStore;
+use crate::registry::blob_store::BlobStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
@@ -38,7 +38,7 @@ pub trait RegistryAPIBlobHandlersExt {
     ) -> Result<Response<Body>, Error>;
 }
 
-impl<D: DataStore + 'static> RegistryAPIBlobHandlersExt for Registry<D> {
+impl<D: BlobStore + 'static> RegistryAPIBlobHandlersExt for Registry<D> {
     #[instrument(skip(self, request))]
     async fn handle_head_blob<T>(
         &self,
@@ -162,7 +162,7 @@ mod tests {
     use hyper::Method;
     use hyper::Uri;
 
-    async fn test_handle_head_blob_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_head_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
@@ -211,7 +211,7 @@ mod tests {
         test_handle_head_blob_impl(&registry).await;
     }
 
-    async fn test_handle_delete_blob_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_delete_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
@@ -277,7 +277,7 @@ mod tests {
         test_handle_delete_blob_impl(&registry).await;
     }
 
-    async fn test_handle_get_blob_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_get_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
@@ -332,7 +332,7 @@ mod tests {
         test_handle_get_blob_impl(&registry).await;
     }
 
-    async fn test_handle_get_blob_with_range_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_get_blob_with_range_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;

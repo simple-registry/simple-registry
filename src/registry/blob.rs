@@ -1,10 +1,10 @@
 use crate::registry::api::hyper::response_ext::IntoAsyncRead;
 use crate::registry::api::hyper::response_ext::ResponseExt;
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
-use crate::registry::data_store::{DataStore, Reader};
+use crate::registry::blob_store::{BlobStore, Reader};
 use crate::registry::oci_types::Digest;
 use crate::registry::utils::{task_queue, BlobLink};
-use crate::registry::{data_store, Error, Registry, Repository};
+use crate::registry::{blob_store, Error, Registry, Repository};
 use hyper::header::CONTENT_LENGTH;
 use hyper::Method;
 use std::sync::Arc;
@@ -27,7 +27,7 @@ pub struct HeadBlobResponse {
     pub size: u64,
 }
 
-impl<D: DataStore + 'static> Registry<D> {
+impl<D: BlobStore + 'static> Registry<D> {
     #[instrument(skip(repository))]
     pub async fn head_blob(
         &self,
@@ -68,7 +68,7 @@ impl<D: DataStore + 'static> Registry<D> {
         digest: Digest,
     ) -> Result<(), Error>
     where
-        E: DataStore,
+        E: BlobStore,
         S: AsyncRead + Send + Sync + Unpin,
     {
         let session_id = Uuid::new_v4().to_string();
@@ -180,7 +180,7 @@ impl<D: DataStore + 'static> Registry<D> {
 
         let reader = match self.store.build_blob_reader(digest, start).await {
             Ok(reader) => reader,
-            Err(data_store::Error::BlobNotFound) => return Ok(GetBlobResponse::Empty),
+            Err(blob_store::Error::BlobNotFound) => return Ok(GetBlobResponse::Empty),
             Err(err) => Err(err)?,
         };
 
@@ -226,7 +226,7 @@ mod tests {
     use std::io::Cursor;
     use tokio::io::AsyncReadExt;
 
-    async fn test_head_blob_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_head_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -252,7 +252,7 @@ mod tests {
         test_head_blob_impl(&registry).await;
     }
 
-    async fn test_get_blob_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_get_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -285,7 +285,7 @@ mod tests {
         test_get_blob_impl(&registry).await;
     }
 
-    async fn test_get_blob_with_range_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_get_blob_with_range_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -322,7 +322,7 @@ mod tests {
         test_get_blob_with_range_impl(&registry).await;
     }
 
-    async fn test_delete_blob_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_delete_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -375,7 +375,7 @@ mod tests {
         test_delete_blob_impl(&registry).await;
     }
 
-    async fn test_copy_blob_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_copy_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test blob content";
 

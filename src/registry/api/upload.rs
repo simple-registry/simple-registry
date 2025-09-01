@@ -1,7 +1,7 @@
 use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::{IntoAsyncRead, RequestExt};
 use crate::registry::api::hyper::{DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID};
-use crate::registry::data_store::DataStore;
+use crate::registry::blob_store::BlobStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, StartUploadResponse};
@@ -63,7 +63,7 @@ pub trait RegistryAPIUploadHandlersExt {
     ) -> Result<Response<Body>, Error>;
 }
 
-impl<D: DataStore> RegistryAPIUploadHandlersExt for Registry<D> {
+impl<D: BlobStore> RegistryAPIUploadHandlersExt for Registry<D> {
     #[instrument(skip(self, request))]
     async fn handle_start_upload<T>(
         &self,
@@ -261,7 +261,7 @@ mod tests {
     use hyper::Uri;
     use uuid::Uuid;
 
-    async fn test_handle_start_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_start_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
 
         // Test start upload without digest
@@ -339,7 +339,7 @@ mod tests {
         test_handle_start_upload_impl(&registry).await;
     }
 
-    async fn test_handle_get_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_get_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let uuid = Uuid::new_v4();
 
@@ -384,7 +384,7 @@ mod tests {
         test_handle_get_upload_impl(&registry).await;
     }
 
-    async fn test_handle_patch_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_patch_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let uuid = Uuid::new_v4();
 
@@ -442,7 +442,7 @@ mod tests {
         test_handle_patch_upload_impl(&registry).await;
     }
 
-    async fn test_handle_put_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_put_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let uuid = Uuid::new_v4();
         let content = b"test content";
@@ -518,7 +518,7 @@ mod tests {
         test_handle_put_upload_impl(&registry).await;
     }
 
-    async fn test_handle_delete_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_delete_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let uuid = Uuid::new_v4();
 

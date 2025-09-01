@@ -1,4 +1,4 @@
-use crate::registry::data_store::DataStore;
+use crate::registry::blob_store::BlobStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::{Error, Registry};
 use tokio::io::AsyncRead;
@@ -10,7 +10,7 @@ pub enum StartUploadResponse {
     Session(String, String),
 }
 
-impl<D: DataStore> Registry<D> {
+impl<D: BlobStore> Registry<D> {
     #[instrument]
     pub async fn start_upload(
         &self,
@@ -155,7 +155,7 @@ mod tests {
     use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
     use std::io::Cursor;
 
-    async fn test_start_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_start_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test upload content";
 
@@ -195,7 +195,7 @@ mod tests {
         test_start_upload_impl(&registry).await;
     }
 
-    async fn test_patch_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_patch_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test patch content";
         let session_id = Uuid::new_v4();
@@ -248,7 +248,7 @@ mod tests {
         test_patch_upload_impl(&registry).await;
     }
 
-    async fn test_complete_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_complete_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test complete content";
         let session_id = Uuid::new_v4();
@@ -298,7 +298,7 @@ mod tests {
         test_complete_upload_impl(&registry).await;
     }
 
-    async fn test_delete_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_delete_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let session_id = Uuid::new_v4();
 
@@ -339,7 +339,7 @@ mod tests {
         test_delete_upload_impl(&registry).await;
     }
 
-    async fn test_get_upload_range_max_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_get_upload_range_max_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let content = b"test range content";
         let session_id = Uuid::new_v4();

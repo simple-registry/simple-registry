@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::configuration::StorageS3Config;
-use crate::registry::data_store::{DataStore, Error, LinkMetadata, Reader};
+use crate::registry::blob_store::{BlobStore, Error, LinkMetadata, Reader};
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::reader::{ChunkedReader, HashingReader};
 use crate::registry::utils::sha256_ext::Sha256Ext;
@@ -573,7 +573,7 @@ impl S3Backend {
 }
 
 #[async_trait]
-impl DataStore for S3Backend {
+impl BlobStore for S3Backend {
     #[instrument(skip(self))]
     async fn list_namespaces(
         &self,
@@ -1263,7 +1263,7 @@ impl DataStore for S3Backend {
 mod tests {
     use super::*;
     use crate::configuration::StorageS3Config;
-    use crate::registry::data_store::tests::{
+    use crate::registry::blob_store::tests::{
         test_datastore_blob_operations, test_datastore_link_operations, test_datastore_list_blobs,
         test_datastore_list_namespaces, test_datastore_list_referrers,
         test_datastore_list_revisions, test_datastore_list_tags, test_datastore_list_uploads,
@@ -1300,7 +1300,7 @@ mod tests {
         }
     }
 
-    // Generic DataStore trait tests
+    // Generic BlobStore trait tests
     #[tokio::test]
     async fn test_list_namespaces() {
         let backend = create_test_backend();

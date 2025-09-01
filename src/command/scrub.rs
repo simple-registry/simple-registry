@@ -1,5 +1,5 @@
 use crate::command;
-use crate::registry::data_store::DataStore;
+use crate::registry::blob_store::BlobStore;
 use crate::registry::Registry;
 use argh::FromArgs;
 use humantime::Duration;
@@ -54,7 +54,7 @@ pub struct Command<D> {
     enabled_checks: HashSet<ScrubCheck>,
 }
 
-impl<D: DataStore> Command<D> {
+impl<D: BlobStore> Command<D> {
     pub fn new(options: &Options, registry: Registry<D>) -> Self {
         let upload_timeout = options
             .upload_timeout

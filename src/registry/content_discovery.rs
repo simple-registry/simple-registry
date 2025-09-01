@@ -1,9 +1,9 @@
-use crate::registry::data_store::DataStore;
+use crate::registry::blob_store::BlobStore;
 use crate::registry::oci_types::{Descriptor, Digest};
-use crate::registry::{data_store, Error, Registry};
+use crate::registry::{blob_store, Error, Registry};
 use tracing::instrument;
 
-impl<D: DataStore> Registry<D> {
+impl<D: BlobStore> Registry<D> {
     #[instrument]
     pub async fn get_referrers(
         &self,
@@ -19,7 +19,7 @@ impl<D: DataStore> Registry<D> {
             .await
         {
             Ok(referrers) => Ok(referrers),
-            Err(data_store::Error::BlobNotFound) => Ok(Vec::new()),
+            Err(blob_store::Error::BlobNotFound) => Ok(Vec::new()),
             Err(e) => Err(e)?,
         }
     }
@@ -80,7 +80,7 @@ mod tests {
         test_get_referrers(&registry).await;
     }
 
-    async fn test_get_referrers<D: DataStore>(registry: &Registry<D>) {
+    async fn test_get_referrers<D: BlobStore>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let digest = Digest::from_str(
             "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
@@ -123,7 +123,7 @@ mod tests {
         test_list_catalog(&registry).await;
     }
 
-    async fn test_list_catalog<D: DataStore>(registry: &Registry<D>) {
+    async fn test_list_catalog<D: BlobStore>(registry: &Registry<D>) {
         // Test default pagination (n=100)
         let (namespaces, token) = registry.list_catalog(None, None).await.unwrap();
         assert!(namespaces.is_empty());
@@ -155,7 +155,7 @@ mod tests {
         test_list_tags(&registry).await;
     }
 
-    async fn test_list_tags<D: DataStore>(registry: &Registry<D>) {
+    async fn test_list_tags<D: BlobStore>(registry: &Registry<D>) {
         let namespace = "test-repo";
 
         // Create some tags first

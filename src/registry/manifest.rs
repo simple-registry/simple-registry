@@ -1,6 +1,6 @@
 use crate::registry::api::hyper::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
-use crate::registry::data_store::DataStore;
+use crate::registry::blob_store::BlobStore;
 use crate::registry::oci_types::{Digest, Manifest, Reference};
 use crate::registry::utils::BlobLink;
 use crate::registry::{Error, Registry, Repository};
@@ -74,7 +74,7 @@ pub fn parse_manifest_digests(
     })
 }
 
-impl<D: DataStore> Registry<D> {
+impl<D: BlobStore> Registry<D> {
     #[instrument(skip(repository))]
     pub async fn head_manifest(
         &self,
@@ -390,7 +390,7 @@ mod tests {
         (content, media_type)
     }
 
-    async fn test_put_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_put_manifest_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -448,7 +448,7 @@ mod tests {
         test_put_manifest_impl(&registry).await;
     }
 
-    async fn test_get_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_get_manifest_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -507,7 +507,7 @@ mod tests {
         test_get_manifest_impl(&registry).await;
     }
 
-    async fn test_head_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_head_manifest_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -566,7 +566,7 @@ mod tests {
         test_head_manifest_impl(&registry).await;
     }
 
-    async fn test_delete_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_delete_manifest_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();

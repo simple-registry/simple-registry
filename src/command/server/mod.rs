@@ -41,7 +41,7 @@ use crate::registry::api::{
     RegistryAPIManifestHandlersExt, RegistryAPIUploadHandlersExt, RegistryAPIVersionHandlerExt,
     TagsParameters,
 };
-use crate::registry::data_store::DataStore;
+use crate::registry::blob_store::BlobStore;
 use crate::registry::policy_types::ClientIdentity;
 use crate::registry::Registry;
 
@@ -81,7 +81,7 @@ pub struct Command<D> {
     listener: ServiceListener<D>,
 }
 
-impl<D: DataStore + 'static> Command<D> {
+impl<D: BlobStore + 'static> Command<D> {
     pub fn new(
         server_config: &ServerConfig,
         identities: &HashMap<String, IdentityConfig>,
@@ -134,7 +134,7 @@ impl<D: DataStore + 'static> Command<D> {
     }
 }
 
-async fn serve_request<D: DataStore + 'static, S>(
+async fn serve_request<D: BlobStore + 'static, S>(
     stream: TokioIo<S>,
     context: Arc<ServerContext<D>>,
     identity: ClientIdentity,
@@ -183,7 +183,7 @@ async fn serve_request<D: DataStore + 'static, S>(
 }
 
 #[instrument(skip(context, request))]
-async fn handle_request<D: DataStore + 'static>(
+async fn handle_request<D: BlobStore + 'static>(
     context: Arc<ServerContext<D>>,
     request: Request<Incoming>,
     identity: ClientIdentity,
@@ -263,7 +263,7 @@ async fn handle_request<D: DataStore + 'static>(
 
 #[allow(clippy::too_many_lines)]
 #[instrument(skip(context, req))]
-async fn router<D: DataStore + 'static>(
+async fn router<D: BlobStore + 'static>(
     context: Arc<ServerContext<D>>,
     req: Request<Incoming>,
     mut id: ClientIdentity,

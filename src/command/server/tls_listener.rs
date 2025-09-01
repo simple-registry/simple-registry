@@ -1,7 +1,7 @@
 use crate::command;
 use crate::command::server::{serve_request, ServerContext};
 use crate::configuration::{Error, ServerConfig, ServerTlsConfig};
-use crate::registry::data_store::DataStore;
+use crate::registry::blob_store::BlobStore;
 use crate::registry::policy_types::ClientIdentity;
 use arc_swap::ArcSwap;
 use hyper_util::rt::TokioIo;
@@ -23,7 +23,7 @@ pub struct TlsListener<D> {
     context: ArcSwap<ServerContext<D>>,
 }
 
-impl<D: DataStore + 'static> TlsListener<D> {
+impl<D: BlobStore + 'static> TlsListener<D> {
     pub fn new(server_config: &ServerConfig, context: ServerContext<D>) -> Result<Self, Error> {
         let tls_config = server_config.tls.as_ref().ok_or_else(|| {
             Error::MissingExpectedTLSSection("TLS configuration is missing".to_string())

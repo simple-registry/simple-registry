@@ -3,9 +3,9 @@
 
 use crate::command::{argon, scrub, server};
 use crate::configuration::{
-    Configuration, BlobStorageConfig, Error, ObservabilityConfig, ServerTlsConfig,
+    BlobStorageConfig, Configuration, Error, ObservabilityConfig, ServerTlsConfig,
 };
-use crate::registry::data_store::{DataStore, FSBackend, S3Backend};
+use crate::registry::blob_store::{BlobStore, FSBackend, S3Backend};
 use crate::registry::Registry;
 use argh::FromArgs;
 use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -78,7 +78,7 @@ fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {
     Ok(())
 }
 
-fn set_config_watcher<D: DataStore + 'static>(
+fn set_config_watcher<D: BlobStore + 'static>(
     data_store: Arc<D>,
     config_path: &str,
     tls_config: Option<ServerTlsConfig>,
@@ -204,7 +204,7 @@ fn main() -> Result<(), command::Error> {
     })
 }
 
-async fn handle_command<D: DataStore + 'static>(
+async fn handle_command<D: BlobStore + 'static>(
     config: Configuration,
     arguments: GlobalArguments,
     data_store: Arc<D>,

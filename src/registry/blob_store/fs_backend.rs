@@ -1,5 +1,5 @@
 use crate::configuration::StorageFSConfig;
-use crate::registry::data_store::{DataStore, Error, LinkMetadata, Reader};
+use crate::registry::blob_store::{BlobStore, Error, LinkMetadata, Reader};
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::reader::HashingReader;
 use crate::registry::utils::sha256_ext::Sha256Ext;
@@ -199,7 +199,7 @@ impl FSBackend {
 }
 
 #[async_trait]
-impl DataStore for FSBackend {
+impl BlobStore for FSBackend {
     #[instrument(skip(self))]
     async fn list_namespaces(
         &self,
@@ -587,7 +587,7 @@ impl DataStore for FSBackend {
 mod tests {
     use super::*;
     use crate::configuration::StorageFSConfig;
-    use crate::registry::data_store::tests::{
+    use crate::registry::blob_store::tests::{
         test_datastore_blob_operations, test_datastore_link_operations, test_datastore_list_blobs,
         test_datastore_list_namespaces, test_datastore_list_referrers,
         test_datastore_list_revisions, test_datastore_list_tags, test_datastore_list_uploads,
@@ -744,7 +744,7 @@ mod tests {
         assert!(temp_dir.path().exists());
     }
 
-    // Generic DataStore trait tests
+    // Generic BlobStore trait tests
     #[tokio::test]
     async fn test_list_namespaces() {
         let (backend, _temp_dir) = create_test_backend();
