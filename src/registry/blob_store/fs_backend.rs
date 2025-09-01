@@ -1,13 +1,12 @@
 use crate::configuration::StorageFSConfig;
-use crate::registry::blob_store::{BlobStore, Error, LinkMetadata, Reader};
-use crate::registry::oci_types::{Descriptor, Digest, Manifest};
+use crate::registry::blob_store::{BlobStore, Error, Reader};
+use crate::registry::oci_types::Digest;
 use crate::registry::reader::HashingReader;
 use crate::registry::utils::sha256_ext::Sha256Ext;
-use crate::registry::utils::{BlobLink, BlobMetadata, DataPathBuilder};
+use crate::registry::utils::DataPathBuilder;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sha2::{Digest as Sha256Digest, Sha256};
-use std::collections::HashSet;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::io::{ErrorKind, SeekFrom};
@@ -25,7 +24,7 @@ pub struct FSBackend {
 
 impl Debug for FSBackend {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FileSystemStorageEngine").finish()
+        f.debug_struct("FSBackend").finish()
     }
 }
 
@@ -43,44 +42,6 @@ impl FSBackend {
             Err(e) if e.kind() == ErrorKind::NotFound => Err(not_found_error),
             Err(e) => Err(e.into()),
         }
-    }
-
-    #[instrument]
-    async fn collect_repositories(&self, base_path: &Path) -> Vec<String> {
-        let mut path_stack: Vec<PathBuf> = vec![base_path.to_path_buf()];
-        let mut repositories = Vec::new();
-
-        while let Some(current_path) = path_stack.pop() {
-            if let Ok(mut entries) = fs::read_dir(&current_path).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let path = entry.path();
-
-                    if path.is_dir() {
-                        debug!("checking path: {}", path.display());
-                        // check entries starting with a "_": it means it's a repository
-                        // add entries not starting with a "_" as paths to explore
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if name.starts_with('_') {
-                                if let Some(name) =
-                                    path.parent().and_then(|p| p.strip_prefix(base_path).ok())
-                                {
-                                    if let Some(name) = name.to_str() {
-                                        debug!("Found repository: {name}");
-                                        repositories.push(name.to_string());
-                                    }
-                                }
-                            } else {
-                                debug!("Exploring path: {}", path.display());
-                                path_stack.push(path);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        repositories.sort();
-        repositories
     }
 
     #[instrument]
@@ -201,72 +162,6 @@ impl FSBackend {
 #[async_trait]
 impl BlobStore for FSBackend {
     #[instrument(skip(self))]
-    async fn list_namespaces(
-        &self,
-        n: u16,
-        last: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
-        let base_path = self.tree.repository_dir();
-        let base_path = Path::new(&base_path);
-
-        let mut repositories = self.collect_repositories(base_path).await;
-        repositories.dedup();
-
-        Ok(Self::paginate(&repositories, n, last))
-    }
-
-    #[instrument(skip(self))]
-    async fn list_tags(
-        &self,
-        namespace: &str,
-        n: u16,
-        last: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
-        let path = self.tree.manifest_tags_dir(namespace);
-        debug!("Listing tags in path: {path}");
-        let mut tags = self.collect_directory_entries(&path).await?;
-        tags.sort();
-
-        Ok(Self::paginate(&tags, n, last))
-    }
-
-    #[instrument(skip(self))]
-    async fn list_referrers(
-        &self,
-        namespace: &str,
-        digest: &Digest,
-        artifact_type: Option<String>,
-    ) -> Result<Vec<Descriptor>, Error> {
-        let path = format!(
-            "{}/sha256",
-            self.tree.manifest_referrers_dir(namespace, digest)
-        );
-        let all_manifest = self.collect_directory_entries(&path).await?;
-        let mut referrers = Vec::new();
-
-        for manifest_digest in all_manifest {
-            let manifest_digest = Digest::Sha256(manifest_digest);
-            let blob_path = self.tree.blob_path(&manifest_digest);
-
-            let manifest = fs::read(&blob_path).await?;
-            let manifest_len = manifest.len();
-
-            let manifest = Manifest::from_slice(&manifest)?;
-            let Some(descriptor) = manifest.into_referrer_descriptor(artifact_type.as_ref()) else {
-                continue;
-            };
-
-            referrers.push(Descriptor {
-                digest: manifest_digest.to_string(),
-                size: manifest_len as u64,
-                ..descriptor
-            });
-        }
-
-        Ok(referrers)
-    }
-
-    #[instrument(skip(self))]
     async fn list_uploads(
         &self,
         namespace: &str,
@@ -313,26 +208,6 @@ impl BlobStore for FSBackend {
         }
 
         Ok(Self::paginate(&digests, n, continuation_token))
-    }
-
-    async fn list_revisions(
-        &self,
-        namespace: &str,
-        n: u16,
-        continuation_token: Option<String>,
-    ) -> Result<(Vec<Digest>, Option<String>), Error> {
-        let path = self
-            .tree
-            .manifest_revisions_link_root_dir(namespace, "sha256"); // HACK: hardcoded sha256
-
-        let all_revisions = self.collect_directory_entries(&path).await?;
-        let mut revisions = Vec::new();
-
-        for revision in all_revisions {
-            revisions.push(Digest::Sha256(revision));
-        }
-
-        Ok(Self::paginate(&revisions, n, continuation_token))
     }
 
     #[instrument(skip(self))]
@@ -469,67 +344,6 @@ impl BlobStore for FSBackend {
     }
 
     #[instrument(skip(self))]
-    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobMetadata, Error> {
-        let path = self.tree.blob_index_path(digest);
-        let content = fs::read_to_string(&path).await?;
-
-        let index = serde_json::from_str(&content)?;
-        Ok(index)
-    }
-
-    async fn update_blob_index<O>(
-        &self,
-        namespace: &str,
-        digest: &Digest,
-        operation: O,
-    ) -> Result<(), Error>
-    where
-        O: FnOnce(&mut HashSet<BlobLink>) + Send,
-    {
-        debug!("Ensuring container directory for digest: {digest}");
-        let path = self.tree.blob_container_dir(digest);
-        fs::create_dir_all(&path).await?;
-
-        debug!("Updating reference count for digest: {digest}");
-        let path = self.tree.blob_index_path(digest);
-
-        let mut reference_index = match fs::read_to_string(&path).await.map_err(Error::from) {
-            Ok(content) => serde_json::from_str::<BlobMetadata>(&content)?,
-            Err(Error::ReferenceNotFound) => BlobMetadata::default(),
-            Err(e) => Err(e)?,
-        };
-
-        debug!("Updating reference index");
-        if let Some(index) = reference_index.namespace.get_mut(namespace) {
-            operation(index);
-            if index.is_empty() {
-                reference_index.namespace.remove(namespace);
-            }
-        } else {
-            let mut index = HashSet::new();
-            operation(&mut index);
-            if !index.is_empty() {
-                reference_index
-                    .namespace
-                    .insert(namespace.to_string(), index);
-            }
-        }
-
-        if reference_index.namespace.is_empty() {
-            debug!("Deleting no longer referenced Blob: {digest}");
-            let path = self.tree.blob_container_dir(digest);
-            let _ = self.delete_empty_parent_dirs(&path).await;
-        } else {
-            debug!("Writing reference count to path: {path}");
-            let content = serde_json::to_string(&reference_index)?;
-            Self::write_file(&path, content.as_bytes()).await?;
-            debug!("Reference index for {digest} updated");
-        }
-
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
         let path = self.tree.blob_path(digest);
         self.get_file_size(&path, Error::BlobNotFound).await
@@ -554,33 +368,6 @@ impl BlobStore for FSBackend {
 
         Ok(Box::new(file))
     }
-
-    async fn read_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
-        let link_path = self.tree.get_link_path(link, namespace);
-
-        let link = fs::read(&link_path).await?;
-        Ok(LinkMetadata::from_bytes(link)?)
-    }
-
-    async fn write_link(
-        &self,
-        namespace: &str,
-        link: &BlobLink,
-        metadata: &LinkMetadata,
-    ) -> Result<(), Error> {
-        let link_path = self.tree.get_link_path(link, namespace);
-        let serialized_link_data = serde_json::to_vec(metadata)?;
-        Self::write_file(&link_path, &serialized_link_data).await
-    }
-
-    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
-        let path = self.tree.get_link_container_path(link, namespace);
-        debug!("Deleting link at path: {path}");
-
-        let _ = self.delete_empty_parent_dirs(&path).await;
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -588,9 +375,7 @@ mod tests {
     use super::*;
     use crate::configuration::StorageFSConfig;
     use crate::registry::blob_store::tests::{
-        test_datastore_blob_operations, test_datastore_link_operations, test_datastore_list_blobs,
-        test_datastore_list_namespaces, test_datastore_list_referrers,
-        test_datastore_list_revisions, test_datastore_list_tags, test_datastore_list_uploads,
+        test_datastore_blob_operations, test_datastore_list_blobs, test_datastore_list_uploads,
         test_datastore_upload_operations,
     };
     use tempfile::TempDir;
@@ -672,58 +457,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_collect_directory_entries() {
-        let (backend, _) = create_test_backend();
-        let namespace = "test-repo";
-
-        let digest1 = backend.create_blob(b"content1").await.unwrap();
-        let digest2 = backend.create_blob(b"content2").await.unwrap();
-
-        backend
-            .write_link(
-                namespace,
-                &BlobLink::Tag("file1.txt".to_string()),
-                &LinkMetadata {
-                    target: digest1,
-                    ..LinkMetadata::default()
-                },
-            )
-            .await
-            .unwrap();
-        backend
-            .write_link(
-                namespace,
-                &BlobLink::Tag("file2.txt".to_string()),
-                &LinkMetadata {
-                    target: digest2,
-                    ..LinkMetadata::default()
-                },
-            )
-            .await
-            .unwrap();
-
-        let tags_dir = backend.tree.manifest_tags_dir(namespace);
-
-        // Test the collect_directory_entries method
-        let entries = backend.collect_directory_entries(&tags_dir).await.unwrap();
-
-        assert_eq!(entries.len(), 2);
-        assert!(entries.contains(&"file1.txt".to_string()));
-        assert!(entries.contains(&"file2.txt".to_string()));
-
-        // Test empty directory case
-        let empty_namespace = "empty-repo";
-        let empty_tags_dir = backend.tree.manifest_tags_dir(empty_namespace);
-        let empty_entries = backend.collect_directory_entries(&empty_tags_dir).await;
-        assert_eq!(Ok(Vec::new()), empty_entries);
-
-        // Test non-existent directory case
-        let non_existent_dir = backend.tree.manifest_tags_dir("non-existent-repo");
-        let non_existent_entries = backend.collect_directory_entries(&non_existent_dir).await;
-        assert_eq!(Ok(Vec::new()), non_existent_entries);
-    }
-
-    #[tokio::test]
     async fn test_delete_empty_parent_dirs() {
         let (backend, temp_dir) = create_test_backend();
 
@@ -744,25 +477,6 @@ mod tests {
         assert!(temp_dir.path().exists());
     }
 
-    // Generic BlobStore trait tests
-    #[tokio::test]
-    async fn test_list_namespaces() {
-        let (backend, _temp_dir) = create_test_backend();
-        test_datastore_list_namespaces(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_list_tags() {
-        let (backend, _temp_dir) = create_test_backend();
-        test_datastore_list_tags(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_list_referrers() {
-        let (backend, _temp_dir) = create_test_backend();
-        test_datastore_list_referrers(&backend).await;
-    }
-
     #[tokio::test]
     async fn test_list_uploads() {
         let (backend, _temp_dir) = create_test_backend();
@@ -776,12 +490,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_revisions() {
-        let (backend, _temp_dir) = create_test_backend();
-        test_datastore_list_revisions(&backend).await;
-    }
-
-    #[tokio::test]
     async fn test_blob_operations() {
         let (backend, _temp_dir) = create_test_backend();
         test_datastore_blob_operations(&backend).await;
@@ -791,11 +499,5 @@ mod tests {
     async fn test_upload_operations() {
         let (backend, _temp_dir) = create_test_backend();
         test_datastore_upload_operations(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_link_operations() {
-        let (backend, _temp_dir) = create_test_backend();
-        test_datastore_link_operations(&backend).await;
     }
 }

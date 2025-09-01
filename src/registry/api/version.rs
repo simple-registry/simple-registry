@@ -1,6 +1,7 @@
 use crate::registry::api::body::Body;
 use crate::registry::api::hyper::{DOCKER_DISTRIBUTION_API_VERSION, X_POWERED_BY};
 use crate::registry::blob_store::BlobStore;
+use crate::registry::metadata_store::MetadataStore;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
 use hyper::{Response, StatusCode};
@@ -13,7 +14,7 @@ pub trait RegistryAPIVersionHandlerExt {
     ) -> Result<Response<Body>, Error>;
 }
 
-impl<D: BlobStore> RegistryAPIVersionHandlerExt for Registry<D> {
+impl<B: BlobStore, M: MetadataStore> RegistryAPIVersionHandlerExt for Registry<B, M> {
     #[instrument(skip(self))]
     async fn handle_get_api_version(
         &self,
@@ -36,10 +37,16 @@ mod tests {
     use super::*;
     use crate::registry::api::hyper::response_ext::ResponseExt;
     use crate::registry::blob_store::BlobStore;
+    use crate::registry::metadata_store::MetadataStore;
     use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
     use crate::registry::Registry;
 
-    async fn test_handle_get_api_version_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_get_api_version_impl<
+        B: BlobStore + 'static,
+        M: MetadataStore + 'static,
+    >(
+        registry: &Registry<B, M>,
+    ) {
         let response = registry
             .handle_get_api_version(ClientIdentity::default())
             .await

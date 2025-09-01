@@ -2,6 +2,7 @@ use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::{IntoAsyncRead, RequestExt};
 use crate::registry::api::hyper::{DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID};
 use crate::registry::blob_store::BlobStore;
+use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, StartUploadResponse};
@@ -63,7 +64,7 @@ pub trait RegistryAPIUploadHandlersExt {
     ) -> Result<Response<Body>, Error>;
 }
 
-impl<D: BlobStore> RegistryAPIUploadHandlersExt for Registry<D> {
+impl<B: BlobStore, M: MetadataStore> RegistryAPIUploadHandlersExt for Registry<B, M> {
     #[instrument(skip(self, request))]
     async fn handle_start_upload<T>(
         &self,
@@ -261,7 +262,9 @@ mod tests {
     use hyper::Uri;
     use uuid::Uuid;
 
-    async fn test_handle_start_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_start_upload_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
 
         // Test start upload without digest
@@ -294,7 +297,7 @@ mod tests {
 
         // Test start upload with existing blob
         let content = b"test content";
-        let digest = registry.store.create_blob(content).await.unwrap();
+        let digest = registry.blob_store.create_blob(content).await.unwrap();
 
         let uri = Uri::builder()
             .path_and_query(format!("/v2/{namespace}/blobs/uploads/?digest={digest}"))
@@ -339,13 +342,15 @@ mod tests {
         test_handle_start_upload_impl(&registry).await;
     }
 
-    async fn test_handle_get_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_get_upload_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let uuid = Uuid::new_v4();
 
         // Create initial upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -384,13 +389,15 @@ mod tests {
         test_handle_get_upload_impl(&registry).await;
     }
 
-    async fn test_handle_patch_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_patch_upload_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let uuid = Uuid::new_v4();
 
         // Create initial upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -442,14 +449,16 @@ mod tests {
         test_handle_patch_upload_impl(&registry).await;
     }
 
-    async fn test_handle_put_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_put_upload_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let uuid = Uuid::new_v4();
         let content = b"test content";
 
         // Create initial upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -463,7 +472,7 @@ mod tests {
 
         // Get the upload digest
         let (digest, _, _) = registry
-            .store
+            .blob_store
             .read_upload_summary(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -502,7 +511,7 @@ mod tests {
         );
 
         // Verify blob exists
-        let stored_content = registry.store.read_blob(&digest).await.unwrap();
+        let stored_content = registry.blob_store.read_blob(&digest).await.unwrap();
         assert_eq!(stored_content, content);
     }
 
@@ -518,13 +527,15 @@ mod tests {
         test_handle_put_upload_impl(&registry).await;
     }
 
-    async fn test_handle_delete_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_delete_upload_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let uuid = Uuid::new_v4();
 
         // Create initial upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &uuid.to_string())
             .await
             .unwrap();
@@ -543,7 +554,7 @@ mod tests {
 
         // Verify upload is deleted
         assert!(registry
-            .store
+            .blob_store
             .read_upload_summary(namespace, &uuid.to_string())
             .await
             .is_err());

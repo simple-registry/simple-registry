@@ -1,4 +1,5 @@
 use crate::registry::blob_store::BlobStore;
+use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::{Error, Registry};
 use tokio::io::AsyncRead;
@@ -10,7 +11,11 @@ pub enum StartUploadResponse {
     Session(String, String),
 }
 
-impl<D: BlobStore> Registry<D> {
+impl<B, M> Registry<B, M>
+where
+    B: BlobStore,
+    M: MetadataStore,
+{
     #[instrument]
     pub async fn start_upload(
         &self,
@@ -20,13 +25,15 @@ impl<D: BlobStore> Registry<D> {
         self.validate_namespace(namespace)?;
 
         if let Some(digest) = digest {
-            if self.store.get_blob_size(&digest).await.is_ok() {
+            if self.blob_store.get_blob_size(&digest).await.is_ok() {
                 return Ok(StartUploadResponse::ExistingBlob(digest));
             }
         }
 
         let session_uuid = Uuid::new_v4().to_string();
-        self.store.create_upload(namespace, &session_uuid).await?;
+        self.blob_store
+            .create_upload(namespace, &session_uuid)
+            .await?;
 
         let location = format!("/v2/{namespace}/blobs/uploads/{session_uuid}");
         Ok(StartUploadResponse::Session(location, session_uuid))
@@ -48,7 +55,7 @@ impl<D: BlobStore> Registry<D> {
         let session_id = session_id.to_string();
         if let Some(start_offset) = start_offset {
             let (_, size, _) = self
-                .store
+                .blob_store
                 .read_upload_summary(namespace, &session_id)
                 .await?;
 
@@ -57,12 +64,12 @@ impl<D: BlobStore> Registry<D> {
             }
         }
 
-        self.store
+        self.blob_store
             .write_upload(namespace, &session_id, stream, true)
             .await?;
 
         let (_, size, _) = self
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id)
             .await
             .map_err(|error| {
@@ -93,17 +100,17 @@ impl<D: BlobStore> Registry<D> {
         let session_id = session_id.to_string();
 
         let append = self
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id)
             .await
             .is_ok();
 
-        self.store
+        self.blob_store
             .write_upload(namespace, &session_id, stream, append)
             .await?;
 
         let (upload_digest, _, _) = self
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id)
             .await?;
 
@@ -112,10 +119,12 @@ impl<D: BlobStore> Registry<D> {
             return Err(Error::DigestInvalid);
         }
 
-        self.store
+        self.blob_store
             .complete_upload(namespace, &session_id, Some(digest))
             .await?;
-        self.store.delete_upload(namespace, &session_id).await?;
+        self.blob_store
+            .delete_upload(namespace, &session_id)
+            .await?;
 
         Ok(())
     }
@@ -125,7 +134,7 @@ impl<D: BlobStore> Registry<D> {
         self.validate_namespace(namespace)?;
 
         let uuid = session_id.to_string();
-        self.store.delete_upload(namespace, &uuid).await?;
+        self.blob_store.delete_upload(namespace, &uuid).await?;
 
         Ok(())
     }
@@ -139,7 +148,10 @@ impl<D: BlobStore> Registry<D> {
         self.validate_namespace(namespace)?;
 
         let uuid = session_id.to_string();
-        let (_, size, _) = self.store.read_upload_summary(namespace, &uuid).await?;
+        let (_, size, _) = self
+            .blob_store
+            .read_upload_summary(namespace, &uuid)
+            .await?;
 
         if size < 1 {
             return Ok(0);
@@ -155,7 +167,9 @@ mod tests {
     use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
     use std::io::Cursor;
 
-    async fn test_start_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_start_upload_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test upload content";
 
@@ -170,7 +184,7 @@ mod tests {
         }
 
         // Test starting upload with existing blob
-        let digest = registry.store.create_blob(content).await.unwrap();
+        let digest = registry.blob_store.create_blob(content).await.unwrap();
         let response = registry
             .start_upload(namespace, Some(digest.clone()))
             .await
@@ -195,14 +209,16 @@ mod tests {
         test_start_upload_impl(&registry).await;
     }
 
-    async fn test_patch_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_patch_upload_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test patch content";
         let session_id = Uuid::new_v4();
 
         // Create initial upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -229,7 +245,7 @@ mod tests {
 
         // Verify content
         let (_, size, _) = registry
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -248,14 +264,16 @@ mod tests {
         test_patch_upload_impl(&registry).await;
     }
 
-    async fn test_complete_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_complete_upload_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test complete content";
         let session_id = Uuid::new_v4();
 
         // Create initial upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -269,7 +287,7 @@ mod tests {
 
         // Get the upload digest
         let (upload_digest, _, _) = registry
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -282,7 +300,7 @@ mod tests {
             .unwrap();
 
         // Verify blob exists
-        let stored_content = registry.store.read_blob(&upload_digest).await.unwrap();
+        let stored_content = registry.blob_store.read_blob(&upload_digest).await.unwrap();
         assert_eq!(stored_content, content);
     }
 
@@ -298,20 +316,22 @@ mod tests {
         test_complete_upload_impl(&registry).await;
     }
 
-    async fn test_delete_upload_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_delete_upload_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let session_id = Uuid::new_v4();
 
         // Create upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &session_id.to_string())
             .await
             .unwrap();
 
         // Verify upload exists
         assert!(registry
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id.to_string())
             .await
             .is_ok());
@@ -321,7 +341,7 @@ mod tests {
 
         // Verify upload is deleted
         assert!(registry
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id.to_string())
             .await
             .is_err());
@@ -339,14 +359,16 @@ mod tests {
         test_delete_upload_impl(&registry).await;
     }
 
-    async fn test_get_upload_range_max_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_get_upload_range_max_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test range content";
         let session_id = Uuid::new_v4();
 
         // Create upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &session_id.to_string())
             .await
             .unwrap();

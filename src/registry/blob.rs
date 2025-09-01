@@ -2,6 +2,7 @@ use crate::registry::api::hyper::response_ext::IntoAsyncRead;
 use crate::registry::api::hyper::response_ext::ResponseExt;
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::blob_store::{BlobStore, Reader};
+use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::utils::{task_queue, BlobLink};
 use crate::registry::{blob_store, Error, Registry, Repository};
@@ -27,7 +28,11 @@ pub struct HeadBlobResponse {
     pub size: u64,
 }
 
-impl<D: BlobStore + 'static> Registry<D> {
+impl<B, M> Registry<B, M>
+where
+    B: BlobStore + 'static,
+    M: MetadataStore,
+{
     #[instrument(skip(repository))]
     pub async fn head_blob(
         &self,
@@ -36,7 +41,7 @@ impl<D: BlobStore + 'static> Registry<D> {
         namespace: &str,
         digest: Digest,
     ) -> Result<HeadBlobResponse, Error> {
-        let local_blob = self.store.get_blob_size(&digest).await;
+        let local_blob = self.blob_store.get_blob_size(&digest).await;
 
         if let Ok(size) = local_blob {
             return Ok(HeadBlobResponse { digest, size });
@@ -130,7 +135,7 @@ impl<D: BlobStore + 'static> Registry<D> {
         let client_stream: Box<dyn Reader> = Box::new(client_stream);
 
         // Caching stream
-        let store = self.store.clone();
+        let store = self.blob_store.clone();
         let cache_reader = repository
             .query_upstream_blob(
                 &self.auth_token_cache,
@@ -166,7 +171,7 @@ impl<D: BlobStore + 'static> Registry<D> {
         digest: &Digest,
         range: Option<(u64, Option<u64>)>,
     ) -> Result<GetBlobResponse<Box<dyn Reader>>, Error> {
-        let total_length = self.store.get_blob_size(digest).await?;
+        let total_length = self.blob_store.get_blob_size(digest).await?;
 
         let start = if let Some((start, _)) = range {
             if start > total_length {
@@ -178,7 +183,7 @@ impl<D: BlobStore + 'static> Registry<D> {
             None
         };
 
-        let reader = match self.store.build_blob_reader(digest, start).await {
+        let reader = match self.blob_store.build_blob_reader(digest, start).await {
             Ok(reader) => reader,
             Err(blob_store::Error::BlobNotFound) => return Ok(GetBlobResponse::Empty),
             Err(err) => Err(err)?,
@@ -226,7 +231,9 @@ mod tests {
     use std::io::Cursor;
     use tokio::io::AsyncReadExt;
 
-    async fn test_head_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_head_blob_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -252,7 +259,9 @@ mod tests {
         test_head_blob_impl(&registry).await;
     }
 
-    async fn test_get_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_get_blob_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -285,7 +294,9 @@ mod tests {
         test_get_blob_impl(&registry).await;
     }
 
-    async fn test_get_blob_with_range_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_get_blob_with_range_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -322,7 +333,9 @@ mod tests {
         test_get_blob_with_range_impl(&registry).await;
     }
 
-    async fn test_delete_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_delete_blob_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -346,7 +359,11 @@ mod tests {
         assert!(registry.read_link(namespace, &config_link).await.is_ok());
 
         // Verify blob index is updated
-        let blob_index = registry.store.read_blob_index(&digest).await.unwrap();
+        let blob_index = registry
+            .metadata_store
+            .read_blob_index(&digest)
+            .await
+            .unwrap();
         assert!(blob_index.namespace.contains_key(namespace));
         let namespace_links = blob_index.namespace.get(namespace).unwrap();
         assert!(namespace_links.contains(&layer_link));
@@ -375,7 +392,9 @@ mod tests {
         test_delete_blob_impl(&registry).await;
     }
 
-    async fn test_copy_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_copy_blob_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -383,10 +402,10 @@ mod tests {
 
         // Create a test stream
         let stream = Cursor::new(content.to_vec());
-        let storage_engine = registry.store.clone();
+        let storage_engine = registry.blob_store.clone();
 
         // Test copy_blob
-        Registry::<D>::copy_blob(
+        Registry::<B, M>::copy_blob(
             storage_engine,
             stream,
             namespace.to_string(),
@@ -396,7 +415,7 @@ mod tests {
         .unwrap();
 
         // Verify the blob was copied correctly
-        let stored_content = registry.store.read_blob(&digest).await.unwrap();
+        let stored_content = registry.blob_store.read_blob(&digest).await.unwrap();
         assert_eq!(stored_content, content);
     }
 

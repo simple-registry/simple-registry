@@ -1,15 +1,14 @@
-use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::configuration::StorageS3Config;
-use crate::registry::blob_store::{BlobStore, Error, LinkMetadata, Reader};
-use crate::registry::oci_types::{Descriptor, Digest, Manifest};
+use crate::registry::blob_store::{BlobStore, Error, Reader};
+use crate::registry::oci_types::Digest;
 use crate::registry::reader::{ChunkedReader, HashingReader};
 use crate::registry::utils::sha256_ext::Sha256Ext;
-use crate::registry::utils::{BlobLink, BlobMetadata, DataPathBuilder};
+use crate::registry::utils::DataPathBuilder;
 use async_trait::async_trait;
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
@@ -575,219 +574,6 @@ impl S3Backend {
 #[async_trait]
 impl BlobStore for S3Backend {
     #[instrument(skip(self))]
-    async fn list_namespaces(
-        &self,
-        n: u16,
-        last: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
-        debug!("Fetching {n} namespace(s) with continuation token: {last:?}");
-
-        // List all objects under the repository directory
-        let base_prefix = format!("{}/", self.tree.repository_dir());
-        let base_prefix_len = base_prefix.len();
-
-        let mut namespaces = Vec::new();
-        let mut continuation_token = None;
-
-        // List all objects recursively to find all namespaces
-        loop {
-            let mut request = self
-                .s3_client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(&base_prefix)
-                .max_keys(i32::from(n));
-
-            if let Some(token) = continuation_token {
-                request = request.continuation_token(token);
-            }
-
-            let res = request.send().await?;
-
-            for object in res.contents.unwrap_or_default() {
-                let Some(key) = object.key else {
-                    continue;
-                };
-
-                // We need to extract the namespace from the path
-                // In S3, the path will be something like:
-                // v2/repositories/namespace/_manifests/... or
-                // v2/repositories/namespace/nested/_manifests/...
-                let rel_path = &key[base_prefix_len..];
-
-                // Look for special directories that indicate a namespace
-                for marker in &["/_manifests/", "/_layers/", "/_uploads/", "/_config/"] {
-                    if let Some(idx) = rel_path.find(marker) {
-                        let namespace = rel_path[..idx].to_string();
-                        namespaces.push(namespace);
-                        break; // Found a namespace, no need to check other markers
-                    }
-                }
-            }
-
-            if res.is_truncated == Some(true) {
-                continuation_token = res.next_continuation_token;
-            } else {
-                break;
-            }
-        }
-
-        let start_idx = if let Some(last_item) = &last {
-            namespaces
-                .iter()
-                .position(|ns| ns > last_item)
-                .unwrap_or(namespaces.len())
-        } else {
-            0
-        };
-
-        let end_idx = std::cmp::min(start_idx + usize::from(n), namespaces.len());
-        let result_namespaces = namespaces[start_idx..end_idx].to_vec();
-
-        let next_token = if end_idx < namespaces.len() {
-            result_namespaces.last().cloned()
-        } else {
-            None
-        };
-
-        Ok((result_namespaces, next_token))
-    }
-
-    #[instrument(skip(self))]
-    async fn list_tags(
-        &self,
-        namespace: &str,
-        n: u16,
-        last: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
-        debug!("Listing {n} tag(s) for namespace '{namespace}' starting with continuation_token '{last:?}'");
-        let base_prefix = format!("{}/", self.tree.manifest_tags_dir(namespace));
-        let base_prefix_len = base_prefix.len();
-
-        let mut all_tags = Vec::new();
-        let mut continuation_token = None;
-
-        loop {
-            let mut request = self
-                .s3_client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(&base_prefix)
-                .delimiter("/")
-                .max_keys(i32::from(n));
-
-            if let Some(token) = continuation_token {
-                request = request.continuation_token(token);
-            }
-
-            let res = request.send().await?;
-
-            for common_prefixes in res.common_prefixes.unwrap_or_default() {
-                if let Some(key) = common_prefixes.prefix {
-                    let mut tag = key[base_prefix_len..].to_string();
-                    if tag.ends_with('/') {
-                        tag = tag.trim_end_matches('/').to_string();
-                    }
-                    all_tags.push(tag);
-                }
-            }
-
-            if res.is_truncated == Some(true) {
-                continuation_token = res.next_continuation_token;
-            } else {
-                break;
-            }
-        }
-
-        let start_idx = if let Some(last_tag) = &last {
-            all_tags
-                .iter()
-                .position(|tag| tag > last_tag)
-                .unwrap_or(all_tags.len())
-        } else {
-            0
-        };
-
-        let end_idx = std::cmp::min(start_idx + usize::from(n), all_tags.len());
-        let result_tags = all_tags[start_idx..end_idx].to_vec();
-
-        let next_token = if end_idx < all_tags.len() {
-            result_tags.last().cloned()
-        } else {
-            None
-        };
-
-        Ok((result_tags, next_token))
-    }
-
-    #[instrument(skip(self))]
-    async fn list_referrers(
-        &self,
-        namespace: &str,
-        digest: &Digest,
-        artifact_type: Option<String>,
-    ) -> Result<Vec<Descriptor>, Error> {
-        let base_prefix = format!(
-            "{}/sha256/",
-            self.tree.manifest_referrers_dir(namespace, digest)
-        );
-        let base_prefix_len = base_prefix.len();
-
-        let mut referrers = Vec::new();
-
-        let mut continuation_token = None;
-
-        loop {
-            let res = self
-                .s3_client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(&base_prefix)
-                .max_keys(100)
-                .set_continuation_token(continuation_token)
-                .send()
-                .await?;
-
-            for object in res.contents.unwrap_or_default() {
-                let Some(key) = object.key else {
-                    continue;
-                };
-
-                let mut manifest_digest = key[base_prefix_len..].to_string();
-                if manifest_digest.ends_with("/link") {
-                    manifest_digest = manifest_digest.trim_end_matches("/link").to_string();
-                }
-
-                let manifest_digest = Digest::Sha256(manifest_digest);
-                let blob_path = self.tree.blob_path(&manifest_digest);
-
-                let manifest = self.get_object_body_as_vec(&blob_path, None).await?;
-                let manifest_len = manifest.len();
-
-                let manifest = Manifest::from_slice(&manifest)?;
-                let Some(descriptor) = manifest.into_referrer_descriptor(artifact_type.as_ref())
-                else {
-                    continue;
-                };
-
-                referrers.push(Descriptor {
-                    digest: manifest_digest.to_string(),
-                    size: manifest_len as u64,
-                    ..descriptor
-                });
-            }
-
-            if res.is_truncated == Some(true) {
-                continuation_token = res.next_continuation_token;
-            } else {
-                break;
-            }
-        }
-
-        Ok(referrers)
-    }
-
-    #[instrument(skip(self))]
     async fn list_uploads(
         &self,
         namespace: &str,
@@ -899,52 +685,6 @@ impl BlobStore for S3Backend {
         };
 
         Ok((result_blobs, next_token))
-    }
-
-    async fn list_revisions(
-        &self,
-        namespace: &str,
-        n: u16,
-        continuation_token: Option<String>,
-    ) -> Result<(Vec<Digest>, Option<String>), Error> {
-        debug!("Fetching {n} revision(s) for namespace '{namespace}' with continuation token: {continuation_token:?}");
-        let base_prefix = format!(
-            "{}/",
-            self.tree
-                .manifest_revisions_link_root_dir(namespace, "sha256")
-        );
-        let base_prefix_len = base_prefix.len();
-
-        let res = self
-            .s3_client
-            .list_objects_v2()
-            .bucket(&self.bucket)
-            .prefix(&base_prefix)
-            .delimiter("/")
-            .max_keys(i32::from(n))
-            .set_continuation_token(continuation_token)
-            .send()
-            .await?;
-
-        let mut revisions = Vec::new();
-        for common_prefixes in res.common_prefixes.unwrap_or_default() {
-            let Some(key) = common_prefixes.prefix else {
-                continue;
-            };
-
-            let mut key = key[base_prefix_len..].to_string();
-            if key.ends_with('/') {
-                key = key.trim_end_matches('/').to_string();
-            }
-            revisions.push(Digest::Sha256(key));
-        }
-
-        let next_last = match res.is_truncated {
-            Some(true) => res.next_continuation_token,
-            _ => None,
-        };
-
-        Ok((revisions, next_last))
     }
 
     #[instrument(skip(self))]
@@ -1167,56 +907,6 @@ impl BlobStore for S3Backend {
     }
 
     #[instrument(skip(self))]
-    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobMetadata, Error> {
-        let path = self.tree.blob_index_path(digest);
-
-        let data = self.get_object_body_as_vec(&path, None).await?;
-        let index = serde_json::from_slice(&data)?;
-
-        Ok(index)
-    }
-
-    #[instrument(skip(self, operation))]
-    async fn update_blob_index<O>(
-        &self,
-        namespace: &str,
-        digest: &Digest,
-        operation: O,
-    ) -> Result<(), Error>
-    where
-        O: FnOnce(&mut HashSet<BlobLink>) + Send,
-    {
-        let path = self.tree.blob_index_path(digest);
-
-        let res = self.get_object_body_as_vec(&path, None).await;
-
-        let mut reference_index = match res {
-            Ok(data) => serde_json::from_slice::<BlobMetadata>(&data)?,
-            Err(_) => BlobMetadata::default(),
-        };
-
-        let index = reference_index
-            .namespace
-            .entry(namespace.to_string())
-            .or_insert_with(HashSet::new);
-
-        operation(index);
-        if index.is_empty() {
-            reference_index.namespace.remove(namespace);
-        }
-
-        if reference_index.namespace.is_empty() {
-            let path = self.tree.blob_container_dir(digest);
-            self.delete_object_with_prefix(&path).await?;
-        } else {
-            let content = Bytes::from(serde_json::to_vec(&reference_index)?);
-            self.put_object(&path, content).await?;
-        }
-
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
         let path = self.tree.blob_path(digest);
 
@@ -1234,29 +924,6 @@ impl BlobStore for S3Backend {
         let res = self.get_object(&path, start_offset).await?;
         Ok(Box::new(res.body.into_async_read()))
     }
-
-    async fn read_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
-        let link_path = self.tree.get_link_path(link, namespace);
-        self.get_object_body_as_vec(&link_path, None)
-            .await
-            .and_then(LinkMetadata::from_bytes)
-    }
-
-    async fn write_link(
-        &self,
-        namespace: &str,
-        link: &BlobLink,
-        metadata: &LinkMetadata,
-    ) -> Result<(), Error> {
-        let link_path = self.tree.get_link_path(link, namespace);
-        let serialized_link_data = Bytes::from(serde_json::to_vec(metadata)?);
-        self.put_object(&link_path, serialized_link_data).await
-    }
-
-    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
-        let link_path = self.tree.get_link_path(link, namespace);
-        self.delete_object(&link_path).await
-    }
 }
 
 #[cfg(test)]
@@ -1264,9 +931,7 @@ mod tests {
     use super::*;
     use crate::configuration::StorageS3Config;
     use crate::registry::blob_store::tests::{
-        test_datastore_blob_operations, test_datastore_link_operations, test_datastore_list_blobs,
-        test_datastore_list_namespaces, test_datastore_list_referrers,
-        test_datastore_list_revisions, test_datastore_list_tags, test_datastore_list_uploads,
+        test_datastore_blob_operations, test_datastore_list_blobs, test_datastore_list_uploads,
         test_datastore_upload_operations,
     };
     use bytesize::ByteSize;
@@ -1300,28 +965,6 @@ mod tests {
         }
     }
 
-    // Generic BlobStore trait tests
-    #[tokio::test]
-    async fn test_list_namespaces() {
-        let backend = create_test_backend();
-        test_datastore_list_namespaces(&backend).await;
-        cleanup_test_prefix(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_list_tags() {
-        let backend = create_test_backend();
-        test_datastore_list_tags(&backend).await;
-        cleanup_test_prefix(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_list_referrers() {
-        let backend = create_test_backend();
-        test_datastore_list_referrers(&backend).await;
-        cleanup_test_prefix(&backend).await;
-    }
-
     #[tokio::test]
     async fn test_list_uploads() {
         let backend = create_test_backend();
@@ -1337,13 +980,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_revisions() {
-        let backend = create_test_backend();
-        test_datastore_list_revisions(&backend).await;
-        cleanup_test_prefix(&backend).await;
-    }
-
-    #[tokio::test]
     async fn test_blob_operations() {
         let backend = create_test_backend();
         test_datastore_blob_operations(&backend).await;
@@ -1354,13 +990,6 @@ mod tests {
     async fn test_upload_operations() {
         let backend = create_test_backend();
         test_datastore_upload_operations(&backend).await;
-        cleanup_test_prefix(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_link_operations() {
-        let backend = create_test_backend();
-        test_datastore_link_operations(&backend).await;
         cleanup_test_prefix(&backend).await;
     }
 }

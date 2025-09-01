@@ -1,9 +1,14 @@
 use crate::registry::blob_store::BlobStore;
+use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::{Descriptor, Digest};
 use crate::registry::{blob_store, Error, Registry};
 use tracing::instrument;
 
-impl<D: BlobStore> Registry<D> {
+impl<B, M> Registry<B, M>
+where
+    B: BlobStore,
+    M: MetadataStore,
+{
     #[instrument]
     pub async fn get_referrers(
         &self,
@@ -14,7 +19,7 @@ impl<D: BlobStore> Registry<D> {
         self.validate_namespace(namespace)?;
 
         match self
-            .store
+            .metadata_store
             .list_referrers(namespace, &digest, artifact_type)
             .await
         {
@@ -32,7 +37,7 @@ impl<D: BlobStore> Registry<D> {
     ) -> Result<(Vec<String>, Option<String>), Error> {
         let n = n.unwrap_or(100);
 
-        let (namespaces, next_last) = self.store.list_namespaces(n, last).await?;
+        let (namespaces, next_last) = self.metadata_store.list_namespaces(n, last).await?;
         let link = next_last.map(|next_last| format!("/v2/_catalog?n={n}&last={next_last}"));
 
         let namespaces = namespaces
@@ -53,7 +58,7 @@ impl<D: BlobStore> Registry<D> {
 
         let n = n.unwrap_or(100);
 
-        let (tags, next_last) = self.store.list_tags(namespace, n, last).await?;
+        let (tags, next_last) = self.metadata_store.list_tags(namespace, n, last).await?;
         let link =
             next_last.map(|next_last| format!("/v2/{namespace}/tags/list?n={n}&last={next_last}"));
 
@@ -80,7 +85,7 @@ mod tests {
         test_get_referrers(&registry).await;
     }
 
-    async fn test_get_referrers<D: BlobStore>(registry: &Registry<D>) {
+    async fn test_get_referrers<B: BlobStore, M: MetadataStore>(registry: &Registry<B, M>) {
         let namespace = "test-repo";
         let digest = Digest::from_str(
             "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
@@ -89,7 +94,7 @@ mod tests {
 
         // Create a link to make the namespace valid
         let test_content = b"test content";
-        let test_digest = registry.store.create_blob(test_content).await.unwrap();
+        let test_digest = registry.blob_store.create_blob(test_content).await.unwrap();
         let tag_link = BlobLink::Tag("latest".to_string());
         registry
             .create_link(namespace, &tag_link, &test_digest)
@@ -123,7 +128,7 @@ mod tests {
         test_list_catalog(&registry).await;
     }
 
-    async fn test_list_catalog<D: BlobStore>(registry: &Registry<D>) {
+    async fn test_list_catalog<B: BlobStore, M: MetadataStore>(registry: &Registry<B, M>) {
         // Test default pagination (n=100)
         let (namespaces, token) = registry.list_catalog(None, None).await.unwrap();
         assert!(namespaces.is_empty());
@@ -155,12 +160,12 @@ mod tests {
         test_list_tags(&registry).await;
     }
 
-    async fn test_list_tags<D: BlobStore>(registry: &Registry<D>) {
+    async fn test_list_tags<B: BlobStore, M: MetadataStore>(registry: &Registry<B, M>) {
         let namespace = "test-repo";
 
         // Create some tags first
         let test_content = b"test content";
-        let test_digest = registry.store.create_blob(test_content).await.unwrap();
+        let test_digest = registry.blob_store.create_blob(test_content).await.unwrap();
         let tags = ["latest", "v1.0", "v2.0"];
         for tag in tags {
             let tag_link = BlobLink::Tag(tag.to_string());

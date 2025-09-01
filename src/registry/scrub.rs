@@ -1,4 +1,5 @@
 use crate::registry::blob_store::{BlobStore, LinkMetadata};
+use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::policy_types::ManifestImage;
 use crate::registry::utils::BlobLink;
@@ -77,14 +78,17 @@ pub fn manifest_should_be_purged(
     Ok(!rules.is_empty())
 }
 
-impl<D: BlobStore> Registry<D> {
+impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
     pub async fn enforce_retention(&self, namespace: &str) -> Result<(), Error> {
         info!("'{namespace}': Enforcing retention policy");
 
         let mut marker = None;
         let mut tag_names = Vec::new();
         loop {
-            let (tags, next_marker) = self.store.list_tags(namespace, 1000, marker).await?;
+            let (tags, next_marker) = self
+                .metadata_store
+                .list_tags(namespace, 1000, marker)
+                .await?;
             tag_names.extend(tags);
             if next_marker.is_none() {
                 break;
@@ -169,7 +173,8 @@ impl<D: BlobStore> Registry<D> {
 
         let mut marker = None;
         loop {
-            let (uploads, next_marker) = self.store.list_uploads(namespace, 100, marker).await?;
+            let (uploads, next_marker) =
+                self.blob_store.list_uploads(namespace, 100, marker).await?;
 
             for uuid in uploads {
                 if let Err(error) = self.check_upload(namespace, &uuid).await {
@@ -187,7 +192,7 @@ impl<D: BlobStore> Registry<D> {
     }
 
     async fn check_upload(&self, namespace: &str, uuid: &str) -> Result<(), Error> {
-        let (_, _, start_date) = self.store.read_upload_summary(namespace, uuid).await?;
+        let (_, _, start_date) = self.blob_store.read_upload_summary(namespace, uuid).await?;
 
         let now = Utc::now();
         let duration = now.signed_duration_since(start_date);
@@ -198,7 +203,7 @@ impl<D: BlobStore> Registry<D> {
 
         warn!("'{namespace}': upload '{uuid}' is obsolete");
         if !self.scrub_dry_run {
-            if let Err(error) = self.store.delete_upload(namespace, uuid).await {
+            if let Err(error) = self.blob_store.delete_upload(namespace, uuid).await {
                 error!("Failed to delete upload '{uuid}': {error}");
             }
         }
@@ -211,7 +216,10 @@ impl<D: BlobStore> Registry<D> {
 
         let mut marker = None;
         loop {
-            let (tags, next_marker) = self.store.list_tags(namespace, 100, marker).await?;
+            let (tags, next_marker) = self
+                .metadata_store
+                .list_tags(namespace, 100, marker)
+                .await?;
 
             for tag in tags {
                 if let Err(error) = self.check_tag(namespace, &tag).await {
@@ -251,11 +259,13 @@ impl<D: BlobStore> Registry<D> {
         let mut marker = None;
 
         loop {
-            let (revisions, next_marker) =
-                self.store.list_revisions(namespace, 100, marker).await?;
+            let (revisions, next_marker) = self
+                .metadata_store
+                .list_revisions(namespace, 100, marker)
+                .await?;
 
             for revision in revisions {
-                let content = self.store.read_blob(&revision).await?;
+                let content = self.blob_store.read_blob(&revision).await?;
                 let manifest = parse_manifest_digests(&content, None)?;
 
                 self.check_layers(namespace, &revision, &manifest.layers)
@@ -361,7 +371,7 @@ impl<D: BlobStore> Registry<D> {
 
         let mut marker = None;
         loop {
-            let Ok((blobs, next_marker)) = self.store.list_blobs(100, marker).await else {
+            let Ok((blobs, next_marker)) = self.blob_store.list_blobs(100, marker).await else {
                 error!("Failed to list blobs");
                 return Err(Error::Internal(
                     "Failed to list blobs while checking for orphan blobs".to_string(),
@@ -382,7 +392,7 @@ impl<D: BlobStore> Registry<D> {
     }
 
     async fn check_blob(&self, blob: &Digest) -> Result<(), Error> {
-        let blob_index = self.store.read_blob_index(blob).await?;
+        let blob_index = self.metadata_store.read_blob_index(blob).await?;
 
         for (namespace, references) in blob_index.namespace {
             for link_reference in references {
@@ -390,7 +400,7 @@ impl<D: BlobStore> Registry<D> {
                     warn!("Missing link from blob index: {namespace}/{blob} <- {link_reference}");
                     if !self.scrub_dry_run {
                         if let Err(error) = self
-                            .store
+                            .metadata_store
                             .update_blob_index(&namespace, blob, |index| {
                                 index.remove(&link_reference);
                             })
@@ -411,12 +421,14 @@ impl<D: BlobStore> Registry<D> {
 mod tests {
     use super::*;
     use crate::configuration::{CacheStoreConfig, GlobalConfig, LockStoreConfig};
+    use crate::registry::metadata_store::MetadataStore;
     use crate::registry::test_utils::{
         create_test_fs_backend, create_test_manifest, create_test_repository_config,
         create_test_s3_backend,
     };
     use crate::registry::utils::BlobLink;
     use chrono::Duration;
+    use std::slice;
     use uuid::Uuid;
 
     #[test]
@@ -539,7 +551,9 @@ mod tests {
         .unwrap());
     }
 
-    async fn test_enforce_retention_impl<D: BlobStore + 'static>(registry: Registry<D>) {
+    async fn test_enforce_retention_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let (content, media_type) = create_test_manifest();
 
@@ -585,7 +599,7 @@ mod tests {
             let result = registry
                 .get_manifest(
                     registry.validate_namespace(namespace).unwrap(),
-                    &[media_type.clone()],
+                    slice::from_ref(&media_type),
                     namespace,
                     Reference::Tag(tag.clone()),
                 )
@@ -603,7 +617,7 @@ mod tests {
         }
 
         // Verify that the manifest blob still exists (since it's referenced by the 'latest' tag)
-        assert!(registry.store.read_blob(&first_digest).await.is_ok());
+        assert!(registry.blob_store.read_blob(&first_digest).await.is_ok());
     }
 
     #[tokio::test]
@@ -618,13 +632,15 @@ mod tests {
         test_enforce_retention_impl(registry).await;
     }
 
-    async fn test_scrub_uploads_impl<D: BlobStore + 'static>(registry: Registry<D>) {
+    async fn test_scrub_uploads_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let session_id = Uuid::new_v4().to_string();
 
         // Create an upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &session_id)
             .await
             .unwrap();
@@ -639,7 +655,7 @@ mod tests {
 
         // Verify upload is deleted
         assert!(registry
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id)
             .await
             .is_err());
@@ -657,7 +673,9 @@ mod tests {
         test_scrub_uploads_impl(registry).await;
     }
 
-    async fn test_scrub_tags_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_scrub_tags_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -680,7 +698,7 @@ mod tests {
         let manifest = registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
@@ -703,18 +721,44 @@ mod tests {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn test_scrub_revisions_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_scrub_revisions_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
 
         // Create test blobs
-        let config_digest = registry.store.create_blob(b"test config").await.unwrap();
-        let layer_digest1 = registry.store.create_blob(b"test layer 1").await.unwrap();
-        let layer_digest2 = registry.store.create_blob(b"test layer 2").await.unwrap();
-        let subject_digest = registry.store.create_blob(b"test subject").await.unwrap();
+        let config_digest = registry
+            .blob_store
+            .create_blob(b"test config")
+            .await
+            .unwrap();
+        let layer_digest1 = registry
+            .blob_store
+            .create_blob(b"test layer 1")
+            .await
+            .unwrap();
+        let layer_digest2 = registry
+            .blob_store
+            .create_blob(b"test layer 2")
+            .await
+            .unwrap();
+        let subject_digest = registry
+            .blob_store
+            .create_blob(b"test subject")
+            .await
+            .unwrap();
 
         // Create some incorrect blobs to test link fixing
-        let wrong_config_digest = registry.store.create_blob(b"wrong config").await.unwrap();
-        let wrong_layer_digest = registry.store.create_blob(b"wrong layer").await.unwrap();
+        let wrong_config_digest = registry
+            .blob_store
+            .create_blob(b"wrong config")
+            .await
+            .unwrap();
+        let wrong_layer_digest = registry
+            .blob_store
+            .create_blob(b"wrong layer")
+            .await
+            .unwrap();
 
         // Create manifest content with correct digests
         let manifest = serde_json::json!({
@@ -765,9 +809,9 @@ mod tests {
         let content_with_subject = serde_json::to_vec(&manifest_with_subject).unwrap();
 
         // Create manifest blobs
-        let manifest_digest = registry.store.create_blob(&content).await.unwrap();
+        let manifest_digest = registry.blob_store.create_blob(&content).await.unwrap();
         let manifest_with_subject_digest = registry
-            .store
+            .blob_store
             .create_blob(&content_with_subject)
             .await
             .unwrap();
@@ -828,7 +872,8 @@ mod tests {
 
         // Create a new registry with dry run disabled
         let new_registry = Registry::new(
-            registry.store.clone(),
+            registry.blob_store.clone(),
+            registry.metadata_store.clone(),
             create_test_repository_config(),
             &GlobalConfig::default(),
             CacheStoreConfig::default(),
@@ -890,7 +935,7 @@ mod tests {
         // Test error case with invalid manifest content
         let invalid_content = b"invalid manifest content";
         let invalid_digest = new_registry
-            .store
+            .blob_store
             .create_blob(invalid_content)
             .await
             .unwrap();
@@ -905,9 +950,15 @@ mod tests {
         assert!(new_registry.scrub_revisions(namespace).await.is_ok()); // Should handle invalid manifest gracefully
     }
 
-    async fn test_ensure_link_impl<D: BlobStore + 'static>(registry: Registry<D>) {
+    async fn test_ensure_link_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: Registry<B, M>,
+    ) {
         let namespace = "test-repo";
-        let digest = registry.store.create_blob(b"test content").await.unwrap();
+        let digest = registry
+            .blob_store
+            .create_blob(b"test content")
+            .await
+            .unwrap();
         let link = BlobLink::Tag("test-tag".to_string());
 
         let registry = registry.with_scrub_dry_run(false);
@@ -920,7 +971,11 @@ mod tests {
         assert!(registry.read_link(namespace, &link).await.is_ok());
 
         // Test updating an existing link
-        let new_digest = registry.store.create_blob(b"new content").await.unwrap();
+        let new_digest = registry
+            .blob_store
+            .create_blob(b"new content")
+            .await
+            .unwrap();
         registry
             .ensure_link(namespace, &link, &new_digest)
             .await
@@ -937,16 +992,18 @@ mod tests {
         assert!(registry.read_link(namespace, &invalid_link).await.is_ok());
     }
 
-    async fn test_cleanup_orphan_blobs_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_cleanup_orphan_blobs_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace1 = "test-repo1";
         let namespace2 = "test-repo2";
         let content = b"test orphan blob content";
 
         // Create multiple blobs
-        let digest1 = registry.store.create_blob(content).await.unwrap();
-        let digest2 = registry.store.create_blob(content).await.unwrap();
-        let digest3 = registry.store.create_blob(content).await.unwrap();
-        let digest4 = registry.store.create_blob(content).await.unwrap();
+        let digest1 = registry.blob_store.create_blob(content).await.unwrap();
+        let digest2 = registry.blob_store.create_blob(content).await.unwrap();
+        let digest3 = registry.blob_store.create_blob(content).await.unwrap();
+        let digest4 = registry.blob_store.create_blob(content).await.unwrap();
 
         // Create valid links for blobs in different namespaces
         let valid_link1 = BlobLink::Tag("valid-tag1".to_string());
@@ -974,7 +1031,7 @@ mod tests {
         // Create invalid link by adding to blob index but not creating the actual link
         let invalid_link = BlobLink::Tag("invalid-tag".to_string());
         registry
-            .store
+            .metadata_store
             .update_blob_index(namespace1, &digest2, |index| {
                 index.insert(invalid_link.clone());
             })
@@ -983,7 +1040,8 @@ mod tests {
 
         // Create a new registry with dry run disabled
         let new_registry = Registry::new(
-            registry.store.clone(),
+            registry.blob_store.clone(),
+            registry.metadata_store.clone(),
             create_test_repository_config(),
             &GlobalConfig::default(),
             CacheStoreConfig::default(),
@@ -996,10 +1054,10 @@ mod tests {
         new_registry.cleanup_orphan_blobs().await.unwrap();
 
         // Verify results
-        assert!(new_registry.store.read_blob(&digest1).await.is_ok()); // Should exist (has valid tag link)
-        assert!(new_registry.store.read_blob(&digest2).await.is_ok()); // Should exist (has valid layer link)
-        assert!(new_registry.store.read_blob(&digest3).await.is_ok()); // Should exist (has valid config link)
-        assert!(new_registry.store.read_blob(&digest4).await.is_ok()); // Should exist (has valid referrer link)
+        assert!(new_registry.blob_store.read_blob(&digest1).await.is_ok()); // Should exist (has valid tag link)
+        assert!(new_registry.blob_store.read_blob(&digest2).await.is_ok()); // Should exist (has valid layer link)
+        assert!(new_registry.blob_store.read_blob(&digest3).await.is_ok()); // Should exist (has valid config link)
+        assert!(new_registry.blob_store.read_blob(&digest4).await.is_ok()); // Should exist (has valid referrer link)
     }
 
     #[tokio::test]

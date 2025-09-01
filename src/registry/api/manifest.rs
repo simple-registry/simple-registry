@@ -2,6 +2,7 @@ use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::RequestExt;
 use crate::registry::api::hyper::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT};
 use crate::registry::blob_store::BlobStore;
+use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::Reference;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
@@ -47,7 +48,7 @@ pub trait RegistryAPIManifestHandlersExt {
     ) -> Result<Response<Body>, Error>;
 }
 
-impl<D: BlobStore> RegistryAPIManifestHandlersExt for Registry<D> {
+impl<B: BlobStore, M: MetadataStore> RegistryAPIManifestHandlersExt for Registry<B, M> {
     #[instrument(skip(self, request))]
     async fn handle_head_manifest<T>(
         &self,
@@ -221,9 +222,12 @@ mod tests {
     use hyper::body::Bytes;
     use hyper::Method;
     use hyper::Uri;
+    use std::slice;
     use tokio::io::AsyncReadExt;
 
-    async fn test_handle_head_manifest_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_head_manifest_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -284,7 +288,9 @@ mod tests {
         test_handle_head_manifest_impl(&registry).await;
     }
 
-    async fn test_handle_get_manifest_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_get_manifest_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -347,8 +353,8 @@ mod tests {
         test_handle_get_manifest_impl(&registry).await;
     }
 
-    async fn test_handle_put_manifest_impl<D: BlobStore + 'static>(
-        registry: &Registry<D>,
+    async fn test_handle_put_manifest_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
+        registry: &Registry<B, M>,
     ) -> Result<(), Error> {
         let namespace = "test-repo";
         let tag = "latest";
@@ -386,7 +392,7 @@ mod tests {
         let stored_manifest = registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
@@ -412,7 +418,12 @@ mod tests {
         test_handle_put_manifest_impl(&registry).await.unwrap();
     }
 
-    async fn test_handle_delete_manifest_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_delete_manifest_impl<
+        B: BlobStore + 'static,
+        M: MetadataStore + 'static,
+    >(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -444,7 +455,7 @@ mod tests {
         assert!(registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )

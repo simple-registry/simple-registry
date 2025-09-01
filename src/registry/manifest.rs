@@ -1,6 +1,7 @@
 use crate::registry::api::hyper::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::blob_store::BlobStore;
+use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::{Digest, Manifest, Reference};
 use crate::registry::utils::BlobLink;
 use crate::registry::{Error, Registry, Repository};
@@ -74,7 +75,11 @@ pub fn parse_manifest_digests(
     })
 }
 
-impl<D: BlobStore> Registry<D> {
+impl<B, M> Registry<B, M>
+where
+    B: BlobStore,
+    M: MetadataStore,
+{
     #[instrument(skip(repository))]
     pub async fn head_manifest(
         &self,
@@ -132,7 +137,7 @@ impl<D: BlobStore> Registry<D> {
         let link = self.read_link(namespace, &blob_link).await?;
 
         let mut reader = self
-            .store
+            .blob_store
             .build_blob_reader(&link.target, None)
             .await
             .map_err(|error| {
@@ -205,7 +210,7 @@ impl<D: BlobStore> Registry<D> {
         let blob_link = reference.clone().into();
         let link = self.read_link(namespace, &blob_link).await?;
 
-        let content = self.store.read_blob(&link.target).await?;
+        let content = self.blob_store.read_blob(&link.target).await?;
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|error| {
             warn!("Failed to deserialize manifest: {error}");
             Error::ManifestInvalid("Failed to deserialize manifest".to_string())
@@ -232,7 +237,7 @@ impl<D: BlobStore> Registry<D> {
 
         let digest = match reference {
             Reference::Tag(tag) => {
-                let digest = self.store.create_blob(body).await?;
+                let digest = self.blob_store.create_blob(body).await?;
 
                 let link = BlobLink::Tag(tag);
                 self.create_link(namespace, &link, &digest).await?;
@@ -243,7 +248,7 @@ impl<D: BlobStore> Registry<D> {
                 digest
             }
             Reference::Digest(provided_digest) => {
-                let digest = self.store.create_blob(body).await?;
+                let digest = self.blob_store.create_blob(body).await?;
 
                 if provided_digest != digest {
                     warn!("Provided digest does not match calculated digest: {provided_digest} != {digest}");
@@ -296,7 +301,10 @@ impl<D: BlobStore> Registry<D> {
             Reference::Digest(digest) => {
                 let mut marker = None;
                 loop {
-                    let (tags, next_marker) = self.store.list_tags(namespace, 100, marker).await?;
+                    let (tags, next_marker) = self
+                        .metadata_store
+                        .list_tags(namespace, 100, marker)
+                        .await?;
 
                     for tag in tags {
                         let link_reference = BlobLink::Tag(tag);
@@ -310,7 +318,7 @@ impl<D: BlobStore> Registry<D> {
                     let blob_link = BlobLink::Digest(digest.clone());
                     let link = self.read_link(namespace, &blob_link).await?;
 
-                    let content = self.store.read_blob(&link.target).await?;
+                    let content = self.blob_store.read_blob(&link.target).await?;
                     let manifest_digests = parse_manifest_digests(&content, None)?;
 
                     if let Some(subject_digest) = manifest_digests.subject {
@@ -338,6 +346,7 @@ mod tests {
     use super::*;
     use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
     use serde_json::json;
+    use std::slice;
 
     fn create_test_manifest() -> (Vec<u8>, String) {
         let manifest = json!({
@@ -390,7 +399,9 @@ mod tests {
         (content, media_type)
     }
 
-    async fn test_put_manifest_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_put_manifest_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -410,7 +421,7 @@ mod tests {
         let stored_manifest = registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
@@ -448,7 +459,9 @@ mod tests {
         test_put_manifest_impl(&registry).await;
     }
 
-    async fn test_get_manifest_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_get_manifest_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -468,7 +481,7 @@ mod tests {
         let manifest = registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
@@ -483,7 +496,7 @@ mod tests {
         let manifest = registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Digest(response.digest.clone()),
             )
@@ -507,7 +520,9 @@ mod tests {
         test_get_manifest_impl(&registry).await;
     }
 
-    async fn test_head_manifest_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_head_manifest_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -527,7 +542,7 @@ mod tests {
         let manifest = registry
             .head_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
@@ -542,7 +557,7 @@ mod tests {
         let manifest = registry
             .head_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Digest(response.digest.clone()),
             )
@@ -566,7 +581,9 @@ mod tests {
         test_head_manifest_impl(&registry).await;
     }
 
-    async fn test_delete_manifest_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_delete_manifest_impl<B: BlobStore + 'static, M: MetadataStore>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -592,7 +609,7 @@ mod tests {
         assert!(registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
@@ -609,7 +626,7 @@ mod tests {
         assert!(registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Digest(response.digest),
             )

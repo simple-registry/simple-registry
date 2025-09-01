@@ -3,6 +3,7 @@ use crate::registry::api::hyper::request_ext::RequestExt;
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::blob::GetBlobResponse;
 use crate::registry::blob_store::BlobStore;
+use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
@@ -38,7 +39,9 @@ pub trait RegistryAPIBlobHandlersExt {
     ) -> Result<Response<Body>, Error>;
 }
 
-impl<D: BlobStore + 'static> RegistryAPIBlobHandlersExt for Registry<D> {
+impl<B: BlobStore + 'static, M: MetadataStore + 'static> RegistryAPIBlobHandlersExt
+    for Registry<B, M>
+{
     #[instrument(skip(self, request))]
     async fn handle_head_blob<T>(
         &self,
@@ -153,6 +156,7 @@ mod tests {
     use super::*;
     use crate::registry::api::hyper::response_ext::IntoAsyncRead;
     use crate::registry::api::hyper::response_ext::ResponseExt;
+    use crate::registry::metadata_store::MetadataStore;
     use crate::registry::test_utils::{
         create_test_blob, create_test_fs_backend, create_test_s3_backend,
     };
@@ -162,7 +166,9 @@ mod tests {
     use hyper::Method;
     use hyper::Uri;
 
-    async fn test_handle_head_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_head_blob_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
@@ -211,7 +217,9 @@ mod tests {
         test_handle_head_blob_impl(&registry).await;
     }
 
-    async fn test_handle_delete_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_delete_blob_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
@@ -235,7 +243,7 @@ mod tests {
         assert!(registry.read_link(namespace, &latest_link).await.is_ok());
 
         // Verify blob exists
-        assert!(registry.store.read_blob(&digest).await.is_ok());
+        assert!(registry.blob_store.read_blob(&digest).await.is_ok());
 
         let parameters = QueryBlobParameters {
             name: namespace.to_string(),
@@ -258,11 +266,11 @@ mod tests {
         assert!(registry.read_link(namespace, &latest_link).await.is_err());
 
         // Verify blob index is empty
-        let blob_index = registry.store.read_blob_index(&digest).await;
+        let blob_index = registry.metadata_store.read_blob_index(&digest).await;
         assert!(blob_index.is_err());
 
         // Verify blob is deleted (since all links are removed)
-        assert!(registry.store.read_blob(&digest).await.is_err());
+        assert!(registry.blob_store.read_blob(&digest).await.is_err());
     }
 
     #[tokio::test]
@@ -277,7 +285,9 @@ mod tests {
         test_handle_delete_blob_impl(&registry).await;
     }
 
-    async fn test_handle_get_blob_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_get_blob_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
@@ -332,7 +342,12 @@ mod tests {
         test_handle_get_blob_impl(&registry).await;
     }
 
-    async fn test_handle_get_blob_with_range_impl<D: BlobStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_get_blob_with_range_impl<
+        B: BlobStore + 'static,
+        M: MetadataStore + 'static,
+    >(
+        registry: &Registry<B, M>,
+    ) {
         let namespace = "test-repo";
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;

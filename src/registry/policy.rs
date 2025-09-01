@@ -3,7 +3,7 @@ use crate::registry::{Error, Registry, Repository};
 use cel_interpreter::{Context, Program, Value};
 use tracing::{debug, error, info, instrument};
 
-impl<T> Registry<T> {
+impl<B, M> Registry<B, M> {
     fn deny() -> Error {
         Error::Unauthorized("Access denied".to_string())
     }
@@ -150,6 +150,8 @@ mod tests {
     use crate::registry::oci_types::Reference;
     use crate::registry::test_utils::create_test_fs_backend;
 
+    type NoStoreRegistry = Registry<(), ()>;
+
     fn create_default_deny_repo(rules: Vec<String>) -> Repository {
         let config = RepositoryConfig {
             retention_policy: RepositoryRetentionPolicyConfig::default(),
@@ -181,7 +183,7 @@ mod tests {
         let request = ClientRequest::list_catalog();
         let identity = ClientIdentity::default();
 
-        assert!(Registry::<()>::validate_request(None, &request, &identity).is_ok());
+        assert!(NoStoreRegistry::validate_request(None, &request, &identity).is_ok());
 
         // TODO: implement global rules for non-namespaced queries.
     }
@@ -196,7 +198,7 @@ mod tests {
             ..ClientIdentity::default()
         };
 
-        assert!(Registry::<()>::validate_request(None, &request, &identity).is_ok());
+        assert!(NoStoreRegistry::validate_request(None, &request, &identity).is_ok());
 
         let request = ClientRequest::get_manifest("policy-deny-repo", &reference);
         let identity = ClientIdentity {
@@ -204,7 +206,7 @@ mod tests {
             ..ClientIdentity::default()
         };
 
-        assert!(Registry::<()>::validate_request(None, &request, &identity).is_ok());
+        assert!(NoStoreRegistry::validate_request(None, &request, &identity).is_ok());
     }
 
     #[tokio::test]
@@ -224,7 +226,7 @@ mod tests {
         };
         let repository = registry.validate_namespace("test-repo").unwrap();
 
-        assert!(Registry::<()>::validate_request(Some(repository), &request, &identity).is_ok());
+        assert!(NoStoreRegistry::validate_request(Some(repository), &request, &identity).is_ok());
     }
 
     #[tokio::test]
@@ -244,7 +246,7 @@ mod tests {
         };
         let repository = registry.validate_namespace("policy-deny-repo").unwrap();
 
-        assert!(Registry::<()>::validate_request(Some(repository), &request, &identity).is_err());
+        assert!(NoStoreRegistry::validate_request(Some(repository), &request, &identity).is_err());
     }
 
     #[tokio::test]
@@ -265,7 +267,7 @@ mod tests {
         };
         let repository = registry.validate_namespace("policy-allow-repo").unwrap();
 
-        assert!(Registry::<()>::validate_request(Some(repository), &request, &identity).is_ok());
+        assert!(NoStoreRegistry::validate_request(Some(repository), &request, &identity).is_ok());
 
         let request = ClientRequest::get_manifest("policy-allow-repo", &reference);
         let identity = ClientIdentity {
@@ -274,7 +276,7 @@ mod tests {
         };
         let repository = registry.validate_namespace("policy-allow-repo").unwrap();
 
-        assert!(Registry::<()>::validate_request(Some(repository), &request, &identity).is_err());
+        assert!(NoStoreRegistry::validate_request(Some(repository), &request, &identity).is_err());
     }
 
     #[tokio::test]
@@ -295,7 +297,7 @@ mod tests {
         };
         let repository = registry.validate_namespace("policy-deny-repo").unwrap();
 
-        assert!(Registry::<()>::validate_request(Some(repository), &request, &identity).is_ok());
+        assert!(NoStoreRegistry::validate_request(Some(repository), &request, &identity).is_ok());
 
         let request = ClientRequest::get_manifest("policy-deny-repo", &reference);
         let identity = ClientIdentity {
@@ -304,6 +306,6 @@ mod tests {
         };
         let repository = registry.validate_namespace("policy-deny-repo").unwrap();
 
-        assert!(Registry::<()>::validate_request(Some(repository), &request, &identity).is_err());
+        assert!(NoStoreRegistry::validate_request(Some(repository), &request, &identity).is_err());
     }
 }
