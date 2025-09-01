@@ -13,21 +13,21 @@ arc-swap = "1.7"
 argh = "0.1"
 argon2 = "0.5.3"
 async-trait = "0.1"
-aws-sdk-s3 = { version = "1.96" }
+aws-sdk-s3 = { version = "1.104" }
 base64 = "0.22"
 bytes = "1.10"
 bytesize = { version = "2.0", features = ["serde"] }
-cel-interpreter = "0.9"
+cel-interpreter = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 crossbeam-channel = "0.5"
 futures-util = { version = "0.3", default-features = false }
 hex = "0.4"
 http-body-util = "0.1"
 humantime = "2.2"
-hyper = { version = "1.6" , features = ["full"]}
+hyper = { version = "1.7" , features = ["full"]}
 hyper-util = { version = "0.1", features = ["tokio", "server-graceful"] }
 hyper-rustls = "0.27"
-notify = "8.1"
+notify = "8.2"
 opentelemetry = "0.29"
 opentelemetry-otlp = { version = "0.29" , features = ["grpc-tonic"]}
 opentelemetry-prometheus = "0.29"
@@ -45,16 +45,16 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_urlencoded = "0.7"
 sha2 = "0.11.0-rc.0"
-tokio = { version = "1.46", features = ["full", "tracing"] }
+tokio = { version = "1.47", features = ["full", "tracing"] }
 tokio-rustls = "0.26"
 tokio-util = { version = "0.7", features = ["io-util"] }
-toml = "0.8"
+toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-opentelemetry = "0.30"
 uuid = { version = "1.17", features = ["v4", "serde"] }
-x509-parser = "0.17"
+x509-parser = "0.18"
 
 [dev-dependencies]
-tempfile = "3.20"
+tempfile = "3.21"
 mockall = "0.13"

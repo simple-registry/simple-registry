@@ -20,7 +20,7 @@ pub enum Error {
     Tls(String),
     TracingInit(TraceError),
     ExporterInit(ExporterBuildError),
-    CELPolicy(cel_interpreter::ParseError),
+    CELPolicy(cel_interpreter::ParseErrors),
 }
 
 impl fmt::Display for Error {
@@ -132,8 +132,8 @@ impl From<ExporterBuildError> for Error {
     }
 }
 
-impl From<cel_interpreter::ParseError> for Error {
-    fn from(error: cel_interpreter::ParseError) -> Self {
+impl From<cel_interpreter::ParseErrors> for Error {
+    fn from(error: cel_interpreter::ParseErrors) -> Self {
         Error::CELPolicy(error)
     }
 }

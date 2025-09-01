@@ -174,7 +174,7 @@ impl StorageS3Config {
     }
 
     fn default_multipart_part_size() -> ByteSize {
-        ByteSize::mb(100)
+        ByteSize::mib(10)
     }
 }
 
@@ -251,9 +251,14 @@ impl Configuration {
         })?;
 
         if let DataStoreConfig::S3(storage) = &config.storage {
-            if storage.multipart_part_size.as_u64() < 50 * 1024 * 1024 {
+            if storage.multipart_part_size < ByteSize::mib(5) {
                 return Err(Error::StreamingChunkSize(
-                    "Multipart part size must be at least 50MiB".to_string(),
+                    "Multipart part size must be at least 5MiB".to_string(),
+                ));
+            }
+            if storage.multipart_copy_chunk_size > ByteSize::gib(5) {
+                return Err(Error::StreamingChunkSize(
+                    "Multipart copy chunk size must be at most 5GiB".to_string(),
                 ));
             }
         }
