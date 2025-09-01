@@ -61,20 +61,16 @@ If no configuration is provided, an in-memory cache is used, which is not suitab
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
 - `key_prefix` (optional string): The key prefix for all cache keys
 
-## Storage (`storage`)
+## Blob storage (`blob_store`)
 
-Multiple storage backends are supported: filesystem or s3-baked.
+The blob store is the place where image content is stored.
+Multiple blob storage backends are supported: filesystem or s3-baked.
 
-### Filesystem Storage (`storage.fs`)
-
-> [!NOTE]
-> The filesystem storage backend is not leveraging the async API for filesystem operations.
-> The async implementation is inefficient on most platforms.
-> In scenarios where you need massive-scale parallelism, consider switching to S3-compatible storage.
+### Filesystem Storage (`blob_store.fs`)
 
 - `root_dir` (string): The root directory for the storage.
 
-### S3 Storage (`storage.s3`)
+### S3 Storage (`blob_store.s3`)
 
 - `access_key_id` (string): The access key ID for the S3 server
 - `secret_key` (string): The secret access key for the S3 server

@@ -19,13 +19,46 @@ pub struct Configuration {
     #[serde(default)]
     pub cache_store: CacheStoreConfig,
     #[serde(default)]
-    pub storage: DataStoreConfig,
+    pub blob_store: BlobStorageConfig,
     #[serde(default)]
     pub identity: HashMap<String, IdentityConfig>, // hashmap of identity_id <-> identity_config (username, password)
     #[serde(default)]
     pub repository: HashMap<String, RepositoryConfig>, // hashmap of namespace <-> repository_config
     #[serde(default)]
     pub observability: Option<ObservabilityConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ServerConfig {
+    pub bind_address: IpAddr,
+    #[serde(default = "ServerConfig::default_port")]
+    pub port: u16,
+    #[serde(default = "ServerConfig::default_query_timeout")]
+    pub query_timeout: u64,
+    #[serde(default = "ServerConfig::default_query_timeout_grace_period")]
+    pub query_timeout_grace_period: u64,
+    pub tls: Option<ServerTlsConfig>,
+}
+
+impl ServerConfig {
+    fn default_port() -> u16 {
+        8000
+    }
+
+    fn default_query_timeout() -> u64 {
+        3600
+    }
+
+    fn default_query_timeout_grace_period() -> u64 {
+        60
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ServerTlsConfig {
+    pub server_certificate_bundle: String,
+    pub server_private_key: String,
+    pub client_ca_bundle: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -62,32 +95,6 @@ impl GlobalConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct ServerConfig {
-    pub bind_address: IpAddr,
-    #[serde(default = "ServerConfig::default_port")]
-    pub port: u16,
-    #[serde(default = "ServerConfig::default_query_timeout")]
-    pub query_timeout: u64,
-    #[serde(default = "ServerConfig::default_query_timeout_grace_period")]
-    pub query_timeout_grace_period: u64,
-    pub tls: Option<ServerTlsConfig>,
-}
-
-impl ServerConfig {
-    fn default_port() -> u16 {
-        8000
-    }
-
-    fn default_query_timeout() -> u64 {
-        3600
-    }
-
-    fn default_query_timeout_grace_period() -> u64 {
-        60
-    }
-}
-
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct LockStoreConfig {
     pub redis: Option<RedisLockStoreConfig>,
@@ -113,26 +120,19 @@ pub struct RedisCacheConfig {
     pub key_prefix: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct ServerTlsConfig {
-    pub server_certificate_bundle: String,
-    pub server_private_key: String,
-    pub client_ca_bundle: Option<String>,
-}
-
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 // This is acceptable to have a large enum variant for configuration things.
 #[allow(clippy::large_enum_variant)]
-pub enum DataStoreConfig {
+pub enum BlobStorageConfig {
     #[serde(rename = "fs")]
     FS(StorageFSConfig),
     #[serde(rename = "s3")]
     S3(StorageS3Config),
 }
 
-impl Default for DataStoreConfig {
+impl Default for BlobStorageConfig {
     fn default() -> Self {
-        DataStoreConfig::FS(StorageFSConfig::default())
+        BlobStorageConfig::FS(StorageFSConfig::default())
     }
 }
 
@@ -250,13 +250,13 @@ impl Configuration {
             Error::ConfigurationFileFormat(e.to_string())
         })?;
 
-        if let DataStoreConfig::S3(storage) = &config.storage {
-            if storage.multipart_part_size < ByteSize::mib(5) {
+        if let BlobStorageConfig::S3(s3_storage) = &config.blob_store {
+            if s3_storage.multipart_part_size < ByteSize::mib(5) {
                 return Err(Error::StreamingChunkSize(
                     "Multipart part size must be at least 5MiB".to_string(),
                 ));
             }
-            if storage.multipart_copy_chunk_size > ByteSize::gib(5) {
+            if s3_storage.multipart_copy_chunk_size > ByteSize::gib(5) {
                 return Err(Error::StreamingChunkSize(
                     "Multipart copy chunk size must be at most 5GiB".to_string(),
                 ));
@@ -292,8 +292,8 @@ mod tests {
         assert!(config.lock_store.redis.is_none());
         assert!(config.cache_store.redis.is_none());
         assert_eq!(
-            config.storage,
-            DataStoreConfig::FS(StorageFSConfig {
+            config.blob_store,
+            BlobStorageConfig::FS(StorageFSConfig {
                 root_dir: String::new()
             })
         );

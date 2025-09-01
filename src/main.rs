@@ -3,7 +3,7 @@
 
 use crate::command::{argon, scrub, server};
 use crate::configuration::{
-    Configuration, DataStoreConfig, Error, ObservabilityConfig, ServerTlsConfig,
+    Configuration, BlobStorageConfig, Error, ObservabilityConfig, ServerTlsConfig,
 };
 use crate::registry::data_store::{DataStore, FSBackend, S3Backend};
 use crate::registry::Registry;
@@ -189,15 +189,15 @@ fn main() -> Result<(), command::Error> {
     runtime.block_on(async move {
         set_tracing(config.observability.clone())?;
 
-        match config.storage.clone() {
-            DataStoreConfig::FS(storage_config) => {
+        match config.blob_store.clone() {
+            BlobStorageConfig::FS(blob_storage_config) => {
                 info!("Using filesystem backend");
-                let data_store = Arc::new(FSBackend::new(storage_config));
+                let data_store = Arc::new(FSBackend::new(blob_storage_config));
                 handle_command(config, arguments, data_store).await
             }
-            DataStoreConfig::S3(storage_config) => {
+            BlobStorageConfig::S3(blob_storage_config) => {
                 info!("Using S3 backend");
-                let data_store = Arc::new(S3Backend::new(storage_config));
+                let data_store = Arc::new(S3Backend::new(blob_storage_config));
                 handle_command(config, arguments, data_store).await
             }
         }
