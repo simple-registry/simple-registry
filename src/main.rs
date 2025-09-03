@@ -197,10 +197,15 @@ fn main() -> Result<(), command::Error> {
         match config.blob_store.clone() {
             BlobStorageConfig::FS(blob_storage_config) => {
                 info!("Using filesystem blob-store backend");
-                let data_store = Arc::new(blob_store::fs::Backend::new(blob_storage_config));
+                let data_store =
+                    Arc::new(blob_store::fs::Backend::new(blob_storage_config.clone()));
                 match config.metadata_store.clone() {
-                    MetadataStoreConfig::FS(metadata_store_config) => {
+                    MetadataStoreConfig::FS(mut metadata_store_config) => {
                         info!("Using filesystem metadata-store backend");
+                        // If metadata_store root_dir is not configured, use blob_store root_dir
+                        if metadata_store_config.root_dir.is_empty() {
+                            metadata_store_config.root_dir = blob_storage_config.root_dir.clone();
+                        }
                         let metadata_store =
                             Arc::new(metadata_store::fs::Backend::new(metadata_store_config));
                         handle_command(config, arguments, data_store, metadata_store).await
@@ -219,13 +224,43 @@ fn main() -> Result<(), command::Error> {
                     Arc::new(blob_store::s3::Backend::new(blob_storage_config.clone()));
                 match config.metadata_store.clone() {
                     MetadataStoreConfig::FS(metadata_store_config) => {
-                        info!("Using filesystem metadata-store backend");
-                        let metadata_store =
-                            Arc::new(metadata_store::fs::Backend::new(metadata_store_config));
-                        handle_command(config, arguments, data_store, metadata_store).await
+                        // If FS metadata_store has empty root_dir, it's the default - use S3 instead
+                        if metadata_store_config.root_dir.is_empty() {
+                            info!(
+                                "Using s3 metadata-store backend (auto-configured from blob_store)"
+                            );
+                            let metadata_store_config = metadata_store::s3::BackendConfig {
+                                bucket: blob_storage_config.bucket.clone(),
+                                region: blob_storage_config.region.clone(),
+                                endpoint: blob_storage_config.endpoint.clone(),
+                                access_key_id: blob_storage_config.access_key_id.clone(),
+                                secret_key: blob_storage_config.secret_key.clone(),
+                                key_prefix: blob_storage_config.key_prefix.clone(),
+                            };
+                            let metadata_store =
+                                Arc::new(metadata_store::s3::Backend::new(metadata_store_config));
+                            handle_command(config, arguments, data_store, metadata_store).await
+                        } else {
+                            info!("Using filesystem metadata-store backend");
+                            let metadata_store =
+                                Arc::new(metadata_store::fs::Backend::new(metadata_store_config));
+                            handle_command(config, arguments, data_store, metadata_store).await
+                        }
                     }
-                    MetadataStoreConfig::S3(metadata_store_config) => {
+                    MetadataStoreConfig::S3(mut metadata_store_config) => {
                         info!("Using s3 metadata-store backend");
+                        // If metadata_store is not configured, use blob_store config
+                        if metadata_store_config.bucket.is_empty() {
+                            metadata_store_config.bucket = blob_storage_config.bucket.clone();
+                            metadata_store_config.region = blob_storage_config.region.clone();
+                            metadata_store_config.endpoint = blob_storage_config.endpoint.clone();
+                            metadata_store_config.access_key_id =
+                                blob_storage_config.access_key_id.clone();
+                            metadata_store_config.secret_key =
+                                blob_storage_config.secret_key.clone();
+                            metadata_store_config.key_prefix =
+                                blob_storage_config.key_prefix.clone();
+                        }
                         let metadata_store =
                             Arc::new(metadata_store::s3::Backend::new(metadata_store_config));
                         handle_command(config, arguments, data_store, metadata_store).await
