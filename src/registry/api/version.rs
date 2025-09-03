@@ -38,7 +38,7 @@ mod tests {
     use crate::registry::api::hyper::response_ext::ResponseExt;
     use crate::registry::blob_store::BlobStore;
     use crate::registry::metadata_store::MetadataStore;
-    use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
+    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use crate::registry::Registry;
 
     async fn test_handle_get_api_version_impl<
@@ -65,13 +65,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_get_api_version_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_handle_get_api_version_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_handle_get_api_version_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_handle_get_api_version_s3() {
-        let registry = create_test_s3_backend().await;
-        test_handle_get_api_version_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_handle_get_api_version_impl(t.registry()).await;
     }
 }

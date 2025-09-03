@@ -168,7 +168,7 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
         Ok(())
     }
 
-    pub(crate) async fn scrub_uploads(&self, namespace: &str) -> Result<(), Error> {
+    pub async fn scrub_uploads(&self, namespace: &str) -> Result<(), Error> {
         info!("'{namespace}': Checking for obsolete uploads");
 
         let mut marker = None;
@@ -211,7 +211,7 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
         Ok(())
     }
 
-    pub(crate) async fn scrub_tags(&self, namespace: &str) -> Result<(), Error> {
+    pub async fn scrub_tags(&self, namespace: &str) -> Result<(), Error> {
         info!("'{namespace}': Checking tags/revision inconsistencies");
 
         let mut marker = None;
@@ -253,7 +253,7 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
         Ok(())
     }
 
-    pub(crate) async fn scrub_revisions(&self, namespace: &str) -> Result<(), Error> {
+    pub async fn scrub_revisions(&self, namespace: &str) -> Result<(), Error> {
         info!("'{namespace}': Checking for revision inconsistencies");
 
         let mut marker = None;
@@ -366,7 +366,7 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
         Ok(())
     }
 
-    pub(crate) async fn cleanup_orphan_blobs(&self) -> Result<(), Error> {
+    pub async fn cleanup_orphan_blobs(&self) -> Result<(), Error> {
         info!("Checking for orphan blobs");
 
         let mut marker = None;
@@ -420,14 +420,11 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::{CacheStoreConfig, GlobalConfig, LockStoreConfig};
+    use crate::configuration::{CacheStoreConfig, GlobalConfig, LockStoreConfig, RepositoryConfig};
     use crate::registry::metadata_store::MetadataStore;
-    use crate::registry::test_utils::{
-        create_test_fs_backend, create_test_manifest, create_test_repository_config,
-        create_test_s3_backend,
-    };
+    use crate::registry::test_utils::{create_test_manifest, create_test_repository_config};
+    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use crate::registry::utils::BlobLink;
-    use chrono::Duration;
     use std::slice;
     use uuid::Uuid;
 
@@ -552,24 +549,10 @@ mod tests {
     }
 
     async fn test_enforce_retention_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: Registry<B, M>,
+        registry: &Registry<B, M>,
     ) {
         let namespace = "test-repo";
         let (content, media_type) = create_test_manifest();
-
-        // Create a repository config with retention rules
-        let mut repositories_config = create_test_repository_config();
-        repositories_config
-            .get_mut("test-repo")
-            .unwrap()
-            .retention_policy
-            .rules = vec!["image.tag == 'latest'".to_string()];
-
-        // Create a new registry with the retention rules and dry run disabled
-        let registry = registry
-            .with_repositories_config(repositories_config)
-            .unwrap()
-            .with_scrub_dry_run(false);
 
         // Create multiple tags with different names
         let tags = ["latest", "v1.0", "v2.0", "old-tag"];
@@ -620,20 +603,32 @@ mod tests {
         assert!(registry.blob_store.read_blob(&first_digest).await.is_ok());
     }
 
+    fn repositories_config() -> HashMap<String, RepositoryConfig> {
+        let mut repositories_config = create_test_repository_config();
+        repositories_config
+            .get_mut("test-repo")
+            .unwrap()
+            .retention_policy
+            .rules = vec!["image.tag == 'latest'".to_string()];
+        repositories_config
+    }
+
     #[tokio::test]
     async fn test_enforce_retention_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_enforce_retention_impl(registry).await;
+        let mut t = FSRegistryTestCase::new();
+        t.set_repository_config(repositories_config());
+        test_enforce_retention_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_enforce_retention_s3() {
-        let registry = create_test_s3_backend().await;
-        test_enforce_retention_impl(registry).await;
+        let mut t = S3RegistryTestCase::new();
+        t.set_repository_config(repositories_config());
+        test_enforce_retention_impl(t.registry()).await;
     }
 
     async fn test_scrub_uploads_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: Registry<B, M>,
+        registry: &Registry<B, M>,
     ) {
         let namespace = "test-repo";
         let session_id = Uuid::new_v4().to_string();
@@ -645,12 +640,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Create a new registry with 0 timeout
-        let registry = registry
-            .with_upload_timeout(Duration::seconds(0))
-            .with_scrub_dry_run(false);
-
-        // Test scrub uploads
         registry.scrub_uploads(namespace).await.unwrap();
 
         // Verify upload is deleted
@@ -663,14 +652,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_scrub_uploads_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_scrub_uploads_impl(registry).await;
+        let t = FSRegistryTestCase::new();
+        test_scrub_uploads_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_scrub_uploads_s3() {
-        let registry = create_test_s3_backend().await;
-        test_scrub_uploads_impl(registry).await;
+        let t = S3RegistryTestCase::new();
+        test_scrub_uploads_impl(t.registry()).await;
     }
 
     async fn test_scrub_tags_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -710,14 +699,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_scrub_tags_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_scrub_tags_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_scrub_tags_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_scrub_tags_s3() {
-        let registry = create_test_s3_backend().await;
-        test_scrub_tags_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_scrub_tags_impl(t.registry()).await;
     }
 
     #[allow(clippy::too_many_lines)]
@@ -951,7 +940,7 @@ mod tests {
     }
 
     async fn test_ensure_link_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: Registry<B, M>,
+        registry: &Registry<B, M>,
     ) {
         let namespace = "test-repo";
         let digest = registry
@@ -960,8 +949,6 @@ mod tests {
             .await
             .unwrap();
         let link = BlobLink::Tag("test-tag".to_string());
-
-        let registry = registry.with_scrub_dry_run(false);
 
         // Test creating a new link
         registry
@@ -1062,37 +1049,37 @@ mod tests {
 
     #[tokio::test]
     async fn test_scrub_revisions_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_scrub_revisions_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_scrub_revisions_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_scrub_revisions_s3() {
-        let registry = create_test_s3_backend().await;
-        test_scrub_revisions_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_scrub_revisions_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_ensure_link_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_ensure_link_impl(registry).await;
+        let t = FSRegistryTestCase::new();
+        test_ensure_link_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_ensure_link_s3() {
-        let registry = create_test_s3_backend().await;
-        test_ensure_link_impl(registry).await;
+        let t = S3RegistryTestCase::new();
+        test_ensure_link_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_cleanup_orphan_blobs_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_cleanup_orphan_blobs_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_cleanup_orphan_blobs_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_cleanup_orphan_blobs_s3() {
-        let registry = create_test_s3_backend().await;
-        test_cleanup_orphan_blobs_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_cleanup_orphan_blobs_impl(t.registry()).await;
     }
 }

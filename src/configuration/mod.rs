@@ -7,6 +7,7 @@ use std::path::Path;
 
 mod error;
 
+use crate::registry::{blob_store, metadata_store};
 pub use error::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -20,6 +21,8 @@ pub struct Configuration {
     pub cache_store: CacheStoreConfig,
     #[serde(default)]
     pub blob_store: BlobStorageConfig,
+    #[serde(default)]
+    pub metadata_store: MetadataStoreConfig,
     #[serde(default)]
     pub identity: HashMap<String, IdentityConfig>, // hashmap of identity_id <-> identity_config (username, password)
     #[serde(default)]
@@ -96,19 +99,6 @@ impl GlobalConfig {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct LockStoreConfig {
-    pub redis: Option<RedisLockStoreConfig>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct RedisLockStoreConfig {
-    pub url: String,
-    pub ttl: usize,
-    #[serde(default)]
-    pub key_prefix: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
 pub struct CacheStoreConfig {
     pub redis: Option<RedisCacheConfig>,
 }
@@ -125,57 +115,44 @@ pub struct RedisCacheConfig {
 #[allow(clippy::large_enum_variant)]
 pub enum BlobStorageConfig {
     #[serde(rename = "fs")]
-    FS(StorageFSConfig),
+    FS(blob_store::fs::BackendConfig),
     #[serde(rename = "s3")]
-    S3(StorageS3Config),
+    S3(blob_store::s3::BackendConfig),
 }
 
 impl Default for BlobStorageConfig {
     fn default() -> Self {
-        BlobStorageConfig::FS(StorageFSConfig::default())
+        BlobStorageConfig::FS(blob_store::fs::BackendConfig::default())
     }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub struct StorageFSConfig {
-    pub root_dir: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct StorageS3Config {
-    pub access_key_id: String,
-    pub secret_key: String,
-    pub endpoint: String,
-    pub bucket: String,
-    pub region: String,
-    #[serde(default)]
-    pub key_prefix: String,
-    #[serde(default = "StorageS3Config::default_multipart_copy_threshold")]
-    pub multipart_copy_threshold: ByteSize,
-    #[serde(default = "StorageS3Config::default_multipart_copy_chunk_size")]
-    pub multipart_copy_chunk_size: ByteSize,
-    #[serde(default = "StorageS3Config::default_multipart_copy_jobs")]
-    pub multipart_copy_jobs: usize,
-    #[serde(default = "StorageS3Config::default_multipart_part_size")]
-    pub multipart_part_size: ByteSize,
+// This is acceptable to have a large enum variant for configuration things.
+#[allow(clippy::large_enum_variant)]
+pub enum MetadataStoreConfig {
+    #[serde(rename = "fs")]
+    FS(metadata_store::fs::BackendConfig),
+    #[serde(rename = "s3")]
+    S3(metadata_store::s3::BackendConfig),
 }
 
-impl StorageS3Config {
-    fn default_multipart_copy_threshold() -> ByteSize {
-        ByteSize::gb(5)
+impl Default for MetadataStoreConfig {
+    fn default() -> Self {
+        MetadataStoreConfig::FS(metadata_store::fs::BackendConfig::default())
     }
+}
 
-    fn default_multipart_copy_chunk_size() -> ByteSize {
-        ByteSize::mb(100)
-    }
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct LockStoreConfig {
+    pub redis: Option<RedisLockStoreConfig>,
+}
 
-    fn default_multipart_copy_jobs() -> usize {
-        4
-    }
-
-    fn default_multipart_part_size() -> ByteSize {
-        ByteSize::mib(10)
-    }
+#[derive(Clone, Debug, Deserialize)]
+pub struct RedisLockStoreConfig {
+    pub url: String,
+    pub ttl: usize,
+    #[serde(default)]
+    pub key_prefix: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -282,21 +259,17 @@ mod tests {
         assert_eq!(config.global.max_concurrent_requests, 4);
         assert_eq!(config.global.max_concurrent_cache_jobs, 4);
         assert!(!config.global.update_pull_time);
-        assert_eq!(
-            config.server.bind_address.to_string(),
-            "0.0.0.0".to_string()
-        );
+
+        let bind_address = config.server.bind_address.to_string();
+        assert_eq!(bind_address, "0.0.0.0".to_string());
         assert_eq!(config.server.port, 8000);
         assert_eq!(config.server.query_timeout, 3600);
         assert_eq!(config.server.query_timeout_grace_period, 60);
         assert!(config.lock_store.redis.is_none());
         assert!(config.cache_store.redis.is_none());
-        assert_eq!(
-            config.blob_store,
-            BlobStorageConfig::FS(StorageFSConfig {
-                root_dir: String::new()
-            })
-        );
+
+        assert_eq!(config.blob_store, BlobStorageConfig::default());
+
         assert!(config.identity.is_empty());
         assert!(config.repository.is_empty());
         assert!(config.observability.is_none());

@@ -1,10 +1,13 @@
-use crate::configuration::StorageFSConfig;
+#[cfg(test)]
+mod tests;
+
 use crate::registry::blob_store::{Error, LinkMetadata};
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::{BlobMetadata, DataPathBuilder};
 use crate::registry::BlobLink;
 use async_trait::async_trait;
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -16,19 +19,24 @@ use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, instrument};
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct BackendConfig {
+    pub root_dir: String,
+}
+
 #[derive(Clone)]
-pub struct FSBackend {
+pub struct Backend {
     pub tree: Arc<DataPathBuilder>,
 }
 
-impl Debug for FSBackend {
+impl Debug for Backend {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("FSBackend").finish()
     }
 }
 
-impl FSBackend {
-    pub fn new(config: StorageFSConfig) -> Self {
+impl Backend {
+    pub fn new(config: BackendConfig) -> Self {
         Self {
             tree: Arc::new(DataPathBuilder::new(config.root_dir)),
         }
@@ -169,7 +177,7 @@ impl FSBackend {
 }
 
 #[async_trait]
-impl MetadataStore for FSBackend {
+impl MetadataStore for Backend {
     #[instrument(skip(self))]
     async fn list_namespaces(
         &self,
@@ -342,60 +350,5 @@ impl MetadataStore for FSBackend {
         let _ = self.delete_empty_parent_dirs(&path).await;
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::configuration::StorageFSConfig;
-    use crate::registry::blob_store;
-    use crate::registry::metadata_store::tests::{
-        test_datastore_link_operations, test_datastore_list_namespaces,
-        test_datastore_list_referrers, test_datastore_list_revisions, test_datastore_list_tags,
-    };
-    use crate::registry::metadata_store::FSBackend;
-    use tempfile::TempDir;
-
-    fn create_test_backend() -> (FSBackend, blob_store::FSBackend, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
-        let root_dir = temp_dir.path().to_str().unwrap().to_string();
-
-        let config = StorageFSConfig { root_dir };
-        (
-            FSBackend::new(config.clone()),
-            blob_store::FSBackend::new(config),
-            temp_dir,
-        )
-    }
-
-    // Generic BlobStore trait tests
-    #[tokio::test]
-    async fn test_list_namespaces() {
-        let (backend, _, _temp_dir) = create_test_backend();
-        test_datastore_list_namespaces(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_list_tags() {
-        let (backend, _, _temp_dir) = create_test_backend();
-        test_datastore_list_tags(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_list_referrers() {
-        let (backend, blob_store, _temp_dir) = create_test_backend();
-        test_datastore_list_referrers(&blob_store, &backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_list_revisions() {
-        let (backend, _, _temp_dir) = create_test_backend();
-        test_datastore_list_revisions(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_link_operations() {
-        let (backend, _, _temp_dir) = create_test_backend();
-        test_datastore_link_operations(&backend).await;
     }
 }

@@ -344,7 +344,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
+    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use serde_json::json;
     use std::slice;
 
@@ -449,14 +449,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_manifest_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_put_manifest_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_put_manifest_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_put_manifest_s3() {
-        let registry = create_test_s3_backend().await;
-        test_put_manifest_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_put_manifest_impl(t.registry()).await;
     }
 
     async fn test_get_manifest_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -510,14 +510,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_manifest_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_get_manifest_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_get_manifest_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_get_manifest_s3() {
-        let registry = create_test_s3_backend().await;
-        test_get_manifest_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_get_manifest_impl(t.registry()).await;
     }
 
     async fn test_head_manifest_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -571,14 +571,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_head_manifest_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_head_manifest_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_head_manifest_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_head_manifest_s3() {
-        let registry = create_test_s3_backend().await;
-        test_head_manifest_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_head_manifest_impl(t.registry()).await;
     }
 
     async fn test_delete_manifest_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -636,14 +636,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_manifest_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_delete_manifest_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_delete_manifest_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_delete_manifest_s3() {
-        let registry = create_test_s3_backend().await;
-        test_delete_manifest_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_delete_manifest_impl(t.registry()).await;
     }
 
     #[test]

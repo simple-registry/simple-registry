@@ -170,9 +170,8 @@ mod tests {
     use super::*;
     use crate::registry::api::hyper::response_ext::IntoAsyncRead;
     use crate::registry::oci_types::Reference;
-    use crate::registry::test_utils::{
-        create_test_blob, create_test_fs_backend, create_test_s3_backend,
-    };
+    use crate::registry::test_utils::create_test_blob;
+    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use crate::registry::utils::BlobLink;
     use http_body_util::Empty;
     use hyper::body::Bytes;
@@ -262,14 +261,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_get_referrers_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_handle_get_referrers_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_handle_get_referrers_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_handle_get_referrers_s3() {
-        let registry = create_test_s3_backend().await;
-        test_handle_get_referrers_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_handle_get_referrers_impl(t.registry()).await;
     }
 
     async fn test_handle_list_catalog_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
@@ -340,14 +339,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_list_catalog_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_handle_list_catalog_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_handle_list_catalog_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_handle_list_catalog_s3() {
-        let registry = create_test_s3_backend().await;
-        test_handle_list_catalog_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_handle_list_catalog_impl(t.registry()).await;
     }
 
     async fn test_handle_list_tags_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
@@ -445,13 +444,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_list_tags_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_handle_list_tags_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_handle_list_tags_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_handle_list_tags_s3() {
-        let registry = create_test_s3_backend().await;
-        test_handle_list_tags_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_handle_list_tags_impl(t.registry()).await;
     }
 }

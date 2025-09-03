@@ -5,11 +5,8 @@ use crate::registry::BlobLink;
 use async_trait::async_trait;
 use std::collections::HashSet;
 
-mod fs_backend;
-mod s3_backend;
-
-pub use fs_backend::FSBackend;
-pub use s3_backend::S3Backend;
+pub mod fs;
+pub mod s3;
 
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
@@ -189,7 +186,7 @@ mod tests {
 
     pub async fn test_datastore_list_referrers(
         blob_store: &impl BlobStore,
-        store: &impl MetadataStore,
+        metadata_store: &impl MetadataStore,
     ) {
         let namespace = "test-repo";
         // Create base manifest that will be referenced
@@ -197,7 +194,7 @@ mod tests {
         let base_digest = blob_store.create_blob(base_content).await.unwrap();
         let base_link = BlobLink::Digest(base_digest.clone());
 
-        store
+        metadata_store
             .write_link(
                 namespace,
                 &base_link,
@@ -235,7 +232,7 @@ mod tests {
             .unwrap();
         let link = BlobLink::Digest(referrer_digest.clone());
 
-        store
+        metadata_store
             .write_link(
                 namespace,
                 &link,
@@ -250,7 +247,7 @@ mod tests {
         // Also add it to the referrers index
         let referrers_link = BlobLink::Referrer(base_digest.clone(), referrer_digest.clone());
 
-        store
+        metadata_store
             .write_link(
                 namespace,
                 &referrers_link,
@@ -263,7 +260,9 @@ mod tests {
             .unwrap();
 
         // Test listing referrers
-        let referrers = store.list_referrers(namespace, &base_digest, None).await;
+        let referrers = metadata_store
+            .list_referrers(namespace, &base_digest, None)
+            .await;
 
         let expected = vec![Descriptor {
             media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
@@ -276,7 +275,7 @@ mod tests {
         assert_eq!(Ok(expected), referrers);
 
         // Test with artifact type filter
-        let filtered_referrers = store
+        let filtered_referrers = metadata_store
             .list_referrers(
                 namespace,
                 &base_digest,
@@ -288,7 +287,7 @@ mod tests {
         assert!(!filtered_referrers.is_empty());
 
         // Test with non-matching artifact type
-        let non_matching_referrers = store
+        let non_matching_referrers = metadata_store
             .list_referrers(
                 namespace,
                 &base_digest,

@@ -1,9 +1,11 @@
+#[cfg(test)]
+pub mod tests;
+
 use std::fmt::{Debug, Formatter};
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::configuration::StorageS3Config;
 use crate::registry::blob_store::{BlobStore, Error, Reader};
 use crate::registry::oci_types::Digest;
 use crate::registry::reader::{ChunkedReader, HashingReader};
@@ -22,15 +24,54 @@ use aws_sdk_s3::{
     Client as S3Client, Config as S3Config,
 };
 use bytes::Bytes;
+use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
 use futures_util::{stream, StreamExt, TryFutureExt, TryStreamExt};
+use serde::Deserialize;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{debug, error, instrument};
 use x509_parser::nom::ToUsize;
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct BackendConfig {
+    pub access_key_id: String,
+    pub secret_key: String,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    #[serde(default)]
+    pub key_prefix: String,
+    #[serde(default = "BackendConfig::default_multipart_copy_threshold")]
+    pub multipart_copy_threshold: ByteSize,
+    #[serde(default = "BackendConfig::default_multipart_copy_chunk_size")]
+    pub multipart_copy_chunk_size: ByteSize,
+    #[serde(default = "BackendConfig::default_multipart_copy_jobs")]
+    pub multipart_copy_jobs: usize,
+    #[serde(default = "BackendConfig::default_multipart_part_size")]
+    pub multipart_part_size: ByteSize,
+}
+
+impl BackendConfig {
+    fn default_multipart_copy_threshold() -> ByteSize {
+        ByteSize::gb(5)
+    }
+
+    fn default_multipart_copy_chunk_size() -> ByteSize {
+        ByteSize::mb(100)
+    }
+
+    fn default_multipart_copy_jobs() -> usize {
+        4
+    }
+
+    fn default_multipart_part_size() -> ByteSize {
+        ByteSize::mib(10)
+    }
+}
+
 #[derive(Clone)]
-pub struct S3Backend {
+pub struct Backend {
     s3_client: S3Client,
     tree: Arc<DataPathBuilder>,
     bucket: String,
@@ -40,14 +81,14 @@ pub struct S3Backend {
     multipart_part_size: usize,
 }
 
-impl Debug for S3Backend {
+impl Debug for Backend {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3StorageEngine").finish()
     }
 }
 
-impl S3Backend {
-    pub fn new(config: StorageS3Config) -> Self {
+impl Backend {
+    pub fn new(config: BackendConfig) -> Self {
         let credentials = Credentials::new(
             config.access_key_id,
             config.secret_key,
@@ -181,7 +222,7 @@ impl S3Backend {
     }
 
     #[instrument(skip(self))]
-    async fn delete_object_with_prefix(&self, prefix: &str) -> Result<(), Error> {
+    pub async fn delete_object_with_prefix(&self, prefix: &str) -> Result<(), Error> {
         debug!("Deleting objects with prefix: {prefix}");
 
         let mut continuation_token = None;
@@ -572,7 +613,7 @@ impl S3Backend {
 }
 
 #[async_trait]
-impl BlobStore for S3Backend {
+impl BlobStore for Backend {
     #[instrument(skip(self))]
     async fn list_uploads(
         &self,
@@ -923,73 +964,5 @@ impl BlobStore for S3Backend {
         let path = self.tree.blob_path(digest);
         let res = self.get_object(&path, start_offset).await?;
         Ok(Box::new(res.body.into_async_read()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::configuration::StorageS3Config;
-    use crate::registry::blob_store::tests::{
-        test_datastore_blob_operations, test_datastore_list_blobs, test_datastore_list_uploads,
-        test_datastore_upload_operations,
-    };
-    use bytesize::ByteSize;
-    use uuid::Uuid;
-
-    // Helper function to create a test S3Backend
-    fn create_test_backend() -> S3Backend {
-        let config = StorageS3Config {
-            endpoint: "http://127.0.0.1:9000".to_string(),
-            region: "region".to_string(),
-            bucket: "registry".to_string(),
-            access_key_id: "root".to_string(),
-            secret_key: "roottoor".to_string(),
-            key_prefix: format!("test-{}", Uuid::new_v4()),
-            multipart_copy_threshold: ByteSize::mb(5),
-            multipart_copy_chunk_size: ByteSize::mb(5),
-            multipart_copy_jobs: 4,
-            multipart_part_size: ByteSize::mb(5),
-        };
-
-        S3Backend::new(config)
-    }
-
-    // Helper to clean up test data
-    async fn cleanup_test_prefix(backend: &S3Backend) {
-        if let Err(e) = backend
-            .delete_object_with_prefix(&backend.tree.prefix)
-            .await
-        {
-            println!("Warning: Failed to clean up test data: {e:?}");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_list_uploads() {
-        let backend = create_test_backend();
-        test_datastore_list_uploads(&backend).await;
-        cleanup_test_prefix(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_list_blobs() {
-        let backend = create_test_backend();
-        test_datastore_list_blobs(&backend).await;
-        cleanup_test_prefix(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_blob_operations() {
-        let backend = create_test_backend();
-        test_datastore_blob_operations(&backend).await;
-        cleanup_test_prefix(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_upload_operations() {
-        let backend = create_test_backend();
-        test_datastore_upload_operations(&backend).await;
-        cleanup_test_prefix(&backend).await;
     }
 }

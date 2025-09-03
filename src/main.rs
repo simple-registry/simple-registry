@@ -3,7 +3,8 @@
 
 use crate::command::{argon, scrub, server};
 use crate::configuration::{
-    BlobStorageConfig, Configuration, Error, ObservabilityConfig, ServerTlsConfig,
+    BlobStorageConfig, Configuration, Error, MetadataStoreConfig, ObservabilityConfig,
+    ServerTlsConfig,
 };
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
@@ -19,7 +20,7 @@ use opentelemetry_semantic_conventions::attribute::SERVICE_VERSION;
 use opentelemetry_stdout as stdout;
 use std::path::Path;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
@@ -192,18 +193,44 @@ fn main() -> Result<(), command::Error> {
     runtime.block_on(async move {
         set_tracing(config.observability.clone())?;
 
+        // TODO: refactor this gloubiboulga
         match config.blob_store.clone() {
             BlobStorageConfig::FS(blob_storage_config) => {
-                info!("Using filesystem backend");
-                let data_store = Arc::new(blob_store::FSBackend::new(blob_storage_config.clone()));
-                let metadata_store = Arc::new(metadata_store::FSBackend::new(blob_storage_config));
-                handle_command(config, arguments, data_store, metadata_store).await
+                info!("Using filesystem blob-store backend");
+                let data_store = Arc::new(blob_store::fs::Backend::new(blob_storage_config));
+                match config.metadata_store.clone() {
+                    MetadataStoreConfig::FS(metadata_store_config) => {
+                        info!("Using filesystem metadata-store backend");
+                        let metadata_store =
+                            Arc::new(metadata_store::fs::Backend::new(metadata_store_config));
+                        handle_command(config, arguments, data_store, metadata_store).await
+                    }
+                    MetadataStoreConfig::S3(metadata_store_config) => {
+                        info!("Using s3 metadata-store backend");
+                        let metadata_store =
+                            Arc::new(metadata_store::s3::Backend::new(metadata_store_config));
+                        handle_command(config, arguments, data_store, metadata_store).await
+                    }
+                }
             }
             BlobStorageConfig::S3(blob_storage_config) => {
                 info!("Using S3 backend");
-                let data_store = Arc::new(blob_store::S3Backend::new(blob_storage_config.clone()));
-                let metadata_store = Arc::new(metadata_store::S3Backend::new(blob_storage_config));
-                handle_command(config, arguments, data_store, metadata_store).await
+                let data_store =
+                    Arc::new(blob_store::s3::Backend::new(blob_storage_config.clone()));
+                match config.metadata_store.clone() {
+                    MetadataStoreConfig::FS(metadata_store_config) => {
+                        info!("Using filesystem metadata-store backend");
+                        let metadata_store =
+                            Arc::new(metadata_store::fs::Backend::new(metadata_store_config));
+                        handle_command(config, arguments, data_store, metadata_store).await
+                    }
+                    MetadataStoreConfig::S3(metadata_store_config) => {
+                        info!("Using s3 metadata-store backend");
+                        let metadata_store =
+                            Arc::new(metadata_store::s3::Backend::new(metadata_store_config));
+                        handle_command(config, arguments, data_store, metadata_store).await
+                    }
+                }
             }
         }
     })

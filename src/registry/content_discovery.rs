@@ -69,20 +69,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
+    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use crate::registry::utils::BlobLink;
     use std::str::FromStr;
 
     #[tokio::test]
     async fn test_get_referrers_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_get_referrers(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_get_referrers(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_get_referrers_s3() {
-        let registry = create_test_s3_backend().await;
-        test_get_referrers(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_get_referrers(t.registry()).await;
     }
 
     async fn test_get_referrers<B: BlobStore, M: MetadataStore>(registry: &Registry<B, M>) {
@@ -118,14 +118,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_catalog_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_list_catalog(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_list_catalog(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_list_catalog_s3() {
-        let registry = create_test_s3_backend().await;
-        test_list_catalog(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_list_catalog(t.registry()).await;
     }
 
     async fn test_list_catalog<B: BlobStore, M: MetadataStore>(registry: &Registry<B, M>) {
@@ -150,14 +150,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_tags_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_list_tags(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_list_tags(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_list_tags_s3() {
-        let registry = create_test_s3_backend().await;
-        test_list_tags(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_list_tags(t.registry()).await;
     }
 
     async fn test_list_tags<B: BlobStore, M: MetadataStore>(registry: &Registry<B, M>) {

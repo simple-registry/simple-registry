@@ -225,9 +225,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::test_utils::{
-        create_test_blob, create_test_fs_backend, create_test_s3_backend,
-    };
+    use crate::registry::test_utils::create_test_blob;
+    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use std::io::Cursor;
     use tokio::io::AsyncReadExt;
 
@@ -249,14 +248,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_head_blob_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_head_blob_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_head_blob_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_head_blob_s3() {
-        let registry = create_test_s3_backend().await;
-        test_head_blob_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_head_blob_impl(t.registry()).await;
     }
 
     async fn test_get_blob_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -284,14 +283,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_blob_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_get_blob_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_get_blob_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_get_blob_s3() {
-        let registry = create_test_s3_backend().await;
-        test_get_blob_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_get_blob_impl(t.registry()).await;
     }
 
     async fn test_get_blob_with_range_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -323,14 +322,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_blob_with_range_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_get_blob_with_range_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_get_blob_with_range_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_get_blob_with_range_s3() {
-        let registry = create_test_s3_backend().await;
-        test_get_blob_with_range_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_get_blob_with_range_impl(t.registry()).await;
     }
 
     async fn test_delete_blob_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -382,14 +381,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_blob_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_delete_blob_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_delete_blob_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_delete_blob_s3() {
-        let registry = create_test_s3_backend().await;
-        test_delete_blob_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_delete_blob_impl(t.registry()).await;
     }
 
     async fn test_copy_blob_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -421,13 +420,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_copy_blob_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_copy_blob_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_copy_blob_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_copy_blob_s3() {
-        let registry = create_test_s3_backend().await;
-        test_copy_blob_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_copy_blob_impl(t.registry()).await;
     }
 }

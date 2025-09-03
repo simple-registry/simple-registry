@@ -148,7 +148,7 @@ mod tests {
         RepositoryAccessPolicyConfig, RepositoryConfig, RepositoryRetentionPolicyConfig,
     };
     use crate::registry::oci_types::Reference;
-    use crate::registry::test_utils::create_test_fs_backend;
+    use crate::registry::tests::FSRegistryTestCase;
 
     type NoStoreRegistry = Registry<(), ()>;
 
@@ -211,10 +211,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_request_default_allow_no_rules() {
-        let (mut registry, _) = create_test_fs_backend().await;
+        let mut t = FSRegistryTestCase::new();
         let reference = Reference::Tag("latest".to_string());
 
-        registry.repositories.insert(
+        t.registry_mut().repositories.insert(
             "policy-allow-repo".to_string(),
             create_default_allow_repo(Vec::new()),
         );
@@ -224,17 +224,17 @@ mod tests {
             username: Some("whatever-identity".to_string()),
             ..ClientIdentity::default()
         };
-        let repository = registry.validate_namespace("test-repo").unwrap();
+        let repository = t.registry().validate_namespace("test-repo").unwrap();
 
         assert!(NoStoreRegistry::validate_request(Some(repository), &request, &identity).is_ok());
     }
 
     #[tokio::test]
     async fn test_validate_request_default_deny_no_rules() {
-        let (mut registry, _) = create_test_fs_backend().await;
+        let mut t = FSRegistryTestCase::new();
         let reference = Reference::Tag("latest".to_string());
 
-        registry.repositories.insert(
+        t.registry_mut().repositories.insert(
             "policy-deny-repo".to_string(),
             create_default_deny_repo(Vec::new()),
         );
@@ -244,18 +244,18 @@ mod tests {
             username: Some("forbidden".to_string()),
             ..ClientIdentity::default()
         };
-        let repository = registry.validate_namespace("policy-deny-repo").unwrap();
+        let repository = t.registry().validate_namespace("policy-deny-repo").unwrap();
 
         assert!(NoStoreRegistry::validate_request(Some(repository), &request, &identity).is_err());
     }
 
     #[tokio::test]
     async fn test_validate_request_default_allow() {
-        let (mut registry, _) = create_test_fs_backend().await;
+        let mut t = FSRegistryTestCase::new();
         let reference = Reference::Tag("latest".to_string());
 
         let rules = vec!["identity.username == 'forbidden'".to_string()];
-        registry.repositories.insert(
+        t.registry_mut().repositories.insert(
             "policy-allow-repo".to_string(),
             create_default_allow_repo(rules),
         );
@@ -265,7 +265,10 @@ mod tests {
             username: Some("whatever-identity".to_string()),
             ..ClientIdentity::default()
         };
-        let repository = registry.validate_namespace("policy-allow-repo").unwrap();
+        let repository = t
+            .registry()
+            .validate_namespace("policy-allow-repo")
+            .unwrap();
 
         assert!(NoStoreRegistry::validate_request(Some(repository), &request, &identity).is_ok());
 
@@ -274,18 +277,21 @@ mod tests {
             username: Some("forbidden".to_string()),
             ..ClientIdentity::default()
         };
-        let repository = registry.validate_namespace("policy-allow-repo").unwrap();
+        let repository = t
+            .registry()
+            .validate_namespace("policy-allow-repo")
+            .unwrap();
 
         assert!(NoStoreRegistry::validate_request(Some(repository), &request, &identity).is_err());
     }
 
     #[tokio::test]
     async fn test_validate_request_default_deny() {
-        let (mut registry, _) = create_test_fs_backend().await;
+        let mut t = FSRegistryTestCase::new();
         let reference = Reference::Tag("latest".to_string());
 
         let rules = vec!["identity.username == 'admin'".to_string()];
-        registry.repositories.insert(
+        t.registry_mut().repositories.insert(
             "policy-deny-repo".to_string(),
             create_default_deny_repo(rules),
         );
@@ -295,7 +301,7 @@ mod tests {
             username: Some("admin".to_string()),
             ..ClientIdentity::default()
         };
-        let repository = registry.validate_namespace("policy-deny-repo").unwrap();
+        let repository = t.registry().validate_namespace("policy-deny-repo").unwrap();
 
         assert!(NoStoreRegistry::validate_request(Some(repository), &request, &identity).is_ok());
 
@@ -304,7 +310,7 @@ mod tests {
             username: Some("forbidden".to_string()),
             ..ClientIdentity::default()
         };
-        let repository = registry.validate_namespace("policy-deny-repo").unwrap();
+        let repository = t.registry().validate_namespace("policy-deny-repo").unwrap();
 
         assert!(NoStoreRegistry::validate_request(Some(repository), &request, &identity).is_err());
     }

@@ -1,4 +1,6 @@
-use crate::configuration::StorageS3Config;
+#[cfg(test)]
+pub(crate) mod tests;
+
 use crate::registry::blob_store::{Error, LinkMetadata};
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
@@ -11,21 +13,33 @@ use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Config as S3Config};
 use bytes::Bytes;
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, instrument};
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct BackendConfig {
+    pub access_key_id: String,
+    pub secret_key: String,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    #[serde(default)]
+    pub key_prefix: String,
+}
+
 #[derive(Clone)]
-pub struct S3Backend {
+pub struct Backend {
     s3_client: S3Client,
     tree: Arc<DataPathBuilder>,
     bucket: String,
 }
 
-impl S3Backend {
+impl Backend {
     // TODO: implement simplified S3 client
-    pub fn new(config: StorageS3Config) -> Self {
+    pub fn new(config: BackendConfig) -> Self {
         let credentials = Credentials::new(
             config.access_key_id,
             config.secret_key,
@@ -91,7 +105,7 @@ impl S3Backend {
     }
 
     #[instrument(skip(self))]
-    async fn delete_object_with_prefix(&self, prefix: &str) -> Result<(), Error> {
+    pub async fn delete_object_with_prefix(&self, prefix: &str) -> Result<(), Error> {
         debug!("Deleting objects with prefix: {prefix}");
 
         let mut continuation_token = None;
@@ -153,7 +167,7 @@ impl S3Backend {
 }
 
 #[async_trait]
-impl MetadataStore for S3Backend {
+impl MetadataStore for Backend {
     #[instrument(skip(self))]
     async fn list_namespaces(
         &self,
@@ -484,85 +498,5 @@ impl MetadataStore for S3Backend {
     async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
         let link_path = self.tree.get_link_path(link, namespace);
         self.delete_object(&link_path).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::configuration::StorageS3Config;
-    use crate::registry::blob_store;
-    use crate::registry::metadata_store::tests::{
-        test_datastore_link_operations, test_datastore_list_namespaces,
-        test_datastore_list_referrers, test_datastore_list_revisions, test_datastore_list_tags,
-    };
-    use crate::registry::metadata_store::S3Backend;
-    use bytesize::ByteSize;
-    use uuid::Uuid;
-
-    // Helper function to create a test S3Backend
-    fn create_test_backend() -> (S3Backend, blob_store::S3Backend) {
-        let config = StorageS3Config {
-            endpoint: "http://127.0.0.1:9000".to_string(),
-            region: "region".to_string(),
-            bucket: "registry".to_string(),
-            access_key_id: "root".to_string(),
-            secret_key: "roottoor".to_string(),
-            key_prefix: format!("test-{}", Uuid::new_v4()),
-            multipart_copy_threshold: ByteSize::mb(5),
-            multipart_copy_chunk_size: ByteSize::mb(5),
-            multipart_copy_jobs: 4,
-            multipart_part_size: ByteSize::mb(5),
-        };
-
-        (
-            S3Backend::new(config.clone()),
-            blob_store::S3Backend::new(config),
-        )
-    }
-
-    // Helper to clean up test data
-    async fn cleanup_test_prefix(backend: &S3Backend) {
-        if let Err(e) = backend
-            .delete_object_with_prefix(&backend.tree.prefix)
-            .await
-        {
-            println!("Warning: Failed to clean up test data: {e:?}");
-        }
-    }
-
-    // Generic BlobStore trait tests
-    #[tokio::test]
-    async fn test_list_namespaces() {
-        let (backend, _) = create_test_backend();
-        test_datastore_list_namespaces(&backend).await;
-        cleanup_test_prefix(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_list_tags() {
-        let (backend, _) = create_test_backend();
-        test_datastore_list_tags(&backend).await;
-        cleanup_test_prefix(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_list_referrers() {
-        let (backend, blob_store) = create_test_backend();
-        test_datastore_list_referrers(&blob_store, &backend).await;
-        cleanup_test_prefix(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_list_revisions() {
-        let (backend, _) = create_test_backend();
-        test_datastore_list_revisions(&backend).await;
-        cleanup_test_prefix(&backend).await;
-    }
-
-    #[tokio::test]
-    async fn test_link_operations() {
-        let (backend, _) = create_test_backend();
-        test_datastore_link_operations(&backend).await;
-        cleanup_test_prefix(&backend).await;
     }
 }

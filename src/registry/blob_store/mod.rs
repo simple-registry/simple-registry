@@ -1,6 +1,6 @@
 mod error;
-mod fs_backend;
-mod s3_backend;
+pub mod fs;
+pub mod s3;
 
 use crate::registry::oci_types::Digest;
 use async_trait::async_trait;
@@ -9,11 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use tokio::io::AsyncRead;
 
-pub use fs_backend::FSBackend;
-pub use s3_backend::S3Backend;
-
 pub use error::Error;
 
+// TODO: move to metadata-store
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct LinkMetadata {
     pub target: Digest,

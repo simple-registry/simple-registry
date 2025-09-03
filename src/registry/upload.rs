@@ -164,7 +164,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
+    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use std::io::Cursor;
 
     async fn test_start_upload_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -199,14 +199,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_upload_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_start_upload_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_start_upload_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_start_upload_s3() {
-        let registry = create_test_s3_backend().await;
-        test_start_upload_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_start_upload_impl(t.registry()).await;
     }
 
     async fn test_patch_upload_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -254,14 +254,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_patch_upload_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_patch_upload_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_patch_upload_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_patch_upload_s3() {
-        let registry = create_test_s3_backend().await;
-        test_patch_upload_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_patch_upload_impl(t.registry()).await;
     }
 
     async fn test_complete_upload_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -306,14 +306,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_complete_upload_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_complete_upload_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_complete_upload_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_complete_upload_s3() {
-        let registry = create_test_s3_backend().await;
-        test_complete_upload_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_complete_upload_impl(t.registry()).await;
     }
 
     async fn test_delete_upload_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -349,14 +349,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_upload_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_delete_upload_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_delete_upload_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_delete_upload_s3() {
-        let registry = create_test_s3_backend().await;
-        test_delete_upload_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_delete_upload_impl(t.registry()).await;
     }
 
     async fn test_get_upload_range_max_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -397,13 +397,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_upload_range_max_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_get_upload_range_max_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_get_upload_range_max_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_get_upload_range_max_s3() {
-        let registry = create_test_s3_backend().await;
-        test_get_upload_range_max_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_get_upload_range_max_impl(t.registry()).await;
     }
 }

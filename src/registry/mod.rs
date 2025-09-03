@@ -21,6 +21,8 @@ pub mod policy_types;
 mod reader;
 mod repository;
 mod scrub;
+#[cfg(test)]
+mod tests;
 mod upload;
 pub mod utils;
 
@@ -65,13 +67,7 @@ where
     B: BlobStore,
     M: MetadataStore,
 {
-    #[instrument(skip(
-        repositories_config,
-        blob_store,
-        metadata_store,
-        auth_token_cache,
-        lock_store
-    ))]
+    #[instrument(skip(repositories_config, blob_store, metadata_store, auth_token_cache))]
     pub fn new(
         blob_store: Arc<B>,
         metadata_store: Arc<M>,
@@ -102,21 +98,6 @@ where
         };
 
         Ok(res)
-    }
-
-    #[cfg(test)]
-    pub fn with_repositories_config(
-        mut self,
-        repositories_config: HashMap<String, RepositoryConfig>,
-    ) -> Result<Self, Error> {
-        let mut repositories = HashMap::new();
-        for (repository_name, repository_config) in repositories_config {
-            let res = Repository::new(repository_config, repository_name.clone())?;
-            repositories.insert(repository_name, res);
-        }
-
-        self.repositories = repositories;
-        Ok(self)
     }
 
     pub fn with_scrub_dry_run(mut self, scrub_dry_run: bool) -> Self {
@@ -236,20 +217,12 @@ where
 }
 
 #[cfg(test)]
-pub(crate) mod test_utils {
+pub mod test_utils {
     use super::*;
-    use crate::configuration::{
-        CacheStoreConfig, RepositoryAccessPolicyConfig, RepositoryRetentionPolicyConfig,
-        StorageFSConfig, StorageS3Config,
-    };
-    use crate::registry::blob_store;
-    use crate::registry::metadata_store;
+    use crate::configuration::{RepositoryAccessPolicyConfig, RepositoryRetentionPolicyConfig};
     use crate::registry::oci_types::Digest;
     use crate::registry::utils::BlobLink;
-    use bytesize::ByteSize;
     use serde_json::json;
-    use tempfile::TempDir;
-    use uuid::Uuid;
 
     pub fn create_test_repository_config() -> HashMap<String, RepositoryConfig> {
         let mut repositories = HashMap::new();
@@ -265,68 +238,6 @@ pub(crate) mod test_utils {
             },
         );
         repositories
-    }
-
-    pub async fn create_test_fs_backend() -> (
-        Registry<blob_store::FSBackend, metadata_store::FSBackend>,
-        TempDir,
-    ) {
-        let temp_dir = TempDir::new().unwrap();
-        let root_dir = temp_dir.path().to_str().unwrap().to_string();
-
-        let config = StorageFSConfig { root_dir };
-        let blob_backend = Arc::new(blob_store::FSBackend::new(config.clone()));
-        let metadata_backend = Arc::new(metadata_store::FSBackend::new(config));
-
-        let repositories_config = create_test_repository_config();
-        let global = GlobalConfig::default();
-        let token_cache = CacheStoreConfig::default();
-        let lock_store = LockStoreConfig::default();
-
-        let registry = Registry::new(
-            blob_backend,
-            metadata_backend,
-            repositories_config,
-            &global,
-            token_cache,
-            lock_store,
-        )
-        .unwrap();
-
-        (registry, temp_dir)
-    }
-
-    pub async fn create_test_s3_backend(
-    ) -> Registry<blob_store::S3Backend, metadata_store::S3Backend> {
-        let config = StorageS3Config {
-            endpoint: "http://127.0.0.1:9000".to_string(),
-            region: "region".to_string(),
-            bucket: "registry".to_string(),
-            access_key_id: "root".to_string(),
-            secret_key: "roottoor".to_string(),
-            key_prefix: format!("test-{}", Uuid::new_v4()),
-            multipart_copy_threshold: ByteSize::mb(100),
-            multipart_copy_chunk_size: ByteSize::mb(10),
-            multipart_copy_jobs: 4,
-            multipart_part_size: ByteSize::mb(5),
-        };
-
-        let blob_backend = Arc::new(blob_store::S3Backend::new(config.clone()));
-        let metadata_backend = Arc::new(metadata_store::S3Backend::new(config));
-        let repositories_config = create_test_repository_config();
-        let global = GlobalConfig::default();
-        let token_cache = CacheStoreConfig::default();
-        let lock_store = LockStoreConfig::default();
-
-        Registry::new(
-            blob_backend,
-            metadata_backend,
-            repositories_config,
-            &global,
-            token_cache,
-            lock_store,
-        )
-        .unwrap()
     }
 
     pub async fn create_test_blob<B: BlobStore, M: MetadataStore>(
