@@ -10,6 +10,7 @@ mod blob;
 pub mod blob_store;
 pub mod cache_store;
 mod content_discovery;
+pub mod data_store;
 mod error;
 mod http_client;
 pub mod lock_store;

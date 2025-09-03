@@ -52,42 +52,50 @@ fn test_paginate() {
 #[tokio::test]
 async fn test_write_and_read_file() {
     let t = FSBlobStoreBackendTestCase::new();
+    let backend = t.backend();
 
-    let test_path = t.path().join("test_file.txt");
+    let test_path = "test_file.txt";
     let test_content = b"Hello, world!";
 
-    Backend::write_file(&test_path, test_content).await.unwrap();
-    assert!(test_path.exists());
+    backend.store.write(test_path, test_content).await.unwrap();
 
-    let content = fs::read(&test_path).await.unwrap();
+    let full_path = t.path().join(test_path);
+    assert!(full_path.exists());
+
+    let content = fs::read(&full_path).await.unwrap();
     assert_eq!(content, test_content);
 
     let test_string = "Hello world!";
-    Backend::write_file(&test_path, test_string.as_bytes())
+    backend
+        .store
+        .write(test_path, test_string.as_bytes())
         .await
         .unwrap();
-    let string_content = fs::read_to_string(&test_path).await.unwrap();
+    let string_content = fs::read_to_string(&full_path).await.unwrap();
     assert_eq!(string_content, test_string);
 }
 
 #[tokio::test]
 async fn test_delete_empty_parent_dirs() {
     let t = FSBlobStoreBackendTestCase::new();
+    let backend = t.backend();
 
-    let nested_dir = t.temp_dir.path().join("a/b/c/d");
-    fs::create_dir_all(&nested_dir).await.unwrap();
+    let nested_path = "a/b/c/d";
+    let test_file_path = "a/b/c/d/test.txt";
 
-    let test_file = nested_dir.join("test.txt");
-    fs::write(&test_file, b"test").await.unwrap();
+    backend.store.write(test_file_path, b"test").await.unwrap();
 
-    fs::remove_file(&test_file).await.unwrap();
+    backend.store.delete(test_file_path).await.unwrap();
 
-    t.backend()
-        .delete_empty_parent_dirs(nested_dir.to_str().unwrap())
+    backend.store.delete_dir(nested_path).await.unwrap();
+    backend
+        .store
+        .delete_empty_parent_dirs(nested_path)
         .await
         .unwrap();
 
-    assert!(!nested_dir.exists());
+    let full_path = t.temp_dir.path().join(nested_path);
+    assert!(!full_path.exists());
     assert!(t.path().exists());
 }
 

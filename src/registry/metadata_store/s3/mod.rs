@@ -2,21 +2,15 @@
 pub(crate) mod tests;
 
 use crate::registry::blob_store::{Error, LinkMetadata};
+use crate::registry::data_store;
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
-use crate::registry::utils::{BlobMetadata, DataPathBuilder};
+use crate::registry::utils::{path_builder, BlobMetadata};
 use crate::registry::BlobLink;
 use async_trait::async_trait;
-use aws_sdk_s3::config::timeout::TimeoutConfig;
-use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
-use aws_sdk_s3::operation::get_object::GetObjectOutput;
-use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::{Client as S3Client, Config as S3Config};
 use bytes::Bytes;
 use serde::Deserialize;
 use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, instrument};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -32,137 +26,14 @@ pub struct BackendConfig {
 
 #[derive(Clone)]
 pub struct Backend {
-    s3_client: S3Client,
-    tree: Arc<DataPathBuilder>,
-    bucket: String,
+    pub store: data_store::s3::Backend,
 }
 
 impl Backend {
-    // TODO: implement simplified S3 client
     pub fn new(config: BackendConfig) -> Self {
-        let credentials = Credentials::new(
-            config.access_key_id,
-            config.secret_key,
-            None,
-            None,
-            "custom",
-        );
+        let store = data_store::s3::Backend::new(config.into());
 
-        let timeout = TimeoutConfig::builder()
-            .operation_timeout(Duration::from_secs(10))
-            .operation_attempt_timeout(Duration::from_secs(10))
-            .build();
-
-        let client_config = S3Config::builder()
-            .behavior_version(BehaviorVersion::latest())
-            .region(Region::new(config.region))
-            .endpoint_url(config.endpoint)
-            .credentials_provider(credentials)
-            .timeout_config(timeout)
-            .force_path_style(true)
-            .build();
-
-        let s3_client = S3Client::from_conf(client_config);
-
-        Self {
-            s3_client,
-            tree: Arc::new(DataPathBuilder::new(config.key_prefix)),
-            bucket: config.bucket,
-        }
-    }
-
-    #[instrument(skip(self))]
-    async fn get_object(&self, key: &str, offset: Option<u64>) -> Result<GetObjectOutput, Error> {
-        let mut res = self.s3_client.get_object().bucket(&self.bucket).key(key);
-
-        if let Some(offset) = offset {
-            res = res.range(format!("bytes={offset}-"));
-        }
-
-        match res.send().await {
-            Err(e) => {
-                let service_error = e.into_service_error();
-                if service_error.is_no_such_key() {
-                    Err(Error::ReferenceNotFound)
-                } else {
-                    Err(service_error.into())
-                }
-            }
-            Ok(res) => Ok(res),
-        }
-    }
-
-    #[instrument(skip(self))]
-    async fn get_object_body_as_vec(
-        &self,
-        key: &str,
-        offset: Option<u64>,
-    ) -> Result<Vec<u8>, Error> {
-        let res = self.get_object(key, offset).await?;
-
-        let body = res.body.collect().await?;
-        Ok(body.to_vec())
-    }
-
-    #[instrument(skip(self))]
-    pub async fn delete_object_with_prefix(&self, prefix: &str) -> Result<(), Error> {
-        debug!("Deleting objects with prefix: {prefix}");
-
-        let mut continuation_token = None;
-        loop {
-            let res = self
-                .s3_client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(prefix)
-                .max_keys(1000)
-                .set_continuation_token(continuation_token)
-                .send()
-                .await?;
-
-            for object in res.contents.unwrap_or_default() {
-                if let Some(key) = object.key {
-                    debug!("Deleting object: {key}");
-                    self.delete_object(&key).await?;
-                }
-            }
-
-            if res.is_truncated.unwrap_or_default() {
-                continuation_token = res.next_continuation_token;
-            } else {
-                break;
-            }
-        }
-
-        Ok(())
-    }
-
-    #[instrument(skip(self, data))]
-    async fn put_object<T>(&self, key: &str, data: T) -> Result<(), Error>
-    where
-        T: Into<Bytes>,
-    {
-        self.s3_client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .body(ByteStream::from(data.into()))
-            .send()
-            .await?;
-
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
-    async fn delete_object(&self, key: &str) -> Result<(), Error> {
-        self.s3_client
-            .delete_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await?;
-
-        Ok(())
+        Self { store }
     }
 }
 
@@ -177,54 +48,43 @@ impl MetadataStore for Backend {
         debug!("Fetching {n} namespace(s) with continuation token: {last:?}");
 
         // List all objects under the repository directory
-        let base_prefix = format!("{}/", self.tree.repository_dir());
-        let base_prefix_len = base_prefix.len();
+        let repo_dir = path_builder::repository_dir();
 
         let mut namespaces = Vec::new();
         let mut continuation_token = None;
 
         // List all objects recursively to find all namespaces
         loop {
-            let mut request = self
-                .s3_client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(&base_prefix)
-                .max_keys(i32::from(n));
+            let (objects, next_token) = self
+                .store
+                .list_objects(&repo_dir, 1000, continuation_token)
+                .await?;
 
-            if let Some(token) = continuation_token {
-                request = request.continuation_token(token);
-            }
-
-            let res = request.send().await?;
-
-            for object in res.contents.unwrap_or_default() {
-                let Some(key) = object.key else {
-                    continue;
-                };
-
-                // We need to extract the namespace from the path
-                // In S3, the path will be something like:
-                // v2/repositories/namespace/_manifests/... or
-                // v2/repositories/namespace/nested/_manifests/...
-                let rel_path = &key[base_prefix_len..];
+            for key in objects {
+                // The path is relative to v2/repositories, like:
+                // namespace/_manifests/... or
+                // namespace/nested/_manifests/...
 
                 // Look for special directories that indicate a namespace
                 for marker in &["/_manifests/", "/_layers/", "/_uploads/", "/_config/"] {
-                    if let Some(idx) = rel_path.find(marker) {
-                        let namespace = rel_path[..idx].to_string();
-                        namespaces.push(namespace);
+                    if let Some(idx) = key.find(marker) {
+                        let namespace = key[..idx].to_string();
+                        if !namespaces.contains(&namespace) {
+                            namespaces.push(namespace);
+                        }
                         break; // Found a namespace, no need to check other markers
                     }
                 }
             }
 
-            if res.is_truncated == Some(true) {
-                continuation_token = res.next_continuation_token;
-            } else {
+            continuation_token = next_token;
+            if continuation_token.is_none() {
                 break;
             }
         }
+
+        // Sort namespaces for consistent pagination
+        namespaces.sort();
 
         let start_idx = if let Some(last_item) = &last {
             namespaces
@@ -255,40 +115,23 @@ impl MetadataStore for Backend {
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
         debug!("Listing {n} tag(s) for namespace '{namespace}' starting with continuation_token '{last:?}'");
-        let base_prefix = format!("{}/", self.tree.manifest_tags_dir(namespace));
-        let base_prefix_len = base_prefix.len();
+        let tags_dir = path_builder::manifest_tags_dir(namespace);
 
         let mut all_tags = Vec::new();
         let mut continuation_token = None;
 
         loop {
-            let mut request = self
-                .s3_client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(&base_prefix)
-                .delimiter("/")
-                .max_keys(i32::from(n));
+            let (prefixes, _, next_token) = self
+                .store
+                .list_prefixes(&tags_dir, "/", 1000, continuation_token)
+                .await?;
 
-            if let Some(token) = continuation_token {
-                request = request.continuation_token(token);
+            for tag in prefixes {
+                all_tags.push(tag);
             }
 
-            let res = request.send().await?;
-
-            for common_prefixes in res.common_prefixes.unwrap_or_default() {
-                if let Some(key) = common_prefixes.prefix {
-                    let mut tag = key[base_prefix_len..].to_string();
-                    if tag.ends_with('/') {
-                        tag = tag.trim_end_matches('/').to_string();
-                    }
-                    all_tags.push(tag);
-                }
-            }
-
-            if res.is_truncated == Some(true) {
-                continuation_token = res.next_continuation_token;
-            } else {
+            continuation_token = next_token;
+            if continuation_token.is_none() {
                 break;
             }
         }
@@ -321,41 +164,34 @@ impl MetadataStore for Backend {
         digest: &Digest,
         artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, Error> {
-        let base_prefix = format!(
-            "{}/sha256/",
-            self.tree.manifest_referrers_dir(namespace, digest)
-        );
-        let base_prefix_len = base_prefix.len();
+        let referrers_dir = path_builder::manifest_referrers_dir(namespace, digest);
 
         let mut referrers = Vec::new();
-
         let mut continuation_token = None;
 
         loop {
-            let res = self
-                .s3_client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(&base_prefix)
-                .max_keys(100)
-                .set_continuation_token(continuation_token)
-                .send()
+            let (objects, next_token) = self
+                .store
+                .list_objects(&referrers_dir, 100, continuation_token)
                 .await?;
 
-            for object in res.contents.unwrap_or_default() {
-                let Some(key) = object.key else {
+            for key in objects {
+                // The key is a relative path like "sha256/<digest>/link"
+                let parts: Vec<&str> = key.split('/').collect();
+                if parts.len() < 2 || parts[0] != "sha256" {
                     continue;
-                };
-
-                let mut manifest_digest = key[base_prefix_len..].to_string();
-                if manifest_digest.ends_with("/link") {
-                    manifest_digest = manifest_digest.trim_end_matches("/link").to_string();
                 }
 
-                let manifest_digest = Digest::Sha256(manifest_digest);
-                let blob_path = self.tree.blob_path(&manifest_digest);
+                let manifest_digest = Digest::Sha256(parts[1].to_string());
+                let blob_path = path_builder::blob_path(&manifest_digest);
 
-                let manifest = self.get_object_body_as_vec(&blob_path, None).await?;
+                let manifest = match self.store.read(&blob_path).await {
+                    Ok(data) => data,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(Error::ReferenceNotFound)
+                    }
+                    Err(e) => return Err(e.into()),
+                };
                 let manifest_len = manifest.len();
 
                 let manifest = Manifest::from_slice(&manifest)?;
@@ -371,9 +207,8 @@ impl MetadataStore for Backend {
                 });
             }
 
-            if res.is_truncated == Some(true) {
-                continuation_token = res.next_continuation_token;
-            } else {
+            continuation_token = next_token;
+            if continuation_token.is_none() {
                 break;
             }
         }
@@ -388,50 +223,32 @@ impl MetadataStore for Backend {
         continuation_token: Option<String>,
     ) -> Result<(Vec<Digest>, Option<String>), Error> {
         debug!("Fetching {n} revision(s) for namespace '{namespace}' with continuation token: {continuation_token:?}");
-        let base_prefix = format!(
-            "{}/",
-            self.tree
-                .manifest_revisions_link_root_dir(namespace, "sha256")
-        );
-        let base_prefix_len = base_prefix.len();
+        let revisions_dir = path_builder::manifest_revisions_link_root_dir(namespace, "sha256");
 
-        let res = self
-            .s3_client
-            .list_objects_v2()
-            .bucket(&self.bucket)
-            .prefix(&base_prefix)
-            .delimiter("/")
-            .max_keys(i32::from(n))
-            .set_continuation_token(continuation_token)
-            .send()
+        let (prefixes, _, next_last) = self
+            .store
+            .list_prefixes(&revisions_dir, "/", i32::from(n), continuation_token)
             .await?;
 
         let mut revisions = Vec::new();
-        for common_prefixes in res.common_prefixes.unwrap_or_default() {
-            let Some(key) = common_prefixes.prefix else {
-                continue;
-            };
-
-            let mut key = key[base_prefix_len..].to_string();
-            if key.ends_with('/') {
-                key = key.trim_end_matches('/').to_string();
-            }
+        for key in prefixes {
             revisions.push(Digest::Sha256(key));
         }
-
-        let next_last = match res.is_truncated {
-            Some(true) => res.next_continuation_token,
-            _ => None,
-        };
 
         Ok((revisions, next_last))
     }
 
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobMetadata, Error> {
-        let path = self.tree.blob_index_path(digest);
+        let path = path_builder::blob_index_path(digest);
 
-        let data = self.get_object_body_as_vec(&path, None).await?;
+        let data = match self.store.read(&path).await {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Error::ReferenceNotFound)
+            }
+            Err(e) => return Err(e.into()),
+        };
         let index = serde_json::from_slice(&data)?;
 
         Ok(index)
@@ -447,9 +264,9 @@ impl MetadataStore for Backend {
     where
         O: FnOnce(&mut HashSet<BlobLink>) + Send,
     {
-        let path = self.tree.blob_index_path(digest);
+        let path = path_builder::blob_index_path(digest);
 
-        let res = self.get_object_body_as_vec(&path, None).await;
+        let res = self.store.read(&path).await;
 
         let mut reference_index = match res {
             Ok(data) => serde_json::from_slice::<BlobMetadata>(&data)?,
@@ -467,21 +284,23 @@ impl MetadataStore for Backend {
         }
 
         if reference_index.namespace.is_empty() {
-            let path = self.tree.blob_container_dir(digest);
-            self.delete_object_with_prefix(&path).await?;
+            let path = path_builder::blob_container_dir(digest);
+            self.store.delete_prefix(&path).await?;
         } else {
             let content = Bytes::from(serde_json::to_vec(&reference_index)?);
-            self.put_object(&path, content).await?;
+            self.store.put_object(&path, content).await?;
         }
 
         Ok(())
     }
 
     async fn read_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
-        let link_path = self.tree.get_link_path(link, namespace);
-        self.get_object_body_as_vec(&link_path, None)
-            .await
-            .and_then(LinkMetadata::from_bytes)
+        let link_path = path_builder::get_link_path(link, namespace);
+        match self.store.read(&link_path).await {
+            Ok(data) => LinkMetadata::from_bytes(data),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Error::ReferenceNotFound),
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn write_link(
@@ -490,13 +309,17 @@ impl MetadataStore for Backend {
         link: &BlobLink,
         metadata: &LinkMetadata,
     ) -> Result<(), Error> {
-        let link_path = self.tree.get_link_path(link, namespace);
+        let link_path = path_builder::get_link_path(link, namespace);
         let serialized_link_data = Bytes::from(serde_json::to_vec(metadata)?);
-        self.put_object(&link_path, serialized_link_data).await
+        self.store
+            .put_object(&link_path, serialized_link_data)
+            .await?;
+        Ok(())
     }
 
     async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
-        let link_path = self.tree.get_link_path(link, namespace);
-        self.delete_object(&link_path).await
+        let link_path = path_builder::get_link_path(link, namespace);
+        self.store.delete(&link_path).await?;
+        Ok(())
     }
 }

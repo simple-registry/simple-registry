@@ -2,21 +2,17 @@
 mod tests;
 
 use crate::registry::blob_store::{Error, LinkMetadata};
+use crate::registry::data_store;
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
-use crate::registry::utils::{BlobMetadata, DataPathBuilder};
+use crate::registry::utils::{path_builder, BlobMetadata};
 use crate::registry::BlobLink;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::fs;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
+use std::path::PathBuf;
 use tracing::{debug, instrument};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -26,7 +22,7 @@ pub struct BackendConfig {
 
 #[derive(Clone)]
 pub struct Backend {
-    pub tree: Arc<DataPathBuilder>,
+    store: data_store::fs::Backend,
 }
 
 impl Debug for Backend {
@@ -38,73 +34,8 @@ impl Debug for Backend {
 impl Backend {
     pub fn new(config: BackendConfig) -> Self {
         Self {
-            tree: Arc::new(DataPathBuilder::new(config.root_dir)),
+            store: data_store::fs::Backend::new(config.into()),
         }
-    }
-
-    // TODO: move to extension trait or utility module
-    #[instrument(skip(path, contents))]
-    async fn write_file<P>(path: P, contents: &[u8]) -> Result<(), Error>
-    where
-        P: AsRef<Path>,
-    {
-        if let Some(parent) = path.as_ref().parent() {
-            fs::create_dir_all(parent).await?;
-        }
-
-        let mut file = File::create(&path).await?;
-        file.write_all(contents).await?;
-        file.sync_all().await?;
-
-        Ok(())
-    }
-
-    #[instrument]
-    pub async fn delete_empty_parent_dirs(&self, path: &str) -> Result<(), Error> {
-        let path = PathBuf::from(path);
-        let root_dir = Path::new(&self.tree.prefix);
-
-        let _ = fs::remove_dir_all(&path).await;
-
-        let mut parent = path.parent();
-        while let Some(parent_path) = parent {
-            if parent_path == root_dir {
-                break;
-            }
-
-            let mut entries = match fs::read_dir(parent_path).await {
-                Ok(entries) => entries,
-                Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
-                Err(e) => return Err(e.into()),
-            };
-
-            if entries.next_entry().await?.is_some() {
-                break;
-            }
-
-            debug!("Deleting empty parent dir: {}", parent_path.display());
-            fs::remove_dir(parent_path).await?;
-
-            parent = parent_path.parent();
-        }
-
-        Ok(())
-    }
-
-    #[instrument]
-    pub async fn collect_directory_entries(&self, path: &str) -> Result<Vec<String>, Error> {
-        let mut entries = Vec::new();
-        let mut read_dir = match fs::read_dir(path).await {
-            Ok(rd) => rd,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(entries),
-            Err(e) => return Err(e.into()),
-        };
-
-        while let Ok(Some(entry)) = read_dir.next_entry().await {
-            entries.push(entry.file_name().to_string_lossy().to_string());
-        }
-
-        Ok(entries)
     }
 
     pub fn paginate<T>(
@@ -138,34 +69,38 @@ impl Backend {
     //
 
     #[instrument]
-    async fn collect_repositories(&self, base_path: &Path) -> Vec<String> {
-        let mut path_stack: Vec<PathBuf> = vec![base_path.to_path_buf()];
+    async fn collect_repositories(&self, base_path: &str) -> Vec<String> {
+        let mut path_stack: Vec<String> = vec![base_path.to_string()];
         let mut repositories = Vec::new();
 
         while let Some(current_path) = path_stack.pop() {
-            if let Ok(mut entries) = fs::read_dir(&current_path).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let path = entry.path();
+            if let Ok(entries) = self.store.list_dir(&current_path).await {
+                for entry in entries {
+                    let path = if current_path.ends_with('/') {
+                        format!("{current_path}{entry}")
+                    } else if current_path.is_empty() {
+                        entry.clone()
+                    } else {
+                        format!("{current_path}/{entry}")
+                    };
 
-                    if path.is_dir() {
-                        debug!("checking path: {}", path.display());
-                        // check entries starting with a "_": it means it's a repository
-                        // add entries not starting with a "_" as paths to explore
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if name.starts_with('_') {
-                                if let Some(name) =
-                                    path.parent().and_then(|p| p.strip_prefix(base_path).ok())
-                                {
-                                    if let Some(name) = name.to_str() {
-                                        debug!("Found repository: {name}");
-                                        repositories.push(name.to_string());
-                                    }
-                                }
-                            } else {
-                                debug!("Exploring path: {}", path.display());
-                                path_stack.push(path);
+                    // check entries starting with a "_": it means it's a repository
+                    // add entries not starting with a "_" as paths to explore
+                    if entry.starts_with('_') {
+                        // Extract the repository name from the parent path
+                        if let Some(repo_name) = PathBuf::from(&current_path)
+                            .strip_prefix(base_path)
+                            .ok()
+                            .and_then(|p| p.to_str())
+                        {
+                            if !repo_name.is_empty() {
+                                debug!("Found repository: {repo_name}");
+                                repositories.push(repo_name.to_string());
                             }
                         }
+                    } else {
+                        debug!("Exploring path: {}", path);
+                        path_stack.push(path);
                     }
                 }
             }
@@ -184,10 +119,9 @@ impl MetadataStore for Backend {
         n: u16,
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
-        let base_path = self.tree.repository_dir();
-        let base_path = Path::new(&base_path);
+        let base_path = path_builder::repository_dir();
 
-        let mut repositories = self.collect_repositories(base_path).await;
+        let mut repositories = self.collect_repositories(&base_path).await;
         repositories.dedup();
 
         Ok(Self::paginate(&repositories, n, last))
@@ -200,9 +134,9 @@ impl MetadataStore for Backend {
         n: u16,
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
-        let path = self.tree.manifest_tags_dir(namespace);
+        let path = path_builder::manifest_tags_dir(namespace);
         debug!("Listing tags in path: {path}");
-        let mut tags = self.collect_directory_entries(&path).await?;
+        let mut tags = self.store.list_dir(&path).await?;
         tags.sort();
 
         Ok(Self::paginate(&tags, n, last))
@@ -217,16 +151,16 @@ impl MetadataStore for Backend {
     ) -> Result<Vec<Descriptor>, Error> {
         let path = format!(
             "{}/sha256",
-            self.tree.manifest_referrers_dir(namespace, digest)
+            path_builder::manifest_referrers_dir(namespace, digest)
         );
-        let all_manifest = self.collect_directory_entries(&path).await?;
+        let all_manifest = self.store.list_dir(&path).await?;
         let mut referrers = Vec::new();
 
         for manifest_digest in all_manifest {
             let manifest_digest = Digest::Sha256(manifest_digest);
-            let blob_path = self.tree.blob_path(&manifest_digest);
+            let blob_path = path_builder::blob_path(&manifest_digest);
 
-            let manifest = fs::read(&blob_path).await?;
+            let manifest = self.store.read(&blob_path).await?;
             let manifest_len = manifest.len();
 
             let manifest = Manifest::from_slice(&manifest)?;
@@ -250,11 +184,9 @@ impl MetadataStore for Backend {
         n: u16,
         continuation_token: Option<String>,
     ) -> Result<(Vec<Digest>, Option<String>), Error> {
-        let path = self
-            .tree
-            .manifest_revisions_link_root_dir(namespace, "sha256"); // HACK: hardcoded sha256
+        let path = path_builder::manifest_revisions_link_root_dir(namespace, "sha256"); // HACK: hardcoded sha256
 
-        let all_revisions = self.collect_directory_entries(&path).await?;
+        let all_revisions = self.store.list_dir(&path).await?;
         let mut revisions = Vec::new();
 
         for revision in all_revisions {
@@ -266,8 +198,8 @@ impl MetadataStore for Backend {
 
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobMetadata, Error> {
-        let path = self.tree.blob_index_path(digest);
-        let content = fs::read_to_string(&path).await?;
+        let path = path_builder::blob_index_path(digest);
+        let content = self.store.read_to_string(&path).await?;
 
         let index = serde_json::from_str(&content)?;
         Ok(index)
@@ -283,13 +215,12 @@ impl MetadataStore for Backend {
         O: FnOnce(&mut HashSet<BlobLink>) + Send,
     {
         debug!("Ensuring container directory for digest: {digest}");
-        let path = self.tree.blob_container_dir(digest);
-        fs::create_dir_all(&path).await?;
 
         debug!("Updating reference count for digest: {digest}");
-        let path = self.tree.blob_index_path(digest);
+        let path = path_builder::blob_index_path(digest);
 
-        let mut reference_index = match fs::read_to_string(&path).await.map_err(Error::from) {
+        let mut reference_index = match self.store.read_to_string(&path).await.map_err(Error::from)
+        {
             Ok(content) => serde_json::from_str::<BlobMetadata>(&content)?,
             Err(Error::ReferenceNotFound) => BlobMetadata::default(),
             Err(e) => Err(e)?,
@@ -313,12 +244,13 @@ impl MetadataStore for Backend {
 
         if reference_index.namespace.is_empty() {
             debug!("Deleting no longer referenced Blob: {digest}");
-            let path = self.tree.blob_container_dir(digest);
-            let _ = self.delete_empty_parent_dirs(&path).await;
+            let path = path_builder::blob_container_dir(digest);
+            self.store.delete_dir(&path).await?;
+            let _ = self.store.delete_empty_parent_dirs(&path).await;
         } else {
             debug!("Writing reference count to path: {path}");
             let content = serde_json::to_string(&reference_index)?;
-            Self::write_file(&path, content.as_bytes()).await?;
+            self.store.write(&path, content.as_bytes()).await?;
             debug!("Reference index for {digest} updated");
         }
 
@@ -326,9 +258,9 @@ impl MetadataStore for Backend {
     }
 
     async fn read_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
-        let link_path = self.tree.get_link_path(link, namespace);
+        let link_path = path_builder::get_link_path(link, namespace);
 
-        let link = fs::read(&link_path).await?;
+        let link = self.store.read(&link_path).await?;
         Ok(LinkMetadata::from_bytes(link)?)
     }
 
@@ -338,16 +270,18 @@ impl MetadataStore for Backend {
         link: &BlobLink,
         metadata: &LinkMetadata,
     ) -> Result<(), Error> {
-        let link_path = self.tree.get_link_path(link, namespace);
+        let link_path = path_builder::get_link_path(link, namespace);
         let serialized_link_data = serde_json::to_vec(metadata)?;
-        Self::write_file(&link_path, &serialized_link_data).await
+        self.store.write(&link_path, &serialized_link_data).await?;
+        Ok(())
     }
 
     async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
-        let path = self.tree.get_link_container_path(link, namespace);
+        let path = path_builder::get_link_container_path(link, namespace);
         debug!("Deleting link at path: {path}");
 
-        let _ = self.delete_empty_parent_dirs(&path).await;
+        self.store.delete_dir(&path).await?;
+        let _ = self.store.delete_empty_parent_dirs(&path).await;
 
         Ok(())
     }

@@ -124,7 +124,7 @@ impl FSRegistryTestCase {
         &mut self,
         repositories_config: HashMap<String, RepositoryConfig>,
     ) {
-        prepare_with_repository_config(&mut self.fs_registry, repositories_config)
+        prepare_with_repository_config(&mut self.fs_registry, repositories_config);
     }
 
     pub fn blob_store(&self) -> &blob_store::fs::Backend {
@@ -174,7 +174,7 @@ impl Drop for S3BlobStoreBackendTestCase {
             let key_prefix = self.key_prefix.clone();
             let backend = self.s3_backend.clone();
             handle.spawn(async move {
-                if let Err(e) = backend.delete_object_with_prefix(&key_prefix).await {
+                if let Err(e) = backend.store.delete_prefix(&key_prefix).await {
                     println!("Warning: Failed to clean up S3BlobStoreBackendTestCase data: {e:?}");
                 }
             });
@@ -217,7 +217,7 @@ impl Drop for S3MetadataStoreBackendTestCase {
             let key_prefix = self.key_prefix.clone();
             let backend = self.s3_backend.clone();
             handle.spawn(async move {
-                if let Err(e) = backend.delete_object_with_prefix(&key_prefix).await {
+                if let Err(e) = backend.store.delete_prefix(&key_prefix).await {
                     println!(
                         "Warning: Failed to clean up S3MetadataStoreBackendTestCase data: {e:?}"
                     );
@@ -291,7 +291,7 @@ impl S3RegistryTestCase {
         &mut self,
         repositories_config: HashMap<String, RepositoryConfig>,
     ) {
-        prepare_with_repository_config(&mut self.s3_registry, repositories_config)
+        prepare_with_repository_config(&mut self.s3_registry, repositories_config);
     }
 
     pub fn registry(&self) -> &Registry<blob_store::s3::Backend, metadata_store::s3::Backend> {
@@ -313,7 +313,7 @@ impl Drop for S3RegistryTestCase {
             let key_prefix = self.key_prefix.clone();
             let blob_store = self.s3_blob_store.clone();
             handle.spawn(async move {
-                if let Err(e) = blob_store.delete_object_with_prefix(&key_prefix).await {
+                if let Err(e) = blob_store.store.delete_prefix(&key_prefix).await {
                     println!("Warning: Failed to clean up S3RegistryTestCase data: {e:?}");
                 }
             });
