@@ -38,18 +38,6 @@ This should be set according to the number of CPU cores available on the server.
 - `update_pull_time` (bool): When set to true, the registry will update the pull time metadata for blobs, 
   which is useful for garbage collection and retention policies (default: false).
 
-## Lock Store (`lock_store`)
-
-Distributed locking is used to prevent concurrent operations that could lead to data corruption.
-If no configuration is provided, an in-memory locking mechanism is used, which is not suitable for
-multi-replica deployments.
-
-### Redis Locking (`lock_store.redis`)
-
-- `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
-- `ttl` (string): The time-to-live for the lock in seconds (e.g., `10s`)
-- `key_prefix` (optional string): The key prefix for all lock keys
-
 ## Token Cache (`cache_store`)
 
 Authentication tokens are cached to reduce unnecessary requests to upstream servers when using a pull-through cache
@@ -64,7 +52,7 @@ If no configuration is provided, an in-memory cache is used, which is not suitab
 ## Blob storage (`blob_store`)
 
 The blob store is the place where image content is stored.
-Multiple blob storage backends are supported: filesystem or s3-baked.
+Multiple blob storage backends are supported: filesystem or s3-backed.
 
 ### Filesystem Storage (`blob_store.fs`)
 
@@ -82,6 +70,51 @@ Multiple blob storage backends are supported: filesystem or s3-baked.
 - `multipart_copy_threshold` (uint64 | string): The threshold for multipart copy in bytes (default: 5GB)
 - `multipart_copy_chunk_size` (uint64 | string): The chunk size for multipart copy in bytes (default: 100MB)
 - `multipart_copy_jobs` (usize): The max number of concurrent multipart copy jobs (default: 4)
+
+## Metadata storage (`metadata_store`)
+
+The metadata store manages registry metadata including manifests, tags, and link references.
+By default, the metadata store uses the same backend configuration as the blob store.
+You can optionally configure a different backend for metadata storage.
+
+### Filesystem Storage (`metadata_store.fs`)
+
+- `root_dir` (string): The root directory for the metadata storage. If not specified, uses the blob store's root directory.
+- `lock_store` (optional): Configuration for distributed locking (see Lock Store section below)
+
+### S3 Storage (`metadata_store.s3`)
+
+- `access_key_id` (string): The access key ID for the S3 server. If not specified, uses the blob store's configuration.
+- `secret_key` (string): The secret access key for the S3 server
+- `endpoint` (string): The endpoint for the S3 server
+- `bucket` (string): The bucket for the S3 server
+- `region` (string): The region for the S3 server
+- `key_prefix` (optional string): The key prefix for all S3 keys
+- `lock_store` (optional): Configuration for distributed locking (see Lock Store section below)
+
+### Lock Store Configuration (`metadata_store.<backend>.lock_store`)
+
+Distributed locking is used to prevent concurrent operations that could lead to data corruption.
+If no configuration is provided, an in-memory locking mechanism is used, which is not suitable for
+multi-replica deployments.
+
+#### Redis Locking (`metadata_store.<backend>.lock_store.redis`)
+
+- `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
+- `ttl` (usize): The time-to-live for the lock in seconds
+- `key_prefix` (optional string): The key prefix for all lock keys
+
+Example:
+
+```toml
+[metadata_store.fs]
+root_dir = "/var/registry/metadata"
+
+[metadata_store.fs.lock_store.redis]
+url = "redis://localhost:6379"
+ttl = 10
+key_prefix = "registry-locks"
+```
 
 ## Identity (`identity.<identity-id>`)
 

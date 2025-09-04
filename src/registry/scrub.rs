@@ -1,5 +1,5 @@
-use crate::registry::blob_store::{BlobStore, LinkMetadata};
-use crate::registry::metadata_store::MetadataStore;
+use crate::registry::blob_store::BlobStore;
+use crate::registry::metadata_store::{LinkMetadata, MetadataStore};
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::policy_types::ManifestImage;
 use crate::registry::utils::BlobLink;
@@ -99,7 +99,8 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
         let mut tags = HashMap::new();
         for tag in &tag_names {
             let info = self
-                .read_link(namespace, &BlobLink::Tag(tag.to_string()))
+                .metadata_store
+                .read_link(namespace, &BlobLink::Tag(tag.to_string()), false)
                 .await?;
             tags.insert(tag.to_string(), info);
         }
@@ -239,7 +240,8 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
     async fn check_tag(&self, namespace: &str, tag: &str) -> Result<(), Error> {
         debug!("Checking {namespace}:{tag} for revision inconsistencies");
         let digest = self
-            .read_link(namespace, &BlobLink::Tag(tag.to_string()))
+            .metadata_store
+            .read_link(namespace, &BlobLink::Tag(tag.to_string()), false)
             .await?;
 
         let link_reference = BlobLink::Digest(digest.target.clone());
@@ -345,7 +347,10 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
         link_reference: &BlobLink,
         digest: &Digest,
     ) -> Result<(), Error> {
-        let blob_digest = self.read_link(namespace, link_reference).await;
+        let blob_digest = self
+            .metadata_store
+            .read_link(namespace, link_reference, false)
+            .await;
 
         match blob_digest {
             Ok(link) if &link.target == digest => {
@@ -355,10 +360,16 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
             _ => {
                 warn!("Missing or invalid link: {link_reference} -> {digest}");
                 if !self.scrub_dry_run {
-                    if let Err(error) = self.delete_link(namespace, link_reference).await {
+                    if let Err(error) = self
+                        .metadata_store
+                        .delete_link(namespace, link_reference)
+                        .await
+                    {
                         warn!("Failed to delete old link: {error}");
                     }
-                    self.create_link(namespace, link_reference, digest).await?;
+                    self.metadata_store
+                        .create_link(namespace, link_reference, digest)
+                        .await?;
                 }
             }
         }
@@ -396,7 +407,12 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
 
         for (namespace, references) in blob_index.namespace {
             for link_reference in references {
-                if self.read_link(&namespace, &link_reference).await.is_err() {
+                if self
+                    .metadata_store
+                    .read_link(&namespace, &link_reference, false)
+                    .await
+                    .is_err()
+                {
                     warn!("Missing link from blob index: {namespace}/{blob} <- {link_reference}");
                     if !self.scrub_dry_run {
                         if let Err(error) = self
@@ -420,7 +436,7 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::{CacheStoreConfig, GlobalConfig, LockStoreConfig, RepositoryConfig};
+    use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
     use crate::registry::metadata_store::MetadataStore;
     use crate::registry::test_utils::{create_test_manifest, create_test_repository_config};
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
@@ -807,6 +823,7 @@ mod tests {
 
         // Create correct config link first
         registry
+            .metadata_store
             .create_link(
                 namespace,
                 &BlobLink::Config(config_digest.clone()),
@@ -817,6 +834,7 @@ mod tests {
 
         // Create manifest revision links and tag
         registry
+            .metadata_store
             .create_link(
                 namespace,
                 &BlobLink::Digest(manifest_digest.clone()),
@@ -825,6 +843,7 @@ mod tests {
             .await
             .unwrap();
         registry
+            .metadata_store
             .create_link(
                 namespace,
                 &BlobLink::Digest(manifest_with_subject_digest.clone()),
@@ -833,6 +852,7 @@ mod tests {
             .await
             .unwrap();
         registry
+            .metadata_store
             .create_link(
                 namespace,
                 &BlobLink::Tag("latest".to_string()),
@@ -843,6 +863,7 @@ mod tests {
 
         // Create incorrect links
         registry
+            .metadata_store
             .create_link(
                 namespace,
                 &BlobLink::Config(wrong_config_digest.clone()),
@@ -851,6 +872,7 @@ mod tests {
             .await
             .unwrap();
         registry
+            .metadata_store
             .create_link(
                 namespace,
                 &BlobLink::Layer(wrong_layer_digest.clone()),
@@ -866,7 +888,6 @@ mod tests {
             create_test_repository_config(),
             &GlobalConfig::default(),
             CacheStoreConfig::default(),
-            LockStoreConfig::default(),
         )
         .unwrap()
         .with_scrub_dry_run(false);
@@ -877,7 +898,8 @@ mod tests {
         // Verify links point to correct digests
         assert_eq!(
             new_registry
-                .read_link(namespace, &BlobLink::Config(config_digest.clone()))
+                .metadata_store
+                .read_link(namespace, &BlobLink::Config(config_digest.clone()), false)
                 .await
                 .unwrap()
                 .target,
@@ -887,7 +909,8 @@ mod tests {
 
         assert_eq!(
             new_registry
-                .read_link(namespace, &BlobLink::Layer(layer_digest1.clone()))
+                .metadata_store
+                .read_link(namespace, &BlobLink::Layer(layer_digest1.clone()), false)
                 .await
                 .unwrap()
                 .target,
@@ -897,7 +920,8 @@ mod tests {
 
         assert_eq!(
             new_registry
-                .read_link(namespace, &BlobLink::Layer(layer_digest2.clone()))
+                .metadata_store
+                .read_link(namespace, &BlobLink::Layer(layer_digest2.clone()), false)
                 .await
                 .unwrap()
                 .target,
@@ -907,12 +931,14 @@ mod tests {
 
         assert_eq!(
             new_registry
+                .metadata_store
                 .read_link(
                     namespace,
                     &BlobLink::Referrer(
                         subject_digest.clone(),
                         manifest_with_subject_digest.clone()
-                    )
+                    ),
+                    false
                 )
                 .await
                 .unwrap()
@@ -929,6 +955,7 @@ mod tests {
             .await
             .unwrap();
         new_registry
+            .metadata_store
             .create_link(
                 namespace,
                 &BlobLink::Digest(invalid_digest.clone()),
@@ -955,7 +982,11 @@ mod tests {
             .ensure_link(namespace, &link, &digest)
             .await
             .unwrap();
-        assert!(registry.read_link(namespace, &link).await.is_ok());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &link, false)
+            .await
+            .is_ok());
 
         // Test updating an existing link
         let new_digest = registry
@@ -967,7 +998,11 @@ mod tests {
             .ensure_link(namespace, &link, &new_digest)
             .await
             .unwrap();
-        let stored_link = registry.read_link(namespace, &link).await.unwrap();
+        let stored_link = registry
+            .metadata_store
+            .read_link(namespace, &link, false)
+            .await
+            .unwrap();
         assert_eq!(stored_link.target, new_digest);
 
         // Test with invalid link
@@ -976,7 +1011,11 @@ mod tests {
             .ensure_link(namespace, &invalid_link, &digest)
             .await
             .unwrap();
-        assert!(registry.read_link(namespace, &invalid_link).await.is_ok());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &invalid_link, false)
+            .await
+            .is_ok());
     }
 
     async fn test_cleanup_orphan_blobs_impl<B: BlobStore + 'static, M: MetadataStore>(
@@ -999,18 +1038,22 @@ mod tests {
         let valid_link4 = BlobLink::Referrer(digest1.clone(), digest4.clone());
 
         registry
+            .metadata_store
             .create_link(namespace1, &valid_link1, &digest1)
             .await
             .unwrap();
         registry
+            .metadata_store
             .create_link(namespace1, &valid_link2, &digest2)
             .await
             .unwrap();
         registry
+            .metadata_store
             .create_link(namespace2, &valid_link3, &digest3)
             .await
             .unwrap();
         registry
+            .metadata_store
             .create_link(namespace2, &valid_link4, &digest4)
             .await
             .unwrap();
@@ -1032,7 +1075,6 @@ mod tests {
             create_test_repository_config(),
             &GlobalConfig::default(),
             CacheStoreConfig::default(),
-            LockStoreConfig::default(),
         )
         .unwrap()
         .with_scrub_dry_run(false);

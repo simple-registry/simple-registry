@@ -23,6 +23,14 @@ pub struct BackendConfig {
     pub root_dir: String,
 }
 
+impl From<BackendConfig> for data_store::fs::BackendConfig {
+    fn from(config: BackendConfig) -> Self {
+        Self {
+            root_dir: config.root_dir,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Backend {
     store: data_store::fs::Backend,

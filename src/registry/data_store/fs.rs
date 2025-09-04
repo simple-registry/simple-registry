@@ -1,4 +1,3 @@
-use crate::registry::{blob_store, metadata_store};
 use serde::Deserialize;
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -8,22 +7,6 @@ use tokio::io::AsyncWriteExt;
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {
     pub root_dir: String,
-}
-
-impl From<blob_store::fs::BackendConfig> for BackendConfig {
-    fn from(config: blob_store::fs::BackendConfig) -> Self {
-        Self {
-            root_dir: config.root_dir,
-        }
-    }
-}
-
-impl From<metadata_store::fs::BackendConfig> for BackendConfig {
-    fn from(config: metadata_store::fs::BackendConfig) -> Self {
-        Self {
-            root_dir: config.root_dir,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]

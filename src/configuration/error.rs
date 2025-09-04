@@ -1,5 +1,5 @@
+use crate::registry::cache_store;
 use crate::registry::utils::task_queue;
-use crate::registry::{cache_store, lock_store};
 use hyper::header::InvalidHeaderValue;
 use opentelemetry_otlp::ExporterBuildError;
 use opentelemetry_sdk::trace::TraceError;
@@ -10,7 +10,7 @@ use tracing::debug;
 #[derive(Debug)]
 pub enum Error {
     Cache(cache_store::Error),
-    Lock(lock_store::Error),
+    MetadataStore(String),
     Io(io::Error),
     MissingExpectedTLSSection(String),
     ConfigurationFileFormat(String),
@@ -27,7 +27,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Cache(err) => write!(f, "Cache error: {err}"),
-            Error::Lock(err) => write!(f, "Lock error: {err}"),
+            Error::MetadataStore(err) => write!(f, "Metadata store error: {err}"),
             Error::Io(err) => write!(f, "IO error: {err}"),
             Error::MissingExpectedTLSSection(error) => {
                 write!(f, "Missing expected TLS section: {error}")
@@ -66,13 +66,6 @@ impl From<cache_store::Error> for Error {
     fn from(error: cache_store::Error) -> Self {
         debug!("Cache error: {error}");
         Error::Cache(error)
-    }
-}
-
-impl From<lock_store::Error> for Error {
-    fn from(error: lock_store::Error) -> Self {
-        debug!("Lock error: {error}");
-        Error::Lock(error)
     }
 }
 

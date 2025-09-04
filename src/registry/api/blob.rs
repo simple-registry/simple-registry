@@ -228,18 +228,32 @@ mod tests {
         let config_link = BlobLink::Config(digest.clone());
         let latest_link = BlobLink::Tag("latest".to_string());
         registry
+            .metadata_store
             .create_link(namespace, &layer_link, &digest)
             .await
             .unwrap();
         registry
+            .metadata_store
             .create_link(namespace, &config_link, &digest)
             .await
             .unwrap();
 
         // Verify links exist
-        assert!(registry.read_link(namespace, &layer_link).await.is_ok());
-        assert!(registry.read_link(namespace, &config_link).await.is_ok());
-        assert!(registry.read_link(namespace, &latest_link).await.is_ok());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &layer_link, false)
+            .await
+            .is_ok());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &config_link, false)
+            .await
+            .is_ok());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &latest_link, false)
+            .await
+            .is_ok());
 
         // Verify blob exists
         assert!(registry.blob_store.read_blob(&digest).await.is_ok());
@@ -257,12 +271,28 @@ mod tests {
         assert_eq!(response.status(), StatusCode::ACCEPTED);
 
         // Delete the latest tag link
-        registry.delete_link(namespace, &latest_link).await.unwrap();
+        registry
+            .metadata_store
+            .delete_link(namespace, &latest_link)
+            .await
+            .unwrap();
 
         // Verify links are deleted
-        assert!(registry.read_link(namespace, &layer_link).await.is_err());
-        assert!(registry.read_link(namespace, &config_link).await.is_err());
-        assert!(registry.read_link(namespace, &latest_link).await.is_err());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &layer_link, false)
+            .await
+            .is_err());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &config_link, false)
+            .await
+            .is_err());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &latest_link, false)
+            .await
+            .is_err());
 
         // Verify blob index is empty
         let blob_index = registry.metadata_store.read_blob_index(&digest).await;

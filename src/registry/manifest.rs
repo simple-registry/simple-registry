@@ -134,7 +134,10 @@ where
         reference: Reference,
     ) -> Result<HeadManifestResponse, Error> {
         let blob_link = reference.into();
-        let link = self.read_link(namespace, &blob_link).await?;
+        let link = self
+            .metadata_store
+            .read_link(namespace, &blob_link, self.update_pull_time)
+            .await?;
 
         let mut reader = self
             .blob_store
@@ -208,7 +211,10 @@ where
         reference: &Reference,
     ) -> Result<GetManifestResponse, Error> {
         let blob_link = reference.clone().into();
-        let link = self.read_link(namespace, &blob_link).await?;
+        let link = self
+            .metadata_store
+            .read_link(namespace, &blob_link, self.update_pull_time)
+            .await?;
 
         let content = self.blob_store.read_blob(&link.target).await?;
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|error| {
@@ -240,10 +246,14 @@ where
                 let digest = self.blob_store.create_blob(body).await?;
 
                 let link = BlobLink::Tag(tag);
-                self.create_link(namespace, &link, &digest).await?;
+                self.metadata_store
+                    .create_link(namespace, &link, &digest)
+                    .await?;
 
                 let link = BlobLink::Digest(digest.clone());
-                self.create_link(namespace, &link, &digest).await?;
+                self.metadata_store
+                    .create_link(namespace, &link, &digest)
+                    .await?;
 
                 digest
             }
@@ -258,7 +268,9 @@ where
                 }
 
                 let link = BlobLink::Digest(digest.clone());
-                self.create_link(namespace, &link, &digest).await?;
+                self.metadata_store
+                    .create_link(namespace, &link, &digest)
+                    .await?;
 
                 digest
             }
@@ -266,17 +278,23 @@ where
 
         if let Some(subject) = &manifest_digests.subject {
             let link = BlobLink::Referrer(subject.clone(), digest.clone());
-            self.create_link(namespace, &link, &digest).await?;
+            self.metadata_store
+                .create_link(namespace, &link, &digest)
+                .await?;
         }
 
         if let Some(config_digest) = manifest_digests.config {
             let link = BlobLink::Config(config_digest.clone());
-            self.create_link(namespace, &link, &config_digest).await?;
+            self.metadata_store
+                .create_link(namespace, &link, &config_digest)
+                .await?;
         }
 
         for layer_digest in manifest_digests.layers {
             let link = BlobLink::Layer(layer_digest.clone());
-            self.create_link(namespace, &link, &layer_digest).await?;
+            self.metadata_store
+                .create_link(namespace, &link, &layer_digest)
+                .await?;
         }
 
         Ok(PutManifestResponse {
@@ -296,7 +314,7 @@ where
         match reference {
             Reference::Tag(tag) => {
                 let link = BlobLink::Tag(tag);
-                self.delete_link(namespace, &link).await?;
+                self.metadata_store.delete_link(namespace, &link).await?;
             }
             Reference::Digest(digest) => {
                 let mut marker = None;
@@ -308,25 +326,35 @@ where
 
                     for tag in tags {
                         let link_reference = BlobLink::Tag(tag);
-                        let link = self.read_link(namespace, &link_reference).await?;
+                        let link = self
+                            .metadata_store
+                            .read_link(namespace, &link_reference, self.update_pull_time)
+                            .await?;
 
                         if link.target == digest {
-                            self.delete_link(namespace, &link_reference).await?;
+                            self.metadata_store
+                                .delete_link(namespace, &link_reference)
+                                .await?;
                         }
                     }
 
                     let blob_link = BlobLink::Digest(digest.clone());
-                    let link = self.read_link(namespace, &blob_link).await?;
+                    let link = self
+                        .metadata_store
+                        .read_link(namespace, &blob_link, self.update_pull_time)
+                        .await?;
 
                     let content = self.blob_store.read_blob(&link.target).await?;
                     let manifest_digests = parse_manifest_digests(&content, None)?;
 
                     if let Some(subject_digest) = manifest_digests.subject {
                         let link = BlobLink::Referrer(subject_digest, link.target);
-                        self.delete_link(namespace, &link).await?;
+                        self.metadata_store.delete_link(namespace, &link).await?;
                     }
 
-                    self.delete_link(namespace, &blob_link).await?;
+                    self.metadata_store
+                        .delete_link(namespace, &blob_link)
+                        .await?;
 
                     if next_marker.is_none() {
                         break;

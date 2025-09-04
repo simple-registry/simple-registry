@@ -3,8 +3,8 @@
 
 use crate::command::{argon, scrub, server};
 use crate::configuration::{
-    BlobStorageConfig, Configuration, Error, MetadataStoreConfig, ObservabilityConfig,
-    ServerTlsConfig,
+    BlobStorageConfig, Configuration, Error, LockStoreConfig, MetadataStoreConfig,
+    ObservabilityConfig, ServerTlsConfig,
 };
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
@@ -114,7 +114,6 @@ fn set_config_watcher<B: BlobStore + 'static, M: MetadataStore + 'static>(
                 config.repository,
                 &config.global,
                 config.cache_store,
-                config.lock_store,
             ) {
                 Ok(registry) => registry,
                 Err(error) => {
@@ -200,25 +199,25 @@ fn main() -> Result<(), command::Error> {
             (BlobStorageConfig::FS(blob_cfg), MetadataStoreConfig::FS(meta_cfg)) => {
                 info!("Using filesystem blob-store and metadata-store backends");
                 let blob_store = Arc::new(blob_store::fs::Backend::new(blob_cfg.clone()));
-                let metadata_store = Arc::new(metadata_store::fs::Backend::new(meta_cfg.clone()));
+                let metadata_store = Arc::new(metadata_store::fs::Backend::new(meta_cfg.clone())?);
                 handle_command(config, arguments, blob_store, metadata_store).await
             }
             (BlobStorageConfig::FS(blob_cfg), MetadataStoreConfig::S3(meta_cfg)) => {
                 info!("Using filesystem blob-store and S3 metadata-store backends");
                 let blob_store = Arc::new(blob_store::fs::Backend::new(blob_cfg.clone()));
-                let metadata_store = Arc::new(metadata_store::s3::Backend::new(meta_cfg.clone()));
+                let metadata_store = Arc::new(metadata_store::s3::Backend::new(meta_cfg.clone())?);
                 handle_command(config, arguments, blob_store, metadata_store).await
             }
             (BlobStorageConfig::S3(blob_cfg), MetadataStoreConfig::FS(meta_cfg)) => {
                 info!("Using S3 blob-store and filesystem metadata-store backends");
                 let blob_store = Arc::new(blob_store::s3::Backend::new(blob_cfg.clone()));
-                let metadata_store = Arc::new(metadata_store::fs::Backend::new(meta_cfg.clone()));
+                let metadata_store = Arc::new(metadata_store::fs::Backend::new(meta_cfg.clone())?);
                 handle_command(config, arguments, blob_store, metadata_store).await
             }
             (BlobStorageConfig::S3(blob_cfg), MetadataStoreConfig::S3(meta_cfg)) => {
                 info!("Using S3 blob-store and metadata-store backends");
                 let blob_store = Arc::new(blob_store::s3::Backend::new(blob_cfg.clone()));
-                let metadata_store = Arc::new(metadata_store::s3::Backend::new(meta_cfg.clone()));
+                let metadata_store = Arc::new(metadata_store::s3::Backend::new(meta_cfg.clone())?);
                 handle_command(config, arguments, blob_store, metadata_store).await
             }
         }
@@ -236,6 +235,7 @@ fn normalize_metadata_config(
         {
             MetadataStoreConfig::FS(metadata_store::fs::BackendConfig {
                 root_dir: blob_cfg.root_dir.clone(),
+                lock_store: LockStoreConfig::default(),
             })
         }
 
@@ -251,6 +251,7 @@ fn normalize_metadata_config(
                 access_key_id: blob_cfg.access_key_id.clone(),
                 secret_key: blob_cfg.secret_key.clone(),
                 key_prefix: blob_cfg.key_prefix.clone(),
+                lock_store: LockStoreConfig::default(),
             })
         }
 
@@ -265,6 +266,7 @@ fn normalize_metadata_config(
                 access_key_id: blob_cfg.access_key_id.clone(),
                 secret_key: blob_cfg.secret_key.clone(),
                 key_prefix: blob_cfg.key_prefix.clone(),
+                lock_store: LockStoreConfig::default(),
             })
         }
 
@@ -285,7 +287,6 @@ async fn handle_command<B: BlobStore + 'static, M: MetadataStore + 'static>(
         config.repository,
         &config.global,
         config.cache_store,
-        config.lock_store,
     )?;
 
     match arguments.nested {

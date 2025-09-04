@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -13,7 +13,6 @@ mod content_discovery;
 pub mod data_store;
 mod error;
 mod http_client;
-pub mod lock_store;
 mod manifest;
 pub mod metadata_store;
 pub mod oci_types;
@@ -28,14 +27,12 @@ mod upload;
 pub mod utils;
 
 use crate::configuration;
-use crate::configuration::{CacheStoreConfig, GlobalConfig, LockStoreConfig, RepositoryConfig};
+use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
 use crate::registry::cache_store::CacheStore;
 pub use repository::Repository;
 
-use crate::registry::blob_store::{BlobStore, LinkMetadata};
-use crate::registry::lock_store::LockStore;
+use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
-use crate::registry::oci_types::Digest;
 pub use crate::registry::utils::{BlobLink, TaskQueue};
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
@@ -48,7 +45,6 @@ static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub struct Registry<B, M> {
     blob_store: Arc<B>,
     metadata_store: Arc<M>,
-    lock_store: LockStore,
     auth_token_cache: CacheStore,
     repositories: HashMap<String, Repository>,
     update_pull_time: bool,
@@ -75,9 +71,7 @@ where
         repositories_config: HashMap<String, RepositoryConfig>,
         global_config: &GlobalConfig,
         auth_token_cache: CacheStoreConfig,
-        lock_store: LockStoreConfig,
     ) -> Result<Self, configuration::Error> {
-        let lock_store = LockStore::new(lock_store)?;
         let auth_token_cache = CacheStore::new(auth_token_cache)?;
 
         let mut repositories = HashMap::new();
@@ -90,7 +84,6 @@ where
             update_pull_time: global_config.update_pull_time,
             blob_store,
             metadata_store,
-            lock_store,
             auth_token_cache,
             repositories,
             scrub_dry_run: true,
@@ -122,98 +115,6 @@ where
         } else {
             Err(Error::NameInvalid)
         }
-    }
-
-    // TODO: move this logic to metadata store layer
-    async fn create_link(
-        &self,
-        namespace: &str,
-        link: &BlobLink,
-        digest: &Digest,
-    ) -> Result<LinkMetadata, Error> {
-        let _guard = self.lock_store.acquire_lock(link.to_string()).await?;
-        let link_data = self.metadata_store.read_link(namespace, link).await;
-
-        // overwriting an existing link!
-        if let Ok(link_data) = link_data {
-            if &link_data.target != digest {
-                let _blob_guard = self
-                    .lock_store
-                    .acquire_lock(link_data.target.as_str())
-                    .await?;
-
-                self.metadata_store
-                    .update_blob_index(namespace, &link_data.target, |index| {
-                        index.remove(link);
-                    })
-                    .await?;
-
-                let _blob_guard = self.lock_store.acquire_lock(digest.as_str()).await?;
-                self.metadata_store
-                    .update_blob_index(namespace, digest, |index| {
-                        index.insert(link.clone());
-                    })
-                    .await?;
-            }
-        } else {
-            let _blob_guard = self.lock_store.acquire_lock(digest.as_str()).await?;
-            self.metadata_store
-                .update_blob_index(namespace, digest, |index| {
-                    index.insert(link.clone());
-                })
-                .await?;
-        }
-
-        let link_data = LinkMetadata {
-            target: digest.clone(),
-            created_at: Some(Utc::now()),
-            accessed_at: None,
-        };
-        self.metadata_store
-            .write_link(namespace, link, &link_data)
-            .await?;
-        Ok(link_data)
-    }
-
-    // TODO: move this logic to metadata store layer
-    #[instrument(skip(self))]
-    async fn read_link(&self, name: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
-        let _guard = self.lock_store.acquire_lock(link.to_string()).await?;
-
-        if self.update_pull_time {
-            let mut link_data = self.metadata_store.read_link(name, link).await?;
-            link_data.accessed_at = Some(Utc::now());
-
-            self.metadata_store
-                .write_link(name, link, &link_data)
-                .await?;
-            Ok(link_data)
-        } else {
-            Ok(self.metadata_store.read_link(name, link).await?)
-        }
-    }
-
-    // TODO: move this logic to metadata store layer
-    #[instrument(skip(self))]
-    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
-        let _guard = self.lock_store.acquire_lock(link.to_string()).await?;
-        let metadata = self.metadata_store.read_link(namespace, link).await;
-
-        let digest = match metadata {
-            Ok(link_data) => link_data.target,
-            Err(blob_store::Error::ReferenceNotFound) => return Ok(()),
-            Err(e) => return Err(e.into()),
-        };
-
-        let _blob_guard = self.lock_store.acquire_lock(digest.as_str()).await?;
-
-        self.metadata_store.delete_link(namespace, link).await?;
-        self.metadata_store
-            .update_blob_index(namespace, &digest, |index| {
-                index.remove(link);
-            })
-            .await?;
-        Ok(())
     }
 }
 
@@ -252,6 +153,7 @@ pub mod test_utils {
         // Create a tag to ensure the namespace exists
         let tag_link = BlobLink::Tag("latest".to_string());
         registry
+            .metadata_store
             .create_link(namespace, &tag_link, &digest)
             .await
             .unwrap();

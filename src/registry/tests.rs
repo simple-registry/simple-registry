@@ -50,8 +50,11 @@ impl FSMetadataStoreBackendTestCase {
         let temp_dir = TempDir::new().expect("Failed to create temp dir for FSBackendConfig");
 
         let path = temp_dir.path().to_string_lossy().to_string();
-        let fs_backend =
-            metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig { root_dir: path });
+        let fs_backend = metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
+            root_dir: path,
+            lock_store: LockStoreConfig::default(),
+        })
+        .unwrap();
 
         FSMetadataStoreBackendTestCase {
             fs_backend,
@@ -82,13 +85,16 @@ impl FSRegistryTestCase {
         let fs_blob_store = Arc::new(fs_blob_store);
 
         let fs_metadata_store =
-            metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig { root_dir: path });
+            metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
+                root_dir: path,
+                lock_store: LockStoreConfig::default(),
+            })
+            .unwrap();
         let fs_metadata_store = Arc::new(fs_metadata_store);
 
         let repositories_config = create_test_repository_config();
         let global = GlobalConfig::default();
         let token_cache = CacheStoreConfig::default();
-        let lock_store = LockStoreConfig::default();
 
         let registry = Registry::new(
             fs_blob_store.clone(),
@@ -96,7 +102,6 @@ impl FSRegistryTestCase {
             repositories_config,
             &global,
             token_cache,
-            lock_store,
         )
         .unwrap()
         .with_upload_timeout(Duration::seconds(0))
@@ -198,7 +203,9 @@ impl S3MetadataStoreBackendTestCase {
             region: "region".to_string(),
             bucket: "registry".to_string(),
             key_prefix: key_prefix.clone(),
-        });
+            lock_store: LockStoreConfig::default(),
+        })
+        .unwrap();
 
         Self {
             key_prefix,
@@ -259,13 +266,14 @@ impl S3RegistryTestCase {
             region: "region".to_string(),
             bucket: "registry".to_string(),
             key_prefix: key_prefix.clone(),
-        });
+            lock_store: LockStoreConfig::default(),
+        })
+        .unwrap();
         let metadata_store = Arc::new(metadata_store);
 
         let repositories_config = create_test_repository_config();
         let global = GlobalConfig::default();
         let token_cache = CacheStoreConfig::default();
-        let lock_store = LockStoreConfig::default();
 
         let registry = Registry::new(
             blob_store.clone(),
@@ -273,7 +281,6 @@ impl S3RegistryTestCase {
             repositories_config,
             &global,
             token_cache,
-            lock_store,
         )
         .unwrap()
         .with_upload_timeout(Duration::seconds(0))

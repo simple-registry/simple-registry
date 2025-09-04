@@ -1,4 +1,3 @@
-use crate::registry::{blob_store, metadata_store};
 use aws_sdk_s3::config::{timeout::TimeoutConfig, BehaviorVersion, Credentials, Region};
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
@@ -44,37 +43,6 @@ impl BackendConfig {
 
     pub fn default_multipart_part_size() -> ByteSize {
         ByteSize::mib(10)
-    }
-}
-
-impl From<blob_store::s3::BackendConfig> for BackendConfig {
-    fn from(config: blob_store::s3::BackendConfig) -> Self {
-        Self {
-            access_key_id: config.access_key_id,
-            secret_key: config.secret_key,
-            endpoint: config.endpoint,
-            bucket: config.bucket,
-            region: config.region,
-            key_prefix: config.key_prefix,
-            multipart_copy_threshold: config.multipart_copy_threshold,
-            multipart_copy_chunk_size: config.multipart_copy_chunk_size,
-            multipart_copy_jobs: config.multipart_copy_jobs,
-            multipart_part_size: config.multipart_part_size,
-        }
-    }
-}
-
-impl From<metadata_store::s3::BackendConfig> for BackendConfig {
-    fn from(config: metadata_store::s3::BackendConfig) -> Self {
-        Self {
-            access_key_id: config.access_key_id,
-            secret_key: config.secret_key,
-            endpoint: config.endpoint,
-            bucket: config.bucket,
-            region: config.region,
-            key_prefix: config.key_prefix,
-            ..Default::default()
-        }
     }
 }
 

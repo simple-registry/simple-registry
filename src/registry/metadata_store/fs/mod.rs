@@ -1,41 +1,57 @@
 #[cfg(test)]
 mod tests;
 
-use crate::registry::blob_store::{Error, LinkMetadata};
+use crate::configuration::LockStoreConfig;
+use crate::registry::blob_store::Error;
 use crate::registry::data_store;
-use crate::registry::metadata_store::MetadataStore;
+use crate::registry::metadata_store::lock::LockStore;
+use crate::registry::metadata_store::{LinkMetadata, MetadataStore};
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::{path_builder, BlobMetadata};
 use crate::registry::BlobLink;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashSet;
-use std::fmt;
-use std::fmt::{Debug, Formatter};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::{debug, instrument};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {
     pub root_dir: String,
+    #[serde(default)]
+    pub lock_store: LockStoreConfig,
 }
 
-#[derive(Clone)]
-pub struct Backend {
-    store: data_store::fs::Backend,
-}
-
-impl Debug for Backend {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FSBackend").finish()
+impl From<BackendConfig> for data_store::fs::BackendConfig {
+    fn from(config: BackendConfig) -> Self {
+        Self {
+            root_dir: config.root_dir,
+        }
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct Backend {
+    store: data_store::fs::Backend,
+    lock_store: Arc<LockStore>,
+}
+
 impl Backend {
-    pub fn new(config: BackendConfig) -> Self {
-        Self {
-            store: data_store::fs::Backend::new(config.into()),
-        }
+    pub fn new(config: BackendConfig) -> Result<Self, crate::configuration::Error> {
+        let store = data_store::fs::Backend::new(data_store::fs::BackendConfig {
+            root_dir: config.root_dir,
+        });
+
+        let Ok(lock_store) = LockStore::new(config.lock_store.clone()) else {
+            return Err(crate::configuration::Error::MetadataStore(
+                "Failed to initialize LockStore".to_string(),
+            ));
+        };
+
+        let lock_store = Arc::new(lock_store);
+
+        Ok(Self { store, lock_store })
     }
 
     pub fn paginate<T>(
@@ -257,14 +273,127 @@ impl MetadataStore for Backend {
         Ok(())
     }
 
-    async fn read_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error> {
+    #[instrument(skip(self))]
+    async fn create_link(
+        &self,
+        namespace: &str,
+        link: &BlobLink,
+        digest: &Digest,
+    ) -> Result<LinkMetadata, Error> {
+        let _guard = self
+            .lock_store
+            .acquire_lock(link.to_string())
+            .await
+            .map_err(|e| Error::StorageBackend(e.to_string()))?;
+        let link_data = self.read_link_reference(namespace, link).await;
+
+        // Overwriting an existing link!
+        if let Ok(link_data) = link_data {
+            if &link_data.target != digest {
+                let _blob_guard = self
+                    .lock_store
+                    .acquire_lock(link_data.target.as_str())
+                    .await
+                    .map_err(|e| Error::StorageBackend(e.to_string()))?;
+                self.update_blob_index(namespace, &link_data.target, |index| {
+                    index.remove(link);
+                })
+                .await?;
+
+                let _blob_guard = self
+                    .lock_store
+                    .acquire_lock(digest.as_str())
+                    .await
+                    .map_err(|e| Error::StorageBackend(e.to_string()))?;
+                self.update_blob_index(namespace, digest, |index| {
+                    index.insert(link.clone());
+                })
+                .await?;
+            }
+        } else {
+            let _blob_guard = self
+                .lock_store
+                .acquire_lock(digest.as_str())
+                .await
+                .map_err(|e| Error::StorageBackend(e.to_string()))?;
+            self.update_blob_index(namespace, digest, |index| {
+                index.insert(link.clone());
+            })
+            .await?;
+        }
+
+        let metadata = LinkMetadata::from_digest(digest.clone());
+        self.write_link_reference(namespace, link, &metadata)
+            .await?;
+        Ok(metadata)
+    }
+
+    #[instrument(skip(self))]
+    async fn read_link(
+        &self,
+        namespace: &str,
+        link: &BlobLink,
+        update_access_time: bool,
+    ) -> Result<LinkMetadata, Error> {
+        let _guard = self
+            .lock_store
+            .acquire_lock(link.to_string())
+            .await
+            .map_err(|e| Error::StorageBackend(e.to_string()))?;
+
+        if update_access_time {
+            let link_data = self.read_link_reference(namespace, link).await?.accessed();
+            self.write_link_reference(namespace, link, &link_data)
+                .await?;
+            Ok(link_data)
+        } else {
+            self.read_link_reference(namespace, link).await
+        }
+    }
+
+    #[instrument(skip(self))]
+    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
+        let _guard = self
+            .lock_store
+            .acquire_lock(link.to_string())
+            .await
+            .map_err(|e| Error::StorageBackend(e.to_string()))?;
+        let metadata = self.read_link_reference(namespace, link).await;
+
+        let digest = match metadata {
+            Ok(link_data) => link_data.target,
+            Err(Error::ReferenceNotFound) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+
+        let _blob_guard = self
+            .lock_store
+            .acquire_lock(digest.as_str())
+            .await
+            .map_err(|e| Error::StorageBackend(e.to_string()))?;
+        self.delete_link_reference(namespace, link).await?;
+        self.update_blob_index(namespace, &digest, |index| {
+            index.remove(link);
+        })
+        .await?;
+
+        Ok(())
+    }
+}
+
+impl Backend {
+    async fn read_link_reference(
+        &self,
+        namespace: &str,
+        link: &BlobLink,
+    ) -> Result<LinkMetadata, Error> {
         let link_path = path_builder::get_link_path(link, namespace);
 
         let link = self.store.read(&link_path).await?;
-        Ok(LinkMetadata::from_bytes(link)?)
+        LinkMetadata::from_bytes(link)
     }
 
-    async fn write_link(
+    async fn write_link_reference(
         &self,
         namespace: &str,
         link: &BlobLink,
@@ -276,7 +405,7 @@ impl MetadataStore for Backend {
         Ok(())
     }
 
-    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
+    async fn delete_link_reference(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
         let path = path_builder::get_link_container_path(link, namespace);
         debug!("Deleting link at path: {path}");
 

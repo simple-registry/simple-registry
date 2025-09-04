@@ -16,8 +16,6 @@ pub struct Configuration {
     #[serde(default)]
     pub global: GlobalConfig,
     #[serde(default)]
-    pub lock_store: LockStoreConfig,
-    #[serde(default)]
     pub cache_store: CacheStoreConfig,
     #[serde(default)]
     pub blob_store: BlobStorageConfig,
@@ -142,12 +140,12 @@ impl Default for MetadataStoreConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct LockStoreConfig {
     pub redis: Option<RedisLockStoreConfig>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct RedisLockStoreConfig {
     pub url: String,
     pub ttl: usize,
@@ -265,7 +263,6 @@ mod tests {
         assert_eq!(config.server.port, 8000);
         assert_eq!(config.server.query_timeout, 3600);
         assert_eq!(config.server.query_timeout_grace_period, 60);
-        assert!(config.lock_store.redis.is_none());
         assert!(config.cache_store.redis.is_none());
 
         assert_eq!(config.blob_store, BlobStorageConfig::default());

@@ -1,4 +1,4 @@
-use crate::registry::blob_store::{Error, LinkMetadata};
+use crate::registry::blob_store::Error;
 use crate::registry::oci_types::{Descriptor, Digest};
 use crate::registry::utils::BlobMetadata;
 use crate::registry::BlobLink;
@@ -6,7 +6,11 @@ use async_trait::async_trait;
 use std::collections::HashSet;
 
 pub mod fs;
+mod link;
+mod lock;
 pub mod s3;
+
+pub use link::LinkMetadata;
 
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
@@ -48,14 +52,19 @@ pub trait MetadataStore: Send + Sync {
     where
         O: FnOnce(&mut HashSet<BlobLink>) + Send;
 
-    async fn read_link(&self, namespace: &str, link: &BlobLink) -> Result<LinkMetadata, Error>;
-
-    async fn write_link(
+    async fn create_link(
         &self,
         namespace: &str,
         link: &BlobLink,
-        metadata: &LinkMetadata,
-    ) -> Result<(), Error>;
+        digest: &Digest,
+    ) -> Result<LinkMetadata, Error>;
+
+    async fn read_link(
+        &self,
+        namespace: &str,
+        link: &BlobLink,
+        update_access_time: bool,
+    ) -> Result<LinkMetadata, Error>;
 
     async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error>;
 }
@@ -63,7 +72,7 @@ pub trait MetadataStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::MetadataStore;
-    use crate::registry::blob_store::{BlobStore, LinkMetadata};
+    use crate::registry::blob_store::BlobStore;
     use crate::registry::oci_types::Descriptor;
     use crate::registry::utils::sha256_ext::Sha256Ext;
     use crate::registry::BlobLink;
@@ -79,14 +88,7 @@ mod tests {
         for namespace in &namespaces {
             let tag_link = BlobLink::Tag("latest".to_string());
             store
-                .write_link(
-                    namespace,
-                    &tag_link,
-                    &LinkMetadata {
-                        target: digest.clone(),
-                        ..LinkMetadata::default()
-                    },
-                )
+                .create_link(namespace, &tag_link, &digest)
                 .await
                 .unwrap();
         }
@@ -132,14 +134,7 @@ mod tests {
         for tag in tags {
             let tag_link = BlobLink::Tag(tag.to_string());
             store
-                .write_link(
-                    namespace,
-                    &tag_link,
-                    &LinkMetadata {
-                        target: digest.clone(),
-                        ..LinkMetadata::default()
-                    },
-                )
+                .create_link(namespace, &tag_link, &digest)
                 .await
                 .unwrap();
         }
@@ -195,14 +190,7 @@ mod tests {
         let base_link = BlobLink::Digest(base_digest.clone());
 
         metadata_store
-            .write_link(
-                namespace,
-                &base_link,
-                &LinkMetadata {
-                    target: base_digest.clone(),
-                    ..LinkMetadata::default()
-                },
-            )
+            .create_link(namespace, &base_link, &base_digest)
             .await
             .unwrap();
 
@@ -233,14 +221,7 @@ mod tests {
         let link = BlobLink::Digest(referrer_digest.clone());
 
         metadata_store
-            .write_link(
-                namespace,
-                &link,
-                &LinkMetadata {
-                    target: referrer_digest.clone(),
-                    ..LinkMetadata::default()
-                },
-            )
+            .create_link(namespace, &link, &referrer_digest)
             .await
             .unwrap();
 
@@ -248,14 +229,7 @@ mod tests {
         let referrers_link = BlobLink::Referrer(base_digest.clone(), referrer_digest.clone());
 
         metadata_store
-            .write_link(
-                namespace,
-                &referrers_link,
-                &LinkMetadata {
-                    target: referrer_digest.clone(),
-                    ..LinkMetadata::default()
-                },
-            )
+            .create_link(namespace, &referrers_link, &referrer_digest)
             .await
             .unwrap();
 
@@ -315,14 +289,7 @@ mod tests {
 
             let digest_link = BlobLink::Digest(digest.clone());
             store
-                .write_link(
-                    namespace,
-                    &digest_link,
-                    &LinkMetadata {
-                        target: digest,
-                        ..LinkMetadata::default()
-                    },
-                )
+                .create_link(namespace, &digest_link, &digest)
                 .await
                 .unwrap();
         }
@@ -367,23 +334,15 @@ mod tests {
         let tag_link = BlobLink::Tag(tag.to_string());
 
         store
-            .write_link(
-                namespace,
-                &tag_link,
-                &LinkMetadata {
-                    target: digest.clone(),
-                    created_at: Some(Utc::now()),
-                    accessed_at: None,
-                },
-            )
+            .create_link(namespace, &tag_link, &digest)
             .await
             .unwrap();
 
-        let read_digest = store.read_link(namespace, &tag_link).await.unwrap();
+        let read_digest = store.read_link(namespace, &tag_link, false).await.unwrap();
         assert_eq!(read_digest.target, digest);
 
         // Test reading reference info
-        let ref_info = store.read_link(namespace, &tag_link).await.unwrap();
+        let ref_info = store.read_link(namespace, &tag_link, false).await.unwrap();
         let created_at = ref_info.created_at.unwrap();
         assert!(Utc::now().signed_duration_since(created_at) < Duration::seconds(1));
     }

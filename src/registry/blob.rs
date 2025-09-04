@@ -209,12 +209,12 @@ where
         self.validate_namespace(namespace)?;
 
         let link = BlobLink::Layer(digest.clone());
-        if let Err(error) = self.delete_link(namespace, &link).await {
+        if let Err(error) = self.metadata_store.delete_link(namespace, &link).await {
             warn!("Failed to delete layer link: {error}");
         }
 
         let link = BlobLink::Config(digest);
-        if let Err(error) = self.delete_link(namespace, &link).await {
+        if let Err(error) = self.metadata_store.delete_link(namespace, &link).await {
             warn!("Failed to delete config link: {error}");
         }
 
@@ -345,17 +345,27 @@ mod tests {
         let layer_link = BlobLink::Layer(digest.clone());
         let config_link = BlobLink::Config(digest.clone());
         registry
+            .metadata_store
             .create_link(namespace, &layer_link, &digest)
             .await
             .unwrap();
         registry
+            .metadata_store
             .create_link(namespace, &config_link, &digest)
             .await
             .unwrap();
 
         // Verify links exist
-        assert!(registry.read_link(namespace, &layer_link).await.is_ok());
-        assert!(registry.read_link(namespace, &config_link).await.is_ok());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &layer_link, false)
+            .await
+            .is_ok());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &config_link, false)
+            .await
+            .is_ok());
 
         // Verify blob index is updated
         let blob_index = registry
@@ -375,8 +385,16 @@ mod tests {
             .unwrap();
 
         // Verify links are deleted
-        assert!(registry.read_link(namespace, &layer_link).await.is_err());
-        assert!(registry.read_link(namespace, &config_link).await.is_err());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &layer_link, false)
+            .await
+            .is_err());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &config_link, false)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

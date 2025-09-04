@@ -56,6 +56,23 @@ impl BackendConfig {
     }
 }
 
+impl From<BackendConfig> for data_store::s3::BackendConfig {
+    fn from(config: BackendConfig) -> Self {
+        Self {
+            access_key_id: config.access_key_id,
+            secret_key: config.secret_key,
+            endpoint: config.endpoint,
+            bucket: config.bucket,
+            region: config.region,
+            key_prefix: config.key_prefix,
+            multipart_copy_threshold: config.multipart_copy_threshold,
+            multipart_copy_chunk_size: config.multipart_copy_chunk_size,
+            multipart_copy_jobs: config.multipart_copy_jobs,
+            multipart_part_size: config.multipart_part_size,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Backend {
     pub store: data_store::s3::Backend,
