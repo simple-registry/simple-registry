@@ -326,10 +326,18 @@ where
 
                     for tag in tags {
                         let link_reference = BlobLink::Tag(tag);
-                        let link = self
+                        let link = match self
                             .metadata_store
                             .read_link(namespace, &link_reference, self.update_pull_time)
-                            .await?;
+                            .await
+                        {
+                            Ok(link) => link,
+                            Err(crate::registry::metadata_store::Error::ReferenceNotFound) => {
+                                // Tag doesn't exist, skip it
+                                continue;
+                            }
+                            Err(e) => return Err(e.into()),
+                        };
 
                         if link.target == digest {
                             self.metadata_store
@@ -338,11 +346,24 @@ where
                         }
                     }
 
+                    // Try to read the manifest by digest to check for referrers
                     let blob_link = BlobLink::Digest(digest.clone());
-                    let link = self
+                    let link = match self
                         .metadata_store
                         .read_link(namespace, &blob_link, self.update_pull_time)
-                        .await?;
+                        .await
+                    {
+                        Ok(link) => link,
+                        Err(crate::registry::metadata_store::Error::ReferenceNotFound) => {
+                            // Manifest doesn't exist, but still try to delete the link
+                            // (delete_link is idempotent and returns Ok if not found)
+                            self.metadata_store
+                                .delete_link(namespace, &blob_link)
+                                .await?;
+                            break;
+                        }
+                        Err(e) => return Err(e.into()),
+                    };
 
                     let content = self.blob_store.read_blob(&link.target).await?;
                     let manifest_digests = parse_manifest_digests(&content, None)?;
