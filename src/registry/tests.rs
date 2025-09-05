@@ -1,4 +1,4 @@
-use crate::configuration::{CacheStoreConfig, GlobalConfig, LockStoreConfig, RepositoryConfig};
+use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store;
 use crate::registry::metadata_store::MetadataStore;
@@ -52,7 +52,7 @@ impl FSMetadataStoreBackendTestCase {
         let path = temp_dir.path().to_string_lossy().to_string();
         let fs_backend = metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
             root_dir: path,
-            lock_store: LockStoreConfig::default(),
+            redis: None,
         })
         .unwrap();
 
@@ -87,7 +87,7 @@ impl FSRegistryTestCase {
         let fs_metadata_store =
             metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
                 root_dir: path,
-                lock_store: LockStoreConfig::default(),
+                redis: None,
             })
             .unwrap();
         let fs_metadata_store = Arc::new(fs_metadata_store);
@@ -203,7 +203,7 @@ impl S3MetadataStoreBackendTestCase {
             region: "region".to_string(),
             bucket: "registry".to_string(),
             key_prefix: key_prefix.clone(),
-            lock_store: LockStoreConfig::default(),
+            redis: None,
         })
         .unwrap();
 
@@ -266,7 +266,7 @@ impl S3RegistryTestCase {
             region: "region".to_string(),
             bucket: "registry".to_string(),
             key_prefix: key_prefix.clone(),
-            lock_store: LockStoreConfig::default(),
+            redis: None,
         })
         .unwrap();
         let metadata_store = Arc::new(metadata_store);

@@ -1,11 +1,9 @@
 #[cfg(test)]
 mod tests;
 
-use crate::configuration::LockStoreConfig;
-use crate::registry::blob_store::Error;
 use crate::registry::data_store;
-use crate::registry::metadata_store::lock::LockStore;
-use crate::registry::metadata_store::{LinkMetadata, MetadataStore};
+use crate::registry::metadata_store::lock::{self, LockBackend, MemoryBackend};
+use crate::registry::metadata_store::{Error, LinkMetadata, LockConfig, MetadataStore};
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::{path_builder, BlobMetadata};
 use crate::registry::BlobLink;
@@ -20,7 +18,7 @@ use tracing::{debug, instrument};
 pub struct BackendConfig {
     pub root_dir: String,
     #[serde(default)]
-    pub lock_store: LockStoreConfig,
+    pub redis: Option<LockConfig>,
 }
 
 impl From<BackendConfig> for data_store::fs::BackendConfig {
@@ -31,10 +29,10 @@ impl From<BackendConfig> for data_store::fs::BackendConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Backend {
     store: data_store::fs::Backend,
-    lock_store: Arc<LockStore>,
+    lock: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync>,
 }
 
 impl Backend {
@@ -43,15 +41,23 @@ impl Backend {
             root_dir: config.root_dir,
         });
 
-        let Ok(lock_store) = LockStore::new(config.lock_store.clone()) else {
-            return Err(crate::configuration::Error::MetadataStore(
-                "Failed to initialize LockStore".to_string(),
-            ));
-        };
+        // Choose lock backend based on configuration
+        let lock: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync> =
+            if let Some(redis_config) = config.redis {
+                let backend = lock::RedisBackend::new(redis_config).map_err(|e| {
+                    crate::configuration::Error::MetadataStore(format!(
+                        "Failed to initialize Redis lock store: {e}"
+                    ))
+                })?;
+                Arc::new(backend)
+            } else {
+                Arc::new(MemoryBackend::new())
+            };
 
-        let lock_store = Arc::new(lock_store);
-
-        Ok(Self { store, lock_store })
+        Ok(Self {
+            store,
+            lock,
+        })
     }
 
     pub fn paginate<T>(
@@ -84,7 +90,7 @@ impl Backend {
 
     //
 
-    #[instrument]
+    #[instrument(skip(self))]
     async fn collect_repositories(&self, base_path: &str) -> Vec<String> {
         let mut path_stack: Vec<String> = vec![base_path.to_string()];
         let mut repositories = Vec::new();
@@ -281,8 +287,8 @@ impl MetadataStore for Backend {
         digest: &Digest,
     ) -> Result<LinkMetadata, Error> {
         let _guard = self
-            .lock_store
-            .acquire_lock(link.to_string())
+            .lock
+            .acquire_lock(&link.to_string())
             .await
             .map_err(|e| Error::StorageBackend(e.to_string()))?;
         let link_data = self.read_link_reference(namespace, link).await;
@@ -291,7 +297,7 @@ impl MetadataStore for Backend {
         if let Ok(link_data) = link_data {
             if &link_data.target != digest {
                 let _blob_guard = self
-                    .lock_store
+                    .lock
                     .acquire_lock(link_data.target.as_str())
                     .await
                     .map_err(|e| Error::StorageBackend(e.to_string()))?;
@@ -301,7 +307,7 @@ impl MetadataStore for Backend {
                 .await?;
 
                 let _blob_guard = self
-                    .lock_store
+                    .lock
                     .acquire_lock(digest.as_str())
                     .await
                     .map_err(|e| Error::StorageBackend(e.to_string()))?;
@@ -312,7 +318,7 @@ impl MetadataStore for Backend {
             }
         } else {
             let _blob_guard = self
-                .lock_store
+                .lock
                 .acquire_lock(digest.as_str())
                 .await
                 .map_err(|e| Error::StorageBackend(e.to_string()))?;
@@ -336,8 +342,8 @@ impl MetadataStore for Backend {
         update_access_time: bool,
     ) -> Result<LinkMetadata, Error> {
         let _guard = self
-            .lock_store
-            .acquire_lock(link.to_string())
+            .lock
+            .acquire_lock(&link.to_string())
             .await
             .map_err(|e| Error::StorageBackend(e.to_string()))?;
 
@@ -354,8 +360,8 @@ impl MetadataStore for Backend {
     #[instrument(skip(self))]
     async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
         let _guard = self
-            .lock_store
-            .acquire_lock(link.to_string())
+            .lock
+            .acquire_lock(&link.to_string())
             .await
             .map_err(|e| Error::StorageBackend(e.to_string()))?;
         let metadata = self.read_link_reference(namespace, link).await;
@@ -367,7 +373,7 @@ impl MetadataStore for Backend {
         };
 
         let _blob_guard = self
-            .lock_store
+            .lock
             .acquire_lock(digest.as_str())
             .await
             .map_err(|e| Error::StorageBackend(e.to_string()))?;

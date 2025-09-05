@@ -1,8 +1,9 @@
-use crate::registry::blob_store::Error;
+mod error;
 use crate::registry::oci_types::{Descriptor, Digest};
 use crate::registry::utils::BlobMetadata;
 use crate::registry::BlobLink;
 use async_trait::async_trait;
+pub use error::Error;
 use std::collections::HashSet;
 
 pub mod fs;
@@ -11,6 +12,7 @@ mod lock;
 pub mod s3;
 
 pub use link::LinkMetadata;
+pub use lock::redis::LockConfig;
 
 #[async_trait]
 pub trait MetadataStore: Send + Sync {

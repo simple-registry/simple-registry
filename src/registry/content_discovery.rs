@@ -1,7 +1,7 @@
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::{Descriptor, Digest};
-use crate::registry::{blob_store, Error, Registry};
+use crate::registry::{Error, Registry};
 use tracing::instrument;
 
 impl<B, M> Registry<B, M>
@@ -18,15 +18,10 @@ where
     ) -> Result<Vec<Descriptor>, Error> {
         self.validate_namespace(namespace)?;
 
-        match self
+        Ok(self
             .metadata_store
             .list_referrers(namespace, &digest, artifact_type)
-            .await
-        {
-            Ok(referrers) => Ok(referrers),
-            Err(blob_store::Error::BlobNotFound) => Ok(Vec::new()),
-            Err(e) => Err(e)?,
-        }
+            .await?)
     }
 
     #[instrument]

@@ -3,8 +3,8 @@
 
 use crate::command::{argon, scrub, server};
 use crate::configuration::{
-    BlobStorageConfig, Configuration, Error, LockStoreConfig, MetadataStoreConfig,
-    ObservabilityConfig, ServerTlsConfig,
+    BlobStorageConfig, Configuration, Error, MetadataStoreConfig, ObservabilityConfig,
+    ServerTlsConfig,
 };
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
@@ -235,7 +235,7 @@ fn normalize_metadata_config(
         {
             MetadataStoreConfig::FS(metadata_store::fs::BackendConfig {
                 root_dir: blob_cfg.root_dir.clone(),
-                lock_store: LockStoreConfig::default(),
+                redis: None,
             })
         }
 
@@ -251,7 +251,7 @@ fn normalize_metadata_config(
                 access_key_id: blob_cfg.access_key_id.clone(),
                 secret_key: blob_cfg.secret_key.clone(),
                 key_prefix: blob_cfg.key_prefix.clone(),
-                lock_store: LockStoreConfig::default(),
+                redis: None,
             })
         }
 
@@ -266,7 +266,7 @@ fn normalize_metadata_config(
                 access_key_id: blob_cfg.access_key_id.clone(),
                 secret_key: blob_cfg.secret_key.clone(),
                 key_prefix: blob_cfg.key_prefix.clone(),
-                lock_store: LockStoreConfig::default(),
+                redis: None,
             })
         }
 

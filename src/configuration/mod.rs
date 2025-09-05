@@ -140,19 +140,6 @@ impl Default for MetadataStoreConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub struct LockStoreConfig {
-    pub redis: Option<RedisLockStoreConfig>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct RedisLockStoreConfig {
-    pub url: String,
-    pub ttl: usize,
-    #[serde(default)]
-    pub key_prefix: String,
-}
-
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct IdentityConfig {
     pub username: String,

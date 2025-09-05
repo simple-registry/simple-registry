@@ -1,7 +1,7 @@
 use crate::configuration;
 use crate::registry::oci_types;
 use crate::registry::utils::task_queue;
-use crate::registry::{blob_store, cache_store};
+use crate::registry::{blob_store, cache_store, metadata_store};
 use cel_interpreter::SerializationError;
 use hyper::header::InvalidHeaderValue;
 use hyper::http::uri::InvalidUri;
@@ -92,6 +92,13 @@ impl From<blob_store::Error> for Error {
                 Error::Internal("Data store error during operations".to_string())
             }
         }
+    }
+}
+
+impl From<metadata_store::Error> for Error {
+    fn from(error: metadata_store::Error) -> Self {
+        warn!("Metadata store error: {error}");
+        Error::Internal("Metadata store error during operations".to_string())
     }
 }
 
