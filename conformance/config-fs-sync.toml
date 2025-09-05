@@ -1,0 +1,13 @@
+[server]
+bind_address = "0.0.0.0"
+port = 8001
+
+[global]
+max_concurrent_requests = 20
+
+[blob_store.fs]
+root_dir = "./conformance/fs-data-sync"
+sync_to_disk = true
+
+[repository."conformance".access_policy]
+default_allow = true

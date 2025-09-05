@@ -1,23 +1,26 @@
 use serde::Deserialize;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {
     pub root_dir: String,
+    #[serde(default)]
+    pub sync_to_disk: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct Backend {
     root: PathBuf,
+    sync_to_disk: bool,
 }
 
 impl Backend {
     pub fn new(config: BackendConfig) -> Self {
         Self {
             root: config.root_dir.into(),
+            sync_to_disk: config.sync_to_disk,
         }
     }
 
@@ -38,9 +41,19 @@ impl Backend {
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent).await?;
         }
-        let mut file = fs::File::create(full_path).await?;
-        file.write_all(data).await?;
-        file.sync_all().await?;
+
+        let mut temp_file = tempfile::NamedTempFile::new_in(
+            full_path.parent().unwrap_or(std::path::Path::new(".")),
+        )?;
+
+        temp_file.write_all(data)?;
+
+        if self.sync_to_disk {
+            temp_file.flush()?;
+            temp_file.as_file().sync_all()?;
+        }
+
+        temp_file.persist(full_path)?;
         Ok(())
     }
 
@@ -85,6 +98,11 @@ impl Backend {
         }
 
         Ok(entries)
+    }
+
+    pub async fn delete_file(&self, path: &str) -> Result<(), std::io::Error> {
+        let full_path = self.full_path(path);
+        fs::remove_file(full_path).await
     }
 
     pub async fn delete_empty_parent_dirs(&self, path: &str) -> Result<(), std::io::Error> {
@@ -141,7 +159,8 @@ impl Backend {
         }
         fs::OpenOptions::new()
             .create(true)
-            .append(true)
+            .truncate(false)
+            .write(true)
             .open(full_path)
             .await
     }

@@ -20,6 +20,7 @@ bytesize = { version = "2.0", features = ["serde"] }
 cel-interpreter = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 crossbeam-channel = "0.5"
+fs4 = { version = "0.13", features = ["tokio"] }
 futures-util = { version = "0.3", default-features = false }
 hex = "0.4"
 http-body-util = "0.1"
@@ -45,6 +46,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_urlencoded = "0.7"
 sha2 = "0.11.0-rc.0"
+tempfile = "3.21"
 tokio = { version = "1.47", features = ["full", "tracing"] }
 tokio-rustls = "0.26"
 tokio-util = { version = "0.7", features = ["io-util"] }
@@ -56,5 +58,4 @@ uuid = { version = "1.17", features = ["v4", "serde"] }
 x509-parser = "0.18"
 
 [dev-dependencies]
-tempfile = "3.21"
 mockall = "0.13"

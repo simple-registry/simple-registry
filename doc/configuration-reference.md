@@ -57,6 +57,7 @@ Multiple blob storage backends are supported: filesystem or s3-backed.
 ### Filesystem Storage (`blob_store.fs`)
 
 - `root_dir` (string): The root directory for the storage.
+- `sync_to_disk` (optional bool): When true, forces filesystem sync after write operations for stronger durability guarantees (default: false).
 
 ### S3 Storage (`blob_store.s3`)
 
@@ -80,7 +81,8 @@ You can optionally configure a different backend for metadata storage.
 ### Filesystem Storage (`metadata_store.fs`)
 
 - `root_dir` (string): The root directory for the metadata storage. If not specified, uses the blob store's root directory.
-- `lock_store` (optional): Configuration for distributed locking (see Lock Store section below)
+- `sync_to_disk` (optional bool): When true, forces filesystem sync after write operations for better durability (default: false).
+- `redis` (optional): Configuration for distributed locking using Redis (see Redis Locking section below)
 
 ### S3 Storage (`metadata_store.s3`)
 
@@ -90,15 +92,15 @@ You can optionally configure a different backend for metadata storage.
 - `bucket` (string): The bucket for the S3 server
 - `region` (string): The region for the S3 server
 - `key_prefix` (optional string): The key prefix for all S3 keys
-- `lock_store` (optional): Configuration for distributed locking (see Lock Store section below)
+- `redis` (optional): Configuration for distributed locking using Redis (see Redis Locking section below)
 
-### Lock Store Configuration (`metadata_store.<backend>.lock_store`)
+### Distributed Locking Configuration
 
 Distributed locking is used to prevent concurrent operations that could lead to data corruption.
 If no configuration is provided, an in-memory locking mechanism is used, which is not suitable for
 multi-replica deployments.
 
-#### Redis Locking (`metadata_store.<backend>.lock_store.redis`)
+#### Redis Locking (`metadata_store.<backend>.redis`)
 
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
 - `ttl` (usize): The time-to-live for the lock in seconds
@@ -110,7 +112,7 @@ Example:
 [metadata_store.fs]
 root_dir = "/var/registry/metadata"
 
-[metadata_store.fs.lock_store.redis]
+[metadata_store.fs.redis]
 url = "redis://localhost:6379"
 ttl = 10
 key_prefix = "registry-locks"

@@ -19,12 +19,15 @@ pub struct BackendConfig {
     pub root_dir: String,
     #[serde(default)]
     pub redis: Option<LockConfig>,
+    #[serde(default)]
+    pub sync_to_disk: bool,
 }
 
 impl From<BackendConfig> for data_store::fs::BackendConfig {
     fn from(config: BackendConfig) -> Self {
         Self {
             root_dir: config.root_dir,
+            sync_to_disk: config.sync_to_disk,
         }
     }
 }
@@ -39,6 +42,7 @@ impl Backend {
     pub fn new(config: BackendConfig) -> Result<Self, crate::configuration::Error> {
         let store = data_store::fs::Backend::new(data_store::fs::BackendConfig {
             root_dir: config.root_dir,
+            sync_to_disk: config.sync_to_disk,
         });
 
         // Choose lock backend based on configuration
@@ -54,10 +58,7 @@ impl Backend {
                 Arc::new(MemoryBackend::new())
             };
 
-        Ok(Self {
-            store,
-            lock,
-        })
+        Ok(Self { store, lock })
     }
 
     pub fn paginate<T>(

@@ -16,17 +16,20 @@ use std::fmt::{Debug, Formatter};
 use std::io::{ErrorKind, SeekFrom};
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncSeekExt};
-use tracing::{error, instrument};
+use tracing::{error, instrument, warn};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {
     pub root_dir: String,
+    #[serde(default)]
+    pub sync_to_disk: bool,
 }
 
 impl From<BackendConfig> for data_store::fs::BackendConfig {
     fn from(config: BackendConfig) -> Self {
         Self {
             root_dir: config.root_dir,
+            sync_to_disk: config.sync_to_disk,
         }
     }
 }

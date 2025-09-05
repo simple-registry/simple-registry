@@ -22,8 +22,10 @@ impl FSBlobStoreBackendTestCase {
         let temp_dir = TempDir::new().expect("Failed to create temp dir for FSBackendConfig");
 
         let path = temp_dir.path().to_string_lossy().to_string();
-        let fs_backend =
-            blob_store::fs::Backend::new(blob_store::fs::BackendConfig { root_dir: path });
+        let fs_backend = blob_store::fs::Backend::new(blob_store::fs::BackendConfig {
+            root_dir: path,
+            sync_to_disk: false,
+        });
 
         FSBlobStoreBackendTestCase {
             fs_backend,
@@ -53,6 +55,7 @@ impl FSMetadataStoreBackendTestCase {
         let fs_backend = metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
             root_dir: path,
             redis: None,
+            sync_to_disk: false,
         })
         .unwrap();
 
@@ -81,12 +84,14 @@ impl FSRegistryTestCase {
 
         let fs_blob_store = blob_store::fs::Backend::new(blob_store::fs::BackendConfig {
             root_dir: path.clone(),
+            sync_to_disk: false,
         });
         let fs_blob_store = Arc::new(fs_blob_store);
 
         let fs_metadata_store =
             metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
                 root_dir: path,
+                sync_to_disk: false,
                 redis: None,
             })
             .unwrap();

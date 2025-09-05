@@ -236,6 +236,7 @@ fn normalize_metadata_config(
             MetadataStoreConfig::FS(metadata_store::fs::BackendConfig {
                 root_dir: blob_cfg.root_dir.clone(),
                 redis: None,
+                sync_to_disk: blob_cfg.sync_to_disk,
             })
         }
 
