@@ -16,7 +16,7 @@ use std::fmt::{Debug, Formatter};
 use std::io::{ErrorKind, SeekFrom};
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncSeekExt};
-use tracing::{error, instrument, warn};
+use tracing::{error, instrument};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {

@@ -100,11 +100,6 @@ impl Backend {
         Ok(entries)
     }
 
-    pub async fn delete_file(&self, path: &str) -> Result<(), std::io::Error> {
-        let full_path = self.full_path(path);
-        fs::remove_file(full_path).await
-    }
-
     pub async fn delete_empty_parent_dirs(&self, path: &str) -> Result<(), std::io::Error> {
         let full_path = self.full_path(path);
         let mut current_path = full_path.parent();
