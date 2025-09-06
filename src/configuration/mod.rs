@@ -109,7 +109,6 @@ pub struct RedisCacheConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
-// This is acceptable to have a large enum variant for configuration things.
 #[allow(clippy::large_enum_variant)]
 pub enum BlobStorageConfig {
     #[serde(rename = "fs")]
@@ -124,20 +123,16 @@ impl Default for BlobStorageConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-// This is acceptable to have a large enum variant for configuration things.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum MetadataStoreConfig {
     #[serde(rename = "fs")]
     FS(metadata_store::fs::BackendConfig),
     #[serde(rename = "s3")]
     S3(metadata_store::s3::BackendConfig),
-}
-
-impl Default for MetadataStoreConfig {
-    fn default() -> Self {
-        MetadataStoreConfig::FS(metadata_store::fs::BackendConfig::default())
-    }
+    #[serde(skip_deserializing)]
+    #[default]
+    Unspecified,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -206,11 +201,36 @@ impl Configuration {
     }
 
     pub fn load_from_str(slice: &str) -> Result<Self, Error> {
-        let config: Configuration = toml::from_str(slice).map_err(|e| {
+        let mut config: Configuration = toml::from_str(slice).map_err(|e| {
             println!("Configuration file format error:");
             println!("{e}");
             Error::ConfigurationFileFormat(e.to_string())
         })?;
+
+        // Resolve Unspecified metadata_store based on blob_store configuration
+        if matches!(config.metadata_store, MetadataStoreConfig::Unspecified) {
+            config.metadata_store = match &config.blob_store {
+                BlobStorageConfig::FS(cfg) => {
+                    MetadataStoreConfig::FS(metadata_store::fs::BackendConfig {
+                        root_dir: cfg.root_dir.clone(),
+                        redis: None,
+                        sync_to_disk: cfg.sync_to_disk,
+                    })
+                }
+                BlobStorageConfig::S3(cfg) => {
+                    tracing::info!("Auto-configuring S3 metadata-store from blob-store");
+                    MetadataStoreConfig::S3(metadata_store::s3::BackendConfig {
+                        bucket: cfg.bucket.clone(),
+                        region: cfg.region.clone(),
+                        endpoint: cfg.endpoint.clone(),
+                        access_key_id: cfg.access_key_id.clone(),
+                        secret_key: cfg.secret_key.clone(),
+                        key_prefix: cfg.key_prefix.clone(),
+                        redis: None,
+                    })
+                }
+            };
+        }
 
         if let BlobStorageConfig::S3(s3_storage) = &config.blob_store {
             if s3_storage.multipart_part_size < ByteSize::mib(5) {
@@ -257,5 +277,90 @@ mod tests {
         assert!(config.identity.is_empty());
         assert!(config.repository.is_empty());
         assert!(config.observability.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_metadata_store_defaults_with_s3_blob_store() {
+        // When using S3 blob store and no metadata store is specified,
+        // it should auto-configure S3 metadata store
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+        
+        [blob_store.s3]
+        bucket = "test-bucket"
+        region = "us-east-1"
+        endpoint = "http://localhost:9000"
+        access_key_id = "test-key"
+        secret_key = "test-secret"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+
+        // Should auto-configure S3 metadata store with same settings
+        match config.metadata_store {
+            MetadataStoreConfig::S3(ref meta_cfg) => {
+                assert_eq!(meta_cfg.bucket, "test-bucket");
+                assert_eq!(meta_cfg.region, "us-east-1");
+                assert_eq!(meta_cfg.endpoint, "http://localhost:9000");
+                assert_eq!(meta_cfg.access_key_id, "test-key");
+                assert_eq!(meta_cfg.secret_key, "test-secret");
+            }
+            _ => panic!("Expected S3 metadata store to be auto-configured"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metadata_store_defaults_with_fs_blob_store() {
+        // When using FS blob store and no metadata store is specified,
+        // it should use FS metadata store with same root_dir
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+        
+        [blob_store.fs]
+        root_dir = "/data/registry"
+        sync_to_disk = true
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+
+        // Should use FS metadata store with same root_dir
+        match config.metadata_store {
+            MetadataStoreConfig::FS(ref meta_cfg) => {
+                assert_eq!(meta_cfg.root_dir, "/data/registry");
+                assert!(meta_cfg.sync_to_disk);
+            }
+            _ => panic!("Expected FS metadata store"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metadata_store_explicit_config_not_overridden() {
+        // When metadata store is explicitly configured, it should not be overridden
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+        
+        [blob_store.s3]
+        bucket = "blob-bucket"
+        region = "us-west-2"
+        endpoint = "http://blob.example.com"
+        access_key_id = "blob-key"
+        secret_key = "blob-secret"
+        
+        [metadata_store.fs]
+        root_dir = "/custom/metadata/path"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+
+        // Should keep the explicitly configured FS metadata store
+        match config.metadata_store {
+            MetadataStoreConfig::FS(ref meta_cfg) => {
+                assert_eq!(meta_cfg.root_dir, "/custom/metadata/path");
+            }
+            _ => panic!("Expected explicitly configured FS metadata store to be preserved"),
+        }
     }
 }

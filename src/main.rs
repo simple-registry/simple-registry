@@ -192,96 +192,35 @@ fn main() -> Result<(), command::Error> {
     runtime.block_on(async move {
         set_tracing(config.observability.clone())?;
 
-        // Normalize metadata store configuration based on blob store type
-        let metadata_config = normalize_metadata_config(&config.blob_store, &config.metadata_store);
+        let blob_store: Arc<dyn BlobStore + Send + Sync> = match &config.blob_store {
+            BlobStorageConfig::FS(cfg) => {
+                info!("Using filesystem blob-store backend");
+                Arc::new(blob_store::fs::Backend::new(cfg.clone()))
+            }
+            BlobStorageConfig::S3(cfg) => {
+                info!("Using S3 blob-store backend");
+                Arc::new(blob_store::s3::Backend::new(cfg.clone()))
+            }
+        };
 
-        match (&config.blob_store, &metadata_config) {
-            (BlobStorageConfig::FS(blob_cfg), MetadataStoreConfig::FS(meta_cfg)) => {
-                info!("Using filesystem blob-store and metadata-store backends");
-                let blob_store: Arc<dyn BlobStore + Send + Sync> = 
-                    Arc::new(blob_store::fs::Backend::new(blob_cfg.clone()));
-                let metadata_store: Arc<dyn MetadataStore + Send + Sync> = 
-                    Arc::new(metadata_store::fs::Backend::new(meta_cfg.clone())?);
-                handle_command(config, arguments, blob_store, metadata_store).await
+        let metadata_store: Arc<dyn MetadataStore + Send + Sync> = match &config.metadata_store {
+            MetadataStoreConfig::FS(cfg) => {
+                info!("Using filesystem metadata-store backend");
+                Arc::new(metadata_store::fs::Backend::new(cfg.clone())?)
             }
-            (BlobStorageConfig::FS(blob_cfg), MetadataStoreConfig::S3(meta_cfg)) => {
-                info!("Using filesystem blob-store and S3 metadata-store backends");
-                let blob_store: Arc<dyn BlobStore + Send + Sync> = 
-                    Arc::new(blob_store::fs::Backend::new(blob_cfg.clone()));
-                let metadata_store: Arc<dyn MetadataStore + Send + Sync> = 
-                    Arc::new(metadata_store::s3::Backend::new(meta_cfg.clone())?);
-                handle_command(config, arguments, blob_store, metadata_store).await
+            MetadataStoreConfig::S3(cfg) => {
+                info!("Using S3 metadata-store backend");
+                Arc::new(metadata_store::s3::Backend::new(cfg.clone())?)
             }
-            (BlobStorageConfig::S3(blob_cfg), MetadataStoreConfig::FS(meta_cfg)) => {
-                info!("Using S3 blob-store and filesystem metadata-store backends");
-                let blob_store: Arc<dyn BlobStore + Send + Sync> = 
-                    Arc::new(blob_store::s3::Backend::new(blob_cfg.clone()));
-                let metadata_store: Arc<dyn MetadataStore + Send + Sync> = 
-                    Arc::new(metadata_store::fs::Backend::new(meta_cfg.clone())?);
-                handle_command(config, arguments, blob_store, metadata_store).await
+            MetadataStoreConfig::Unspecified => {
+                unreachable!(
+                    "Metadata store should have been resolved during configuration loading"
+                )
             }
-            (BlobStorageConfig::S3(blob_cfg), MetadataStoreConfig::S3(meta_cfg)) => {
-                info!("Using S3 blob-store and metadata-store backends");
-                let blob_store: Arc<dyn BlobStore + Send + Sync> = 
-                    Arc::new(blob_store::s3::Backend::new(blob_cfg.clone()));
-                let metadata_store: Arc<dyn MetadataStore + Send + Sync> = 
-                    Arc::new(metadata_store::s3::Backend::new(meta_cfg.clone())?);
-                handle_command(config, arguments, blob_store, metadata_store).await
-            }
-        }
+        };
+
+        handle_command(config, arguments, blob_store, metadata_store).await
     })
-}
-
-fn normalize_metadata_config(
-    blob_config: &BlobStorageConfig,
-    metadata_config: &MetadataStoreConfig,
-) -> MetadataStoreConfig {
-    match (blob_config, metadata_config) {
-        // FS blob store with unconfigured FS metadata store - inherit root_dir
-        (BlobStorageConfig::FS(blob_cfg), MetadataStoreConfig::FS(meta_cfg))
-            if meta_cfg.root_dir.is_empty() =>
-        {
-            MetadataStoreConfig::FS(metadata_store::fs::BackendConfig {
-                root_dir: blob_cfg.root_dir.clone(),
-                redis: None,
-                sync_to_disk: blob_cfg.sync_to_disk,
-            })
-        }
-
-        // S3 blob store with default FS metadata store - use S3 metadata store instead
-        (BlobStorageConfig::S3(blob_cfg), MetadataStoreConfig::FS(meta_cfg))
-            if meta_cfg.root_dir.is_empty() =>
-        {
-            info!("Auto-configuring S3 metadata-store from blob-store");
-            MetadataStoreConfig::S3(metadata_store::s3::BackendConfig {
-                bucket: blob_cfg.bucket.clone(),
-                region: blob_cfg.region.clone(),
-                endpoint: blob_cfg.endpoint.clone(),
-                access_key_id: blob_cfg.access_key_id.clone(),
-                secret_key: blob_cfg.secret_key.clone(),
-                key_prefix: blob_cfg.key_prefix.clone(),
-                redis: None,
-            })
-        }
-
-        // S3 blob store with unconfigured S3 metadata store - inherit S3 config
-        (BlobStorageConfig::S3(blob_cfg), MetadataStoreConfig::S3(meta_cfg))
-            if meta_cfg.bucket.is_empty() =>
-        {
-            MetadataStoreConfig::S3(metadata_store::s3::BackendConfig {
-                bucket: blob_cfg.bucket.clone(),
-                region: blob_cfg.region.clone(),
-                endpoint: blob_cfg.endpoint.clone(),
-                access_key_id: blob_cfg.access_key_id.clone(),
-                secret_key: blob_cfg.secret_key.clone(),
-                key_prefix: blob_cfg.key_prefix.clone(),
-                redis: None,
-            })
-        }
-
-        // All other cases - use as configured
-        _ => metadata_config.clone(),
-    }
 }
 
 async fn handle_command(
