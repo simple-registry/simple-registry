@@ -41,8 +41,6 @@ use crate::registry::api::{
     RegistryAPIManifestHandlersExt, RegistryAPIUploadHandlersExt, RegistryAPIVersionHandlerExt,
     TagsParameters,
 };
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::policy_types::ClientIdentity;
 use crate::registry::Registry;
 
@@ -65,9 +63,9 @@ static ROUTE_LIST_TAGS_REGEX: LazyLock<Regex> =
 static ROUTE_CATALOG_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^/v2/_catalog$").unwrap());
 
-pub enum ServiceListener<B, M> {
-    Insecure(InsecureListener<B, M>),
-    Secure(TlsListener<B, M>),
+pub enum ServiceListener {
+    Insecure(InsecureListener),
+    Secure(TlsListener),
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -78,20 +76,16 @@ pub enum ServiceListener<B, M> {
 )]
 pub struct Options {}
 
-pub struct Command<B, M> {
-    listener: ServiceListener<B, M>,
+pub struct Command {
+    listener: ServiceListener,
 }
 
-impl<B, M> Command<B, M>
-where
-    B: BlobStore + 'static,
-    M: MetadataStore + 'static,
-{
+impl Command {
     pub fn new(
         server_config: &ServerConfig,
         identities: &HashMap<String, IdentityConfig>,
-        registry: Registry<B, M>,
-    ) -> Result<Command<B, M>, configuration::Error> {
+        registry: Registry,
+    ) -> Result<Command, configuration::Error> {
         let timeouts = vec![
             Duration::from_secs(server_config.query_timeout),
             Duration::from_secs(server_config.query_timeout_grace_period),
@@ -111,7 +105,7 @@ where
         &self,
         server_config: ServerConfig,
         identities: &HashMap<String, IdentityConfig>,
-        registry: Registry<B, M>,
+        registry: Registry,
     ) -> Result<(), configuration::Error> {
         let timeouts = vec![
             Duration::from_secs(server_config.query_timeout),
@@ -139,11 +133,8 @@ where
     }
 }
 
-async fn serve_request<B: BlobStore + 'static, M: MetadataStore + 'static, S>(
-    stream: TokioIo<S>,
-    context: Arc<ServerContext<B, M>>,
-    identity: ClientIdentity,
-) where
+async fn serve_request<S>(stream: TokioIo<S>, context: Arc<ServerContext>, identity: ClientIdentity)
+where
     S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
     let conn = http1::Builder::new().serve_connection(
@@ -188,8 +179,8 @@ async fn serve_request<B: BlobStore + 'static, M: MetadataStore + 'static, S>(
 }
 
 #[instrument(skip(context, request))]
-async fn handle_request<B: BlobStore + 'static, M: MetadataStore + 'static>(
-    context: Arc<ServerContext<B, M>>,
+async fn handle_request(
+    context: Arc<ServerContext>,
     request: Request<Incoming>,
     identity: ClientIdentity,
 ) -> Result<Response<Body>, Infallible> {
@@ -268,8 +259,8 @@ async fn handle_request<B: BlobStore + 'static, M: MetadataStore + 'static>(
 
 #[allow(clippy::too_many_lines)]
 #[instrument(skip(context, req))]
-async fn router<B: BlobStore + 'static, M: MetadataStore + 'static>(
-    context: Arc<ServerContext<B, M>>,
+async fn router(
+    context: Arc<ServerContext>,
     req: Request<Incoming>,
     mut id: ClientIdentity,
 ) -> (

@@ -42,9 +42,9 @@ static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap()
 });
 
-pub struct Registry<B, M> {
-    blob_store: Arc<B>,
-    metadata_store: Arc<M>,
+pub struct Registry {
+    blob_store: Arc<dyn BlobStore + Send + Sync>,
+    metadata_store: Arc<dyn MetadataStore + Send + Sync>,
     auth_token_cache: CacheStore,
     repositories: HashMap<String, Repository>,
     update_pull_time: bool,
@@ -53,21 +53,17 @@ pub struct Registry<B, M> {
     task_queue: TaskQueue,
 }
 
-impl<B, M> Debug for Registry<B, M> {
+impl Debug for Registry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Registry").finish()
     }
 }
 
-impl<B, M> Registry<B, M>
-where
-    B: BlobStore,
-    M: MetadataStore,
-{
+impl Registry {
     #[instrument(skip(repositories_config, blob_store, metadata_store, auth_token_cache))]
     pub fn new(
-        blob_store: Arc<B>,
-        metadata_store: Arc<M>,
+        blob_store: Arc<dyn BlobStore + Send + Sync>,
+        metadata_store: Arc<dyn MetadataStore + Send + Sync>,
         repositories_config: HashMap<String, RepositoryConfig>,
         global_config: &GlobalConfig,
         auth_token_cache: CacheStoreConfig,
@@ -142,8 +138,8 @@ pub mod test_utils {
         repositories
     }
 
-    pub async fn create_test_blob<B: BlobStore, M: MetadataStore>(
-        registry: &Registry<B, M>,
+    pub async fn create_test_blob(
+        registry: &Registry,
         namespace: &str,
         content: &[u8],
     ) -> (Digest, Repository) {

@@ -1,8 +1,6 @@
 use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::{IntoAsyncRead, RequestExt};
 use crate::registry::api::hyper::{DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID};
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, StartUploadResponse};
@@ -42,7 +40,7 @@ pub trait RegistryAPIUploadHandlersExt {
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error>
     where
-        T: body::Body + Unpin + Sync + Send,
+        T: body::Body + Unpin + Sync + Send + 'static,
         T::Data: Send + Sync,
         T::Error: Send + Sync + std::error::Error + 'static;
 
@@ -53,7 +51,7 @@ pub trait RegistryAPIUploadHandlersExt {
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error>
     where
-        T: body::Body + Unpin + Sync + Send,
+        T: body::Body + Unpin + Sync + Send + 'static,
         T::Data: Send + Sync,
         T::Error: Send + Sync + std::error::Error + 'static;
 
@@ -64,7 +62,7 @@ pub trait RegistryAPIUploadHandlersExt {
     ) -> Result<Response<Body>, Error>;
 }
 
-impl<B: BlobStore, M: MetadataStore> RegistryAPIUploadHandlersExt for Registry<B, M> {
+impl RegistryAPIUploadHandlersExt for Registry {
     #[instrument(skip(self, request))]
     async fn handle_start_upload<T>(
         &self,
@@ -145,7 +143,7 @@ impl<B: BlobStore, M: MetadataStore> RegistryAPIUploadHandlersExt for Registry<B
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error>
     where
-        T: body::Body + Unpin + Sync + Send,
+        T: body::Body + Unpin + Sync + Send + 'static,
         T::Data: Send + Sync,
         T::Error: Send + Sync + std::error::Error + 'static,
     {
@@ -189,7 +187,7 @@ impl<B: BlobStore, M: MetadataStore> RegistryAPIUploadHandlersExt for Registry<B
         identity: ClientIdentity,
     ) -> Result<Response<Body>, Error>
     where
-        T: body::Body + Unpin + Sync + Send,
+        T: body::Body + Unpin + Sync + Send + 'static,
         T::Data: Send + Sync,
         T::Error: Send + Sync + std::error::Error + 'static,
     {
@@ -262,9 +260,7 @@ mod tests {
     use hyper::Uri;
     use uuid::Uuid;
 
-    async fn test_handle_start_upload_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_start_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
 
         // Test start upload without digest
@@ -342,9 +338,7 @@ mod tests {
         test_handle_start_upload_impl(t.registry()).await;
     }
 
-    async fn test_handle_get_upload_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_get_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
         let uuid = Uuid::new_v4();
 
@@ -389,9 +383,7 @@ mod tests {
         test_handle_get_upload_impl(t.registry()).await;
     }
 
-    async fn test_handle_patch_upload_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_patch_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
         let uuid = Uuid::new_v4();
 
@@ -449,9 +441,7 @@ mod tests {
         test_handle_patch_upload_impl(t.registry()).await;
     }
 
-    async fn test_handle_put_upload_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_put_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
         let uuid = Uuid::new_v4();
         let content = b"test content";
@@ -527,9 +517,7 @@ mod tests {
         test_handle_put_upload_impl(t.registry()).await;
     }
 
-    async fn test_handle_delete_upload_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_delete_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
         let uuid = Uuid::new_v4();
 

@@ -2,8 +2,6 @@ use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::RequestExt;
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::blob::GetBlobResponse;
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
@@ -39,9 +37,7 @@ pub trait RegistryAPIBlobHandlersExt {
     ) -> Result<Response<Body>, Error>;
 }
 
-impl<B: BlobStore + 'static, M: MetadataStore + 'static> RegistryAPIBlobHandlersExt
-    for Registry<B, M>
-{
+impl RegistryAPIBlobHandlersExt for Registry {
     #[instrument(skip(self, request))]
     async fn handle_head_blob<T>(
         &self,
@@ -156,7 +152,6 @@ mod tests {
     use super::*;
     use crate::registry::api::hyper::response_ext::IntoAsyncRead;
     use crate::registry::api::hyper::response_ext::ResponseExt;
-    use crate::registry::metadata_store::MetadataStore;
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use crate::registry::utils::BlobLink;
@@ -165,9 +160,7 @@ mod tests {
     use hyper::Method;
     use hyper::Uri;
 
-    async fn test_handle_head_blob_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_head_blob_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
@@ -216,9 +209,7 @@ mod tests {
         test_handle_head_blob_impl(t.registry()).await;
     }
 
-    async fn test_handle_delete_blob_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_delete_blob_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
@@ -314,9 +305,7 @@ mod tests {
         test_handle_delete_blob_impl(t.registry()).await;
     }
 
-    async fn test_handle_get_blob_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_get_blob_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
@@ -371,12 +360,7 @@ mod tests {
         test_handle_get_blob_impl(t.registry()).await;
     }
 
-    async fn test_handle_get_blob_with_range_impl<
-        B: BlobStore + 'static,
-        M: MetadataStore + 'static,
-    >(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_get_blob_with_range_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;

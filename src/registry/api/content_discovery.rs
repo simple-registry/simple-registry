@@ -2,8 +2,6 @@ use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::RequestExt;
 use crate::registry::api::hyper::response_ext::ResponseExt;
 use crate::registry::api::hyper::OCI_FILTERS_APPLIED;
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::{Digest, ReferrerList};
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
@@ -45,7 +43,7 @@ pub trait RegistryAPIContentDiscoveryHandlersExt {
     ) -> Result<Response<Body>, Error>;
 }
 
-impl<B: BlobStore, M: MetadataStore> RegistryAPIContentDiscoveryHandlersExt for Registry<B, M> {
+impl RegistryAPIContentDiscoveryHandlersExt for Registry {
     #[instrument(skip(self, request))]
     async fn handle_get_referrers<T>(
         &self,
@@ -179,9 +177,7 @@ mod tests {
     use hyper::Uri;
     use tokio::io::AsyncReadExt;
 
-    async fn test_handle_get_referrers_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_get_referrers_impl(registry: &Registry) {
         let namespace = "test-repo";
 
         // Create manifest blobs
@@ -272,9 +268,7 @@ mod tests {
         test_handle_get_referrers_impl(t.registry()).await;
     }
 
-    async fn test_handle_list_catalog_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_list_catalog_impl(registry: &Registry) {
         // Create some test repositories
         let namespaces = ["repo1", "repo2", "repo3"];
         let content = b"test content";
@@ -351,9 +345,7 @@ mod tests {
         test_handle_list_catalog_impl(t.registry()).await;
     }
 
-    async fn test_handle_list_tags_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_list_tags_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;

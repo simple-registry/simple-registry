@@ -1,14 +1,8 @@
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::{Descriptor, Digest};
 use crate::registry::{Error, Registry};
 use tracing::instrument;
 
-impl<B, M> Registry<B, M>
-where
-    B: BlobStore,
-    M: MetadataStore,
-{
+impl Registry {
     #[instrument]
     pub async fn get_referrers(
         &self,
@@ -80,7 +74,7 @@ mod tests {
         test_get_referrers(t.registry()).await;
     }
 
-    async fn test_get_referrers<B: BlobStore, M: MetadataStore>(registry: &Registry<B, M>) {
+    async fn test_get_referrers(registry: &Registry) {
         let namespace = "test-repo";
         let digest = Digest::from_str(
             "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
@@ -124,7 +118,7 @@ mod tests {
         test_list_catalog(t.registry()).await;
     }
 
-    async fn test_list_catalog<B: BlobStore, M: MetadataStore>(registry: &Registry<B, M>) {
+    async fn test_list_catalog(registry: &Registry) {
         // Test default pagination (n=100)
         let (namespaces, token) = registry.list_catalog(None, None).await.unwrap();
         assert!(namespaces.is_empty());
@@ -156,7 +150,7 @@ mod tests {
         test_list_tags(t.registry()).await;
     }
 
-    async fn test_list_tags<B: BlobStore, M: MetadataStore>(registry: &Registry<B, M>) {
+    async fn test_list_tags(registry: &Registry) {
         let namespace = "test-repo";
 
         // Create some tags first

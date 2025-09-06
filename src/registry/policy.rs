@@ -3,7 +3,7 @@ use crate::registry::{Error, Registry, Repository};
 use cel_interpreter::{Context, Program, Value};
 use tracing::{debug, error, info, instrument};
 
-impl<B, M> Registry<B, M> {
+impl Registry {
     fn deny() -> Error {
         Error::Unauthorized("Access denied".to_string())
     }
@@ -150,7 +150,7 @@ mod tests {
     use crate::registry::oci_types::Reference;
     use crate::registry::tests::FSRegistryTestCase;
 
-    type NoStoreRegistry = Registry<(), ()>;
+    type NoStoreRegistry = Registry;
 
     fn create_default_deny_repo(rules: Vec<String>) -> Repository {
         let config = RepositoryConfig {

@@ -29,11 +29,11 @@ pub trait BlobStore: Send + Sync {
 
     async fn create_upload(&self, namespace: &str, uuid: &str) -> Result<String, Error>;
 
-    async fn write_upload<S: AsyncRead + Unpin + Send + Sync>(
+    async fn write_upload(
         &self,
         namespace: &str,
         uuid: &str,
-        stream: S,
+        stream: Box<dyn AsyncRead + Unpin + Send + Sync>,
         append: bool,
     ) -> Result<(), Error>;
 
@@ -81,9 +81,9 @@ mod tests {
         for id in upload_ids {
             store.create_upload(namespace, id).await.unwrap();
 
-            let content = format!("Content for upload {id}");
+            let content = format!("Content for upload {id}").into_bytes();
             store
-                .write_upload(namespace, id, Cursor::new(content.as_bytes()), false)
+                .write_upload(namespace, id, Box::new(Cursor::new(content)), false)
                 .await
                 .unwrap();
         }
@@ -212,7 +212,12 @@ mod tests {
         let expected_digest = hasher.digest();
 
         store
-            .write_upload(namespace, &uuid, Cursor::new(test_content.to_vec()), false)
+            .write_upload(
+                namespace,
+                &uuid,
+                Box::new(Cursor::new(test_content.to_vec())),
+                false,
+            )
             .await
             .unwrap();
 

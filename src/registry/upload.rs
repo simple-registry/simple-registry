@@ -1,5 +1,3 @@
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::{Error, Registry};
 use tokio::io::AsyncRead;
@@ -11,11 +9,7 @@ pub enum StartUploadResponse {
     Session(String, String),
 }
 
-impl<B, M> Registry<B, M>
-where
-    B: BlobStore,
-    M: MetadataStore,
-{
+impl Registry {
     #[instrument]
     pub async fn start_upload(
         &self,
@@ -48,7 +42,7 @@ where
         stream: S,
     ) -> Result<u64, Error>
     where
-        S: AsyncRead + Unpin + Send + Sync,
+        S: AsyncRead + Unpin + Send + Sync + 'static,
     {
         self.validate_namespace(namespace)?;
 
@@ -65,7 +59,7 @@ where
         }
 
         self.blob_store
-            .write_upload(namespace, &session_id, stream, true)
+            .write_upload(namespace, &session_id, Box::new(stream), true)
             .await?;
 
         let (_, size, _) = self
@@ -93,7 +87,7 @@ where
         stream: S,
     ) -> Result<(), Error>
     where
-        S: AsyncRead + Unpin + Send + Sync,
+        S: AsyncRead + Unpin + Send + Sync + 'static,
     {
         self.validate_namespace(namespace)?;
 
@@ -106,7 +100,7 @@ where
             .is_ok();
 
         self.blob_store
-            .write_upload(namespace, &session_id, stream, append)
+            .write_upload(namespace, &session_id, Box::new(stream), append)
             .await?;
 
         let (upload_digest, _, _) = self
@@ -167,9 +161,7 @@ mod tests {
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use std::io::Cursor;
 
-    async fn test_start_upload_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_start_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test upload content";
 
@@ -209,9 +201,7 @@ mod tests {
         test_start_upload_impl(t.registry()).await;
     }
 
-    async fn test_patch_upload_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_patch_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test patch content";
         let session_id = Uuid::new_v4();
@@ -264,9 +254,7 @@ mod tests {
         test_patch_upload_impl(t.registry()).await;
     }
 
-    async fn test_complete_upload_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_complete_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test complete content";
         let session_id = Uuid::new_v4();
@@ -316,9 +304,7 @@ mod tests {
         test_complete_upload_impl(t.registry()).await;
     }
 
-    async fn test_delete_upload_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_delete_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
         let session_id = Uuid::new_v4();
 
@@ -359,9 +345,7 @@ mod tests {
         test_delete_upload_impl(t.registry()).await;
     }
 
-    async fn test_get_upload_range_max_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_get_upload_range_max_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test range content";
         let session_id = Uuid::new_v4();

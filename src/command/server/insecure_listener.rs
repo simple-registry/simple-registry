@@ -1,8 +1,6 @@
 use crate::command;
 use crate::command::server::{serve_request, ServerContext};
 use crate::configuration::ServerConfig;
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::policy_types::ClientIdentity;
 use arc_swap::ArcSwap;
 use hyper_util::rt::TokioIo;
@@ -11,17 +9,13 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{debug, info};
 
-pub struct InsecureListener<B, M> {
+pub struct InsecureListener {
     binding_address: SocketAddr,
-    context: ArcSwap<ServerContext<B, M>>,
+    context: ArcSwap<ServerContext>,
 }
 
-impl<B, M> InsecureListener<B, M>
-where
-    B: BlobStore + 'static,
-    M: MetadataStore + 'static,
-{
-    pub fn new(server_config: &ServerConfig, context: ServerContext<B, M>) -> Self {
+impl InsecureListener {
+    pub fn new(server_config: &ServerConfig, context: ServerContext) -> Self {
         let binding_address = SocketAddr::new(server_config.bind_address, server_config.port);
 
         Self {
@@ -30,7 +24,7 @@ where
         }
     }
 
-    pub fn notify_config_change(&self, context: ServerContext<B, M>) {
+    pub fn notify_config_change(&self, context: ServerContext) {
         self.context.store(Arc::new(context));
     }
 

@@ -2,7 +2,6 @@ use crate::registry::api::hyper::response_ext::IntoAsyncRead;
 use crate::registry::api::hyper::response_ext::ResponseExt;
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::blob_store::{BlobStore, Reader};
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::utils::{task_queue, BlobLink};
 use crate::registry::{blob_store, Error, Registry, Repository};
@@ -28,11 +27,7 @@ pub struct HeadBlobResponse {
     pub size: u64,
 }
 
-impl<B, M> Registry<B, M>
-where
-    B: BlobStore + 'static,
-    M: MetadataStore,
-{
+impl Registry {
     #[instrument(skip(repository))]
     pub async fn head_blob(
         &self,
@@ -66,16 +61,12 @@ where
     }
 
     #[instrument(skip(storage_engine, stream))]
-    async fn copy_blob<E, S>(
-        storage_engine: Arc<E>,
-        stream: S,
+    async fn copy_blob(
+        storage_engine: Arc<dyn BlobStore + Send + Sync>,
+        stream: impl AsyncRead + Send + Sync + Unpin + 'static,
         namespace: String,
         digest: Digest,
-    ) -> Result<(), Error>
-    where
-        E: BlobStore,
-        S: AsyncRead + Send + Sync + Unpin,
-    {
+    ) -> Result<(), Error> {
         let session_id = Uuid::new_v4().to_string();
 
         storage_engine
@@ -83,7 +74,7 @@ where
             .await?;
 
         storage_engine
-            .write_upload(&namespace, &session_id, stream, false)
+            .write_upload(&namespace, &session_id, Box::new(stream), false)
             .await?;
 
         if let Err(error) = storage_engine
@@ -230,9 +221,7 @@ mod tests {
     use std::io::Cursor;
     use tokio::io::AsyncReadExt;
 
-    async fn test_head_blob_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_head_blob_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -258,9 +247,7 @@ mod tests {
         test_head_blob_impl(t.registry()).await;
     }
 
-    async fn test_get_blob_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_get_blob_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -293,9 +280,7 @@ mod tests {
         test_get_blob_impl(t.registry()).await;
     }
 
-    async fn test_get_blob_with_range_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_get_blob_with_range_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -332,9 +317,7 @@ mod tests {
         test_get_blob_with_range_impl(t.registry()).await;
     }
 
-    async fn test_delete_blob_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_delete_blob_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -409,9 +392,7 @@ mod tests {
         test_delete_blob_impl(t.registry()).await;
     }
 
-    async fn test_copy_blob_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_copy_blob_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test blob content";
 
@@ -422,7 +403,7 @@ mod tests {
         let storage_engine = registry.blob_store.clone();
 
         // Test copy_blob
-        Registry::<B, M>::copy_blob(
+        Registry::copy_blob(
             storage_engine,
             stream,
             namespace.to_string(),

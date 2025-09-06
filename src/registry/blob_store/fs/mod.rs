@@ -163,11 +163,11 @@ impl BlobStore for Backend {
     }
 
     #[instrument(skip(self, stream))]
-    async fn write_upload<S: AsyncRead + Unpin + Send + Sync>(
+    async fn write_upload(
         &self,
         name: &str,
         uuid: &str,
-        stream: S,
+        stream: Box<dyn AsyncRead + Unpin + Send + Sync>,
         append: bool,
     ) -> Result<(), Error> {
         let upload_size = if append {

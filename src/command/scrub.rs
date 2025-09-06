@@ -1,6 +1,4 @@
 use crate::command;
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::Registry;
 use argh::FromArgs;
 use humantime::Duration;
@@ -50,13 +48,13 @@ enum ScrubCheck {
     Retention,
 }
 
-pub struct Command<B, M> {
-    registry: Arc<Registry<B, M>>,
+pub struct Command {
+    registry: Arc<Registry>,
     enabled_checks: HashSet<ScrubCheck>,
 }
 
-impl<B: BlobStore, M: MetadataStore> Command<B, M> {
-    pub fn new(options: &Options, registry: Registry<B, M>) -> Self {
+impl Command {
+    pub fn new(options: &Options, registry: Registry) -> Self {
         let upload_timeout = options
             .upload_timeout
             .map_or(StdDuration::from_secs(86400), Into::into);

@@ -1,8 +1,6 @@
 use crate::command;
 use crate::command::server::{serve_request, ServerContext};
 use crate::configuration::{Error, ServerConfig, ServerTlsConfig};
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::policy_types::ClientIdentity;
 use arc_swap::ArcSwap;
 use hyper_util::rt::TokioIo;
@@ -18,18 +16,14 @@ use tracing::{debug, info};
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
 
-pub struct TlsListener<B, M> {
+pub struct TlsListener {
     binding_address: SocketAddr,
     tls_acceptor: ArcSwap<TlsAcceptor>,
-    context: ArcSwap<ServerContext<B, M>>,
+    context: ArcSwap<ServerContext>,
 }
 
-impl<B, M> TlsListener<B, M>
-where
-    B: BlobStore + 'static,
-    M: MetadataStore + 'static,
-{
-    pub fn new(server_config: &ServerConfig, context: ServerContext<B, M>) -> Result<Self, Error> {
+impl TlsListener {
+    pub fn new(server_config: &ServerConfig, context: ServerContext) -> Result<Self, Error> {
         let tls_config = server_config.tls.as_ref().ok_or_else(|| {
             Error::MissingExpectedTLSSection("TLS configuration is missing".to_string())
         })?;
@@ -47,7 +41,7 @@ where
     pub fn notify_config_change(
         &self,
         server_config: ServerConfig,
-        context: ServerContext<B, M>,
+        context: ServerContext,
     ) -> Result<(), Error> {
         let tls_config = server_config.tls.ok_or_else(|| {
             Error::MissingExpectedTLSSection("TLS configuration is missing".to_string())

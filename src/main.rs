@@ -80,12 +80,12 @@ fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {
     Ok(())
 }
 
-fn set_config_watcher<B: BlobStore + 'static, M: MetadataStore + 'static>(
-    blob_store: Arc<B>,
-    metadata_store: Arc<M>,
+fn set_config_watcher(
+    blob_store: Arc<dyn BlobStore + Send + Sync>,
+    metadata_store: Arc<dyn MetadataStore + Send + Sync>,
     config_path: &str,
     tls_config: Option<ServerTlsConfig>,
-    server: &Arc<server::Command<B, M>>,
+    server: &Arc<server::Command>,
 ) -> Result<RecommendedWatcher, command::Error> {
     info!("Setting up file system watcher for configuration file");
     let server_watcher = server.clone();
@@ -198,26 +198,34 @@ fn main() -> Result<(), command::Error> {
         match (&config.blob_store, &metadata_config) {
             (BlobStorageConfig::FS(blob_cfg), MetadataStoreConfig::FS(meta_cfg)) => {
                 info!("Using filesystem blob-store and metadata-store backends");
-                let blob_store = Arc::new(blob_store::fs::Backend::new(blob_cfg.clone()));
-                let metadata_store = Arc::new(metadata_store::fs::Backend::new(meta_cfg.clone())?);
+                let blob_store: Arc<dyn BlobStore + Send + Sync> = 
+                    Arc::new(blob_store::fs::Backend::new(blob_cfg.clone()));
+                let metadata_store: Arc<dyn MetadataStore + Send + Sync> = 
+                    Arc::new(metadata_store::fs::Backend::new(meta_cfg.clone())?);
                 handle_command(config, arguments, blob_store, metadata_store).await
             }
             (BlobStorageConfig::FS(blob_cfg), MetadataStoreConfig::S3(meta_cfg)) => {
                 info!("Using filesystem blob-store and S3 metadata-store backends");
-                let blob_store = Arc::new(blob_store::fs::Backend::new(blob_cfg.clone()));
-                let metadata_store = Arc::new(metadata_store::s3::Backend::new(meta_cfg.clone())?);
+                let blob_store: Arc<dyn BlobStore + Send + Sync> = 
+                    Arc::new(blob_store::fs::Backend::new(blob_cfg.clone()));
+                let metadata_store: Arc<dyn MetadataStore + Send + Sync> = 
+                    Arc::new(metadata_store::s3::Backend::new(meta_cfg.clone())?);
                 handle_command(config, arguments, blob_store, metadata_store).await
             }
             (BlobStorageConfig::S3(blob_cfg), MetadataStoreConfig::FS(meta_cfg)) => {
                 info!("Using S3 blob-store and filesystem metadata-store backends");
-                let blob_store = Arc::new(blob_store::s3::Backend::new(blob_cfg.clone()));
-                let metadata_store = Arc::new(metadata_store::fs::Backend::new(meta_cfg.clone())?);
+                let blob_store: Arc<dyn BlobStore + Send + Sync> = 
+                    Arc::new(blob_store::s3::Backend::new(blob_cfg.clone()));
+                let metadata_store: Arc<dyn MetadataStore + Send + Sync> = 
+                    Arc::new(metadata_store::fs::Backend::new(meta_cfg.clone())?);
                 handle_command(config, arguments, blob_store, metadata_store).await
             }
             (BlobStorageConfig::S3(blob_cfg), MetadataStoreConfig::S3(meta_cfg)) => {
                 info!("Using S3 blob-store and metadata-store backends");
-                let blob_store = Arc::new(blob_store::s3::Backend::new(blob_cfg.clone()));
-                let metadata_store = Arc::new(metadata_store::s3::Backend::new(meta_cfg.clone())?);
+                let blob_store: Arc<dyn BlobStore + Send + Sync> = 
+                    Arc::new(blob_store::s3::Backend::new(blob_cfg.clone()));
+                let metadata_store: Arc<dyn MetadataStore + Send + Sync> = 
+                    Arc::new(metadata_store::s3::Backend::new(meta_cfg.clone())?);
                 handle_command(config, arguments, blob_store, metadata_store).await
             }
         }
@@ -276,11 +284,11 @@ fn normalize_metadata_config(
     }
 }
 
-async fn handle_command<B: BlobStore + 'static, M: MetadataStore + 'static>(
+async fn handle_command(
     config: Configuration,
     arguments: GlobalArguments,
-    data_store: Arc<B>,
-    metadata_store: Arc<M>,
+    data_store: Arc<dyn BlobStore + Send + Sync>,
+    metadata_store: Arc<dyn MetadataStore + Send + Sync>,
 ) -> Result<(), command::Error> {
     let registry = Registry::new(
         data_store.clone(),

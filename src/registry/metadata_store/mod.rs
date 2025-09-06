@@ -4,7 +4,12 @@ use crate::registry::utils::BlobMetadata;
 use crate::registry::BlobLink;
 use async_trait::async_trait;
 pub use error::Error;
-use std::collections::HashSet;
+
+#[derive(Debug, Clone)]
+pub enum BlobIndexOperation {
+    Insert(BlobLink),
+    Remove(BlobLink),
+}
 
 pub mod fs;
 mod link;
@@ -45,14 +50,12 @@ pub trait MetadataStore: Send + Sync {
 
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobMetadata, Error>;
 
-    async fn update_blob_index<O>(
+    async fn update_blob_index(
         &self,
         namespace: &str,
         digest: &Digest,
-        operation: O,
-    ) -> Result<(), Error>
-    where
-        O: FnOnce(&mut HashSet<BlobLink>) + Send;
+        operation: BlobIndexOperation,
+    ) -> Result<(), Error>;
 
     async fn create_link(
         &self,

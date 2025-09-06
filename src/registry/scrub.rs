@@ -1,5 +1,4 @@
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::{LinkMetadata, MetadataStore};
+use crate::registry::metadata_store::LinkMetadata;
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::policy_types::ManifestImage;
 use crate::registry::utils::BlobLink;
@@ -78,7 +77,7 @@ pub fn manifest_should_be_purged(
     Ok(!rules.is_empty())
 }
 
-impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
+impl Registry {
     pub async fn enforce_retention(&self, namespace: &str) -> Result<(), Error> {
         info!("'{namespace}': Enforcing retention policy");
 
@@ -417,9 +416,13 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
                     if !self.scrub_dry_run {
                         if let Err(error) = self
                             .metadata_store
-                            .update_blob_index(&namespace, blob, |index| {
-                                index.remove(&link_reference);
-                            })
+                            .update_blob_index(
+                                &namespace,
+                                blob,
+                                crate::registry::metadata_store::BlobIndexOperation::Remove(
+                                    link_reference.clone(),
+                                ),
+                            )
                             .await
                         {
                             error!("Failed to update blob index: {error}");
@@ -437,7 +440,6 @@ impl<B: BlobStore, M: MetadataStore> Registry<B, M> {
 mod tests {
     use super::*;
     use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
-    use crate::registry::metadata_store::MetadataStore;
     use crate::registry::test_utils::{create_test_manifest, create_test_repository_config};
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use crate::registry::utils::BlobLink;
@@ -564,9 +566,7 @@ mod tests {
         .unwrap());
     }
 
-    async fn test_enforce_retention_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_enforce_retention_impl(registry: &Registry) {
         let namespace = "test-repo";
         let (content, media_type) = create_test_manifest();
 
@@ -643,9 +643,7 @@ mod tests {
         test_enforce_retention_impl(t.registry()).await;
     }
 
-    async fn test_scrub_uploads_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_scrub_uploads_impl(registry: &Registry) {
         let namespace = "test-repo";
         let session_id = Uuid::new_v4().to_string();
 
@@ -678,9 +676,7 @@ mod tests {
         test_scrub_uploads_impl(t.registry()).await;
     }
 
-    async fn test_scrub_tags_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_scrub_tags_impl(registry: &Registry) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -726,9 +722,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn test_scrub_revisions_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_scrub_revisions_impl(registry: &Registry) {
         let namespace = "test-repo";
 
         // Create test blobs
@@ -966,9 +960,7 @@ mod tests {
         assert!(new_registry.scrub_revisions(namespace).await.is_ok()); // Should handle invalid manifest gracefully
     }
 
-    async fn test_ensure_link_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_ensure_link_impl(registry: &Registry) {
         let namespace = "test-repo";
         let digest = registry
             .blob_store
@@ -1018,9 +1010,7 @@ mod tests {
             .is_ok());
     }
 
-    async fn test_cleanup_orphan_blobs_impl<B: BlobStore + 'static, M: MetadataStore>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_cleanup_orphan_blobs_impl(registry: &Registry) {
         let namespace1 = "test-repo1";
         let namespace2 = "test-repo2";
         let content = b"test orphan blob content";
@@ -1062,9 +1052,11 @@ mod tests {
         let invalid_link = BlobLink::Tag("invalid-tag".to_string());
         registry
             .metadata_store
-            .update_blob_index(namespace1, &digest2, |index| {
-                index.insert(invalid_link.clone());
-            })
+            .update_blob_index(
+                namespace1,
+                &digest2,
+                crate::registry::metadata_store::BlobIndexOperation::Insert(invalid_link.clone()),
+            )
             .await
             .unwrap();
 

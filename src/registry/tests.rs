@@ -1,7 +1,5 @@
 use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
-use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::test_utils::create_test_repository_config;
 use crate::registry::{blob_store, Registry, Repository};
 use bytesize::ByteSize;
@@ -73,7 +71,7 @@ impl FSMetadataStoreBackendTestCase {
 pub struct FSRegistryTestCase {
     fs_blob_store: Arc<blob_store::fs::Backend>,
     fs_metadata_store: Arc<metadata_store::fs::Backend>,
-    fs_registry: Registry<blob_store::fs::Backend, metadata_store::fs::Backend>,
+    fs_registry: Registry,
     _temp_dir: TempDir,
 }
 
@@ -102,8 +100,8 @@ impl FSRegistryTestCase {
         let token_cache = CacheStoreConfig::default();
 
         let registry = Registry::new(
-            fs_blob_store.clone(),
-            fs_metadata_store.clone(),
+            fs_blob_store.clone() as Arc<dyn blob_store::BlobStore + Send + Sync>,
+            fs_metadata_store.clone() as Arc<dyn metadata_store::MetadataStore + Send + Sync>,
             repositories_config,
             &global,
             token_cache,
@@ -120,13 +118,11 @@ impl FSRegistryTestCase {
         }
     }
 
-    pub fn registry(&self) -> &Registry<blob_store::fs::Backend, metadata_store::fs::Backend> {
+    pub fn registry(&self) -> &Registry {
         &self.fs_registry
     }
 
-    pub fn registry_mut(
-        &mut self,
-    ) -> &mut Registry<blob_store::fs::Backend, metadata_store::fs::Backend> {
+    pub fn registry_mut(&mut self) -> &mut Registry {
         &mut self.fs_registry
     }
 
@@ -243,7 +239,7 @@ pub struct S3RegistryTestCase {
     key_prefix: String,
     s3_blob_store: Arc<blob_store::s3::Backend>,
     s3_metadata_store: Arc<metadata_store::s3::Backend>,
-    s3_registry: Registry<blob_store::s3::Backend, metadata_store::s3::Backend>,
+    s3_registry: Registry,
 }
 
 impl S3RegistryTestCase {
@@ -281,8 +277,8 @@ impl S3RegistryTestCase {
         let token_cache = CacheStoreConfig::default();
 
         let registry = Registry::new(
-            blob_store.clone(),
-            metadata_store.clone(),
+            blob_store.clone() as Arc<dyn blob_store::BlobStore + Send + Sync>,
+            metadata_store.clone() as Arc<dyn metadata_store::MetadataStore + Send + Sync>,
             repositories_config,
             &global,
             token_cache,
@@ -306,7 +302,7 @@ impl S3RegistryTestCase {
         prepare_with_repository_config(&mut self.s3_registry, repositories_config);
     }
 
-    pub fn registry(&self) -> &Registry<blob_store::s3::Backend, metadata_store::s3::Backend> {
+    pub fn registry(&self) -> &Registry {
         &self.s3_registry
     }
 
@@ -333,8 +329,8 @@ impl Drop for S3RegistryTestCase {
     }
 }
 
-fn prepare_with_repository_config<B: BlobStore, M: MetadataStore>(
-    registry: &mut Registry<B, M>,
+fn prepare_with_repository_config(
+    registry: &mut Registry,
     repositories_config: HashMap<String, RepositoryConfig>,
 ) {
     let mut repositories = HashMap::new();

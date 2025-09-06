@@ -1,8 +1,6 @@
 use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::RequestExt;
 use crate::registry::api::hyper::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT};
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::oci_types::Reference;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
@@ -48,7 +46,7 @@ pub trait RegistryAPIManifestHandlersExt {
     ) -> Result<Response<Body>, Error>;
 }
 
-impl<B: BlobStore, M: MetadataStore> RegistryAPIManifestHandlersExt for Registry<B, M> {
+impl RegistryAPIManifestHandlersExt for Registry {
     #[instrument(skip(self, request))]
     async fn handle_head_manifest<T>(
         &self,
@@ -224,9 +222,7 @@ mod tests {
     use std::slice;
     use tokio::io::AsyncReadExt;
 
-    async fn test_handle_head_manifest_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_head_manifest_impl(registry: &Registry) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -287,9 +283,7 @@ mod tests {
         test_handle_head_manifest_impl(t.registry()).await;
     }
 
-    async fn test_handle_get_manifest_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_get_manifest_impl(registry: &Registry) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -352,9 +346,7 @@ mod tests {
         test_handle_get_manifest_impl(t.registry()).await;
     }
 
-    async fn test_handle_put_manifest_impl<B: BlobStore + 'static, M: MetadataStore + 'static>(
-        registry: &Registry<B, M>,
-    ) -> Result<(), Error> {
+    async fn test_handle_put_manifest_impl(registry: &Registry) -> Result<(), Error> {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -417,12 +409,7 @@ mod tests {
         test_handle_put_manifest_impl(t.registry()).await.unwrap();
     }
 
-    async fn test_handle_delete_manifest_impl<
-        B: BlobStore + 'static,
-        M: MetadataStore + 'static,
-    >(
-        registry: &Registry<B, M>,
-    ) {
+    async fn test_handle_delete_manifest_impl(registry: &Registry) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();

@@ -3,13 +3,14 @@ mod tests;
 
 use crate::registry::data_store;
 use crate::registry::metadata_store::lock::{self, LockBackend, MemoryBackend};
-use crate::registry::metadata_store::{Error, LinkMetadata, LockConfig, MetadataStore};
+use crate::registry::metadata_store::{
+    BlobIndexOperation, Error, LinkMetadata, LockConfig, MetadataStore,
+};
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
 use crate::registry::utils::{path_builder, BlobMetadata};
 use crate::registry::BlobLink;
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, instrument};
@@ -228,15 +229,12 @@ impl MetadataStore for Backend {
         Ok(index)
     }
 
-    async fn update_blob_index<O>(
+    async fn update_blob_index(
         &self,
         namespace: &str,
         digest: &Digest,
-        operation: O,
-    ) -> Result<(), Error>
-    where
-        O: FnOnce(&mut HashSet<BlobLink>) + Send,
-    {
+        operation: BlobIndexOperation,
+    ) -> Result<(), Error> {
         debug!("Ensuring container directory for digest: {digest}");
 
         debug!("Updating reference count for digest: {digest}");
@@ -250,19 +248,22 @@ impl MetadataStore for Backend {
         };
 
         debug!("Updating reference index");
-        if let Some(index) = reference_index.namespace.get_mut(namespace) {
-            operation(index);
-            if index.is_empty() {
-                reference_index.namespace.remove(namespace);
+        let mut index = reference_index
+            .namespace
+            .remove(namespace)
+            .unwrap_or_default();
+        match operation {
+            BlobIndexOperation::Insert(link) => {
+                index.insert(link);
             }
-        } else {
-            let mut index = HashSet::new();
-            operation(&mut index);
-            if !index.is_empty() {
-                reference_index
-                    .namespace
-                    .insert(namespace.to_string(), index);
+            BlobIndexOperation::Remove(link) => {
+                index.remove(&link);
             }
+        }
+        if !index.is_empty() {
+            reference_index
+                .namespace
+                .insert(namespace.to_string(), index);
         }
 
         if reference_index.namespace.is_empty() {
@@ -302,9 +303,11 @@ impl MetadataStore for Backend {
                     .acquire_lock(link_data.target.as_str())
                     .await
                     .map_err(|e| Error::StorageBackend(e.to_string()))?;
-                self.update_blob_index(namespace, &link_data.target, |index| {
-                    index.remove(link);
-                })
+                self.update_blob_index(
+                    namespace,
+                    &link_data.target,
+                    BlobIndexOperation::Remove(link.clone()),
+                )
                 .await?;
 
                 let _blob_guard = self
@@ -312,10 +315,8 @@ impl MetadataStore for Backend {
                     .acquire_lock(digest.as_str())
                     .await
                     .map_err(|e| Error::StorageBackend(e.to_string()))?;
-                self.update_blob_index(namespace, digest, |index| {
-                    index.insert(link.clone());
-                })
-                .await?;
+                self.update_blob_index(namespace, digest, BlobIndexOperation::Insert(link.clone()))
+                    .await?;
             }
         } else {
             let _blob_guard = self
@@ -323,10 +324,8 @@ impl MetadataStore for Backend {
                 .acquire_lock(digest.as_str())
                 .await
                 .map_err(|e| Error::StorageBackend(e.to_string()))?;
-            self.update_blob_index(namespace, digest, |index| {
-                index.insert(link.clone());
-            })
-            .await?;
+            self.update_blob_index(namespace, digest, BlobIndexOperation::Insert(link.clone()))
+                .await?;
         }
 
         let metadata = LinkMetadata::from_digest(digest.clone());
@@ -379,10 +378,8 @@ impl MetadataStore for Backend {
             .await
             .map_err(|e| Error::StorageBackend(e.to_string()))?;
         self.delete_link_reference(namespace, link).await?;
-        self.update_blob_index(namespace, &digest, |index| {
-            index.remove(link);
-        })
-        .await?;
+        self.update_blob_index(namespace, &digest, BlobIndexOperation::Remove(link.clone()))
+            .await?;
 
         Ok(())
     }
