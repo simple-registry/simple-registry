@@ -353,7 +353,7 @@ mod tests {
             BlobStorageConfig::FS(ref cfg) => {
                 assert_eq!(cfg.root_dir, "/data/registry");
             }
-            _ => panic!("Expected FS blob store from 'storage' field"),
+            BlobStorageConfig::S3(_) => panic!("Expected FS blob store from 'storage' field"),
         }
 
         // Should auto-configure metadata store based on blob store
