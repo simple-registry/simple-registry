@@ -17,7 +17,7 @@ pub struct Configuration {
     pub global: GlobalConfig,
     #[serde(default)]
     pub cache_store: CacheStoreConfig,
-    #[serde(default)]
+    #[serde(default, alias = "storage")]
     pub blob_store: BlobStorageConfig,
     #[serde(default)]
     pub metadata_store: MetadataStoreConfig,
@@ -336,6 +336,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_storage_field_backward_compatibility() {
+        // Test that old 'storage' field is supported for backward compatibility
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+        
+        [storage.fs]
+        root_dir = "/data/registry"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+
+        // Should parse 'storage' as 'blob_store'
+        match config.blob_store {
+            BlobStorageConfig::FS(ref cfg) => {
+                assert_eq!(cfg.root_dir, "/data/registry");
+            }
+            _ => panic!("Expected FS blob store from 'storage' field"),
+        }
+
+        // Should auto-configure metadata store based on blob store
+        match config.metadata_store {
+            MetadataStoreConfig::FS(ref cfg) => {
+                assert_eq!(cfg.root_dir, "/data/registry");
+            }
+            _ => panic!("Expected FS metadata store to be auto-configured"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_metadata_store_explicit_config_not_overridden() {
         // When metadata store is explicitly configured, it should not be overridden
         let config = r#"
@@ -345,7 +375,7 @@ mod tests {
         [blob_store.s3]
         bucket = "blob-bucket"
         region = "us-west-2"
-        endpoint = "http://blob.example.com"
+        endpoint = "https://blob.example.com"
         access_key_id = "blob-key"
         secret_key = "blob-secret"
         
