@@ -3,10 +3,12 @@
 
 use crate::command::{argon, scrub, server};
 use crate::configuration::{
-    Configuration, DataStoreConfig, Error, ObservabilityConfig, ServerTlsConfig,
+    BlobStorageConfig, Configuration, Error, MetadataStoreConfig, ObservabilityConfig,
+    ServerTlsConfig,
 };
-use crate::registry::data_store::{DataStore, FSBackend, S3Backend};
-use crate::registry::Registry;
+use crate::registry::blob_store::BlobStore;
+use crate::registry::metadata_store::MetadataStore;
+use crate::registry::{blob_store, metadata_store, Registry};
 use argh::FromArgs;
 use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use opentelemetry::trace::TracerProvider as _;
@@ -18,7 +20,7 @@ use opentelemetry_semantic_conventions::attribute::SERVICE_VERSION;
 use opentelemetry_stdout as stdout;
 use std::path::Path;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
@@ -78,11 +80,12 @@ fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {
     Ok(())
 }
 
-fn set_config_watcher<D: DataStore + 'static>(
-    data_store: Arc<D>,
+fn set_config_watcher(
+    blob_store: Arc<dyn BlobStore + Send + Sync>,
+    metadata_store: Arc<dyn MetadataStore + Send + Sync>,
     config_path: &str,
     tls_config: Option<ServerTlsConfig>,
-    server: &Arc<server::Command<D>>,
+    server: &Arc<server::Command>,
 ) -> Result<RecommendedWatcher, command::Error> {
     info!("Setting up file system watcher for configuration file");
     let server_watcher = server.clone();
@@ -106,11 +109,11 @@ fn set_config_watcher<D: DataStore + 'static>(
             };
 
             let registry = match Registry::new(
-                data_store.clone(),
+                blob_store.clone(),
+                metadata_store.clone(),
                 config.repository,
                 &config.global,
                 config.cache_store,
-                config.lock_store,
             ) {
                 Ok(registry) => registry,
                 Err(error) => {
@@ -189,32 +192,49 @@ fn main() -> Result<(), command::Error> {
     runtime.block_on(async move {
         set_tracing(config.observability.clone())?;
 
-        match config.storage.clone() {
-            DataStoreConfig::FS(storage_config) => {
-                info!("Using filesystem backend");
-                let data_store = Arc::new(FSBackend::new(storage_config));
-                handle_command(config, arguments, data_store).await
+        let blob_store: Arc<dyn BlobStore + Send + Sync> = match &config.blob_store {
+            BlobStorageConfig::FS(cfg) => {
+                info!("Using filesystem blob-store backend");
+                Arc::new(blob_store::fs::Backend::new(cfg.clone()))
             }
-            DataStoreConfig::S3(storage_config) => {
-                info!("Using S3 backend");
-                let data_store = Arc::new(S3Backend::new(storage_config));
-                handle_command(config, arguments, data_store).await
+            BlobStorageConfig::S3(cfg) => {
+                info!("Using S3 blob-store backend");
+                Arc::new(blob_store::s3::Backend::new(cfg.clone()))
             }
-        }
+        };
+
+        let metadata_store: Arc<dyn MetadataStore + Send + Sync> = match &config.metadata_store {
+            MetadataStoreConfig::FS(cfg) => {
+                info!("Using filesystem metadata-store backend");
+                Arc::new(metadata_store::fs::Backend::new(cfg.clone())?)
+            }
+            MetadataStoreConfig::S3(cfg) => {
+                info!("Using S3 metadata-store backend");
+                Arc::new(metadata_store::s3::Backend::new(cfg.clone())?)
+            }
+            MetadataStoreConfig::Unspecified => {
+                unreachable!(
+                    "Metadata store should have been resolved during configuration loading"
+                )
+            }
+        };
+
+        handle_command(config, arguments, blob_store, metadata_store).await
     })
 }
 
-async fn handle_command<D: DataStore + 'static>(
+async fn handle_command(
     config: Configuration,
     arguments: GlobalArguments,
-    data_store: Arc<D>,
+    data_store: Arc<dyn BlobStore + Send + Sync>,
+    metadata_store: Arc<dyn MetadataStore + Send + Sync>,
 ) -> Result<(), command::Error> {
     let registry = Registry::new(
         data_store.clone(),
+        metadata_store.clone(),
         config.repository,
         &config.global,
         config.cache_store,
-        config.lock_store,
     )?;
 
     match arguments.nested {
@@ -230,7 +250,13 @@ async fn handle_command<D: DataStore + 'static>(
                 registry,
             )?);
 
-            let _ = set_config_watcher(data_store, &arguments.config, config.server.tls, &server)?;
+            let _ = set_config_watcher(
+                data_store,
+                metadata_store,
+                &arguments.config,
+                config.server.tls,
+                &server,
+            )?;
             server.run().await
         }
     }

@@ -2,7 +2,6 @@ use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::RequestExt;
 use crate::registry::api::hyper::response_ext::ResponseExt;
 use crate::registry::api::hyper::OCI_FILTERS_APPLIED;
-use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, ReferrerList};
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
@@ -44,7 +43,7 @@ pub trait RegistryAPIContentDiscoveryHandlersExt {
     ) -> Result<Response<Body>, Error>;
 }
 
-impl<D: DataStore> RegistryAPIContentDiscoveryHandlersExt for Registry<D> {
+impl RegistryAPIContentDiscoveryHandlersExt for Registry {
     #[instrument(skip(self, request))]
     async fn handle_get_referrers<T>(
         &self,
@@ -169,9 +168,8 @@ mod tests {
     use super::*;
     use crate::registry::api::hyper::response_ext::IntoAsyncRead;
     use crate::registry::oci_types::Reference;
-    use crate::registry::test_utils::{
-        create_test_blob, create_test_fs_backend, create_test_s3_backend,
-    };
+    use crate::registry::test_utils::create_test_blob;
+    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use crate::registry::utils::BlobLink;
     use http_body_util::Empty;
     use hyper::body::Bytes;
@@ -179,7 +177,7 @@ mod tests {
     use hyper::Uri;
     use tokio::io::AsyncReadExt;
 
-    async fn test_handle_get_referrers_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_get_referrers_impl(registry: &Registry) {
         let namespace = "test-repo";
 
         // Create manifest blobs
@@ -218,6 +216,7 @@ mod tests {
             referrer_manifest_digest.clone(),
         );
         registry
+            .metadata_store
             .create_link(namespace, &referrer_link, &referrer_manifest_digest)
             .await
             .unwrap();
@@ -259,17 +258,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_get_referrers_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_handle_get_referrers_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_handle_get_referrers_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_handle_get_referrers_s3() {
-        let registry = create_test_s3_backend().await;
-        test_handle_get_referrers_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_handle_get_referrers_impl(t.registry()).await;
     }
 
-    async fn test_handle_list_catalog_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_list_catalog_impl(registry: &Registry) {
         // Create some test repositories
         let namespaces = ["repo1", "repo2", "repo3"];
         let content = b"test content";
@@ -278,6 +277,7 @@ mod tests {
             let (digest, _) = create_test_blob(registry, namespace, content).await;
             let tag_link = BlobLink::Tag("latest".to_string());
             registry
+                .metadata_store
                 .create_link(namespace, &tag_link, &digest)
                 .await
                 .unwrap();
@@ -335,17 +335,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_list_catalog_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_handle_list_catalog_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_handle_list_catalog_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_handle_list_catalog_s3() {
-        let registry = create_test_s3_backend().await;
-        test_handle_list_catalog_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_handle_list_catalog_impl(t.registry()).await;
     }
 
-    async fn test_handle_list_tags_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_list_tags_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
@@ -355,6 +355,7 @@ mod tests {
         for tag in tags {
             let tag_link = BlobLink::Tag(tag.to_string());
             registry
+                .metadata_store
                 .create_link(namespace, &tag_link, &digest)
                 .await
                 .unwrap();
@@ -438,13 +439,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_list_tags_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_handle_list_tags_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_handle_list_tags_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_handle_list_tags_s3() {
-        let registry = create_test_s3_backend().await;
-        test_handle_list_tags_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_handle_list_tags_impl(t.registry()).await;
     }
 }

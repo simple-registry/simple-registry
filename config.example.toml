@@ -11,10 +11,10 @@ client_ca_bundle   = "tls.d/client-ca-bundle.pem"
 #url = "redis://localhost:6379"
 #ttl = 5
 
-[storage.fs]
+[blob_store.fs]
 root_dir = "./data-simple-registry"
 
-#[storage.s3]
+#[blob_store.s3]
 #access_key_id = "<key-id>"
 #secret_key = "<secret-key>"
 #endpoint = "https://<s3-compatible-endpoint>"

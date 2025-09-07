@@ -1,6 +1,5 @@
 use crate::registry::api::hyper::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
-use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Digest, Manifest, Reference};
 use crate::registry::utils::BlobLink;
 use crate::registry::{Error, Registry, Repository};
@@ -74,7 +73,7 @@ pub fn parse_manifest_digests(
     })
 }
 
-impl<D: DataStore> Registry<D> {
+impl Registry {
     #[instrument(skip(repository))]
     pub async fn head_manifest(
         &self,
@@ -129,10 +128,13 @@ impl<D: DataStore> Registry<D> {
         reference: Reference,
     ) -> Result<HeadManifestResponse, Error> {
         let blob_link = reference.into();
-        let link = self.read_link(namespace, &blob_link).await?;
+        let link = self
+            .metadata_store
+            .read_link(namespace, &blob_link, self.update_pull_time)
+            .await?;
 
         let mut reader = self
-            .store
+            .blob_store
             .build_blob_reader(&link.target, None)
             .await
             .map_err(|error| {
@@ -203,9 +205,12 @@ impl<D: DataStore> Registry<D> {
         reference: &Reference,
     ) -> Result<GetManifestResponse, Error> {
         let blob_link = reference.clone().into();
-        let link = self.read_link(namespace, &blob_link).await?;
+        let link = self
+            .metadata_store
+            .read_link(namespace, &blob_link, self.update_pull_time)
+            .await?;
 
-        let content = self.store.read_blob(&link.target).await?;
+        let content = self.blob_store.read_blob(&link.target).await?;
         let manifest = serde_json::from_slice::<Manifest>(&content).map_err(|error| {
             warn!("Failed to deserialize manifest: {error}");
             Error::ManifestInvalid("Failed to deserialize manifest".to_string())
@@ -232,18 +237,22 @@ impl<D: DataStore> Registry<D> {
 
         let digest = match reference {
             Reference::Tag(tag) => {
-                let digest = self.store.create_blob(body).await?;
+                let digest = self.blob_store.create_blob(body).await?;
 
                 let link = BlobLink::Tag(tag);
-                self.create_link(namespace, &link, &digest).await?;
+                self.metadata_store
+                    .create_link(namespace, &link, &digest)
+                    .await?;
 
                 let link = BlobLink::Digest(digest.clone());
-                self.create_link(namespace, &link, &digest).await?;
+                self.metadata_store
+                    .create_link(namespace, &link, &digest)
+                    .await?;
 
                 digest
             }
             Reference::Digest(provided_digest) => {
-                let digest = self.store.create_blob(body).await?;
+                let digest = self.blob_store.create_blob(body).await?;
 
                 if provided_digest != digest {
                     warn!("Provided digest does not match calculated digest: {provided_digest} != {digest}");
@@ -253,7 +262,9 @@ impl<D: DataStore> Registry<D> {
                 }
 
                 let link = BlobLink::Digest(digest.clone());
-                self.create_link(namespace, &link, &digest).await?;
+                self.metadata_store
+                    .create_link(namespace, &link, &digest)
+                    .await?;
 
                 digest
             }
@@ -261,17 +272,23 @@ impl<D: DataStore> Registry<D> {
 
         if let Some(subject) = &manifest_digests.subject {
             let link = BlobLink::Referrer(subject.clone(), digest.clone());
-            self.create_link(namespace, &link, &digest).await?;
+            self.metadata_store
+                .create_link(namespace, &link, &digest)
+                .await?;
         }
 
         if let Some(config_digest) = manifest_digests.config {
             let link = BlobLink::Config(config_digest.clone());
-            self.create_link(namespace, &link, &config_digest).await?;
+            self.metadata_store
+                .create_link(namespace, &link, &config_digest)
+                .await?;
         }
 
         for layer_digest in manifest_digests.layers {
             let link = BlobLink::Layer(layer_digest.clone());
-            self.create_link(namespace, &link, &layer_digest).await?;
+            self.metadata_store
+                .create_link(namespace, &link, &layer_digest)
+                .await?;
         }
 
         Ok(PutManifestResponse {
@@ -291,34 +308,68 @@ impl<D: DataStore> Registry<D> {
         match reference {
             Reference::Tag(tag) => {
                 let link = BlobLink::Tag(tag);
-                self.delete_link(namespace, &link).await?;
+                self.metadata_store.delete_link(namespace, &link).await?;
             }
             Reference::Digest(digest) => {
                 let mut marker = None;
                 loop {
-                    let (tags, next_marker) = self.store.list_tags(namespace, 100, marker).await?;
+                    let (tags, next_marker) = self
+                        .metadata_store
+                        .list_tags(namespace, 100, marker)
+                        .await?;
 
                     for tag in tags {
                         let link_reference = BlobLink::Tag(tag);
-                        let link = self.read_link(namespace, &link_reference).await?;
+                        let link = match self
+                            .metadata_store
+                            .read_link(namespace, &link_reference, self.update_pull_time)
+                            .await
+                        {
+                            Ok(link) => link,
+                            Err(crate::registry::metadata_store::Error::ReferenceNotFound) => {
+                                // Tag doesn't exist, skip it
+                                continue;
+                            }
+                            Err(e) => return Err(e.into()),
+                        };
 
                         if link.target == digest {
-                            self.delete_link(namespace, &link_reference).await?;
+                            self.metadata_store
+                                .delete_link(namespace, &link_reference)
+                                .await?;
                         }
                     }
 
+                    // Try to read the manifest by digest to check for referrers
                     let blob_link = BlobLink::Digest(digest.clone());
-                    let link = self.read_link(namespace, &blob_link).await?;
+                    let link = match self
+                        .metadata_store
+                        .read_link(namespace, &blob_link, self.update_pull_time)
+                        .await
+                    {
+                        Ok(link) => link,
+                        Err(crate::registry::metadata_store::Error::ReferenceNotFound) => {
+                            // Manifest doesn't exist, but still try to delete the link
+                            // (delete_link is idempotent and returns Ok if not found)
+                            self.metadata_store
+                                .delete_link(namespace, &blob_link)
+                                .await?;
+                            break;
+                        }
+                        Err(e) => return Err(e.into()),
+                    };
 
-                    let content = self.store.read_blob(&link.target).await?;
+                    let content = self.blob_store.read_blob(&link.target).await?;
                     let manifest_digests = parse_manifest_digests(&content, None)?;
 
                     if let Some(subject_digest) = manifest_digests.subject {
                         let link = BlobLink::Referrer(subject_digest, link.target);
-                        self.delete_link(namespace, &link).await?;
+                        self.metadata_store.delete_link(namespace, &link).await?;
                     }
 
-                    self.delete_link(namespace, &blob_link).await?;
+                    self.metadata_store
+                        .delete_link(namespace, &blob_link)
+                        .await?;
 
                     if next_marker.is_none() {
                         break;
@@ -336,8 +387,9 @@ impl<D: DataStore> Registry<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
+    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use serde_json::json;
+    use std::slice;
 
     fn create_test_manifest() -> (Vec<u8>, String) {
         let manifest = json!({
@@ -390,7 +442,7 @@ mod tests {
         (content, media_type)
     }
 
-    async fn test_put_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_put_manifest_impl(registry: &Registry) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -410,7 +462,7 @@ mod tests {
         let stored_manifest = registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
@@ -438,17 +490,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_manifest_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_put_manifest_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_put_manifest_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_put_manifest_s3() {
-        let registry = create_test_s3_backend().await;
-        test_put_manifest_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_put_manifest_impl(t.registry()).await;
     }
 
-    async fn test_get_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_get_manifest_impl(registry: &Registry) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -468,7 +520,7 @@ mod tests {
         let manifest = registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
@@ -483,7 +535,7 @@ mod tests {
         let manifest = registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Digest(response.digest.clone()),
             )
@@ -497,17 +549,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_manifest_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_get_manifest_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_get_manifest_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_get_manifest_s3() {
-        let registry = create_test_s3_backend().await;
-        test_get_manifest_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_get_manifest_impl(t.registry()).await;
     }
 
-    async fn test_head_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_head_manifest_impl(registry: &Registry) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -527,7 +579,7 @@ mod tests {
         let manifest = registry
             .head_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
@@ -542,7 +594,7 @@ mod tests {
         let manifest = registry
             .head_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Digest(response.digest.clone()),
             )
@@ -556,17 +608,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_head_manifest_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_head_manifest_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_head_manifest_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_head_manifest_s3() {
-        let registry = create_test_s3_backend().await;
-        test_head_manifest_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_head_manifest_impl(t.registry()).await;
     }
 
-    async fn test_delete_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_delete_manifest_impl(registry: &Registry) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -592,7 +644,7 @@ mod tests {
         assert!(registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
@@ -609,7 +661,7 @@ mod tests {
         assert!(registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Digest(response.digest),
             )
@@ -619,14 +671,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_manifest_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_delete_manifest_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_delete_manifest_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_delete_manifest_s3() {
-        let registry = create_test_s3_backend().await;
-        test_delete_manifest_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_delete_manifest_impl(t.registry()).await;
     }
 
     #[test]

@@ -7,9 +7,6 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use opentelemetry::time::now;
-use opentelemetry::trace::TraceContextExt;
-use opentelemetry::KeyValue;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
@@ -17,7 +14,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::pin;
 use tracing::{debug, error, info, instrument, Span};
@@ -41,7 +38,6 @@ use crate::registry::api::{
     RegistryAPIManifestHandlersExt, RegistryAPIUploadHandlersExt, RegistryAPIVersionHandlerExt,
     TagsParameters,
 };
-use crate::registry::data_store::DataStore;
 use crate::registry::policy_types::ClientIdentity;
 use crate::registry::Registry;
 
@@ -64,9 +60,9 @@ static ROUTE_LIST_TAGS_REGEX: LazyLock<Regex> =
 static ROUTE_CATALOG_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^/v2/_catalog$").unwrap());
 
-pub enum ServiceListener<D> {
-    Insecure(InsecureListener<D>),
-    Secure(TlsListener<D>),
+pub enum ServiceListener {
+    Insecure(InsecureListener),
+    Secure(TlsListener),
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -77,16 +73,16 @@ pub enum ServiceListener<D> {
 )]
 pub struct Options {}
 
-pub struct Command<D> {
-    listener: ServiceListener<D>,
+pub struct Command {
+    listener: ServiceListener,
 }
 
-impl<D: DataStore + 'static> Command<D> {
+impl Command {
     pub fn new(
         server_config: &ServerConfig,
         identities: &HashMap<String, IdentityConfig>,
-        registry: Registry<D>,
-    ) -> Result<Command<D>, configuration::Error> {
+        registry: Registry,
+    ) -> Result<Command, configuration::Error> {
         let timeouts = vec![
             Duration::from_secs(server_config.query_timeout),
             Duration::from_secs(server_config.query_timeout_grace_period),
@@ -106,7 +102,7 @@ impl<D: DataStore + 'static> Command<D> {
         &self,
         server_config: ServerConfig,
         identities: &HashMap<String, IdentityConfig>,
-        registry: Registry<D>,
+        registry: Registry,
     ) -> Result<(), configuration::Error> {
         let timeouts = vec![
             Duration::from_secs(server_config.query_timeout),
@@ -134,11 +130,8 @@ impl<D: DataStore + 'static> Command<D> {
     }
 }
 
-async fn serve_request<D: DataStore + 'static, S>(
-    stream: TokioIo<S>,
-    context: Arc<ServerContext<D>>,
-    identity: ClientIdentity,
-) where
+async fn serve_request<S>(stream: TokioIo<S>, context: Arc<ServerContext>, identity: ClientIdentity)
+where
     S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
     let conn = http1::Builder::new().serve_connection(
@@ -148,9 +141,9 @@ async fn serve_request<D: DataStore + 'static, S>(
     pin!(conn);
 
     IN_FLIGHT_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    METRICS_PROVIDER.metric_http_request_in_flight.record(
-        IN_FLIGHT_REQUESTS.load(std::sync::atomic::Ordering::Relaxed),
-        &[],
+    METRICS_PROVIDER.metric_http_request_in_flight.set(
+        i64::try_from(IN_FLIGHT_REQUESTS.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(i64::MAX),
     );
 
     for (iter, sleep_duration) in context.timeouts.iter().enumerate() {
@@ -176,77 +169,53 @@ async fn serve_request<D: DataStore + 'static, S>(
     }
 
     IN_FLIGHT_REQUESTS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-    METRICS_PROVIDER.metric_http_request_in_flight.record(
-        IN_FLIGHT_REQUESTS.load(std::sync::atomic::Ordering::Relaxed),
-        &[],
+    METRICS_PROVIDER.metric_http_request_in_flight.set(
+        i64::try_from(IN_FLIGHT_REQUESTS.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(i64::MAX),
     );
 }
 
 #[instrument(skip(context, request))]
-async fn handle_request<D: DataStore + 'static>(
-    context: Arc<ServerContext<D>>,
+async fn handle_request(
+    context: Arc<ServerContext>,
     request: Request<Incoming>,
     identity: ClientIdentity,
 ) -> Result<Response<Body>, Infallible> {
-    let start_time = now();
+    let start_time = Instant::now();
     let method = request.method().to_owned();
     let path = request.uri().path().to_owned();
 
-    let trace_id = if Span::current().context().span().span_context().is_valid() {
-        Some(
-            Span::current()
-                .context()
-                .span()
-                .span_context()
-                .trace_id()
-                .to_string(),
-        )
-    } else {
-        None
+    let trace_id = {
+        use opentelemetry::trace::TraceContextExt;
+        let context = Span::current().context();
+        let span = context.span();
+        let span_context = span.span_context();
+        if span_context.is_valid() {
+            Some(span_context.trace_id().to_string())
+        } else {
+            None
+        }
     };
 
-    let (handler, response) = match router(context.clone(), request, identity).await {
-        (handler, Ok(response)) => (handler, response),
-        (handler, Err(error)) => {
+    let response = match router(context.clone(), request, identity).await {
+        Ok(response) => response,
+        Err(error) => {
             let details = trace_id
                 .clone()
                 .map(|trace_id| json!({"trace_id": trace_id}))
                 .unwrap_or(json!({}));
-            let response = registry_error_to_response_raw(&error, details);
-            (handler, response)
+            registry_error_to_response_raw(&error, details)
         }
     };
 
     #[allow(clippy::cast_precision_loss)]
-    let elapsed = start_time.elapsed().map_or(0.0, |d| d.as_millis() as f64);
+    let elapsed = start_time.elapsed().as_millis() as f64;
     let status = response.status();
 
-    let handler_all = &[
-        KeyValue::new("method", method.to_string()),
-        KeyValue::new("endpoint", "all"),
-        KeyValue::new("status_code", status.as_u16().to_string()),
-    ];
-
-    METRICS_PROVIDER
-        .metric_http_request_total
-        .add(1, handler_all);
+    METRICS_PROVIDER.metric_http_request_total.inc();
     METRICS_PROVIDER
         .metric_http_request_duration
-        .record(elapsed, handler_all);
-    if let Some(handler) = handler {
-        let handler_specific = &[
-            KeyValue::new("method", method.to_string()),
-            KeyValue::new("endpoint", handler),
-            KeyValue::new("status_code", status.as_u16().to_string()),
-        ];
-
-        METRICS_PROVIDER
-            .metric_http_request_total
-            .add(1, handler_specific);
-        METRICS_PROVIDER
-            .metric_http_request_duration
-            .record(elapsed, handler_specific);
-    }
+        .observe(elapsed);
 
     let log = trace_id
         .map(|trace_id| format!("{trace_id} {elapsed:?} - {status} {method} {path}"))
@@ -263,20 +232,17 @@ async fn handle_request<D: DataStore + 'static>(
 
 #[allow(clippy::too_many_lines)]
 #[instrument(skip(context, req))]
-async fn router<D: DataStore + 'static>(
-    context: Arc<ServerContext<D>>,
+async fn router(
+    context: Arc<ServerContext>,
     req: Request<Incoming>,
     mut id: ClientIdentity,
-) -> (
-    Option<&'static str>,
-    Result<Response<Body>, registry::Error>,
-) {
+) -> Result<Response<Body>, registry::Error> {
     let path = req.uri().path().to_string();
 
     if let Some((username, password)) = req.provided_credentials() {
         id.id = match context.validate_credentials(&username, &password) {
             Ok(id) => id,
-            Err(e) => return (None, Err(e)),
+            Err(e) => return Err(e),
         };
         id.username = Some(username);
     }
@@ -284,147 +250,70 @@ async fn router<D: DataStore + 'static>(
     if ROUTE_API_VERSION_REGEX.is_match(&path) && req.method() == Method::GET {
         // TODO: make this part customizable
         if !context.credentials.is_empty() && id.username.is_none() {
-            return (
-                Some("api-version"),
-                Err(registry::Error::Unauthorized(
-                    "Access denied (requires credentials)".to_string(),
-                )),
-            );
+            return Err(registry::Error::Unauthorized(
+                "Access denied (requires credentials)".to_string(),
+            ));
         }
-        return (
-            Some("api-version"),
-            context.registry.handle_get_api_version(id).await,
-        );
+        return context.registry.handle_get_api_version(id).await;
     } else if let Some(params) = QueryNewUploadParameters::from_regex(&path, &ROUTE_UPLOADS_REGEX) {
         if req.method() == Method::POST {
-            return (
-                Some("upload"),
-                context.registry.handle_start_upload(req, params, id).await,
-            );
+            return context.registry.handle_start_upload(req, params, id).await;
         }
     } else if let Some(params) = QueryUploadParameters::from_regex(&path, &ROUTE_UPLOAD_REGEX) {
         match *req.method() {
-            Method::GET => {
-                return (
-                    Some("upload"),
-                    context.registry.handle_get_upload(params, id).await,
-                )
-            }
-            Method::PATCH => {
-                return (
-                    Some("upload"),
-                    context.registry.handle_patch_upload(req, params, id).await,
-                )
-            }
-            Method::PUT => {
-                return (
-                    Some("upload"),
-                    context.registry.handle_put_upload(req, params, id).await,
-                )
-            }
-            Method::DELETE => {
-                return (
-                    Some("upload"),
-                    context.registry.handle_delete_upload(params, id).await,
-                )
-            }
+            Method::GET => return context.registry.handle_get_upload(params, id).await,
+            Method::PATCH => return context.registry.handle_patch_upload(req, params, id).await,
+            Method::PUT => return context.registry.handle_put_upload(req, params, id).await,
+            Method::DELETE => return context.registry.handle_delete_upload(params, id).await,
             _ => { /* NOOP */ }
         }
     } else if let Some(params) = QueryBlobParameters::from_regex(&path, &ROUTE_BLOB_REGEX) {
         match *req.method() {
-            Method::GET => {
-                return (
-                    Some("blob"),
-                    context.registry.handle_get_blob(req, params, id).await,
-                )
-            }
-            Method::HEAD => {
-                return (
-                    Some("blob"),
-                    context.registry.handle_head_blob(req, params, id).await,
-                )
-            }
-            Method::DELETE => {
-                return (
-                    Some("blob"),
-                    context.registry.handle_delete_blob(params, id).await,
-                )
-            }
+            Method::GET => return context.registry.handle_get_blob(req, params, id).await,
+            Method::HEAD => return context.registry.handle_head_blob(req, params, id).await,
+            Method::DELETE => return context.registry.handle_delete_blob(params, id).await,
             _ => { /* NOOP */ }
         }
     } else if let Some(params) = QueryManifestParameters::from_regex(&path, &ROUTE_MANIFEST_REGEX) {
         match *req.method() {
-            Method::GET => {
-                return (
-                    Some("manifest"),
-                    context.registry.handle_get_manifest(req, params, id).await,
-                )
-            }
-            Method::HEAD => {
-                return (
-                    Some("manifest"),
-                    context.registry.handle_head_manifest(req, params, id).await,
-                )
-            }
-            Method::PUT => {
-                return (
-                    Some("manifest"),
-                    context.registry.handle_put_manifest(req, params, id).await,
-                )
-            }
-            Method::DELETE => {
-                return (
-                    Some("manifest"),
-                    context.registry.handle_delete_manifest(params, id).await,
-                )
-            }
+            Method::GET => return context.registry.handle_get_manifest(req, params, id).await,
+            Method::HEAD => return context.registry.handle_head_manifest(req, params, id).await,
+            Method::PUT => return context.registry.handle_put_manifest(req, params, id).await,
+            Method::DELETE => return context.registry.handle_delete_manifest(params, id).await,
             _ => { /* NOOP */ }
         }
     } else if let Some(params) = ReferrerParameters::from_regex(&path, &ROUTE_REFERRERS_REGEX) {
         if req.method() == Method::GET {
-            return (
-                Some("referrers"),
-                context.registry.handle_get_referrers(req, params, id).await,
-            );
+            return context.registry.handle_get_referrers(req, params, id).await;
         }
     } else if ROUTE_CATALOG_REGEX.is_match(&path) {
         if req.method() == Method::GET {
-            return (
-                Some("catalog"),
-                context.registry.handle_list_catalog(req, id).await,
-            );
+            return context.registry.handle_list_catalog(req, id).await;
         }
     } else if let Some(params) = TagsParameters::from_regex(&path, &ROUTE_LIST_TAGS_REGEX) {
         if req.method() == Method::GET {
-            return (
-                Some("tags"),
-                context.registry.handle_list_tags(req, params, id).await,
-            );
+            return context.registry.handle_list_tags(req, params, id).await;
         }
     } else if ROUTE_HEALTHZ_REGEX.is_match(&path) {
-        let response = Response::builder()
+        return Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "application/json")
             .body(Body::Fixed(Full::new(Bytes::from("{\"status\":\"ok\"}"))))
             .map_err(registry::Error::from);
-
-        return (Some("healthz"), response);
     } else if ROUTE_METRICS_REGEX.is_match(&path) {
         let (content_type, metrics) = METRICS_PROVIDER.gather();
 
-        let response = Response::builder()
-            .status(200)
+        return Response::builder()
+            .status(StatusCode::OK)
             .header(CONTENT_TYPE, content_type)
             .body(Body::Fixed(Full::new(Bytes::from(metrics))))
             .map_err(registry::Error::from);
-
-        return (Some("metrics"), response);
     }
 
     if [Method::GET, Method::HEAD].contains(req.method()) {
-        (Some("not-found"), Err(registry::Error::NotFound))
+        Err(registry::Error::NotFound)
     } else {
-        (Some("unsupported"), Err(registry::Error::Unsupported))
+        Err(registry::Error::Unsupported)
     }
 }
 

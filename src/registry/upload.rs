@@ -1,4 +1,3 @@
-use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::Digest;
 use crate::registry::{Error, Registry};
 use tokio::io::AsyncRead;
@@ -10,7 +9,7 @@ pub enum StartUploadResponse {
     Session(String, String),
 }
 
-impl<D: DataStore> Registry<D> {
+impl Registry {
     #[instrument]
     pub async fn start_upload(
         &self,
@@ -20,13 +19,15 @@ impl<D: DataStore> Registry<D> {
         self.validate_namespace(namespace)?;
 
         if let Some(digest) = digest {
-            if self.store.get_blob_size(&digest).await.is_ok() {
+            if self.blob_store.get_blob_size(&digest).await.is_ok() {
                 return Ok(StartUploadResponse::ExistingBlob(digest));
             }
         }
 
         let session_uuid = Uuid::new_v4().to_string();
-        self.store.create_upload(namespace, &session_uuid).await?;
+        self.blob_store
+            .create_upload(namespace, &session_uuid)
+            .await?;
 
         let location = format!("/v2/{namespace}/blobs/uploads/{session_uuid}");
         Ok(StartUploadResponse::Session(location, session_uuid))
@@ -41,14 +42,14 @@ impl<D: DataStore> Registry<D> {
         stream: S,
     ) -> Result<u64, Error>
     where
-        S: AsyncRead + Unpin + Send + Sync,
+        S: AsyncRead + Unpin + Send + Sync + 'static,
     {
         self.validate_namespace(namespace)?;
 
         let session_id = session_id.to_string();
         if let Some(start_offset) = start_offset {
             let (_, size, _) = self
-                .store
+                .blob_store
                 .read_upload_summary(namespace, &session_id)
                 .await?;
 
@@ -57,12 +58,12 @@ impl<D: DataStore> Registry<D> {
             }
         }
 
-        self.store
-            .write_upload(namespace, &session_id, stream, true)
+        self.blob_store
+            .write_upload(namespace, &session_id, Box::new(stream), true)
             .await?;
 
         let (_, size, _) = self
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id)
             .await
             .map_err(|error| {
@@ -86,24 +87,24 @@ impl<D: DataStore> Registry<D> {
         stream: S,
     ) -> Result<(), Error>
     where
-        S: AsyncRead + Unpin + Send + Sync,
+        S: AsyncRead + Unpin + Send + Sync + 'static,
     {
         self.validate_namespace(namespace)?;
 
         let session_id = session_id.to_string();
 
         let append = self
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id)
             .await
             .is_ok();
 
-        self.store
-            .write_upload(namespace, &session_id, stream, append)
+        self.blob_store
+            .write_upload(namespace, &session_id, Box::new(stream), append)
             .await?;
 
         let (upload_digest, _, _) = self
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id)
             .await?;
 
@@ -112,10 +113,12 @@ impl<D: DataStore> Registry<D> {
             return Err(Error::DigestInvalid);
         }
 
-        self.store
+        self.blob_store
             .complete_upload(namespace, &session_id, Some(digest))
             .await?;
-        self.store.delete_upload(namespace, &session_id).await?;
+        self.blob_store
+            .delete_upload(namespace, &session_id)
+            .await?;
 
         Ok(())
     }
@@ -125,7 +128,7 @@ impl<D: DataStore> Registry<D> {
         self.validate_namespace(namespace)?;
 
         let uuid = session_id.to_string();
-        self.store.delete_upload(namespace, &uuid).await?;
+        self.blob_store.delete_upload(namespace, &uuid).await?;
 
         Ok(())
     }
@@ -139,7 +142,10 @@ impl<D: DataStore> Registry<D> {
         self.validate_namespace(namespace)?;
 
         let uuid = session_id.to_string();
-        let (_, size, _) = self.store.read_upload_summary(namespace, &uuid).await?;
+        let (_, size, _) = self
+            .blob_store
+            .read_upload_summary(namespace, &uuid)
+            .await?;
 
         if size < 1 {
             return Ok(0);
@@ -152,10 +158,10 @@ impl<D: DataStore> Registry<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
+    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use std::io::Cursor;
 
-    async fn test_start_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_start_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test upload content";
 
@@ -170,7 +176,7 @@ mod tests {
         }
 
         // Test starting upload with existing blob
-        let digest = registry.store.create_blob(content).await.unwrap();
+        let digest = registry.blob_store.create_blob(content).await.unwrap();
         let response = registry
             .start_upload(namespace, Some(digest.clone()))
             .await
@@ -185,24 +191,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_upload_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_start_upload_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_start_upload_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_start_upload_s3() {
-        let registry = create_test_s3_backend().await;
-        test_start_upload_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_start_upload_impl(t.registry()).await;
     }
 
-    async fn test_patch_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_patch_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test patch content";
         let session_id = Uuid::new_v4();
 
         // Create initial upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -229,7 +235,7 @@ mod tests {
 
         // Verify content
         let (_, size, _) = registry
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -238,24 +244,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_patch_upload_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_patch_upload_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_patch_upload_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_patch_upload_s3() {
-        let registry = create_test_s3_backend().await;
-        test_patch_upload_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_patch_upload_impl(t.registry()).await;
     }
 
-    async fn test_complete_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_complete_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test complete content";
         let session_id = Uuid::new_v4();
 
         // Create initial upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -269,7 +275,7 @@ mod tests {
 
         // Get the upload digest
         let (upload_digest, _, _) = registry
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -282,36 +288,36 @@ mod tests {
             .unwrap();
 
         // Verify blob exists
-        let stored_content = registry.store.read_blob(&upload_digest).await.unwrap();
+        let stored_content = registry.blob_store.read_blob(&upload_digest).await.unwrap();
         assert_eq!(stored_content, content);
     }
 
     #[tokio::test]
     async fn test_complete_upload_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_complete_upload_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_complete_upload_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_complete_upload_s3() {
-        let registry = create_test_s3_backend().await;
-        test_complete_upload_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_complete_upload_impl(t.registry()).await;
     }
 
-    async fn test_delete_upload_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_delete_upload_impl(registry: &Registry) {
         let namespace = "test-repo";
         let session_id = Uuid::new_v4();
 
         // Create upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &session_id.to_string())
             .await
             .unwrap();
 
         // Verify upload exists
         assert!(registry
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id.to_string())
             .await
             .is_ok());
@@ -321,7 +327,7 @@ mod tests {
 
         // Verify upload is deleted
         assert!(registry
-            .store
+            .blob_store
             .read_upload_summary(namespace, &session_id.to_string())
             .await
             .is_err());
@@ -329,24 +335,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_upload_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_delete_upload_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_delete_upload_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_delete_upload_s3() {
-        let registry = create_test_s3_backend().await;
-        test_delete_upload_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_delete_upload_impl(t.registry()).await;
     }
 
-    async fn test_get_upload_range_max_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_get_upload_range_max_impl(registry: &Registry) {
         let namespace = "test-repo";
         let content = b"test range content";
         let session_id = Uuid::new_v4();
 
         // Create upload
         registry
-            .store
+            .blob_store
             .create_upload(namespace, &session_id.to_string())
             .await
             .unwrap();
@@ -375,13 +381,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_upload_range_max_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_get_upload_range_max_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_get_upload_range_max_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_get_upload_range_max_s3() {
-        let registry = create_test_s3_backend().await;
-        test_get_upload_range_max_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_get_upload_range_max_impl(t.registry()).await;
     }
 }

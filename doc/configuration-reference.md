@@ -38,18 +38,6 @@ This should be set according to the number of CPU cores available on the server.
 - `update_pull_time` (bool): When set to true, the registry will update the pull time metadata for blobs, 
   which is useful for garbage collection and retention policies (default: false).
 
-## Lock Store (`lock_store`)
-
-Distributed locking is used to prevent concurrent operations that could lead to data corruption.
-If no configuration is provided, an in-memory locking mechanism is used, which is not suitable for
-multi-replica deployments.
-
-### Redis Locking (`lock_store.redis`)
-
-- `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
-- `ttl` (string): The time-to-live for the lock in seconds (e.g., `10s`)
-- `key_prefix` (optional string): The key prefix for all lock keys
-
 ## Token Cache (`cache_store`)
 
 Authentication tokens are cached to reduce unnecessary requests to upstream servers when using a pull-through cache
@@ -61,20 +49,17 @@ If no configuration is provided, an in-memory cache is used, which is not suitab
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
 - `key_prefix` (optional string): The key prefix for all cache keys
 
-## Storage (`storage`)
+## Blob storage (`blob_store`)
 
-Multiple storage backends are supported: filesystem or s3-baked.
+The blob store is the place where image content is stored.
+Multiple blob storage backends are supported: filesystem or s3-backed.
 
-### Filesystem Storage (`storage.fs`)
-
-> [!NOTE]
-> The filesystem storage backend is not leveraging the async API for filesystem operations.
-> The async implementation is inefficient on most platforms.
-> In scenarios where you need massive-scale parallelism, consider switching to S3-compatible storage.
+### Filesystem Storage (`blob_store.fs`)
 
 - `root_dir` (string): The root directory for the storage.
+- `sync_to_disk` (optional bool): When true, forces filesystem sync after write operations for stronger durability guarantees (default: false).
 
-### S3 Storage (`storage.s3`)
+### S3 Storage (`blob_store.s3`)
 
 - `access_key_id` (string): The access key ID for the S3 server
 - `secret_key` (string): The secret access key for the S3 server
@@ -86,6 +71,52 @@ Multiple storage backends are supported: filesystem or s3-baked.
 - `multipart_copy_threshold` (uint64 | string): The threshold for multipart copy in bytes (default: 5GB)
 - `multipart_copy_chunk_size` (uint64 | string): The chunk size for multipart copy in bytes (default: 100MB)
 - `multipart_copy_jobs` (usize): The max number of concurrent multipart copy jobs (default: 4)
+
+## Metadata storage (`metadata_store`)
+
+The metadata store manages registry metadata including manifests, tags, and link references.
+By default, the metadata store uses the same backend configuration as the blob store.
+You can optionally configure a different backend for metadata storage.
+
+### Filesystem Storage (`metadata_store.fs`)
+
+- `root_dir` (string): The root directory for the metadata storage. If not specified, uses the blob store's root directory.
+- `sync_to_disk` (optional bool): When true, forces filesystem sync after write operations for better durability (default: false).
+- `redis` (optional): Configuration for distributed locking using Redis (see Redis Locking section below)
+
+### S3 Storage (`metadata_store.s3`)
+
+- `access_key_id` (string): The access key ID for the S3 server. If not specified, uses the blob store's configuration.
+- `secret_key` (string): The secret access key for the S3 server
+- `endpoint` (string): The endpoint for the S3 server
+- `bucket` (string): The bucket for the S3 server
+- `region` (string): The region for the S3 server
+- `key_prefix` (optional string): The key prefix for all S3 keys
+- `redis` (optional): Configuration for distributed locking using Redis (see Redis Locking section below)
+
+### Distributed Locking Configuration
+
+Distributed locking is used to prevent concurrent operations that could lead to data corruption.
+If no configuration is provided, an in-memory locking mechanism is used, which is not suitable for
+multi-replica deployments.
+
+#### Redis Locking (`metadata_store.<backend>.redis`)
+
+- `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
+- `ttl` (usize): The time-to-live for the lock in seconds
+- `key_prefix` (optional string): The key prefix for all lock keys
+
+Example:
+
+```toml
+[metadata_store.fs]
+root_dir = "/var/registry/metadata"
+
+[metadata_store.fs.redis]
+url = "redis://localhost:6379"
+ttl = 10
+key_prefix = "registry-locks"
+```
 
 ## Identity (`identity.<identity-id>`)
 

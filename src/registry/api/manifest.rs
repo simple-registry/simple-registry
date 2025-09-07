@@ -1,7 +1,6 @@
 use crate::registry::api::body::Body;
 use crate::registry::api::hyper::request_ext::RequestExt;
 use crate::registry::api::hyper::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT};
-use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::Reference;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry};
@@ -47,7 +46,7 @@ pub trait RegistryAPIManifestHandlersExt {
     ) -> Result<Response<Body>, Error>;
 }
 
-impl<D: DataStore> RegistryAPIManifestHandlersExt for Registry<D> {
+impl RegistryAPIManifestHandlersExt for Registry {
     #[instrument(skip(self, request))]
     async fn handle_head_manifest<T>(
         &self,
@@ -214,16 +213,16 @@ mod tests {
     use crate::registry::api::hyper::response_ext::IntoAsyncRead;
     use crate::registry::api::hyper::response_ext::ResponseExt;
     use crate::registry::oci_types::Reference;
-    use crate::registry::test_utils::{
-        create_test_fs_backend, create_test_manifest, create_test_s3_backend,
-    };
+    use crate::registry::test_utils::create_test_manifest;
+    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use http_body_util::Empty;
     use hyper::body::Bytes;
     use hyper::Method;
     use hyper::Uri;
+    use std::slice;
     use tokio::io::AsyncReadExt;
 
-    async fn test_handle_head_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_head_manifest_impl(registry: &Registry) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -274,17 +273,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_head_manifest_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_handle_head_manifest_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_handle_head_manifest_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_handle_head_manifest_s3() {
-        let registry = create_test_s3_backend().await;
-        test_handle_head_manifest_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_handle_head_manifest_impl(t.registry()).await;
     }
 
-    async fn test_handle_get_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_get_manifest_impl(registry: &Registry) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -337,19 +336,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_get_manifest_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_handle_get_manifest_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_handle_get_manifest_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_handle_get_manifest_s3() {
-        let registry = create_test_s3_backend().await;
-        test_handle_get_manifest_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_handle_get_manifest_impl(t.registry()).await;
     }
 
-    async fn test_handle_put_manifest_impl<D: DataStore + 'static>(
-        registry: &Registry<D>,
-    ) -> Result<(), Error> {
+    async fn test_handle_put_manifest_impl(registry: &Registry) -> Result<(), Error> {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -386,7 +383,7 @@ mod tests {
         let stored_manifest = registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
@@ -402,17 +399,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_put_manifest_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_handle_put_manifest_impl(&registry).await.unwrap();
+        let t = FSRegistryTestCase::new();
+        test_handle_put_manifest_impl(t.registry()).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_handle_put_manifest_s3() {
-        let registry = create_test_s3_backend().await;
-        test_handle_put_manifest_impl(&registry).await.unwrap();
+        let t = S3RegistryTestCase::new();
+        test_handle_put_manifest_impl(t.registry()).await.unwrap();
     }
 
-    async fn test_handle_delete_manifest_impl<D: DataStore + 'static>(registry: &Registry<D>) {
+    async fn test_handle_delete_manifest_impl(registry: &Registry) {
         let namespace = "test-repo";
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
@@ -444,7 +441,7 @@ mod tests {
         assert!(registry
             .get_manifest(
                 registry.validate_namespace(namespace).unwrap(),
-                &[media_type.clone()],
+                slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
@@ -454,13 +451,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_delete_manifest_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_handle_delete_manifest_impl(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_handle_delete_manifest_impl(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_handle_delete_manifest_s3() {
-        let registry = create_test_s3_backend().await;
-        test_handle_delete_manifest_impl(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_handle_delete_manifest_impl(t.registry()).await;
     }
 }

@@ -1,9 +1,8 @@
-use crate::registry::data_store::DataStore;
 use crate::registry::oci_types::{Descriptor, Digest};
-use crate::registry::{data_store, Error, Registry};
+use crate::registry::{Error, Registry};
 use tracing::instrument;
 
-impl<D: DataStore> Registry<D> {
+impl Registry {
     #[instrument]
     pub async fn get_referrers(
         &self,
@@ -13,15 +12,10 @@ impl<D: DataStore> Registry<D> {
     ) -> Result<Vec<Descriptor>, Error> {
         self.validate_namespace(namespace)?;
 
-        match self
-            .store
+        Ok(self
+            .metadata_store
             .list_referrers(namespace, &digest, artifact_type)
-            .await
-        {
-            Ok(referrers) => Ok(referrers),
-            Err(data_store::Error::BlobNotFound) => Ok(Vec::new()),
-            Err(e) => Err(e)?,
-        }
+            .await?)
     }
 
     #[instrument]
@@ -32,7 +26,7 @@ impl<D: DataStore> Registry<D> {
     ) -> Result<(Vec<String>, Option<String>), Error> {
         let n = n.unwrap_or(100);
 
-        let (namespaces, next_last) = self.store.list_namespaces(n, last).await?;
+        let (namespaces, next_last) = self.metadata_store.list_namespaces(n, last).await?;
         let link = next_last.map(|next_last| format!("/v2/_catalog?n={n}&last={next_last}"));
 
         let namespaces = namespaces
@@ -53,7 +47,7 @@ impl<D: DataStore> Registry<D> {
 
         let n = n.unwrap_or(100);
 
-        let (tags, next_last) = self.store.list_tags(namespace, n, last).await?;
+        let (tags, next_last) = self.metadata_store.list_tags(namespace, n, last).await?;
         let link =
             next_last.map(|next_last| format!("/v2/{namespace}/tags/list?n={n}&last={next_last}"));
 
@@ -64,23 +58,23 @@ impl<D: DataStore> Registry<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::test_utils::{create_test_fs_backend, create_test_s3_backend};
+    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use crate::registry::utils::BlobLink;
     use std::str::FromStr;
 
     #[tokio::test]
     async fn test_get_referrers_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_get_referrers(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_get_referrers(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_get_referrers_s3() {
-        let registry = create_test_s3_backend().await;
-        test_get_referrers(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_get_referrers(t.registry()).await;
     }
 
-    async fn test_get_referrers<D: DataStore>(registry: &Registry<D>) {
+    async fn test_get_referrers(registry: &Registry) {
         let namespace = "test-repo";
         let digest = Digest::from_str(
             "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
@@ -89,9 +83,10 @@ mod tests {
 
         // Create a link to make the namespace valid
         let test_content = b"test content";
-        let test_digest = registry.store.create_blob(test_content).await.unwrap();
+        let test_digest = registry.blob_store.create_blob(test_content).await.unwrap();
         let tag_link = BlobLink::Tag("latest".to_string());
         registry
+            .metadata_store
             .create_link(namespace, &tag_link, &test_digest)
             .await
             .unwrap();
@@ -113,17 +108,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_catalog_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_list_catalog(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_list_catalog(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_list_catalog_s3() {
-        let registry = create_test_s3_backend().await;
-        test_list_catalog(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_list_catalog(t.registry()).await;
     }
 
-    async fn test_list_catalog<D: DataStore>(registry: &Registry<D>) {
+    async fn test_list_catalog(registry: &Registry) {
         // Test default pagination (n=100)
         let (namespaces, token) = registry.list_catalog(None, None).await.unwrap();
         assert!(namespaces.is_empty());
@@ -145,26 +140,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_tags_fs() {
-        let (registry, _temp_dir) = create_test_fs_backend().await;
-        test_list_tags(&registry).await;
+        let t = FSRegistryTestCase::new();
+        test_list_tags(t.registry()).await;
     }
 
     #[tokio::test]
     async fn test_list_tags_s3() {
-        let registry = create_test_s3_backend().await;
-        test_list_tags(&registry).await;
+        let t = S3RegistryTestCase::new();
+        test_list_tags(t.registry()).await;
     }
 
-    async fn test_list_tags<D: DataStore>(registry: &Registry<D>) {
+    async fn test_list_tags(registry: &Registry) {
         let namespace = "test-repo";
 
         // Create some tags first
         let test_content = b"test content";
-        let test_digest = registry.store.create_blob(test_content).await.unwrap();
+        let test_digest = registry.blob_store.create_blob(test_content).await.unwrap();
         let tags = ["latest", "v1.0", "v2.0"];
         for tag in tags {
             let tag_link = BlobLink::Tag(tag.to_string());
             registry
+                .metadata_store
                 .create_link(namespace, &tag_link, &test_digest)
                 .await
                 .unwrap();

@@ -1,7 +1,7 @@
 use crate::configuration;
+use crate::registry::oci_types;
 use crate::registry::utils::task_queue;
-use crate::registry::{cache_store, data_store};
-use crate::registry::{lock_store, oci_types};
+use crate::registry::{blob_store, cache_store, metadata_store};
 use cel_interpreter::SerializationError;
 use hyper::header::InvalidHeaderValue;
 use hyper::http::uri::InvalidUri;
@@ -81,12 +81,12 @@ impl From<oci_types::Error> for Error {
     }
 }
 
-impl From<data_store::Error> for Error {
-    fn from(error: data_store::Error) -> Self {
+impl From<blob_store::Error> for Error {
+    fn from(error: blob_store::Error) -> Self {
         match error {
-            data_store::Error::UploadNotFound => Error::BlobUploadUnknown,
-            data_store::Error::BlobNotFound => Error::BlobUnknown,
-            data_store::Error::ReferenceNotFound => Error::ManifestBlobUnknown,
+            blob_store::Error::UploadNotFound => Error::BlobUploadUnknown,
+            blob_store::Error::BlobNotFound => Error::BlobUnknown,
+            blob_store::Error::ReferenceNotFound => Error::ManifestBlobUnknown,
             _ => {
                 warn!("Data store error: {error}");
                 Error::Internal("Data store error during operations".to_string())
@@ -95,10 +95,10 @@ impl From<data_store::Error> for Error {
     }
 }
 
-impl From<lock_store::Error> for Error {
-    fn from(error: lock_store::Error) -> Self {
-        warn!("Lock store error: {error}");
-        Error::Internal("Error acquiring lock during operations".to_string())
+impl From<metadata_store::Error> for Error {
+    fn from(error: metadata_store::Error) -> Self {
+        warn!("Metadata store error: {error}");
+        Error::Internal("Metadata store error during operations".to_string())
     }
 }
 

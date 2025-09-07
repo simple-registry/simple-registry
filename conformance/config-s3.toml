@@ -2,7 +2,7 @@
 bind_address = "0.0.0.0"
 port = 8000
 
-[storage.s3]
+[blob_store.s3]
 access_key_id = "root"
 secret_key = "roottoor"
 endpoint = "http://127.0.0.1:9000"
