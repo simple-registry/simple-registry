@@ -2,14 +2,14 @@
 pub mod tests;
 
 use crate::registry::data_store;
+use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::lock::{self, LockBackend, MemoryBackend};
-use crate::registry::metadata_store::Error;
+use crate::registry::metadata_store::{BlobIndex, Error};
 use crate::registry::metadata_store::{
     BlobIndexOperation, LinkMetadata, LockConfig, MetadataStore,
 };
 use crate::registry::oci_types::{Descriptor, Digest, Manifest};
-use crate::registry::utils::{path_builder, BlobMetadata};
-use crate::registry::BlobLink;
+use crate::registry::utils::path_builder;
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::Deserialize;
@@ -279,7 +279,7 @@ impl MetadataStore for Backend {
     }
 
     #[instrument(skip(self))]
-    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobMetadata, Error> {
+    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobIndex, Error> {
         let path = path_builder::blob_index_path(digest);
 
         let data = match self.store.read(&path).await {
@@ -306,8 +306,8 @@ impl MetadataStore for Backend {
         let res = self.store.read(&path).await;
 
         let mut reference_index = match res {
-            Ok(data) => serde_json::from_slice::<BlobMetadata>(&data)?,
-            Err(_) => BlobMetadata::default(),
+            Ok(data) => serde_json::from_slice::<BlobIndex>(&data)?,
+            Err(_) => BlobIndex::default(),
         };
 
         let mut index = reference_index
@@ -343,7 +343,7 @@ impl MetadataStore for Backend {
     async fn create_link(
         &self,
         namespace: &str,
-        link: &BlobLink,
+        link: &LinkKind,
         digest: &Digest,
     ) -> Result<LinkMetadata, Error> {
         let _guard = self
@@ -395,7 +395,7 @@ impl MetadataStore for Backend {
     async fn read_link(
         &self,
         namespace: &str,
-        link: &BlobLink,
+        link: &LinkKind,
         update_access_time: bool,
     ) -> Result<LinkMetadata, Error> {
         let _guard = self
@@ -415,7 +415,7 @@ impl MetadataStore for Backend {
     }
 
     #[instrument(skip(self))]
-    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
+    async fn delete_link(&self, namespace: &str, link: &LinkKind) -> Result<(), Error> {
         let _guard = self
             .lock_store
             .acquire_lock(&link.to_string())
@@ -446,7 +446,7 @@ impl Backend {
     async fn read_link_reference(
         &self,
         namespace: &str,
-        link: &BlobLink,
+        link: &LinkKind,
     ) -> Result<LinkMetadata, Error> {
         let link_path = path_builder::get_link_path(link, namespace);
         match self.store.read(&link_path).await {
@@ -459,7 +459,7 @@ impl Backend {
     async fn write_link_reference(
         &self,
         namespace: &str,
-        link: &BlobLink,
+        link: &LinkKind,
         metadata: &LinkMetadata,
     ) -> Result<(), Error> {
         let link_path = path_builder::get_link_path(link, namespace);
@@ -470,7 +470,7 @@ impl Backend {
         Ok(())
     }
 
-    async fn delete_link_reference(&self, namespace: &str, link: &BlobLink) -> Result<(), Error> {
+    async fn delete_link_reference(&self, namespace: &str, link: &LinkKind) -> Result<(), Error> {
         let link_path = path_builder::get_link_path(link, namespace);
         self.store.delete(&link_path).await?;
         Ok(())

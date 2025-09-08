@@ -1,9 +1,9 @@
 use crate::registry::blob_store::{BlobStore, Reader};
+use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::oci_types::Digest;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::utils::request_ext::RequestExt;
 use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
-use crate::registry::utils::BlobLink;
 use crate::registry::{blob_store, task_queue, Error, Registry, Repository, ResponseBody};
 use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use hyper::{Method, Request, Response, StatusCode};
@@ -208,12 +208,12 @@ impl Registry {
     pub async fn delete_blob(&self, namespace: &str, digest: Digest) -> Result<(), Error> {
         self.validate_namespace(namespace)?;
 
-        let link = BlobLink::Layer(digest.clone());
+        let link = LinkKind::Layer(digest.clone());
         if let Err(error) = self.metadata_store.delete_link(namespace, &link).await {
             warn!("Failed to delete layer link: {error}");
         }
 
-        let link = BlobLink::Config(digest);
+        let link = LinkKind::Config(digest);
         if let Err(error) = self.metadata_store.delete_link(namespace, &link).await {
             warn!("Failed to delete config link: {error}");
         }
@@ -445,8 +445,8 @@ mod tests {
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
         // Create test links
-        let layer_link = BlobLink::Layer(digest.clone());
-        let config_link = BlobLink::Config(digest.clone());
+        let layer_link = LinkKind::Layer(digest.clone());
+        let config_link = LinkKind::Config(digest.clone());
         registry
             .metadata_store
             .create_link(namespace, &layer_link, &digest)
@@ -605,9 +605,9 @@ mod tests {
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
         // Create test links
-        let layer_link = BlobLink::Layer(digest.clone());
-        let config_link = BlobLink::Config(digest.clone());
-        let latest_link = BlobLink::Tag("latest".to_string());
+        let layer_link = LinkKind::Layer(digest.clone());
+        let config_link = LinkKind::Config(digest.clone());
+        let latest_link = LinkKind::Tag("latest".to_string());
         registry
             .metadata_store
             .create_link(namespace, &layer_link, &digest)

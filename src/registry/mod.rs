@@ -36,7 +36,6 @@ pub use repository::Repository;
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
 pub use crate::registry::task_queue::TaskQueue;
-pub use crate::registry::utils::BlobLink;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
 pub use response_body::ResponseBody;
@@ -126,8 +125,8 @@ impl Registry {
 pub mod test_utils {
     use super::*;
     use crate::configuration::{RepositoryAccessPolicyConfig, RepositoryRetentionPolicyConfig};
+    use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::oci_types::Digest;
-    use crate::registry::utils::BlobLink;
     use serde_json::json;
 
     pub fn create_test_repository_config() -> HashMap<String, RepositoryConfig> {
@@ -155,7 +154,7 @@ pub mod test_utils {
         let digest = registry.blob_store.create_blob(content).await.unwrap();
 
         // Create a tag to ensure the namespace exists
-        let tag_link = BlobLink::Tag("latest".to_string());
+        let tag_link = LinkKind::Tag("latest".to_string());
         registry
             .metadata_store
             .create_link(namespace, &tag_link, &digest)

@@ -1,8 +1,8 @@
+use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::oci_types::{Digest, Manifest, Reference};
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::utils::request_ext::RequestExt;
 use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
-use crate::registry::utils::BlobLink;
 use crate::registry::{Error, Registry, Repository, ResponseBody};
 use http_body_util::BodyExt;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
@@ -251,12 +251,12 @@ impl Registry {
             Reference::Tag(tag) => {
                 let digest = self.blob_store.create_blob(body).await?;
 
-                let link = BlobLink::Tag(tag);
+                let link = LinkKind::Tag(tag);
                 self.metadata_store
                     .create_link(namespace, &link, &digest)
                     .await?;
 
-                let link = BlobLink::Digest(digest.clone());
+                let link = LinkKind::Digest(digest.clone());
                 self.metadata_store
                     .create_link(namespace, &link, &digest)
                     .await?;
@@ -273,7 +273,7 @@ impl Registry {
                     ));
                 }
 
-                let link = BlobLink::Digest(digest.clone());
+                let link = LinkKind::Digest(digest.clone());
                 self.metadata_store
                     .create_link(namespace, &link, &digest)
                     .await?;
@@ -283,21 +283,21 @@ impl Registry {
         };
 
         if let Some(subject) = &manifest_digests.subject {
-            let link = BlobLink::Referrer(subject.clone(), digest.clone());
+            let link = LinkKind::Referrer(subject.clone(), digest.clone());
             self.metadata_store
                 .create_link(namespace, &link, &digest)
                 .await?;
         }
 
         if let Some(config_digest) = manifest_digests.config {
-            let link = BlobLink::Config(config_digest.clone());
+            let link = LinkKind::Config(config_digest.clone());
             self.metadata_store
                 .create_link(namespace, &link, &config_digest)
                 .await?;
         }
 
         for layer_digest in manifest_digests.layers {
-            let link = BlobLink::Layer(layer_digest.clone());
+            let link = LinkKind::Layer(layer_digest.clone());
             self.metadata_store
                 .create_link(namespace, &link, &layer_digest)
                 .await?;
@@ -319,7 +319,7 @@ impl Registry {
 
         match reference {
             Reference::Tag(tag) => {
-                let link = BlobLink::Tag(tag);
+                let link = LinkKind::Tag(tag);
                 self.metadata_store.delete_link(namespace, &link).await?;
             }
             Reference::Digest(digest) => {
@@ -331,7 +331,7 @@ impl Registry {
                         .await?;
 
                     for tag in tags {
-                        let link_reference = BlobLink::Tag(tag);
+                        let link_reference = LinkKind::Tag(tag);
                         let link = match self
                             .metadata_store
                             .read_link(namespace, &link_reference, self.update_pull_time)
@@ -353,7 +353,7 @@ impl Registry {
                     }
 
                     // Try to read the manifest by digest to check for referrers
-                    let blob_link = BlobLink::Digest(digest.clone());
+                    let blob_link = LinkKind::Digest(digest.clone());
                     let link = match self
                         .metadata_store
                         .read_link(namespace, &blob_link, self.update_pull_time)
@@ -375,7 +375,7 @@ impl Registry {
                     let manifest_digests = parse_manifest_digests(&content, None)?;
 
                     if let Some(subject_digest) = manifest_digests.subject {
-                        let link = BlobLink::Referrer(subject_digest, link.target);
+                        let link = LinkKind::Referrer(subject_digest, link.target);
                         self.metadata_store.delete_link(namespace, &link).await?;
                     }
 

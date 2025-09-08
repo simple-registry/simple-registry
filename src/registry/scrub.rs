@@ -1,7 +1,7 @@
+use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::LinkMetadata;
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::policy_types::ManifestImage;
-use crate::registry::utils::BlobLink;
 use crate::registry::{parse_manifest_digests, Error, Registry};
 use cel_interpreter::{Context, Program, Value};
 use chrono::Utc;
@@ -99,7 +99,7 @@ impl Registry {
         for tag in &tag_names {
             let info = self
                 .metadata_store
-                .read_link(namespace, &BlobLink::Tag(tag.to_string()), false)
+                .read_link(namespace, &LinkKind::Tag(tag.to_string()), false)
                 .await?;
             tags.insert(tag.to_string(), info);
         }
@@ -240,10 +240,10 @@ impl Registry {
         debug!("Checking {namespace}:{tag} for revision inconsistencies");
         let digest = self
             .metadata_store
-            .read_link(namespace, &BlobLink::Tag(tag.to_string()), false)
+            .read_link(namespace, &LinkKind::Tag(tag.to_string()), false)
             .await?;
 
-        let link_reference = BlobLink::Digest(digest.target.clone());
+        let link_reference = LinkKind::Digest(digest.target.clone());
         if let Err(error) = self
             .ensure_link(namespace, &link_reference, &digest.target)
             .await
@@ -298,7 +298,7 @@ impl Registry {
         };
 
         debug!("Checking {namespace}/{revision} config link: {config_digest}");
-        let link_reference = BlobLink::Config(config_digest.clone());
+        let link_reference = LinkKind::Config(config_digest.clone());
         self.ensure_link(namespace, &link_reference, &config_digest)
             .await?;
 
@@ -316,7 +316,7 @@ impl Registry {
         };
 
         debug!("Checking {namespace}/{revision} subject link: {subject_digest}");
-        let link_reference = BlobLink::Referrer(subject_digest.clone(), revision.clone());
+        let link_reference = LinkKind::Referrer(subject_digest.clone(), revision.clone());
         self.ensure_link(namespace, &link_reference, revision)
             .await?;
 
@@ -332,7 +332,7 @@ impl Registry {
         for layer_digest in layers {
             debug!("Checking {namespace}/{revision} layer link: {layer_digest}",);
 
-            let link_reference = BlobLink::Layer(layer_digest.clone());
+            let link_reference = LinkKind::Layer(layer_digest.clone());
             self.ensure_link(namespace, &link_reference, layer_digest)
                 .await?;
         }
@@ -343,7 +343,7 @@ impl Registry {
     async fn ensure_link(
         &self,
         namespace: &str,
-        link_reference: &BlobLink,
+        link_reference: &LinkKind,
         digest: &Digest,
     ) -> Result<(), Error> {
         let blob_digest = self
@@ -442,7 +442,6 @@ mod tests {
     use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
     use crate::registry::test_utils::{create_test_manifest, create_test_repository_config};
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use crate::registry::utils::BlobLink;
     use std::slice;
     use uuid::Uuid;
 
@@ -820,7 +819,7 @@ mod tests {
             .metadata_store
             .create_link(
                 namespace,
-                &BlobLink::Config(config_digest.clone()),
+                &LinkKind::Config(config_digest.clone()),
                 &config_digest,
             )
             .await
@@ -831,7 +830,7 @@ mod tests {
             .metadata_store
             .create_link(
                 namespace,
-                &BlobLink::Digest(manifest_digest.clone()),
+                &LinkKind::Digest(manifest_digest.clone()),
                 &manifest_digest,
             )
             .await
@@ -840,7 +839,7 @@ mod tests {
             .metadata_store
             .create_link(
                 namespace,
-                &BlobLink::Digest(manifest_with_subject_digest.clone()),
+                &LinkKind::Digest(manifest_with_subject_digest.clone()),
                 &manifest_with_subject_digest,
             )
             .await
@@ -849,7 +848,7 @@ mod tests {
             .metadata_store
             .create_link(
                 namespace,
-                &BlobLink::Tag("latest".to_string()),
+                &LinkKind::Tag("latest".to_string()),
                 &manifest_digest,
             )
             .await
@@ -860,7 +859,7 @@ mod tests {
             .metadata_store
             .create_link(
                 namespace,
-                &BlobLink::Config(wrong_config_digest.clone()),
+                &LinkKind::Config(wrong_config_digest.clone()),
                 &wrong_config_digest,
             )
             .await
@@ -869,7 +868,7 @@ mod tests {
             .metadata_store
             .create_link(
                 namespace,
-                &BlobLink::Layer(wrong_layer_digest.clone()),
+                &LinkKind::Layer(wrong_layer_digest.clone()),
                 &wrong_layer_digest,
             )
             .await
@@ -893,7 +892,7 @@ mod tests {
         assert_eq!(
             new_registry
                 .metadata_store
-                .read_link(namespace, &BlobLink::Config(config_digest.clone()), false)
+                .read_link(namespace, &LinkKind::Config(config_digest.clone()), false)
                 .await
                 .unwrap()
                 .target,
@@ -904,7 +903,7 @@ mod tests {
         assert_eq!(
             new_registry
                 .metadata_store
-                .read_link(namespace, &BlobLink::Layer(layer_digest1.clone()), false)
+                .read_link(namespace, &LinkKind::Layer(layer_digest1.clone()), false)
                 .await
                 .unwrap()
                 .target,
@@ -915,7 +914,7 @@ mod tests {
         assert_eq!(
             new_registry
                 .metadata_store
-                .read_link(namespace, &BlobLink::Layer(layer_digest2.clone()), false)
+                .read_link(namespace, &LinkKind::Layer(layer_digest2.clone()), false)
                 .await
                 .unwrap()
                 .target,
@@ -928,7 +927,7 @@ mod tests {
                 .metadata_store
                 .read_link(
                     namespace,
-                    &BlobLink::Referrer(
+                    &LinkKind::Referrer(
                         subject_digest.clone(),
                         manifest_with_subject_digest.clone()
                     ),
@@ -952,7 +951,7 @@ mod tests {
             .metadata_store
             .create_link(
                 namespace,
-                &BlobLink::Digest(invalid_digest.clone()),
+                &LinkKind::Digest(invalid_digest.clone()),
                 &invalid_digest,
             )
             .await
@@ -967,7 +966,7 @@ mod tests {
             .create_blob(b"test content")
             .await
             .unwrap();
-        let link = BlobLink::Tag("test-tag".to_string());
+        let link = LinkKind::Tag("test-tag".to_string());
 
         // Test creating a new link
         registry
@@ -998,7 +997,7 @@ mod tests {
         assert_eq!(stored_link.target, new_digest);
 
         // Test with invalid link
-        let invalid_link = BlobLink::Tag("invalid-tag".to_string());
+        let invalid_link = LinkKind::Tag("invalid-tag".to_string());
         registry
             .ensure_link(namespace, &invalid_link, &digest)
             .await
@@ -1022,10 +1021,10 @@ mod tests {
         let digest4 = registry.blob_store.create_blob(content).await.unwrap();
 
         // Create valid links for blobs in different namespaces
-        let valid_link1 = BlobLink::Tag("valid-tag1".to_string());
-        let valid_link2 = BlobLink::Layer(digest2.clone());
-        let valid_link3 = BlobLink::Config(digest3.clone());
-        let valid_link4 = BlobLink::Referrer(digest1.clone(), digest4.clone());
+        let valid_link1 = LinkKind::Tag("valid-tag1".to_string());
+        let valid_link2 = LinkKind::Layer(digest2.clone());
+        let valid_link3 = LinkKind::Config(digest3.clone());
+        let valid_link4 = LinkKind::Referrer(digest1.clone(), digest4.clone());
 
         registry
             .metadata_store
@@ -1049,7 +1048,7 @@ mod tests {
             .unwrap();
 
         // Create invalid link by adding to blob index but not creating the actual link
-        let invalid_link = BlobLink::Tag("invalid-tag".to_string());
+        let invalid_link = LinkKind::Tag("invalid-tag".to_string());
         registry
             .metadata_store
             .update_blob_index(

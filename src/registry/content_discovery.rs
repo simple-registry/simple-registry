@@ -196,12 +196,12 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::oci_types::Reference;
     use crate::registry::policy_types::ClientIdentity;
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
-    use crate::registry::utils::BlobLink;
     use http_body_util::Empty;
     use hyper::body::Bytes;
     use hyper::Method;
@@ -231,7 +231,7 @@ mod tests {
         // Create a link to make the namespace valid
         let test_content = b"test content";
         let test_digest = registry.blob_store.create_blob(test_content).await.unwrap();
-        let tag_link = BlobLink::Tag("latest".to_string());
+        let tag_link = LinkKind::Tag("latest".to_string());
         registry
             .metadata_store
             .create_link(namespace, &tag_link, &test_digest)
@@ -305,7 +305,7 @@ mod tests {
         let test_digest = registry.blob_store.create_blob(test_content).await.unwrap();
         let tags = ["latest", "v1.0", "v2.0"];
         for tag in tags {
-            let tag_link = BlobLink::Tag(tag.to_string());
+            let tag_link = LinkKind::Tag(tag.to_string());
             registry
                 .metadata_store
                 .create_link(namespace, &tag_link, &test_digest)
@@ -405,7 +405,7 @@ mod tests {
             .unwrap();
 
         // Create a referrer link
-        let referrer_link = BlobLink::Referrer(
+        let referrer_link = LinkKind::Referrer(
             base_manifest_digest.clone(),
             referrer_manifest_digest.clone(),
         );
@@ -469,7 +469,7 @@ mod tests {
 
         for namespace in &namespaces {
             let (digest, _) = create_test_blob(registry, namespace, content).await;
-            let tag_link = BlobLink::Tag("latest".to_string());
+            let tag_link = LinkKind::Tag("latest".to_string());
             registry
                 .metadata_store
                 .create_link(namespace, &tag_link, &digest)
@@ -547,7 +547,7 @@ mod tests {
         // Create some test tags
         let tags = ["v1", "v2", "latest"];
         for tag in tags {
-            let tag_link = BlobLink::Tag(tag.to_string());
+            let tag_link = LinkKind::Tag(tag.to_string());
             registry
                 .metadata_store
                 .create_link(namespace, &tag_link, &digest)

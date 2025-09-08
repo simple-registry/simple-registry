@@ -1,23 +1,31 @@
 mod error;
+
 use crate::registry::oci_types::{Descriptor, Digest};
-use crate::registry::utils::BlobMetadata;
-use crate::registry::BlobLink;
 use async_trait::async_trait;
 pub use error::Error;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Clone)]
-pub enum BlobIndexOperation {
-    Insert(BlobLink),
-    Remove(BlobLink),
-}
-
+pub mod link_kind;
 pub mod fs;
-mod link;
+mod link_metadata;
 mod lock;
 pub mod s3;
 
-pub use link::LinkMetadata;
+use crate::registry::metadata_store::link_kind::LinkKind;
+pub use link_metadata::LinkMetadata;
 pub use lock::redis::LockConfig;
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+pub struct BlobIndex {
+    pub namespace: HashMap<String, HashSet<LinkKind>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BlobIndexOperation {
+    Insert(LinkKind),
+    Remove(LinkKind),
+}
 
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
@@ -48,7 +56,7 @@ pub trait MetadataStore: Send + Sync {
         continuation_token: Option<String>,
     ) -> Result<(Vec<Digest>, Option<String>), Error>;
 
-    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobMetadata, Error>;
+    async fn read_blob_index(&self, digest: &Digest) -> Result<BlobIndex, Error>;
 
     async fn update_blob_index(
         &self,
@@ -60,27 +68,27 @@ pub trait MetadataStore: Send + Sync {
     async fn create_link(
         &self,
         namespace: &str,
-        link: &BlobLink,
+        link: &LinkKind,
         digest: &Digest,
     ) -> Result<LinkMetadata, Error>;
 
     async fn read_link(
         &self,
         namespace: &str,
-        link: &BlobLink,
+        link: &LinkKind,
         update_access_time: bool,
     ) -> Result<LinkMetadata, Error>;
 
-    async fn delete_link(&self, namespace: &str, link: &BlobLink) -> Result<(), Error>;
+    async fn delete_link(&self, namespace: &str, link: &LinkKind) -> Result<(), Error>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::MetadataStore;
     use crate::registry::blob_store::BlobStore;
+    use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::oci_types::Descriptor;
     use crate::registry::utils::sha256_ext::Sha256Ext;
-    use crate::registry::BlobLink;
     use chrono::{Duration, Utc};
     use sha2::digest::Update;
     use sha2::{Digest, Sha256};
@@ -91,7 +99,7 @@ mod tests {
         let digest = Sha256::new().digest();
 
         for namespace in &namespaces {
-            let tag_link = BlobLink::Tag("latest".to_string());
+            let tag_link = LinkKind::Tag("latest".to_string());
             store
                 .create_link(namespace, &tag_link, &digest)
                 .await
@@ -137,7 +145,7 @@ mod tests {
 
         let tags = ["latest", "v1.0", "v2.0"];
         for tag in tags {
-            let tag_link = BlobLink::Tag(tag.to_string());
+            let tag_link = LinkKind::Tag(tag.to_string());
             store
                 .create_link(namespace, &tag_link, &digest)
                 .await
@@ -176,7 +184,7 @@ mod tests {
 
         // Test tag deletion
         let delete_tag = "v1.0";
-        let tag_link = BlobLink::Tag(delete_tag.to_string());
+        let tag_link = LinkKind::Tag(delete_tag.to_string());
         store.delete_link(namespace, &tag_link).await.unwrap();
 
         let (tags_after_delete, _) = store.list_tags(namespace, 10, None).await.unwrap();
@@ -192,7 +200,7 @@ mod tests {
         // Create base manifest that will be referenced
         let base_content = b"base manifest content";
         let base_digest = blob_store.create_blob(base_content).await.unwrap();
-        let base_link = BlobLink::Digest(base_digest.clone());
+        let base_link = LinkKind::Digest(base_digest.clone());
 
         metadata_store
             .create_link(namespace, &base_link, &base_digest)
@@ -223,7 +231,7 @@ mod tests {
             .create_blob(referrer_content.as_bytes())
             .await
             .unwrap();
-        let link = BlobLink::Digest(referrer_digest.clone());
+        let link = LinkKind::Digest(referrer_digest.clone());
 
         metadata_store
             .create_link(namespace, &link, &referrer_digest)
@@ -231,7 +239,7 @@ mod tests {
             .unwrap();
 
         // Also add it to the referrers index
-        let referrers_link = BlobLink::Referrer(base_digest.clone(), referrer_digest.clone());
+        let referrers_link = LinkKind::Referrer(base_digest.clone(), referrer_digest.clone());
 
         metadata_store
             .create_link(namespace, &referrers_link, &referrer_digest)
@@ -292,7 +300,7 @@ mod tests {
             let digest = Sha256::new().chain(content).digest();
             digests.push(digest.clone());
 
-            let digest_link = BlobLink::Digest(digest.clone());
+            let digest_link = LinkKind::Digest(digest.clone());
             store
                 .create_link(namespace, &digest_link, &digest)
                 .await
@@ -336,7 +344,7 @@ mod tests {
 
         // Test creating and reading tag link
         let tag = "latest";
-        let tag_link = BlobLink::Tag(tag.to_string());
+        let tag_link = LinkKind::Tag(tag.to_string());
 
         store
             .create_link(namespace, &tag_link, &digest)
