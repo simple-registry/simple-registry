@@ -1,4 +1,4 @@
-use crate::registry::policy_types::{ClientIdentity, ClientRequest};
+use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, ResponseBody};
 use hyper::{Response, StatusCode};
 use tracing::instrument;

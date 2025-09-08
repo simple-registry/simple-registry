@@ -15,10 +15,8 @@ mod http_client;
 pub mod manifest;
 pub mod metadata_store;
 pub mod oci;
-mod policy;
-pub mod policy_types;
 mod reader;
-mod repository;
+pub mod repository;
 mod response_body;
 mod scrub;
 pub mod task_queue;
@@ -119,6 +117,57 @@ impl Registry {
             Err(Error::NameInvalid)
         }
     }
+
+    /// Validates a registry request against access control policies.
+    ///
+    /// This method:
+    /// 1. Checks if the request has a namespace (repository name)
+    /// 2. Evaluates the repository's access policy
+    /// 3. Enforces pull-through cache write restrictions
+    ///
+    /// # Arguments
+    /// * `repository` - The target repository (if it exists)
+    /// * `request` - The client request to validate
+    /// * `identity` - The client's identity information
+    ///
+    /// # Returns
+    /// * `Ok(())` if the request is allowed
+    /// * `Err(Error::Unauthorized)` if the request is denied
+    #[instrument(skip(repository, request))]
+    pub fn validate_request(
+        repository: Option<&Repository>,
+        request: &repository::access_policy::ClientRequest,
+        identity: &repository::access_policy::ClientIdentity,
+    ) -> Result<(), Error> {
+        use tracing::debug;
+
+        let Some(namespace) = request.namespace.as_ref() else {
+            return Ok(());
+        };
+
+        let Some(repository) = repository else {
+            return Ok(());
+        };
+
+        debug!(
+            "Evaluating access policy for namespace: {namespace} ({})",
+            repository.name
+        );
+
+        let allowed = repository.access_policy.evaluate(request, identity)?;
+
+        if !allowed {
+            return Err(Error::Unauthorized("Access denied".to_string()));
+        }
+
+        if repository.is_pull_through() && request.is_write() {
+            Err(Error::Unauthorized(
+                "Write operations are not supported on pull-through cache repositories".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -206,5 +255,180 @@ pub mod test_utils {
         let content = serde_json::to_vec(&manifest).unwrap();
         let media_type = "application/vnd.docker.distribution.manifest.v2+json".to_string();
         (content, media_type)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::configuration::{
+        RepositoryAccessPolicyConfig, RepositoryConfig, RepositoryRetentionPolicyConfig,
+    };
+    use crate::registry::oci::Reference;
+    use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
+    use crate::registry::tests::FSRegistryTestCase;
+
+    fn create_default_deny_repo(rules: Vec<String>) -> Repository {
+        let config = RepositoryConfig {
+            retention_policy: RepositoryRetentionPolicyConfig::default(),
+            access_policy: RepositoryAccessPolicyConfig {
+                default_allow: false,
+                rules,
+            },
+            ..RepositoryConfig::default()
+        };
+
+        Repository::new(config, "policy-deny-repo".to_string()).unwrap()
+    }
+
+    fn create_default_allow_repo(rules: Vec<String>) -> Repository {
+        let config = RepositoryConfig {
+            access_policy: RepositoryAccessPolicyConfig {
+                default_allow: true,
+                rules,
+            },
+            retention_policy: RepositoryRetentionPolicyConfig::default(),
+            ..RepositoryConfig::default()
+        };
+
+        Repository::new(config, "policy-allow-repo".to_string()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_validate_request_no_namespace() {
+        let request = ClientRequest::list_catalog();
+        let identity = ClientIdentity::default();
+
+        assert!(Registry::validate_request(None, &request, &identity).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_request_no_repository() {
+        let reference = Reference::Tag("latest".to_string());
+
+        let request = ClientRequest::get_manifest("policy-deny-repo", &reference);
+        let identity = ClientIdentity {
+            username: Some("forbidden".to_string()),
+            ..ClientIdentity::default()
+        };
+
+        assert!(Registry::validate_request(None, &request, &identity).is_ok());
+
+        let request = ClientRequest::get_manifest("policy-deny-repo", &reference);
+        let identity = ClientIdentity {
+            username: Some("admin".to_string()),
+            ..ClientIdentity::default()
+        };
+
+        assert!(Registry::validate_request(None, &request, &identity).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_request_default_allow_no_rules() {
+        let mut t = FSRegistryTestCase::new();
+        let reference = Reference::Tag("latest".to_string());
+
+        t.registry_mut().repositories.insert(
+            "policy-allow-repo".to_string(),
+            create_default_allow_repo(Vec::new()),
+        );
+
+        let request = ClientRequest::get_manifest("policy-allow-repo", &reference);
+        let identity = ClientIdentity {
+            username: Some("whatever-identity".to_string()),
+            ..ClientIdentity::default()
+        };
+        let repository = t
+            .registry()
+            .validate_namespace("policy-allow-repo")
+            .unwrap();
+
+        assert!(Registry::validate_request(Some(repository), &request, &identity).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_request_default_deny_no_rules() {
+        let mut t = FSRegistryTestCase::new();
+        let reference = Reference::Tag("latest".to_string());
+
+        t.registry_mut().repositories.insert(
+            "policy-deny-repo".to_string(),
+            create_default_deny_repo(Vec::new()),
+        );
+
+        let request = ClientRequest::get_manifest("policy-deny-repo", &reference);
+        let identity = ClientIdentity {
+            username: Some("forbidden".to_string()),
+            ..ClientIdentity::default()
+        };
+        let repository = t.registry().validate_namespace("policy-deny-repo").unwrap();
+
+        assert!(Registry::validate_request(Some(repository), &request, &identity).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_request_default_allow() {
+        let mut t = FSRegistryTestCase::new();
+        let reference = Reference::Tag("latest".to_string());
+
+        let rules = vec!["identity.username == 'forbidden'".to_string()];
+        t.registry_mut().repositories.insert(
+            "policy-allow-repo".to_string(),
+            create_default_allow_repo(rules),
+        );
+
+        let request = ClientRequest::get_manifest("policy-allow-repo", &reference);
+        let identity = ClientIdentity {
+            username: Some("whatever-identity".to_string()),
+            ..ClientIdentity::default()
+        };
+        let repository = t
+            .registry()
+            .validate_namespace("policy-allow-repo")
+            .unwrap();
+
+        assert!(Registry::validate_request(Some(repository), &request, &identity).is_ok());
+
+        let request = ClientRequest::get_manifest("policy-allow-repo", &reference);
+        let identity = ClientIdentity {
+            username: Some("forbidden".to_string()),
+            ..ClientIdentity::default()
+        };
+        let repository = t
+            .registry()
+            .validate_namespace("policy-allow-repo")
+            .unwrap();
+
+        assert!(Registry::validate_request(Some(repository), &request, &identity).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_request_default_deny() {
+        let mut t = FSRegistryTestCase::new();
+        let reference = Reference::Tag("latest".to_string());
+
+        let rules = vec!["identity.username == 'admin'".to_string()];
+        t.registry_mut().repositories.insert(
+            "policy-deny-repo".to_string(),
+            create_default_deny_repo(rules),
+        );
+
+        let request = ClientRequest::get_manifest("policy-deny-repo", &reference);
+        let identity = ClientIdentity {
+            username: Some("admin".to_string()),
+            ..ClientIdentity::default()
+        };
+        let repository = t.registry().validate_namespace("policy-deny-repo").unwrap();
+
+        assert!(Registry::validate_request(Some(repository), &request, &identity).is_ok());
+
+        let request = ClientRequest::get_manifest("policy-deny-repo", &reference);
+        let identity = ClientIdentity {
+            username: Some("forbidden".to_string()),
+            ..ClientIdentity::default()
+        };
+        let repository = t.registry().validate_namespace("policy-deny-repo").unwrap();
+
+        assert!(Registry::validate_request(Some(repository), &request, &identity).is_err());
     }
 }

@@ -7,33 +7,39 @@ use hyper::body::Incoming;
 use hyper::{Method, Response};
 use tracing::instrument;
 
+pub mod access_policy;
 mod authentication_scheme;
 mod bearer_token;
 mod repository_upstream;
+pub mod retention_policy;
 
 use crate::registry::http_client::HttpClientBuilder;
+pub use access_policy::AccessPolicy;
 use repository_upstream::RepositoryUpstream;
+pub use retention_policy::RetentionPolicy;
 
 pub struct Repository {
     pub name: String,
     pub upstream: Vec<RepositoryUpstream>,
-    pub access_default_allow: bool,
-    pub access_rules: Vec<Program>,
-    pub retention_rules: Vec<Program>,
+    pub access_policy: AccessPolicy,
+    pub retention_policy: RetentionPolicy,
 }
 
 impl Repository {
     pub fn new(config: RepositoryConfig, name: String) -> Result<Self, Error> {
         let access_rules = Self::compile_program_vec(&config.access_policy.rules)?;
-        let upstream = Self::build_upstreams(config.upstream)?;
+        let access_policy = AccessPolicy::new(config.access_policy.default_allow, access_rules);
+
         let retention_rules = Self::compile_program_vec(&config.retention_policy.rules)?;
+        let retention_policy = RetentionPolicy::new(retention_rules);
+
+        let upstream = Self::build_upstreams(config.upstream)?;
 
         Ok(Self {
             name,
             upstream,
-            access_default_allow: config.access_policy.default_allow,
-            access_rules,
-            retention_rules,
+            access_policy,
+            retention_policy,
         })
     }
 

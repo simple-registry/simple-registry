@@ -1,5 +1,147 @@
+//! Access control policy evaluation for registry operations.
+//!
+//! This module provides CEL-based access control for registry operations.
+//! Policies are pre-compiled at configuration load time for performance.
+//!
+//! # Policy Evaluation
+//!
+//! Access policies support two modes:
+//! - **Default Allow**: Access is granted unless explicitly denied by a rule
+//! - **Default Deny**: Access is denied unless explicitly granted by a rule
+//!
+//! # Available Variables
+//!
+//! CEL expressions have access to:
+//! - `identity`: Client identity information (id, username, certificate details)
+//! - `request`: Request details (action, namespace, digest, reference)
+
 use crate::registry::oci::{Digest, Reference};
+use crate::registry::Error;
+use cel_interpreter::{Context, Program, Value};
 use serde::Serialize;
+use tracing::{debug, info, instrument};
+use x509_parser::certificate::X509Certificate;
+
+/// Access control policy engine.
+///
+/// Evaluates CEL expressions to determine if a request should be allowed.
+/// Rules are pre-compiled at configuration time for better performance.
+pub struct AccessPolicy {
+    default_allow: bool,
+    rules: Vec<Program>,
+}
+
+impl AccessPolicy {
+    pub fn new(default_allow: bool, rules: Vec<Program>) -> Self {
+        Self {
+            default_allow,
+            rules,
+        }
+    }
+
+    /// Evaluates the access policy for a given request and identity.
+    ///
+    /// # Arguments
+    /// * `request` - The client request containing action and resource information
+    /// * `identity` - The client identity containing authentication information
+    ///
+    /// # Returns
+    /// * `Ok(true)` if access should be granted
+    /// * `Ok(false)` if access should be denied
+    /// * `Err` if policy evaluation fails
+    pub fn evaluate(
+        &self,
+        request: &ClientRequest,
+        identity: &ClientIdentity,
+    ) -> Result<bool, Error> {
+        if self.rules.is_empty() {
+            return Ok(self.default_allow);
+        }
+
+        let context = Self::build_context(request, identity)?;
+
+        if self.default_allow {
+            for rule in &self.rules {
+                match rule.execute(&context)? {
+                    Value::Bool(true) => {
+                        info!("Deny rule matched");
+                        return Ok(false);
+                    }
+                    Value::Bool(false) => {}
+                    _ => return Ok(false),
+                }
+            }
+            Ok(true)
+        } else {
+            for rule in &self.rules {
+                match rule.execute(&context)? {
+                    Value::Bool(true) => {
+                        debug!("Allow rule matched");
+                        return Ok(true);
+                    }
+                    Value::Bool(false) => {}
+                    _ => return Ok(false),
+                }
+            }
+            Ok(false)
+        }
+    }
+
+    fn build_context<'a>(
+        request: &'a ClientRequest,
+        identity: &'a ClientIdentity,
+    ) -> Result<Context<'a>, Error> {
+        let mut context = Context::default();
+        context.add_variable("request", request)?;
+        context.add_variable("identity", identity)?;
+        Ok(context)
+    }
+}
+
+/// Client identity information used in access control decisions.
+///
+/// Contains authentication details extracted from basic auth or mTLS certificates.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ClientIdentity {
+    pub id: Option<String>,
+    pub username: Option<String>,
+    pub certificate: CELIdentityCertificate,
+}
+
+impl ClientIdentity {
+    #[instrument(skip(cert))]
+    pub fn from_cert(cert: &X509Certificate) -> Result<Self, Error> {
+        let subject = cert.subject();
+        let organizations = subject
+            .iter_organization()
+            .map(|o| o.as_str().map(String::from))
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|_| Error::Unauthorized("Unable to parse provided certificate".to_string()))?;
+        let common_names = subject
+            .iter_common_name()
+            .map(|o| o.as_str().map(String::from))
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|_| Error::Unauthorized("Unable to parse provided certificate".to_string()))?;
+
+        let certificate = CELIdentityCertificate {
+            organizations,
+            common_names,
+        };
+
+        Ok(Self {
+            id: None,
+            username: None,
+            certificate,
+        })
+    }
+}
+
+/// Certificate information extracted from client mTLS certificates.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CELIdentityCertificate {
+    pub organizations: Vec<String>,
+    pub common_names: Vec<String>,
+}
 
 const GET_API_VERSION: &str = "get-api-version";
 const GET_MANIFEST: &str = "get-manifest";
@@ -16,8 +158,10 @@ const GET_REFERRERS: &str = "get-referrers";
 const LIST_CATALOG: &str = "list-catalog";
 const LIST_TAGS: &str = "list-tags";
 
-// NOTE: Here we define a struct instead of an enum to simplify integration with
-// the policy evaluation logic.
+/// Registry operation request details used in access control decisions.
+///
+/// Contains information about the requested action and target resources.
+/// The action field uses static string constants for efficiency.
 #[derive(Debug, Default, Serialize)]
 pub struct ClientRequest {
     pub action: &'static str,
@@ -160,7 +304,114 @@ impl ClientRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::oci::{Digest, Reference};
+    use x509_parser::pem::Pem;
+    use x509_parser::prelude::FromDer;
+
+    #[test]
+    fn test_access_policy_default_allow_no_rules() {
+        let policy = AccessPolicy::new(true, vec![]);
+        let request = ClientRequest::get_api_version();
+        let identity = ClientIdentity::default();
+
+        let result = policy.evaluate(&request, &identity);
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn test_access_policy_default_deny_no_rules() {
+        let policy = AccessPolicy::new(false, vec![]);
+        let request = ClientRequest::get_api_version();
+        let identity = ClientIdentity::default();
+
+        let result = policy.evaluate(&request, &identity);
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn test_access_policy_default_allow_with_deny_rule() {
+        use cel_interpreter::Program;
+        let program = Program::compile("identity.username == 'forbidden'").unwrap();
+        let policy = AccessPolicy::new(true, vec![program]);
+
+        let request = ClientRequest::get_api_version();
+        let identity = ClientIdentity {
+            username: Some("forbidden".to_string()),
+            ..ClientIdentity::default()
+        };
+
+        let result = policy.evaluate(&request, &identity);
+        assert!(!result.unwrap());
+
+        let identity = ClientIdentity {
+            username: Some("allowed".to_string()),
+            ..ClientIdentity::default()
+        };
+
+        let result = policy.evaluate(&request, &identity);
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn test_access_policy_default_deny_with_allow_rule() {
+        use cel_interpreter::Program;
+        let program = Program::compile("identity.username == 'admin'").unwrap();
+        let policy = AccessPolicy::new(false, vec![program]);
+
+        let request = ClientRequest::get_api_version();
+        let identity = ClientIdentity {
+            username: Some("admin".to_string()),
+            ..ClientIdentity::default()
+        };
+
+        let result = policy.evaluate(&request, &identity);
+        assert!(result.unwrap());
+
+        let identity = ClientIdentity {
+            username: Some("user".to_string()),
+            ..ClientIdentity::default()
+        };
+
+        let result = policy.evaluate(&request, &identity);
+        assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn test_client_identity_from_cert() {
+        let cert_pem = r"-----BEGIN CERTIFICATE-----
+MIIDfjCCAmagAwIBAgIUaW13SK9b9NpqZDdhlUOm1PbFPfwwDQYJKoZIhvcNAQEL
+BQAwXDELMAkGA1UEBhMCVVMxCzAJBgNVBAgMAkNBMRcwFQYDVQQHDA5TYW4gRnJh
+bmNpc2NvczETMBEGA1UECgwKTXkgQ29tcGFueTESMBAGA1UEAwwJQ2xpZW50IENB
+MB4XDTI1MDEwNjEwMjAwNVoXDTI2MDEwNjEwMjAwNVowUjELMAkGA1UEBhMCTFUx
+CzAJBgNVBAgMAkxVMRIwEAYDVQQHDAlIb2xsZXJpY2gxDzANBgNVBAoMBmFkbWlu
+czERMA8GA1UEAwwIcGhpbGlwcGUwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEK
+AoIBAQCmpai47IEvSEqZiQSFJwNKoW4Qc9brH8OPLRpZVT515P4deWpGZHVHB59w
+q1OHdyO2I7UBZEEjYqQh5TPopMqudJIP341GfEXbGNpBx5I2fGpXYnMgmgRdoyKb
+s5CM6or5V8iDqTR95Zk+1FyyDWpUPt/JJ3JemJngE4IpPLf+TY1lbinKevFxecRV
+rT3H/Dg4SrCq+hurmnFwQNKYOxFYHb5m/NJUtITDsS+jDsWGWIqQPPqgjnDMlmth
+ClpSfZQRLLf610UAREcePPGcD73XZDQ3KxJQn3ZBu5u3tze1svt6VBXZvYiMXgAm
+4SKmvavCvaeZBjeMkb5FrZpSrziNAgMBAAGjQjBAMB0GA1UdDgQWBBROjANAJ9EZ
+ZVSNIneM6YWameUinDAfBgNVHSMEGDAWgBTmWLkSfI/ltvmnt73hWPZ2jJIQKjAN
+BgkqhkiG9w0BAQsFAAOCAQEAJPacFTGSzjCkT6dTQGpJbVoCiuPiQyma1B7/gQ+Y
+oyO9nonH4HsfjetN+34bvCE9nYT8DV8dk02oVPxoTLU33WygzTopvUi+4Qz5bjiZ
+TpN8PBMfl7Mhd0YhPjsebVuG+yLXO5wFi1K81En8FOCRL/CjHB1ZzufLdTrmnl+2
+LIoJPrvP5ZvHr/s1ygf2MapkbvEGUp8r52oY6lQ9wElD5d4JuIrDj3cofd+iVaMj
+rpdFlMhx4o4OfMqZ/iyi+tDJmBY750FtJRjY4uUKgEW0vdTExlJL9PqmedGtRegO
+BgnxbMXuvf2GlDDhbWOs3/ColqqwqUrkQXH1XxX47a0GCQ==
+-----END CERTIFICATE-----";
+
+        let pem = Pem::iter_from_buffer(cert_pem.as_bytes())
+            .next()
+            .expect("Failed to read PEM certificate")
+            .unwrap();
+
+        let (_, cert) = X509Certificate::from_der(&pem.contents).unwrap();
+        let identity = ClientIdentity::from_cert(&cert).unwrap();
+
+        assert_eq!(identity.certificate.organizations.len(), 1);
+        assert_eq!(identity.certificate.organizations[0], "admins");
+        assert_eq!(identity.certificate.common_names.len(), 1);
+        assert_eq!(identity.certificate.common_names[0], "philippe");
+    }
 
     #[test]
     fn test_get_api_version() {
@@ -173,6 +424,7 @@ mod tests {
 
     #[test]
     fn test_get_manifest() {
+        use crate::registry::oci::Reference;
         let namespace = "test-namespace";
         let reference = Reference::Tag("tag".to_string());
         let request = ClientRequest::get_manifest(namespace, &reference);
@@ -185,6 +437,7 @@ mod tests {
 
     #[test]
     fn test_get_blob() {
+        use crate::registry::oci::Digest;
         let namespace = "test-namespace";
         let digest = Digest::Sha256("1234567890abcdef".to_string());
         let request = ClientRequest::get_blob(namespace, &digest);
@@ -222,6 +475,7 @@ mod tests {
 
     #[test]
     fn test_delete_operations() {
+        use crate::registry::oci::{Digest, Reference};
         let name = "test-namespace";
         let digest = Digest::Sha256("1234567890abcdef".to_string());
         let reference = Reference::Tag("tag".to_string());
@@ -242,6 +496,7 @@ mod tests {
 
     #[test]
     fn test_get_referrers() {
+        use crate::registry::oci::Digest;
         let name = "test-namespace";
         let digest = Digest::Sha256("1234567890abcdef".to_string());
         let request = ClientRequest::get_referrers(name, &digest);
@@ -270,6 +525,7 @@ mod tests {
 
     #[test]
     fn test_is_write() {
+        use crate::registry::oci::{Digest, Reference};
         let write_actions = [
             ClientRequest::start_upload("test"),
             ClientRequest::update_upload("test"),

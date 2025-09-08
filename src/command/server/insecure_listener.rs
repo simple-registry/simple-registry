@@ -1,7 +1,7 @@
 use crate::command;
 use crate::command::server::{serve_request, ServerContext};
 use crate::configuration::ServerConfig;
-use crate::registry::policy_types::ClientIdentity;
+use crate::registry::repository::access_policy::ClientIdentity;
 use arc_swap::ArcSwap;
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;

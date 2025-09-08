@@ -1,81 +1,11 @@
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::LinkMetadata;
 use crate::registry::oci::{Digest, Reference};
-use crate::registry::policy_types::ManifestImage;
+use crate::registry::repository::retention_policy::ManifestImage;
 use crate::registry::{parse_manifest_digests, Error, Registry};
-use cel_interpreter::{Context, Program, Value};
 use chrono::Utc;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tracing::{debug, error, info, warn};
-
-/// Checks if a rule validates and if therefore the specified manifest should be purged
-///
-/// # Arguments
-/// - `rules` - The retention rules to evaluate
-/// - `manifest` - The manifest to evaluate
-/// - `last_pushed` - The list of last pushed tags ordered by push date desc
-/// - `last_pulled` - The list of last pulled tags ordered by pull date desc
-///
-/// # Returns
-/// - `Ok(true)` if the manifest should be purged
-/// - `Ok(false)` if the manifest should be retained
-/// - `Err` if an error occurred during evaluation
-pub fn manifest_should_be_purged(
-    rules: &[Program],
-    manifest: &ManifestImage,
-    last_pushed: &Vec<String>,
-    last_pulled: &Vec<String>,
-) -> Result<bool, Error> {
-    let mut context = Context::default();
-    debug!("Policy context (image) : {manifest:?}");
-
-    context.add_variable("image", manifest)?;
-    context.add_variable("last_pushed", last_pushed)?;
-    context.add_variable("last_pulled", last_pulled)?;
-
-    context.add_function("now", || Utc::now().timestamp());
-    context.add_function("days", |d: i64| d * 86400);
-    context.add_function(
-        "top",
-        |s: Arc<String>, collection: Arc<Vec<Value>>, k: i64| {
-            let mut i = 0;
-            for e in collection.iter() {
-                let Value::String(e) = e else { continue };
-
-                if e.as_str() == s.as_str() {
-                    return true;
-                }
-                i += 1;
-                if i >= k {
-                    break;
-                }
-            }
-
-            false
-        },
-    );
-
-    for policy in rules {
-        let evaluation_result = policy.execute(&context)?;
-
-        debug!("CEL program '{policy:?}' evaluates to {evaluation_result:?}");
-        match evaluation_result {
-            Value::Bool(true) => {
-                debug!("Retention policy matched");
-                return Ok(false);
-            }
-            Value::Bool(false) => { // Not validated, continue checking
-            }
-            _ => {
-                debug!("Not eligible for cleanup");
-                return Ok(false);
-            }
-        }
-    }
-
-    Ok(!rules.is_empty())
-}
 
 impl Registry {
     pub async fn enforce_retention(&self, namespace: &str) -> Result<(), Error> {
@@ -148,8 +78,7 @@ impl Registry {
                 last_pulled_at: info.accessed_at.map(|t| t.timestamp()).unwrap_or_default(),
             };
 
-            if manifest_should_be_purged(
-                &found_repository.retention_rules,
+            if !found_repository.retention_policy.should_retain(
                 &manifest,
                 &last_pushed,
                 &last_pulled,
@@ -447,122 +376,122 @@ mod tests {
 
     #[test]
     fn test_retention_policy_no_rules() {
-        let policies = vec![];
+        use crate::registry::repository::RetentionPolicy;
+        let policy = RetentionPolicy::new(vec![]);
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
             pushed_at: 1_710_441_600,
             last_pulled_at: 1_710_441_600,
         };
-        assert!(!manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
+        assert!(policy.should_retain(&manifest, &[], &[]).unwrap());
     }
 
     #[test]
     fn test_retention_policy_not_purged() {
+        use crate::registry::repository::RetentionPolicy;
+        use cel_interpreter::Program;
         let policies = vec![Program::compile("image.tag == 'latest'").unwrap()];
+        let policy = RetentionPolicy::new(policies);
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
             pushed_at: 1_710_441_600,
             last_pulled_at: 1_710_441_600,
         };
-        assert!(!manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
+        assert!(policy.should_retain(&manifest, &[], &[]).unwrap());
     }
 
     #[test]
     fn test_retention_policy_purged() {
+        use crate::registry::repository::RetentionPolicy;
+        use cel_interpreter::Program;
         let policies = vec![Program::compile("image.tag == 'latest'").unwrap()];
+        let policy = RetentionPolicy::new(policies);
         let manifest = ManifestImage {
             tag: Some("x".to_string()),
             pushed_at: 1_710_441_600,
             last_pulled_at: 1_710_441_600,
         };
-        assert!(manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
+        assert!(!policy.should_retain(&manifest, &[], &[]).unwrap());
     }
 
     #[test]
     fn test_retention_policy_invalid() {
+        use crate::registry::repository::RetentionPolicy;
+        use cel_interpreter::Program;
         let policies = vec![Program::compile("image.tag").unwrap()];
+        let policy = RetentionPolicy::new(policies);
         let manifest = ManifestImage {
             tag: None,
             pushed_at: 1_710_441_600,
             last_pulled_at: 1_710_441_600,
         };
-        assert!(!manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
+        assert!(policy.should_retain(&manifest, &[], &[]).unwrap());
     }
 
     #[test]
     fn test_function_now_days() {
+        use crate::registry::repository::RetentionPolicy;
+        use cel_interpreter::Program;
         let policies = vec![Program::compile("now() + days(15) == now() + 86400 * 15").unwrap()];
+        let policy = RetentionPolicy::new(policies);
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
             pushed_at: 1_710_441_600,
             last_pulled_at: 1_710_441_600,
         };
-
-        assert!(!manifest_should_be_purged(&policies, &manifest, &vec![], &vec![]).unwrap());
+        assert!(policy.should_retain(&manifest, &[], &[]).unwrap());
     }
 
     #[test]
     fn test_function_top_last_pushed() {
+        use crate::registry::repository::RetentionPolicy;
+        use cel_interpreter::Program;
         let policies = vec![Program::compile("top(image.tag, last_pushed, 1)").unwrap()];
+        let policy = RetentionPolicy::new(policies);
 
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
             pushed_at: 1_710_441_600,
             last_pulled_at: 1_710_441_600,
         };
-
-        assert!(!manifest_should_be_purged(
-            &policies,
-            &manifest,
-            &vec!["latest".to_string()],
-            &vec![]
-        )
-        .unwrap());
+        assert!(policy
+            .should_retain(&manifest, &["latest".to_string()], &[])
+            .unwrap());
 
         let manifest = ManifestImage {
             tag: Some("x".to_string()),
             pushed_at: 1_710_441_600,
             last_pulled_at: 1_710_441_600,
         };
-        assert!(manifest_should_be_purged(
-            &policies,
-            &manifest,
-            &vec!["latest".to_string()],
-            &vec![]
-        )
-        .unwrap());
+        assert!(!policy
+            .should_retain(&manifest, &["latest".to_string()], &[])
+            .unwrap());
     }
 
     #[test]
     fn test_function_top_last_pulled() {
+        use crate::registry::repository::RetentionPolicy;
+        use cel_interpreter::Program;
         let policies = vec![Program::compile("top(image.tag, last_pulled, 1)").unwrap()];
+        let policy = RetentionPolicy::new(policies);
 
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
             pushed_at: 1_710_441_600,
             last_pulled_at: 1_710_441_600,
         };
-
-        assert!(!manifest_should_be_purged(
-            &policies,
-            &manifest,
-            &vec![],
-            &vec!["latest".to_string()]
-        )
-        .unwrap());
+        assert!(policy
+            .should_retain(&manifest, &[], &["latest".to_string()])
+            .unwrap());
 
         let manifest = ManifestImage {
             tag: Some("x".to_string()),
             pushed_at: 1_710_441_600,
             last_pulled_at: 1_710_441_600,
         };
-        assert!(manifest_should_be_purged(
-            &policies,
-            &manifest,
-            &vec![],
-            &vec!["latest".to_string()]
-        )
-        .unwrap());
+        assert!(!policy
+            .should_retain(&manifest, &[], &["latest".to_string()])
+            .unwrap());
     }
 
     async fn test_enforce_retention_impl(registry: &Registry) {

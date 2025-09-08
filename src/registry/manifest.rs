@@ -1,6 +1,6 @@
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::oci::{Digest, Manifest, Reference};
-use crate::registry::policy_types::{ClientIdentity, ClientRequest};
+use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
 use crate::registry::utils::request_ext::RequestExt;
 use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::{Error, Registry, Repository, ResponseBody};

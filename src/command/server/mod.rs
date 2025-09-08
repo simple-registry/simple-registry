@@ -32,7 +32,7 @@ use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
 use crate::registry::blob::QueryBlobParameters;
 use crate::registry::content_discovery::{ReferrerParameters, TagsParameters};
 use crate::registry::manifest::QueryManifestParameters;
-use crate::registry::policy_types::ClientIdentity;
+use crate::registry::repository::access_policy::ClientIdentity;
 use crate::registry::upload::{QueryNewUploadParameters, QueryUploadParameters};
 use crate::registry::utils::deserialize_ext::DeserializeExt;
 use crate::registry::utils::request_ext::RequestExt;
