@@ -81,9 +81,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::ResponseBody;
     use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LINK};
     use tokio::io::AsyncReadExt;
-    use crate::registry::ResponseBody;
 
     #[test]
     fn test_get_header() {

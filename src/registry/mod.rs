@@ -19,6 +19,7 @@ mod policy;
 pub mod policy_types;
 mod reader;
 mod repository;
+mod response_body;
 mod scrub;
 pub mod task_queue;
 #[cfg(test)]
@@ -26,7 +27,6 @@ mod tests;
 pub mod upload;
 pub mod utils;
 mod version;
-mod response_body;
 
 use crate::configuration;
 use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};

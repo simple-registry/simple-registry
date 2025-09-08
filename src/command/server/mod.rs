@@ -295,7 +295,9 @@ async fn router(
         return Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "application/json")
-            .body(ResponseBody::Fixed(Full::new(Bytes::from("{\"status\":\"ok\"}"))))
+            .body(ResponseBody::Fixed(Full::new(Bytes::from(
+                "{\"status\":\"ok\"}",
+            ))))
             .map_err(registry::Error::from);
     } else if ROUTE_METRICS_REGEX.is_match(&path) {
         let (content_type, metrics) = METRICS_PROVIDER.gather();
@@ -314,7 +316,10 @@ async fn router(
     }
 }
 
-pub fn registry_error_to_response_raw<T>(error: &registry::Error, details: T) -> Response<ResponseBody>
+pub fn registry_error_to_response_raw<T>(
+    error: &registry::Error,
+    details: T,
+) -> Response<ResponseBody>
 where
     T: Serialize,
 {

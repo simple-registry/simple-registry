@@ -127,10 +127,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::ResponseBody;
     use hyper::header::{HeaderValue, RANGE};
     use std::collections::HashMap;
     use tokio::io::AsyncReadExt;
-    use crate::registry::ResponseBody;
 
     #[test]
     fn test_query_parameters() {
