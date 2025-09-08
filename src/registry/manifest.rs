@@ -105,7 +105,7 @@ impl Registry {
 
         let res = repository
             .query_upstream_manifest(
-                &self.auth_token_cache,
+                &*self.auth_token_cache,
                 &Method::HEAD,
                 accepted_mime_types,
                 namespace,
@@ -187,7 +187,7 @@ impl Registry {
         // TODO: test if upstream manifest has changed or not (if reference is a Reference::Tag)
         let res = repository
             .query_upstream_manifest(
-                &self.auth_token_cache,
+                &*self.auth_token_cache,
                 &Method::GET,
                 accepted_mime_types,
                 namespace,

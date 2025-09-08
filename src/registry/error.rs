@@ -1,5 +1,5 @@
 use crate::configuration;
-use crate::registry::{blob_store, cache_store, metadata_store};
+use crate::registry::{blob_store, cache, metadata_store};
 use crate::registry::{oci_types, task_queue};
 use cel_interpreter::SerializationError;
 use hyper::header::InvalidHeaderValue;
@@ -66,8 +66,8 @@ impl From<configuration::Error> for Error {
     }
 }
 
-impl From<cache_store::Error> for Error {
-    fn from(error: cache_store::Error) -> Self {
+impl From<cache::Error> for Error {
+    fn from(error: cache::Error) -> Self {
         warn!("Cache error: {error}");
         Error::Internal("Cache error during operations".to_string())
     }

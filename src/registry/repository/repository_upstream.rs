@@ -1,6 +1,6 @@
 use crate::configuration::RepositoryUpstreamConfig;
 use crate::registry;
-use crate::registry::cache_store::CacheStore;
+use crate::registry::cache::Cache;
 use crate::registry::http_client::HttpClient;
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::repository::authentication_scheme::AuthenticationScheme;
@@ -53,7 +53,7 @@ impl RepositoryUpstream {
 
     async fn get_auth_token_from_cache(
         &self,
-        cache: &CacheStore,
+        cache: &dyn Cache,
         namespace: &str,
     ) -> Result<Option<HeaderValue>, registry::Error> {
         debug!("Checking bearer token in cache for namespace: {namespace}");
@@ -116,7 +116,7 @@ impl RepositoryUpstream {
     #[tracing::instrument(skip(self))]
     pub async fn query(
         &self,
-        cache: &CacheStore,
+        cache: &dyn Cache,
         namespace: &str,
         method: &Method,
         accepted_mime_types: &[String],
@@ -226,7 +226,8 @@ impl RepositoryUpstream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::CacheStoreConfig;
+    use crate::registry::cache;
+    use crate::registry::cache::Cache;
     use async_trait::async_trait;
     use hyper::body::Bytes;
     use mockall::*;
@@ -310,8 +311,7 @@ mod tests {
     async fn test_get_auth_token_from_cache_success() {
         const TEST_NAMESPACE: &str = "test-namespace";
 
-        let cache = CacheStore::new(CacheStoreConfig::default()).unwrap();
-
+        let cache = cache::memory::Backend::new();
         let upstream = build_upstream(false);
         let result = upstream
             .get_auth_token_from_cache(&cache, TEST_NAMESPACE)

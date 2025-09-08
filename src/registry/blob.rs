@@ -56,7 +56,7 @@ impl Registry {
 
         let res = repository
             .query_upstream_blob(
-                &self.auth_token_cache,
+                &*self.auth_token_cache,
                 &Method::HEAD,
                 accepted_mime_types,
                 namespace,
@@ -123,7 +123,7 @@ impl Registry {
         // Proxying stream
         let client_stream = repository
             .query_upstream_blob(
-                &self.auth_token_cache,
+                &*self.auth_token_cache,
                 &Method::GET,
                 accepted_mime_types,
                 namespace,
@@ -138,7 +138,7 @@ impl Registry {
         let store = self.blob_store.clone();
         let cache_reader = repository
             .query_upstream_blob(
-                &self.auth_token_cache,
+                &*self.auth_token_cache,
                 &Method::GET,
                 accepted_mime_types,
                 namespace,

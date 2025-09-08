@@ -7,7 +7,7 @@ use tracing::instrument;
 
 pub mod blob;
 pub mod blob_store;
-pub mod cache_store;
+pub mod cache;
 pub mod content_discovery;
 pub mod data_store;
 mod error;
@@ -30,7 +30,7 @@ mod response_body;
 
 use crate::configuration;
 use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
-use crate::registry::cache_store::CacheStore;
+use crate::registry::cache::Cache;
 pub use repository::Repository;
 
 use crate::registry::blob_store::BlobStore;
@@ -48,7 +48,7 @@ static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub struct Registry {
     blob_store: Arc<dyn BlobStore + Send + Sync>,
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
-    auth_token_cache: CacheStore,
+    auth_token_cache: Box<dyn Cache>,
     repositories: HashMap<String, Repository>,
     update_pull_time: bool,
     scrub_dry_run: bool,
@@ -71,7 +71,12 @@ impl Registry {
         global_config: &GlobalConfig,
         auth_token_cache: CacheStoreConfig,
     ) -> Result<Self, configuration::Error> {
-        let auth_token_cache = CacheStore::new(auth_token_cache)?;
+        let auth_token_cache: Box<dyn Cache> =
+            if let CacheStoreConfig::Redis(redis_config) = auth_token_cache {
+                Box::new(cache::redis::Backend::new(redis_config)?)
+            } else {
+                Box::new(cache::memory::Backend::new())
+            };
 
         let mut repositories = HashMap::new();
         for (repository_name, repository_config) in repositories_config {

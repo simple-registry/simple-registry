@@ -1,4 +1,4 @@
-use crate::registry::{cache_store, task_queue};
+use crate::registry::{cache, task_queue};
 use hyper::header::InvalidHeaderValue;
 use opentelemetry_otlp::ExporterBuildError;
 use opentelemetry_sdk::trace::TraceError;
@@ -8,7 +8,7 @@ use tracing::debug;
 
 #[derive(Debug)]
 pub enum Error {
-    Cache(cache_store::Error),
+    Cache(cache::Error),
     MetadataStore(String),
     Io(io::Error),
     MissingExpectedTLSSection(String),
@@ -61,8 +61,8 @@ impl fmt::Display for Error {
     }
 }
 
-impl From<cache_store::Error> for Error {
-    fn from(error: cache_store::Error) -> Self {
+impl From<cache::Error> for Error {
+    fn from(error: cache::Error) -> Self {
         debug!("Cache error: {error}");
         Error::Cache(error)
     }

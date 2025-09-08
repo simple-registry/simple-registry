@@ -1,6 +1,6 @@
 use crate::configuration::{Error, RepositoryConfig, RepositoryUpstreamConfig};
 use crate::registry;
-use crate::registry::cache_store::CacheStore;
+use crate::registry::cache::Cache;
 use crate::registry::oci_types::{Digest, Reference};
 use cel_interpreter::Program;
 use hyper::body::Incoming;
@@ -74,7 +74,7 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn query_upstream_blob(
         &self,
-        auth_token_cache: &CacheStore,
+        auth_token_cache: &dyn Cache,
         method: &Method,
         accepted_mime_types: &[String],
         namespace: &str,
@@ -102,7 +102,7 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn query_upstream_manifest(
         &self,
-        auth_token_cache: &CacheStore,
+        auth_token_cache: &dyn Cache,
         method: &Method,
         accepted_mime_types: &[String],
         namespace: &str,
