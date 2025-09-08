@@ -7,7 +7,7 @@ use std::path::Path;
 
 mod error;
 
-use crate::registry::{blob_store, metadata_store};
+use crate::registry::{blob_store, cache, metadata_store};
 pub use error::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -96,16 +96,13 @@ impl GlobalConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct CacheStoreConfig {
-    pub redis: Option<RedisCacheConfig>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct RedisCacheConfig {
-    pub url: String,
-    #[serde(default)]
-    pub key_prefix: String,
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub enum CacheStoreConfig {
+    #[default]
+    #[serde(rename = "memory")]
+    Memory,
+    #[serde(rename = "redis")]
+    Redis(cache::redis::BackendConfig),
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -270,7 +267,7 @@ mod tests {
         assert_eq!(config.server.port, 8000);
         assert_eq!(config.server.query_timeout, 3600);
         assert_eq!(config.server.query_timeout_grace_period, 60);
-        assert!(config.cache_store.redis.is_none());
+        assert_eq!(config.cache_store, CacheStoreConfig::Memory);
 
         assert_eq!(config.blob_store, BlobStorageConfig::default());
 

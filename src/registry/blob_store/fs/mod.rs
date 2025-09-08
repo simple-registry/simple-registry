@@ -3,7 +3,7 @@ pub mod tests;
 
 use crate::registry::blob_store::{BlobStore, Error, Reader};
 use crate::registry::data_store;
-use crate::registry::oci_types::Digest;
+use crate::registry::oci::Digest;
 use crate::registry::reader::HashingReader;
 use crate::registry::utils::path_builder;
 use crate::registry::utils::sha256_ext::Sha256Ext;

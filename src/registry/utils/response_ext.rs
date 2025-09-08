@@ -81,7 +81,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::api::body::Body;
+    use crate::registry::ResponseBody;
     use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LINK};
     use tokio::io::AsyncReadExt;
 
@@ -89,7 +89,7 @@ mod tests {
     fn test_get_header() {
         let res = Response::builder()
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::Empty)
+            .body(ResponseBody::Empty)
             .unwrap();
         assert_eq!(
             res.get_header(CONTENT_TYPE),
@@ -102,7 +102,7 @@ mod tests {
     fn test_parse_header() {
         let res = Response::builder()
             .header(CONTENT_LENGTH, "42")
-            .body(Body::Empty)
+            .body(ResponseBody::Empty)
             .unwrap();
         assert_eq!(res.parse_header::<u64, _>("Content-Length"), Ok(42));
         assert_eq!(
@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn test_paginated() {
-        let body = Body::Empty;
+        let body = ResponseBody::Empty;
         let link = Some("http://example.com");
         let res = Response::paginated(body, link).unwrap();
 
@@ -127,7 +127,7 @@ mod tests {
             Some(String::from("<http://example.com>; rel=\"next\""))
         );
 
-        let body = Body::Empty;
+        let body = ResponseBody::Empty;
         let link = None;
         let res = Response::paginated(body, link).unwrap();
 

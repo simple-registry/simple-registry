@@ -1,17 +1,20 @@
-use crate::registry::api::hyper::response_ext::IntoAsyncRead;
-use crate::registry::api::hyper::response_ext::ResponseExt;
-use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::blob_store::{BlobStore, Reader};
-use crate::registry::oci_types::Digest;
-use crate::registry::utils::{task_queue, BlobLink};
-use crate::registry::{blob_store, Error, Registry, Repository};
-use hyper::header::CONTENT_LENGTH;
-use hyper::Method;
+use crate::registry::metadata_store::link_kind::LinkKind;
+use crate::registry::oci::Digest;
+use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
+use crate::registry::utils::request_ext::RequestExt;
+use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
+use crate::registry::{blob_store, task_queue, Error, Registry, Repository, ResponseBody};
+use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+use hyper::{Method, Request, Response, StatusCode};
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
+
+pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
 
 pub enum GetBlobResponse<R>
 where
@@ -25,6 +28,12 @@ where
 pub struct HeadBlobResponse {
     pub digest: Digest,
     pub size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueryBlobParameters {
+    pub name: String,
+    pub digest: Digest,
 }
 
 impl Registry {
@@ -47,7 +56,7 @@ impl Registry {
 
         let res = repository
             .query_upstream_blob(
-                &self.auth_token_cache,
+                &*self.auth_token_cache,
                 &Method::HEAD,
                 accepted_mime_types,
                 namespace,
@@ -114,7 +123,7 @@ impl Registry {
         // Proxying stream
         let client_stream = repository
             .query_upstream_blob(
-                &self.auth_token_cache,
+                &*self.auth_token_cache,
                 &Method::GET,
                 accepted_mime_types,
                 namespace,
@@ -129,7 +138,7 @@ impl Registry {
         let store = self.blob_store.clone();
         let cache_reader = repository
             .query_upstream_blob(
-                &self.auth_token_cache,
+                &*self.auth_token_cache,
                 &Method::GET,
                 accepted_mime_types,
                 namespace,
@@ -199,17 +208,127 @@ impl Registry {
     pub async fn delete_blob(&self, namespace: &str, digest: Digest) -> Result<(), Error> {
         self.validate_namespace(namespace)?;
 
-        let link = BlobLink::Layer(digest.clone());
+        let link = LinkKind::Layer(digest.clone());
         if let Err(error) = self.metadata_store.delete_link(namespace, &link).await {
             warn!("Failed to delete layer link: {error}");
         }
 
-        let link = BlobLink::Config(digest);
+        let link = LinkKind::Config(digest);
         if let Err(error) = self.metadata_store.delete_link(namespace, &link).await {
             warn!("Failed to delete config link: {error}");
         }
 
         Ok(())
+    }
+
+    // API Handlers
+
+    #[instrument(skip(self, request))]
+    pub async fn handle_head_blob<T>(
+        &self,
+        request: Request<T>,
+        parameters: QueryBlobParameters,
+        identity: ClientIdentity,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let repository = self.validate_namespace(&parameters.name)?;
+        Self::validate_request(
+            Some(repository),
+            &ClientRequest::get_blob(&parameters.name, &parameters.digest),
+            &identity,
+        )?;
+
+        let blob = self
+            .head_blob(
+                repository,
+                &request.accepted_content_types(),
+                &parameters.name,
+                parameters.digest,
+            )
+            .await?;
+
+        let res = Response::builder()
+            .status(StatusCode::OK)
+            .header(DOCKER_CONTENT_DIGEST, blob.digest.to_string())
+            .header(CONTENT_LENGTH, blob.size.to_string())
+            .body(ResponseBody::empty())?;
+
+        Ok(res)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn handle_delete_blob(
+        &self,
+        parameters: QueryBlobParameters,
+        identity: ClientIdentity,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let repository = self.validate_namespace(&parameters.name)?;
+        Self::validate_request(
+            Some(repository),
+            &ClientRequest::delete_blob(&parameters.name, &parameters.digest),
+            &identity,
+        )?;
+
+        self.delete_blob(&parameters.name, parameters.digest)
+            .await?;
+
+        let res = Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .body(ResponseBody::empty())?;
+
+        Ok(res)
+    }
+
+    #[instrument(skip(self, request))]
+    pub async fn handle_get_blob<T>(
+        &self,
+        request: Request<T>,
+        parameters: QueryBlobParameters,
+        identity: ClientIdentity,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let repository = self.validate_namespace(&parameters.name)?;
+        Self::validate_request(
+            Some(repository),
+            &ClientRequest::get_blob(&parameters.name, &parameters.digest),
+            &identity,
+        )?;
+
+        let res = match self
+            .get_blob(
+                repository,
+                &request.accepted_content_types(),
+                &parameters.name,
+                &parameters.digest,
+                request.range(RANGE)?,
+            )
+            .await?
+        {
+            GetBlobResponse::RangedReader(reader, (start, end), total_length) => {
+                let length = end - start + 1;
+                let stream = reader.take(length);
+                let range = format!("bytes {start}-{end}/{total_length}");
+
+                Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(DOCKER_CONTENT_DIGEST, parameters.digest.to_string())
+                    .header(ACCEPT_RANGES, "bytes")
+                    .header(CONTENT_LENGTH, length.to_string())
+                    .header(CONTENT_RANGE, range)
+                    .body(ResponseBody::streaming(stream))?
+            }
+            GetBlobResponse::Reader(stream, total_length) => Response::builder()
+                .status(StatusCode::OK)
+                .header(DOCKER_CONTENT_DIGEST, parameters.digest.to_string())
+                .header(ACCEPT_RANGES, "bytes")
+                .header(CONTENT_LENGTH, total_length)
+                .body(ResponseBody::streaming(stream))?,
+            GetBlobResponse::Empty => Response::builder()
+                .status(StatusCode::OK)
+                .header(ACCEPT_RANGES, "bytes")
+                .header(CONTENT_LENGTH, 0)
+                .body(ResponseBody::empty())?,
+        };
+
+        Ok(res)
     }
 }
 
@@ -218,6 +337,7 @@ mod tests {
     use super::*;
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
+    use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
     use std::io::Cursor;
     use tokio::io::AsyncReadExt;
 
@@ -325,8 +445,8 @@ mod tests {
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
         // Create test links
-        let layer_link = BlobLink::Layer(digest.clone());
-        let config_link = BlobLink::Config(digest.clone());
+        let layer_link = LinkKind::Layer(digest.clone());
+        let config_link = LinkKind::Config(digest.clone());
         registry
             .metadata_store
             .create_link(namespace, &layer_link, &digest)
@@ -427,5 +547,266 @@ mod tests {
     async fn test_copy_blob_s3() {
         let t = S3RegistryTestCase::new();
         test_copy_blob_impl(t.registry()).await;
+    }
+
+    // Handler tests
+    async fn test_handle_head_blob_impl(registry: &Registry) {
+        let namespace = "test-repo";
+        let content = b"test blob content";
+        let (digest, _) = create_test_blob(registry, namespace, content).await;
+
+        let uri = hyper::Uri::builder()
+            .path_and_query(format!("/v2/{namespace}/blobs/{digest}"))
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::HEAD)
+            .uri(uri)
+            .body(ResponseBody::empty())
+            .unwrap();
+
+        let parameters = QueryBlobParameters {
+            name: namespace.to_string(),
+            digest: digest.clone(),
+        };
+
+        let response = registry
+            .handle_head_blob(request, parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.get_header(DOCKER_CONTENT_DIGEST),
+            Some(digest.to_string())
+        );
+        assert_eq!(
+            response.get_header(CONTENT_LENGTH),
+            Some(content.len().to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_head_blob_fs() {
+        let t = FSRegistryTestCase::new();
+        test_handle_head_blob_impl(t.registry()).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_head_blob_s3() {
+        let t = S3RegistryTestCase::new();
+        test_handle_head_blob_impl(t.registry()).await;
+    }
+
+    async fn test_handle_delete_blob_impl(registry: &Registry) {
+        let namespace = "test-repo";
+        let content = b"test blob content";
+        let (digest, _) = create_test_blob(registry, namespace, content).await;
+
+        // Create test links
+        let layer_link = LinkKind::Layer(digest.clone());
+        let config_link = LinkKind::Config(digest.clone());
+        let latest_link = LinkKind::Tag("latest".to_string());
+        registry
+            .metadata_store
+            .create_link(namespace, &layer_link, &digest)
+            .await
+            .unwrap();
+        registry
+            .metadata_store
+            .create_link(namespace, &config_link, &digest)
+            .await
+            .unwrap();
+
+        // Verify links exist
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &layer_link, false)
+            .await
+            .is_ok());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &config_link, false)
+            .await
+            .is_ok());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &latest_link, false)
+            .await
+            .is_ok());
+
+        // Verify blob exists
+        assert!(registry.blob_store.read_blob(&digest).await.is_ok());
+
+        let parameters = QueryBlobParameters {
+            name: namespace.to_string(),
+            digest: digest.clone(),
+        };
+
+        let response = registry
+            .handle_delete_blob(parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        // Delete the latest tag link
+        registry
+            .metadata_store
+            .delete_link(namespace, &latest_link)
+            .await
+            .unwrap();
+
+        // Verify links are deleted
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &layer_link, false)
+            .await
+            .is_err());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &config_link, false)
+            .await
+            .is_err());
+        assert!(registry
+            .metadata_store
+            .read_link(namespace, &latest_link, false)
+            .await
+            .is_err());
+
+        // Verify blob index is empty
+        let blob_index = registry.metadata_store.read_blob_index(&digest).await;
+        assert!(blob_index.is_err());
+
+        // Verify blob is deleted (since all links are removed)
+        assert!(registry.blob_store.read_blob(&digest).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_delete_blob_fs() {
+        let t = FSRegistryTestCase::new();
+        test_handle_delete_blob_impl(t.registry()).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_delete_blob_s3() {
+        let t = S3RegistryTestCase::new();
+        test_handle_delete_blob_impl(t.registry()).await;
+    }
+
+    async fn test_handle_get_blob_impl(registry: &Registry) {
+        let namespace = "test-repo";
+        let content = b"test blob content";
+        let (digest, _) = create_test_blob(registry, namespace, content).await;
+
+        let uri = hyper::Uri::builder()
+            .path_and_query(format!("/v2/{namespace}/blobs/{digest}"))
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(ResponseBody::empty())
+            .unwrap();
+
+        let parameters = QueryBlobParameters {
+            name: namespace.to_string(),
+            digest: digest.clone(),
+        };
+
+        let response = registry
+            .handle_get_blob(request, parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.get_header(DOCKER_CONTENT_DIGEST),
+            Some(digest.to_string())
+        );
+        assert_eq!(
+            response.get_header(CONTENT_LENGTH),
+            Some(content.len().to_string())
+        );
+
+        // Read response body
+        let mut reader = response.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, content);
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_blob_fs() {
+        let t = FSRegistryTestCase::new();
+        test_handle_get_blob_impl(t.registry()).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_blob_s3() {
+        let t = S3RegistryTestCase::new();
+        test_handle_get_blob_impl(t.registry()).await;
+    }
+
+    async fn test_handle_get_blob_with_range_impl(registry: &Registry) {
+        let namespace = "test-repo";
+        let content = b"test blob content";
+        let (digest, _) = create_test_blob(registry, namespace, content).await;
+
+        let uri = hyper::Uri::builder()
+            .path_and_query(format!("/v2/{namespace}/blobs/{digest}"))
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(RANGE, "bytes=5-10")
+            .body(ResponseBody::empty())
+            .unwrap();
+
+        let parameters = QueryBlobParameters {
+            name: namespace.to_string(),
+            digest: digest.clone(),
+        };
+
+        let response = registry
+            .handle_get_blob(request, parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.get_header(DOCKER_CONTENT_DIGEST),
+            Some(digest.to_string())
+        );
+        assert_eq!(
+            response.get_header(CONTENT_LENGTH),
+            Some("6".to_string()) // 10 - 5 + 1
+        );
+        assert_eq!(
+            response.get_header(CONTENT_RANGE),
+            Some(format!("bytes 5-10/{}", content.len()))
+        );
+
+        // Read response body
+        let mut reader = response.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, &content[5..=10]);
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_blob_with_range_fs() {
+        let t = FSRegistryTestCase::new();
+        test_handle_get_blob_with_range_impl(t.registry()).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_blob_with_range_s3() {
+        let t = S3RegistryTestCase::new();
+        test_handle_get_blob_with_range_impl(t.registry()).await;
     }
 }

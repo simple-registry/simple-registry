@@ -127,7 +127,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::api::body::Body;
+    use crate::registry::ResponseBody;
     use hyper::header::{HeaderValue, RANGE};
     use std::collections::HashMap;
     use tokio::io::AsyncReadExt;
@@ -152,7 +152,7 @@ mod tests {
                 AUTHORIZATION,
                 HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA=="),
             )
-            .body(Body::empty())
+            .body(ResponseBody::empty())
             .unwrap();
         assert_eq!(
             request.provided_credentials(),
@@ -164,7 +164,7 @@ mod tests {
                 AUTHORIZATION,
                 HeaderValue::from_static("Bearer dXNlcjpwYXNzd29yZA=="),
             )
-            .body(Body::empty())
+            .body(ResponseBody::empty())
             .unwrap();
         assert_eq!(request.provided_credentials(), None);
 
@@ -173,7 +173,7 @@ mod tests {
                 AUTHORIZATION,
                 HeaderValue::from_static("Basic dXNlcjpw YXNzd29yZA="),
             )
-            .body(Body::empty())
+            .body(ResponseBody::empty())
             .unwrap();
         assert_eq!(request.provided_credentials(), None);
 
@@ -182,7 +182,7 @@ mod tests {
                 AUTHORIZATION,
                 HeaderValue::from_static("Basic dXNlcjpwY%%%%XNzd29yZA"),
             )
-            .body(Body::empty())
+            .body(ResponseBody::empty())
             .unwrap();
         assert_eq!(request.provided_credentials(), None);
 
@@ -191,7 +191,7 @@ mod tests {
                 AUTHORIZATION,
                 HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA==="),
             )
-            .body(Body::empty())
+            .body(ResponseBody::empty())
             .unwrap();
         assert_eq!(request.provided_credentials(), None);
 
@@ -200,7 +200,7 @@ mod tests {
                 AUTHORIZATION,
                 HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA=="),
             )
-            .body(Body::empty())
+            .body(ResponseBody::empty())
             .unwrap();
         assert_eq!(
             request.provided_credentials(),
@@ -214,7 +214,7 @@ mod tests {
             .header(ACCEPT, HeaderValue::from_static("application/json"))
             .header(ACCEPT, HeaderValue::from_static("application/xml"))
             .header(ACCEPT, HeaderValue::from_static("text/plain"));
-        let request = request.body(Body::empty()).unwrap();
+        let request = request.body(ResponseBody::empty()).unwrap();
 
         let result = request.accepted_content_types();
         assert_eq!(

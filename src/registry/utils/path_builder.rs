@@ -1,5 +1,5 @@
-use crate::registry::oci_types::Digest;
-use crate::registry::utils::BlobLink;
+use crate::registry::metadata_store::link_kind::LinkKind;
+use crate::registry::oci::Digest;
 
 pub fn blobs_root_dir() -> String {
     "v2/blobs".to_string()
@@ -185,25 +185,25 @@ pub fn manifest_tags_dir(namespace: &str) -> String {
     format!("{}/tags", manifests_root_dir(namespace))
 }
 
-pub fn get_link_path(reference: &BlobLink, name: &str) -> String {
+pub fn get_link_path(reference: &LinkKind, name: &str) -> String {
     match reference {
-        BlobLink::Tag(tag) => manifest_tag_link_path(name, tag),
-        BlobLink::Digest(digest) => manifest_revisions_link_path(name, digest),
-        BlobLink::Layer(digest) => manifest_layer_link_path(name, digest),
-        BlobLink::Config(digest) => manifest_config_link_path(name, digest),
-        BlobLink::Referrer(subject, referrer) => {
+        LinkKind::Tag(tag) => manifest_tag_link_path(name, tag),
+        LinkKind::Digest(digest) => manifest_revisions_link_path(name, digest),
+        LinkKind::Layer(digest) => manifest_layer_link_path(name, digest),
+        LinkKind::Config(digest) => manifest_config_link_path(name, digest),
+        LinkKind::Referrer(subject, referrer) => {
             manifest_referrer_link_path(name, subject, referrer)
         }
     }
 }
 
-pub fn get_link_container_path(reference: &BlobLink, name: &str) -> String {
+pub fn get_link_container_path(reference: &LinkKind, name: &str) -> String {
     match reference {
-        BlobLink::Tag(tag) => manifest_tag_link_container_dir(name, tag),
-        BlobLink::Digest(digest) => manifest_revisions_link_container_dir(name, digest),
-        BlobLink::Layer(digest) => manifest_layer_link_container_dir(name, digest),
-        BlobLink::Config(digest) => manifest_config_link_container_dir(name, digest),
-        BlobLink::Referrer(subject, referrer) => {
+        LinkKind::Tag(tag) => manifest_tag_link_container_dir(name, tag),
+        LinkKind::Digest(digest) => manifest_revisions_link_container_dir(name, digest),
+        LinkKind::Layer(digest) => manifest_layer_link_container_dir(name, digest),
+        LinkKind::Config(digest) => manifest_config_link_container_dir(name, digest),
+        LinkKind::Referrer(subject, referrer) => {
             manifest_referrer_link_container_dir(name, subject, referrer)
         }
     }
@@ -212,7 +212,7 @@ pub fn get_link_container_path(reference: &BlobLink, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::oci_types::Digest;
+    use crate::registry::oci::Digest;
 
     #[test]
     fn test_no_prefix() {
@@ -497,26 +497,26 @@ mod tests {
 
     #[test]
     fn test_get_link_path() {
-        let tag_ref = BlobLink::Tag("v1.0".to_string());
+        let tag_ref = LinkKind::Tag("v1.0".to_string());
         assert_eq!(
             get_link_path(&tag_ref, "namespace"),
             "v2/repositories/namespace/_manifests/tags/v1.0/current/link"
         );
 
         let digest = Digest::Sha256("digest123".to_string());
-        let digest_ref = BlobLink::Digest(digest.clone());
+        let digest_ref = LinkKind::Digest(digest.clone());
         assert_eq!(
             get_link_path(&digest_ref, "namespace"),
             "v2/repositories/namespace/_manifests/revisions/sha256/digest123/link"
         );
 
-        let layer_ref = BlobLink::Layer(digest.clone());
+        let layer_ref = LinkKind::Layer(digest.clone());
         assert_eq!(
             get_link_path(&layer_ref, "namespace"),
             "v2/repositories/namespace/_layers/sha256/digest123/link"
         );
 
-        let config_ref = BlobLink::Config(digest.clone());
+        let config_ref = LinkKind::Config(digest.clone());
         assert_eq!(
             get_link_path(&config_ref, "namespace"),
             "v2/repositories/namespace/_config/sha256/digest123/link"
@@ -524,7 +524,7 @@ mod tests {
 
         let subject = Digest::Sha256("subject456".to_string());
         let referrer = Digest::Sha256("referrer789".to_string());
-        let referrer_ref = BlobLink::Referrer(subject.clone(), referrer.clone());
+        let referrer_ref = LinkKind::Referrer(subject.clone(), referrer.clone());
         assert_eq!(
             get_link_path(&referrer_ref, "namespace"),
             "v2/repositories/namespace/_manifests/referrers/sha256/subject456/sha256/referrer789/link"
@@ -533,26 +533,26 @@ mod tests {
 
     #[test]
     fn test_get_link_container_path() {
-        let tag_ref = BlobLink::Tag("v1.0".to_string());
+        let tag_ref = LinkKind::Tag("v1.0".to_string());
         assert_eq!(
             get_link_container_path(&tag_ref, "namespace"),
             "v2/repositories/namespace/_manifests/tags/v1.0"
         );
 
         let digest = Digest::Sha256("digest123".to_string());
-        let digest_ref = BlobLink::Digest(digest.clone());
+        let digest_ref = LinkKind::Digest(digest.clone());
         assert_eq!(
             get_link_container_path(&digest_ref, "namespace"),
             "v2/repositories/namespace/_manifests/revisions/sha256/digest123"
         );
 
-        let layer_ref = BlobLink::Layer(digest.clone());
+        let layer_ref = LinkKind::Layer(digest.clone());
         assert_eq!(
             get_link_container_path(&layer_ref, "namespace"),
             "v2/repositories/namespace/_layers/sha256/digest123"
         );
 
-        let config_ref = BlobLink::Config(digest.clone());
+        let config_ref = LinkKind::Config(digest.clone());
         assert_eq!(
             get_link_container_path(&config_ref, "namespace"),
             "v2/repositories/namespace/_config/sha256/digest123"
@@ -560,7 +560,7 @@ mod tests {
 
         let subject = Digest::Sha256("subject456".to_string());
         let referrer = Digest::Sha256("referrer789".to_string());
-        let referrer_ref = BlobLink::Referrer(subject.clone(), referrer.clone());
+        let referrer_ref = LinkKind::Referrer(subject.clone(), referrer.clone());
         assert_eq!(
             get_link_container_path(&referrer_ref, "namespace"),
             "v2/repositories/namespace/_manifests/referrers/sha256/subject456/sha256/referrer789"

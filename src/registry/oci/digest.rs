@@ -1,4 +1,4 @@
-use crate::registry::oci_types::Error;
+use crate::registry::oci::Error;
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use std::fmt;
@@ -33,14 +33,6 @@ impl Digest {
         match self {
             Digest::Sha256(s) => s,
         }
-    }
-}
-
-// NOTE: Implementing Default for Digest is not strictly necessary, but it is useful for global
-// locking in the filesystem. It's a bit of a hack...
-impl Default for Digest {
-    fn default() -> Self {
-        Digest::Sha256(String::default())
     }
 }
 

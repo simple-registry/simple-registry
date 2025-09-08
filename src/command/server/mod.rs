@@ -29,17 +29,14 @@ use crate::command::server::server_context::ServerContext;
 use crate::command::server::tls_listener::TlsListener;
 use crate::configuration::{IdentityConfig, ServerConfig};
 use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
-use crate::registry::api::body::Body;
-use crate::registry::api::hyper::deserialize_ext::DeserializeExt;
-use crate::registry::api::hyper::request_ext::RequestExt;
-use crate::registry::api::{
-    QueryBlobParameters, QueryManifestParameters, QueryNewUploadParameters, QueryUploadParameters,
-    ReferrerParameters, RegistryAPIBlobHandlersExt, RegistryAPIContentDiscoveryHandlersExt,
-    RegistryAPIManifestHandlersExt, RegistryAPIUploadHandlersExt, RegistryAPIVersionHandlerExt,
-    TagsParameters,
-};
-use crate::registry::policy_types::ClientIdentity;
-use crate::registry::Registry;
+use crate::registry::blob::QueryBlobParameters;
+use crate::registry::content_discovery::{ReferrerParameters, TagsParameters};
+use crate::registry::manifest::QueryManifestParameters;
+use crate::registry::repository::access_policy::ClientIdentity;
+use crate::registry::upload::{QueryNewUploadParameters, QueryUploadParameters};
+use crate::registry::utils::deserialize_ext::DeserializeExt;
+use crate::registry::utils::request_ext::RequestExt;
+use crate::registry::{Registry, ResponseBody};
 
 static ROUTE_HEALTHZ_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/healthz$").unwrap());
 static ROUTE_METRICS_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/metrics").unwrap());
@@ -180,7 +177,7 @@ async fn handle_request(
     context: Arc<ServerContext>,
     request: Request<Incoming>,
     identity: ClientIdentity,
-) -> Result<Response<Body>, Infallible> {
+) -> Result<Response<ResponseBody>, Infallible> {
     let start_time = Instant::now();
     let method = request.method().to_owned();
     let path = request.uri().path().to_owned();
@@ -236,7 +233,7 @@ async fn router(
     context: Arc<ServerContext>,
     req: Request<Incoming>,
     mut id: ClientIdentity,
-) -> Result<Response<Body>, registry::Error> {
+) -> Result<Response<ResponseBody>, registry::Error> {
     let path = req.uri().path().to_string();
 
     if let Some((username, password)) = req.provided_credentials() {
@@ -298,7 +295,9 @@ async fn router(
         return Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::Fixed(Full::new(Bytes::from("{\"status\":\"ok\"}"))))
+            .body(ResponseBody::Fixed(Full::new(Bytes::from(
+                "{\"status\":\"ok\"}",
+            ))))
             .map_err(registry::Error::from);
     } else if ROUTE_METRICS_REGEX.is_match(&path) {
         let (content_type, metrics) = METRICS_PROVIDER.gather();
@@ -306,7 +305,7 @@ async fn router(
         return Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, content_type)
-            .body(Body::Fixed(Full::new(Bytes::from(metrics))))
+            .body(ResponseBody::Fixed(Full::new(Bytes::from(metrics))))
             .map_err(registry::Error::from);
     }
 
@@ -317,7 +316,10 @@ async fn router(
     }
 }
 
-pub fn registry_error_to_response_raw<T>(error: &registry::Error, details: T) -> Response<Body>
+pub fn registry_error_to_response_raw<T>(
+    error: &registry::Error,
+    details: T,
+) -> Response<ResponseBody>
 where
     T: Serialize,
 {
@@ -364,12 +366,12 @@ where
                 WWW_AUTHENTICATE,
                 r#"Basic realm="Simple Registry", charset="UTF-8""#,
             )
-            .body(Body::Fixed(Full::new(body)))
+            .body(ResponseBody::Fixed(Full::new(body)))
             .unwrap(),
         _ => Response::builder()
             .status(status)
             .header(CONTENT_TYPE, "application/json")
-            .body(Body::Fixed(Full::new(body)))
+            .body(ResponseBody::Fixed(Full::new(body)))
             .unwrap(),
     }
 }

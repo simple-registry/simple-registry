@@ -1,9 +1,9 @@
 use crate::registry::metadata_store::Error;
-use crate::registry::oci_types::Digest;
+use crate::registry::oci::Digest;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkMetadata {
     pub target: Digest,
     pub created_at: Option<DateTime<Utc>>,

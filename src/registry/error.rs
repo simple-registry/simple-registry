@@ -1,7 +1,6 @@
 use crate::configuration;
-use crate::registry::oci_types;
-use crate::registry::utils::task_queue;
-use crate::registry::{blob_store, cache_store, metadata_store};
+use crate::registry::{blob_store, cache, metadata_store};
+use crate::registry::{oci, task_queue};
 use cel_interpreter::SerializationError;
 use hyper::header::InvalidHeaderValue;
 use hyper::http::uri::InvalidUri;
@@ -67,15 +66,15 @@ impl From<configuration::Error> for Error {
     }
 }
 
-impl From<cache_store::Error> for Error {
-    fn from(error: cache_store::Error) -> Self {
+impl From<cache::Error> for Error {
+    fn from(error: cache::Error) -> Self {
         warn!("Cache error: {error}");
         Error::Internal("Cache error during operations".to_string())
     }
 }
 
-impl From<oci_types::Error> for Error {
-    fn from(error: oci_types::Error) -> Self {
+impl From<oci::Error> for Error {
+    fn from(error: oci::Error) -> Self {
         warn!("OCI error: {error}");
         Error::NameInvalid
     }

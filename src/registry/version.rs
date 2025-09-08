@@ -1,30 +1,25 @@
-use crate::registry::api::body::Body;
-use crate::registry::api::hyper::{DOCKER_DISTRIBUTION_API_VERSION, X_POWERED_BY};
-use crate::registry::policy_types::{ClientIdentity, ClientRequest};
-use crate::registry::{Error, Registry};
+use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
+use crate::registry::{Error, Registry, ResponseBody};
 use hyper::{Response, StatusCode};
 use tracing::instrument;
 
-pub trait RegistryAPIVersionHandlerExt {
-    async fn handle_get_api_version(
-        &self,
-        identity: ClientIdentity,
-    ) -> Result<Response<Body>, Error>;
-}
+pub const DOCKER_DISTRIBUTION_API_VERSION: &str = "Docker-Distribution-API-Version";
+pub const X_POWERED_BY: &str = "X-Powered-By";
 
-impl RegistryAPIVersionHandlerExt for Registry {
+impl Registry {
+    // API Handlers
     #[instrument(skip(self))]
-    async fn handle_get_api_version(
+    pub async fn handle_get_api_version(
         &self,
         identity: ClientIdentity,
-    ) -> Result<Response<Body>, Error> {
+    ) -> Result<Response<ResponseBody>, Error> {
         Self::validate_request(None, &ClientRequest::get_api_version(), &identity)?;
 
         let res = Response::builder()
             .status(StatusCode::OK)
             .header(DOCKER_DISTRIBUTION_API_VERSION, "registry/2.0")
             .header(X_POWERED_BY, "Simple-Registry")
-            .body(Body::empty())?;
+            .body(ResponseBody::empty())?;
 
         Ok(res)
     }
@@ -33,8 +28,8 @@ impl RegistryAPIVersionHandlerExt for Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::api::hyper::response_ext::ResponseExt;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
+    use crate::registry::utils::response_ext::ResponseExt;
     use crate::registry::Registry;
 
     async fn test_handle_get_api_version_impl(registry: &Registry) {
