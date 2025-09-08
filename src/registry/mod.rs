@@ -14,7 +14,7 @@ mod error;
 mod http_client;
 pub mod manifest;
 pub mod metadata_store;
-pub mod oci_types;
+pub mod oci;
 mod policy;
 pub mod policy_types;
 mod reader;
@@ -126,7 +126,7 @@ pub mod test_utils {
     use super::*;
     use crate::configuration::{RepositoryAccessPolicyConfig, RepositoryRetentionPolicyConfig};
     use crate::registry::metadata_store::link_kind::LinkKind;
-    use crate::registry::oci_types::Digest;
+    use crate::registry::oci::Digest;
     use serde_json::json;
 
     pub fn create_test_repository_config() -> HashMap<String, RepositoryConfig> {

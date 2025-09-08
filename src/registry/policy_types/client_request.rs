@@ -1,4 +1,4 @@
-use crate::registry::oci_types::{Digest, Reference};
+use crate::registry::oci::{Digest, Reference};
 use serde::Serialize;
 
 const GET_API_VERSION: &str = "get-api-version";
@@ -160,7 +160,7 @@ impl ClientRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::oci_types::{Digest, Reference};
+    use crate::registry::oci::{Digest, Reference};
 
     #[test]
     fn test_get_api_version() {

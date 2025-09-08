@@ -1,4 +1,4 @@
-use crate::registry::oci_types::{Digest, Reference};
+use crate::registry::oci::{Digest, Reference};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
@@ -35,7 +35,7 @@ impl From<Reference> for LinkKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::oci_types::Reference;
+    use crate::registry::oci::Reference;
 
     #[test]
     fn test_from_reference() {

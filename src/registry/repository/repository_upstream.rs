@@ -2,7 +2,7 @@ use crate::configuration::RepositoryUpstreamConfig;
 use crate::registry;
 use crate::registry::cache::Cache;
 use crate::registry::http_client::HttpClient;
-use crate::registry::oci_types::{Digest, Reference};
+use crate::registry::oci::{Digest, Reference};
 use crate::registry::repository::authentication_scheme::AuthenticationScheme;
 use crate::registry::repository::bearer_token::BearerToken;
 use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};

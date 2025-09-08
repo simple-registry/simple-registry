@@ -8,7 +8,7 @@ use crate::registry::metadata_store::{BlobIndex, Error};
 use crate::registry::metadata_store::{
     BlobIndexOperation, LinkMetadata, LockConfig, MetadataStore,
 };
-use crate::registry::oci_types::{Descriptor, Digest, Manifest};
+use crate::registry::oci::{Descriptor, Digest, Manifest};
 use crate::registry::utils::path_builder;
 use async_trait::async_trait;
 use bytes::Bytes;

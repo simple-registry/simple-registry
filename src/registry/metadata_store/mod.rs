@@ -1,13 +1,13 @@
 mod error;
 
-use crate::registry::oci_types::{Descriptor, Digest};
+use crate::registry::oci::{Descriptor, Digest};
 use async_trait::async_trait;
 pub use error::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-pub mod link_kind;
 pub mod fs;
+pub mod link_kind;
 mod link_metadata;
 mod lock;
 pub mod s3;
@@ -87,7 +87,7 @@ mod tests {
     use super::MetadataStore;
     use crate::registry::blob_store::BlobStore;
     use crate::registry::metadata_store::link_kind::LinkKind;
-    use crate::registry::oci_types::Descriptor;
+    use crate::registry::oci::Descriptor;
     use crate::registry::utils::sha256_ext::Sha256Ext;
     use chrono::{Duration, Utc};
     use sha2::digest::Update;

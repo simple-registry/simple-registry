@@ -1,7 +1,7 @@
 use crate::configuration::{Error, RepositoryConfig, RepositoryUpstreamConfig};
 use crate::registry;
 use crate::registry::cache::Cache;
-use crate::registry::oci_types::{Digest, Reference};
+use crate::registry::oci::{Digest, Reference};
 use cel_interpreter::Program;
 use hyper::body::Incoming;
 use hyper::{Method, Response};

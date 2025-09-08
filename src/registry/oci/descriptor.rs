@@ -1,4 +1,4 @@
-use crate::registry::oci_types::Manifest;
+use crate::registry::oci::Manifest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -30,7 +30,7 @@ impl From<Manifest> for Option<Descriptor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::oci_types::manifest::tests::demo_manifest;
+    use crate::registry::oci::manifest::tests::demo_manifest;
 
     #[test]
     fn test_from_manifest() {

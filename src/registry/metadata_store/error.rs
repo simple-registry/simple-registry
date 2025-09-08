@@ -54,8 +54,8 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<crate::registry::oci_types::Error> for Error {
-    fn from(err: crate::registry::oci_types::Error) -> Self {
+impl From<crate::registry::oci::Error> for Error {
+    fn from(err: crate::registry::oci::Error) -> Self {
         Error::InvalidData(err.to_string())
     }
 }

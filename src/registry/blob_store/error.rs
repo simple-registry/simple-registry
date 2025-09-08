@@ -1,4 +1,4 @@
-use crate::registry::oci_types;
+use crate::registry::oci;
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::GetObjectError;
@@ -113,10 +113,8 @@ impl From<chrono::format::ParseError> for Error {
     }
 }
 
-//
-
-impl From<oci_types::Error> for Error {
-    fn from(e: oci_types::Error) -> Self {
+impl From<oci::Error> for Error {
+    fn from(e: oci::Error) -> Self {
         Error::InvalidFormat(e.to_string())
     }
 }

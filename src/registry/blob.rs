@@ -1,6 +1,6 @@
 use crate::registry::blob_store::{BlobStore, Reader};
 use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::oci_types::Digest;
+use crate::registry::oci::Digest;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::utils::request_ext::RequestExt;
 use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};

@@ -7,7 +7,7 @@ use crate::registry::metadata_store::lock::{self, LockBackend, MemoryBackend};
 use crate::registry::metadata_store::{
     BlobIndex, BlobIndexOperation, Error, LinkMetadata, LockConfig, MetadataStore,
 };
-use crate::registry::oci_types::{Descriptor, Digest, Manifest};
+use crate::registry::oci::{Descriptor, Digest, Manifest};
 use crate::registry::utils::path_builder;
 use async_trait::async_trait;
 use serde::Deserialize;

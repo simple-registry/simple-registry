@@ -1,4 +1,4 @@
-use crate::registry::oci_types::{Descriptor, Digest, ReferrerList};
+use crate::registry::oci::{Descriptor, Digest, ReferrerList};
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::utils::request_ext::RequestExt;
 use crate::registry::utils::response_ext::ResponseExt;
@@ -197,7 +197,7 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::registry::metadata_store::link_kind::LinkKind;
-    use crate::registry::oci_types::Reference;
+    use crate::registry::oci::Reference;
     use crate::registry::policy_types::ClientIdentity;
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};

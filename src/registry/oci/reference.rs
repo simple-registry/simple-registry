@@ -1,5 +1,4 @@
-use crate::registry::oci_types::Digest;
-use crate::registry::oci_types::Error;
+use crate::registry::oci::{Digest, Error};
 use regex::Regex;
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer};

@@ -147,7 +147,7 @@ mod tests {
     use crate::configuration::{
         RepositoryAccessPolicyConfig, RepositoryConfig, RepositoryRetentionPolicyConfig,
     };
-    use crate::registry::oci_types::Reference;
+    use crate::registry::oci::Reference;
     use crate::registry::tests::FSRegistryTestCase;
 
     type NoStoreRegistry = Registry;

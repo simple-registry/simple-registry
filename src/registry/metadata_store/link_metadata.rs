@@ -1,5 +1,5 @@
 use crate::registry::metadata_store::Error;
-use crate::registry::oci_types::Digest;
+use crate::registry::oci::Digest;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

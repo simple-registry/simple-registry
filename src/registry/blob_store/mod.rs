@@ -2,7 +2,7 @@ mod error;
 pub mod fs;
 pub mod s3;
 
-use crate::registry::oci_types::Digest;
+use crate::registry::oci::Digest;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::io::AsyncRead;

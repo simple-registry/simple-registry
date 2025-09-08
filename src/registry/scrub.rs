@@ -1,6 +1,6 @@
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::LinkMetadata;
-use crate::registry::oci_types::{Digest, Reference};
+use crate::registry::oci::{Digest, Reference};
 use crate::registry::policy_types::ManifestImage;
 use crate::registry::{parse_manifest_digests, Error, Registry};
 use cel_interpreter::{Context, Program, Value};

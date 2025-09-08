@@ -1,4 +1,4 @@
-use crate::registry::oci_types::Digest;
+use crate::registry::oci::Digest;
 use crate::registry::policy_types::{ClientIdentity, ClientRequest};
 use crate::registry::utils::request_ext::{IntoAsyncRead, RequestExt};
 use crate::registry::{Error, Registry, ResponseBody};
