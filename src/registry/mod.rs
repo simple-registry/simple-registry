@@ -5,15 +5,14 @@ use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
 use tracing::instrument;
 
-pub mod api;
-mod blob;
+pub mod blob;
 pub mod blob_store;
 pub mod cache_store;
-mod content_discovery;
+pub mod content_discovery;
 pub mod data_store;
 mod error;
 mod http_client;
-mod manifest;
+pub mod manifest;
 pub mod metadata_store;
 pub mod oci_types;
 mod policy;
@@ -21,10 +20,13 @@ pub mod policy_types;
 mod reader;
 mod repository;
 mod scrub;
+pub mod task_queue;
 #[cfg(test)]
 mod tests;
-mod upload;
+pub mod upload;
 pub mod utils;
+mod version;
+mod response_body;
 
 use crate::configuration;
 use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
@@ -33,10 +35,11 @@ pub use repository::Repository;
 
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
-pub use crate::registry::utils::{BlobLink, TaskQueue};
+pub use crate::registry::task_queue::TaskQueue;
+pub use crate::registry::utils::BlobLink;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
-pub use upload::StartUploadResponse;
+pub use response_body::ResponseBody;
 
 static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap()

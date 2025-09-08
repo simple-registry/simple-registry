@@ -1,12 +1,18 @@
-use crate::registry::api::hyper::response_ext::{IntoAsyncRead, ResponseExt};
-use crate::registry::api::hyper::DOCKER_CONTENT_DIGEST;
 use crate::registry::oci_types::{Digest, Manifest, Reference};
+use crate::registry::policy_types::{ClientIdentity, ClientRequest};
+use crate::registry::utils::request_ext::RequestExt;
+use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::utils::BlobLink;
-use crate::registry::{Error, Registry, Repository};
-use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use hyper::Method;
+use crate::registry::{Error, Registry, Repository, ResponseBody};
+use http_body_util::BodyExt;
+use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
+use hyper::{body, Method, Request, Response, StatusCode};
+use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tracing::{error, instrument, warn};
+
+pub const OCI_SUBJECT: &str = "OCI-Subject";
+pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
 
 pub struct GetManifestResponse {
     pub media_type: Option<String>,
@@ -23,6 +29,12 @@ pub struct HeadManifestResponse {
 pub struct PutManifestResponse {
     pub digest: Digest,
     pub subject: Option<Digest>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueryManifestParameters {
+    pub name: String,
+    pub reference: Reference,
 }
 
 pub struct ParsedManifestDigests {
@@ -382,14 +394,179 @@ impl Registry {
 
         Ok(())
     }
+
+    // API Handlers
+    #[instrument(skip(self, request))]
+    pub async fn handle_head_manifest<T>(
+        &self,
+        request: Request<T>,
+        parameters: QueryManifestParameters,
+        identity: ClientIdentity,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let repository = self.validate_namespace(&parameters.name)?;
+        Self::validate_request(
+            Some(repository),
+            &ClientRequest::get_manifest(&parameters.name, &parameters.reference),
+            &identity,
+        )?;
+
+        let manifest = self
+            .head_manifest(
+                repository,
+                &request.accepted_content_types(),
+                &parameters.name,
+                parameters.reference,
+            )
+            .await?;
+
+        let res = if let Some(media_type) = manifest.media_type {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, media_type)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string())
+                .header(CONTENT_LENGTH, manifest.size)
+                .body(ResponseBody::empty())?
+        } else {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string())
+                .header(CONTENT_LENGTH, manifest.size)
+                .body(ResponseBody::empty())?
+        };
+
+        Ok(res)
+    }
+
+    #[instrument(skip(self, request))]
+    pub async fn handle_get_manifest<T>(
+        &self,
+        request: Request<T>,
+        parameters: QueryManifestParameters,
+        identity: ClientIdentity,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let repository = self.validate_namespace(&parameters.name)?;
+        Self::validate_request(
+            Some(repository),
+            &ClientRequest::get_manifest(&parameters.name, &parameters.reference),
+            &identity,
+        )?;
+
+        let manifest = self
+            .get_manifest(
+                repository,
+                &request.accepted_content_types(),
+                &parameters.name,
+                parameters.reference,
+            )
+            .await?;
+
+        let res = if let Some(content_type) = manifest.media_type {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, content_type)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string())
+                .body(ResponseBody::fixed(manifest.content))?
+        } else {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string())
+                .body(ResponseBody::fixed(manifest.content))?
+        };
+
+        Ok(res)
+    }
+
+    #[instrument(skip(self, request))]
+    pub async fn handle_put_manifest<T>(
+        &self,
+        request: Request<T>,
+        parameters: QueryManifestParameters,
+        identity: ClientIdentity,
+    ) -> Result<Response<ResponseBody>, Error>
+    where
+        T: body::Body,
+    {
+        let repository = self.validate_namespace(&parameters.name)?;
+        Self::validate_request(
+            Some(repository),
+            &ClientRequest::put_manifest(&parameters.name, &parameters.reference),
+            &identity,
+        )?;
+
+        let content_type = request
+            .get_header(CONTENT_TYPE)
+            .ok_or(Error::ManifestInvalid(
+                "No Content-Type header provided".to_string(),
+            ))?;
+
+        let request_body = request.into_body().collect().await.map_err(|_| {
+            Error::ManifestInvalid("Unable to retrieve manifest from client query".to_string())
+        })?;
+        let body = request_body.to_bytes();
+
+        let location = format!("/v2/{}/manifests/{}", parameters.name, parameters.reference);
+
+        let manifest = self
+            .put_manifest(
+                &parameters.name,
+                parameters.reference,
+                Some(&content_type),
+                &body,
+            )
+            .await?;
+
+        let res = match manifest.subject {
+            Some(subject) => Response::builder()
+                .status(StatusCode::CREATED)
+                .header(LOCATION, location)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string())
+                .header(OCI_SUBJECT, subject.to_string())
+                .body(ResponseBody::empty())?,
+            None => Response::builder()
+                .status(StatusCode::CREATED)
+                .header(LOCATION, location)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string())
+                .body(ResponseBody::empty())?,
+        };
+
+        Ok(res)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn handle_delete_manifest(
+        &self,
+        parameters: QueryManifestParameters,
+        identity: ClientIdentity,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let repository = self.validate_namespace(&parameters.name)?;
+        Self::validate_request(
+            Some(repository),
+            &ClientRequest::delete_manifest(&parameters.name, &parameters.reference),
+            &identity,
+        )?;
+
+        self.delete_manifest(&parameters.name, parameters.reference)
+            .await?;
+
+        let res = Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .body(ResponseBody::empty())?;
+
+        Ok(res)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
+    use crate::registry::utils::response_ext::IntoAsyncRead;
+    use http_body_util::Empty;
+    use hyper::body::Bytes;
+    use hyper::Uri;
     use serde_json::json;
     use std::slice;
+    use tokio::io::AsyncReadExt;
 
     fn create_test_manifest() -> (Vec<u8>, String) {
         let manifest = json!({
@@ -717,5 +894,242 @@ mod tests {
         // Test media type mismatch
         let wrong_media_type = "application/wrong.media.type".to_string();
         assert!(parse_manifest_digests(&content, Some(&wrong_media_type)).is_err());
+    }
+
+    // API Handler Tests
+    async fn test_handle_head_manifest_impl(registry: &Registry) {
+        let namespace = "test-repo";
+        let tag = "latest";
+        let (content, media_type) = create_test_manifest();
+
+        // Put manifest first
+        let put_response = registry
+            .put_manifest(
+                namespace,
+                Reference::Tag(tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
+            .await
+            .unwrap();
+
+        let uri = Uri::builder()
+            .path_and_query(format!("/v2/{namespace}/manifests/{tag}"))
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::HEAD)
+            .uri(uri)
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let parameters = QueryManifestParameters {
+            name: namespace.to_string(),
+            reference: Reference::Tag(tag.to_string()),
+        };
+
+        let response = registry
+            .handle_head_manifest(request, parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.get_header(DOCKER_CONTENT_DIGEST),
+            Some(put_response.digest.to_string())
+        );
+        assert_eq!(
+            response.get_header(CONTENT_LENGTH),
+            Some(content.len().to_string())
+        );
+        assert_eq!(response.get_header(CONTENT_TYPE), Some(media_type));
+    }
+
+    #[tokio::test]
+    async fn test_handle_head_manifest_fs() {
+        let t = FSRegistryTestCase::new();
+        test_handle_head_manifest_impl(t.registry()).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_head_manifest_s3() {
+        let t = S3RegistryTestCase::new();
+        test_handle_head_manifest_impl(t.registry()).await;
+    }
+
+    async fn test_handle_get_manifest_impl(registry: &Registry) {
+        let namespace = "test-repo";
+        let tag = "latest";
+        let (content, media_type) = create_test_manifest();
+
+        // Put manifest first
+        let put_response = registry
+            .put_manifest(
+                namespace,
+                Reference::Tag(tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
+            .await
+            .unwrap();
+
+        let uri = Uri::builder()
+            .path_and_query(format!("/v2/{namespace}/manifests/{tag}"))
+            .build()
+            .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let parameters = QueryManifestParameters {
+            name: namespace.to_string(),
+            reference: Reference::Tag(tag.to_string()),
+        };
+
+        let response = registry
+            .handle_get_manifest(request, parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.get_header(DOCKER_CONTENT_DIGEST),
+            Some(put_response.digest.to_string())
+        );
+        assert_eq!(response.get_header(CONTENT_TYPE), Some(media_type));
+
+        // Read response body
+        let mut reader = response.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, content);
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_manifest_fs() {
+        let t = FSRegistryTestCase::new();
+        test_handle_get_manifest_impl(t.registry()).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_manifest_s3() {
+        let t = S3RegistryTestCase::new();
+        test_handle_get_manifest_impl(t.registry()).await;
+    }
+
+    async fn test_handle_put_manifest_impl(registry: &Registry) -> Result<(), Error> {
+        let namespace = "test-repo";
+        let tag = "latest";
+        let (content, media_type) = create_test_manifest();
+
+        let uri = Uri::builder()
+            .path_and_query(format!("/v2/{namespace}/manifests/{tag}"))
+            .build()?;
+
+        let request = Request::builder()
+            .method(Method::PUT)
+            .uri(uri)
+            .header(CONTENT_TYPE, &media_type)
+            .body(ResponseBody::fixed(content.clone()))?;
+
+        let parameters = QueryManifestParameters {
+            name: namespace.to_string(),
+            reference: Reference::Tag(tag.to_string()),
+        };
+
+        let response = registry
+            .handle_put_manifest(request, parameters, ClientIdentity::default())
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let digest = response.get_header(DOCKER_CONTENT_DIGEST).unwrap();
+        assert_eq!(
+            response.get_header(LOCATION),
+            Some(format!("/v2/{namespace}/manifests/{tag}"))
+        );
+
+        // Verify manifest was stored
+        let stored_manifest = registry
+            .get_manifest(
+                registry.validate_namespace(namespace).unwrap(),
+                slice::from_ref(&media_type),
+                namespace,
+                Reference::Tag(tag.to_string()),
+            )
+            .await?;
+
+        assert_eq!(stored_manifest.content, content);
+        assert_eq!(stored_manifest.media_type.unwrap(), media_type);
+        assert_eq!(stored_manifest.digest.to_string(), digest);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_put_manifest_fs() {
+        let t = FSRegistryTestCase::new();
+        test_handle_put_manifest_impl(t.registry()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handle_put_manifest_s3() {
+        let t = S3RegistryTestCase::new();
+        test_handle_put_manifest_impl(t.registry()).await.unwrap();
+    }
+
+    async fn test_handle_delete_manifest_impl(registry: &Registry) {
+        let namespace = "test-repo";
+        let tag = "latest";
+        let (content, media_type) = create_test_manifest();
+
+        // Put manifest first
+        let _put_response = registry
+            .put_manifest(
+                namespace,
+                Reference::Tag(tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
+            .await
+            .unwrap();
+
+        let parameters = QueryManifestParameters {
+            name: namespace.to_string(),
+            reference: Reference::Tag(tag.to_string()),
+        };
+
+        let response = registry
+            .handle_delete_manifest(parameters, ClientIdentity::default())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        // Verify manifest is deleted
+        assert!(registry
+            .get_manifest(
+                registry.validate_namespace(namespace).unwrap(),
+                slice::from_ref(&media_type),
+                namespace,
+                Reference::Tag(tag.to_string()),
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_delete_manifest_fs() {
+        let t = FSRegistryTestCase::new();
+        test_handle_delete_manifest_impl(t.registry()).await;
+    }
+
+    #[tokio::test]
+    async fn test_handle_delete_manifest_s3() {
+        let t = S3RegistryTestCase::new();
+        test_handle_delete_manifest_impl(t.registry()).await;
     }
 }

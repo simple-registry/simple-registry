@@ -1,11 +1,11 @@
 use crate::configuration::RepositoryUpstreamConfig;
 use crate::registry;
-use crate::registry::api::hyper::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::cache_store::CacheStore;
 use crate::registry::http_client::HttpClient;
 use crate::registry::oci_types::{Digest, Reference};
 use crate::registry::repository::authentication_scheme::AuthenticationScheme;
 use crate::registry::repository::bearer_token::BearerToken;
+use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use http_body_util::Empty;
