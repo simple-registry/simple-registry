@@ -1,18 +1,18 @@
 use crate::configuration::IdentityConfig;
-use crate::registry::auth::oidc::OidcValidator;
+use crate::registry::auth::{BasicAuthValidator, OidcValidator};
 use crate::registry::repository::access_policy::OidcClaims;
 use crate::registry::{Error, Registry};
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, instrument, warn};
+use tracing::instrument;
 
 pub struct ServerContext {
-    pub credentials: HashMap<String, (String, String)>,
+    pub basic_auth_validator: BasicAuthValidator,
     pub timeouts: Vec<Duration>,
     pub registry: Registry,
     pub oidc_validators: HashMap<String, Arc<OidcValidator>>,
+    pub credentials: HashMap<String, (String, String)>, // Keep for backwards compatibility
 }
 
 impl ServerContext {
@@ -21,6 +21,10 @@ impl ServerContext {
         timeouts: Vec<Duration>,
         registry: Registry,
     ) -> Self {
+        let basic_auth_validator = BasicAuthValidator::new(identities);
+        let oidc_validators = registry.oidc_validators().clone();
+
+        // Keep credentials for backwards compatibility
         let mut credentials = HashMap::new();
         for (identity_id, identity_config) in identities {
             credentials.insert(
@@ -29,18 +33,13 @@ impl ServerContext {
             );
         }
 
-        let oidc_validators = registry.oidc_validators().clone();
-
         Self {
-            credentials,
+            basic_auth_validator,
             timeouts,
             registry,
             oidc_validators,
+            credentials,
         }
-    }
-
-    fn deny() -> Error {
-        Error::Unauthorized("Access denied".to_string())
     }
 
     #[instrument(skip(self, password))]
@@ -49,22 +48,8 @@ impl ServerContext {
         username: &str,
         password: &str,
     ) -> Result<Option<String>, Error> {
-        let (identity_id, identity_password) =
-            self.credentials.get(username).ok_or_else(Self::deny)?;
-
-        let identity_password = PasswordHash::new(identity_password).map_err(|error| {
-            error!("Unable to hash password: {error}");
-            Self::deny()
-        })?;
-
-        Argon2::default()
-            .verify_password(password.as_bytes(), &identity_password)
-            .map_err(|error| {
-                error!("Unable to verify password: {error}");
-                Self::deny()
-            })?;
-
-        Ok(Some(identity_id.clone()))
+        self.basic_auth_validator
+            .validate_credentials(username, password)
     }
 
     #[instrument(skip(self, token))]
