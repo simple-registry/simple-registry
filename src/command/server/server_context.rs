@@ -1,5 +1,5 @@
 use crate::configuration::IdentityConfig;
-use crate::registry::oidc::OidcValidator;
+use crate::registry::auth::oidc::OidcValidator;
 use crate::registry::repository::access_policy::OidcClaims;
 use crate::registry::{Error, Registry};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};

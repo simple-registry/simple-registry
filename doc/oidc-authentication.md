@@ -6,32 +6,51 @@ Simple Registry supports OpenID Connect (OIDC) authentication, allowing you to u
 
 ### GitHub Actions
 
-Optimized support for GitHub Actions OIDC tokens with automatic parsing of GitHub-specific claims.
+Pre-configured support for GitHub Actions OIDC tokens with automatic validation of GitHub-specific claims.
 
 ### Generic OIDC
 
-Support for any OIDC-compliant provider
+Support for any OIDC-compliant provider with configurable issuer and JWKS endpoints.
 
 ## Configuration
 
-Simple Registry supports multiple OIDC providers configured under the `[oidc]` section. Each provider is identified by a unique name and configured under `[oidc.<provider-name>]`.
+OIDC providers are configured under `[oidc.<provider-name>]` sections. Each provider requires a `provider` field specifying the type.
 
-### Single Provider Example
+### GitHub Actions Provider
 
 ```toml
-# GitHub Actions provider
+# GitHub Actions with defaults (simplest configuration)
 [oidc.github-actions]
-type = "github"
+provider = "github"
 
-# Optional: Override default GitHub issuer (rarely needed)
-# issuer = "https://token.actions.githubusercontent.com"
+# Or with custom settings
+[oidc.github-actions]
+provider = "github"
+required_audience = "https://my-registry.example.com"
+jwks_refresh_interval = 7200  # Default: 3600 seconds
+clock_skew_tolerance = 120     # Default: 60 seconds
+```
 
-# Optional: Require specific audience
-# required_audience = "https://my-registry.example.com"
+Default values for GitHub provider:
+- `issuer`: `https://token.actions.githubusercontent.com`
+- `jwks_uri`: `https://token.actions.githubusercontent.com/.well-known/jwks`
 
-# Per-provider settings with defaults
-jwks_refresh_interval = 3600  # Default: 3600 seconds (1 hour)
-clock_skew_tolerance = 60     # Default: 60 seconds
+### Generic OIDC Provider
+
+```toml
+# Generic provider (required fields)
+[oidc.my-provider]
+provider = "generic"
+issuer = "https://auth.example.com"
+
+# With all options
+[oidc.my-provider]
+provider = "generic"
+issuer = "https://auth.example.com"
+jwks_uri = "https://auth.example.com/.well-known/jwks"  # Optional: auto-discovered if not set
+required_audience = "my-registry"
+jwks_refresh_interval = 7200  # Default: 3600 seconds
+clock_skew_tolerance = 120     # Default: 60 seconds
 ```
 
 ### Multiple Providers Example
@@ -39,26 +58,21 @@ clock_skew_tolerance = 60     # Default: 60 seconds
 ```toml
 # GitHub Actions provider
 [oidc.github-actions]
-type = "github"
-jwks_refresh_interval = 3600
-clock_skew_tolerance = 60
+provider = "github"
 
 # Google Cloud provider
 [oidc.google-cloud]
-type = "generic"
+provider = "generic"
 issuer = "https://accounts.google.com"
-# Optional: Custom JWKS URI
 jwks_uri = "https://www.googleapis.com/oauth2/v3/certs"
-jwks_refresh_interval = 3600
-clock_skew_tolerance = 60
 
-# Corporate Keycloak instance with custom settings
+# Corporate Keycloak instance
 [oidc.corporate]
-type = "generic"
+provider = "generic"
 issuer = "https://auth.example.com/realms/myrealm"
-jwks_refresh_interval = 7200  # Refresh every 2 hours
-clock_skew_tolerance = 120     # Allow more clock skew
 required_audience = "internal-registry"
+jwks_refresh_interval = 7200
+clock_skew_tolerance = 120
 ```
 
 Repository and workflow restrictions should be implemented using CEL policies for maximum flexibility. See the Policy Examples section below.
@@ -181,19 +195,29 @@ rules = [
 
 ## Security Considerations
 
-1. **Token Validation**: All tokens are validated for:
-   - Signature verification (when JWKS is available)
-   - Issuer matching
-   - Audience validation (if configured)
-   - Expiration time
-   - Not-before time
+1. **Token Validation**: All tokens are properly validated using the `jsonwebtoken` crate:
+   - Cryptographic signature verification against JWKS
+   - Support for RSA (RS256, RS384, RS512) and EC (ES256, ES384) algorithms
+   - Issuer (`iss`) claim validation
+   - Audience (`aud`) claim validation (if configured)
+   - Expiration (`exp`) claim validation
+   - Not-before (`nbf`) claim validation
+   - Issued-at (`iat`) claim validation
 
-2. **JWKS Caching**: JWKS keys are cached to reduce load on the OIDC provider, with configurable refresh intervals.
+2. **JWKS Management**:
+   - Automatic JWKS fetching from provider's JWKS endpoint
+   - OIDC discovery support (.well-known/openid-configuration)
+   - Caching with configurable refresh intervals (default: 1 hour)
+   - Automatic key rotation support
 
-3. **Clock Skew**: Configurable clock skew tolerance (default 60 seconds) to handle time synchronization issues.
+3. **Clock Skew**: Configurable clock skew tolerance (default 60 seconds) to handle time synchronization issues between systems.
 
-4. **Access Restrictions**: Use CEL policies with regex patterns to implement flexible access controls based on token claims. This allows for:
-   - Repository pattern matching
+4. **Provider-Specific Validation**: 
+   - GitHub provider validates required claims (`repository`, `actor`)
+   - Generic provider allows custom claim validation via policies
+
+5. **Access Restrictions**: Use CEL policies to implement flexible access controls based on token claims:
+   - Repository pattern matching with regex
    - Branch/tag restrictions
    - Workflow file validation
    - Actor/user allowlists

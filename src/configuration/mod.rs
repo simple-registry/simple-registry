@@ -7,7 +7,8 @@ use std::path::Path;
 
 mod error;
 
-use crate::registry::{blob_store, cache, metadata_store, oidc};
+use crate::registry::auth::oidc;
+use crate::registry::{blob_store, cache, metadata_store};
 pub use error::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -143,8 +144,8 @@ pub struct IdentityConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "provider", rename_all = "lowercase")]
 pub enum OidcProviderConfig {
-    Generic(oidc::generic::ProviderConfig),
-    GitHub(oidc::github::ProviderConfig),
+    Generic(oidc::provider::generic::ProviderConfig),
+    GitHub(oidc::provider::github::ProviderConfig),
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

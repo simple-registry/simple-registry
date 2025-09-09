@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
 use tracing::instrument;
 
+pub mod auth;
 pub mod blob;
 pub mod blob_store;
 pub mod cache;
@@ -15,7 +16,6 @@ mod http_client;
 pub mod manifest;
 pub mod metadata_store;
 pub mod oci;
-pub mod oidc;
 mod reader;
 pub mod repository;
 mod response_body;
@@ -29,8 +29,8 @@ mod version;
 
 use crate::configuration;
 use crate::configuration::{CacheStoreConfig, GlobalConfig, OidcProviderConfig, RepositoryConfig};
+use crate::registry::auth::oidc::OidcValidator;
 use crate::registry::cache::Cache;
-use crate::registry::oidc::OidcValidator;
 pub use repository::Repository;
 
 use crate::registry::blob_store::BlobStore;
