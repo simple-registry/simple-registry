@@ -19,6 +19,8 @@ use crate::registry::oci::{Digest, Reference};
 use crate::registry::Error;
 use cel_interpreter::{Context, Program, Value};
 use serde::Serialize;
+use serde_json;
+use std::collections::HashMap;
 use tracing::{debug, info, instrument};
 use x509_parser::certificate::X509Certificate;
 
@@ -100,12 +102,13 @@ impl AccessPolicy {
 
 /// Client identity information used in access control decisions.
 ///
-/// Contains authentication details extracted from basic auth or mTLS certificates.
+/// Contains authentication details extracted from basic auth, mTLS certificates, or OIDC tokens.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ClientIdentity {
     pub id: Option<String>,
     pub username: Option<String>,
     pub certificate: CELIdentityCertificate,
+    pub oidc: Option<OidcClaims>,
 }
 
 impl ClientIdentity {
@@ -132,6 +135,7 @@ impl ClientIdentity {
             id: None,
             username: None,
             certificate,
+            oidc: None,
         })
     }
 }
@@ -141,6 +145,16 @@ impl ClientIdentity {
 pub struct CELIdentityCertificate {
     pub organizations: Vec<String>,
     pub common_names: Vec<String>,
+}
+
+/// OIDC claims extracted from JWT tokens.
+///
+/// All claims from the token are exposed as-is to allow maximum flexibility
+/// in policy expressions. Standard claims like sub, iss, aud are available
+/// along with any custom claims from the OIDC provider.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct OidcClaims {
+    pub claims: HashMap<String, serde_json::Value>,
 }
 
 const GET_API_VERSION: &str = "get-api-version";

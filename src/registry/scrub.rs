@@ -809,7 +809,8 @@ mod tests {
             registry.metadata_store.clone(),
             create_test_repository_config(),
             &GlobalConfig::default(),
-            CacheStoreConfig::default(),
+            &CacheStoreConfig::default(),
+            &HashMap::default(),
         )
         .unwrap()
         .with_scrub_dry_run(false);
@@ -994,7 +995,8 @@ mod tests {
             registry.metadata_store.clone(),
             create_test_repository_config(),
             &GlobalConfig::default(),
-            CacheStoreConfig::default(),
+            &CacheStoreConfig::default(),
+            &HashMap::default(),
         )
         .unwrap()
         .with_scrub_dry_run(false);

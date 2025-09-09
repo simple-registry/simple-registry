@@ -20,7 +20,9 @@ pub trait RequestExt {
     fn get_header<K: AsHeaderName>(&self, header: K) -> Option<String>;
     fn query_parameters<D: DeserializeOwned + Default>(&self) -> Result<D, Error>;
 
-    fn provided_credentials(&self) -> Option<(String, String)>;
+    fn basic_auth(&self) -> Option<(String, String)>;
+
+    fn bearer_token(&self) -> Option<String>;
 
     fn accepted_content_types(&self) -> Vec<String>;
 
@@ -49,7 +51,7 @@ impl<T> RequestExt for Request<T> {
         })
     }
 
-    fn provided_credentials(&self) -> Option<(String, String)> {
+    fn basic_auth(&self) -> Option<(String, String)> {
         let Some(authorization) = self.get_header(AUTHORIZATION) else {
             debug!("No authorization header found");
             return None;
@@ -61,6 +63,13 @@ impl<T> RequestExt for Request<T> {
 
         let (username, password) = value.split_once(':')?;
         Some((username.to_string(), password.to_string()))
+    }
+
+    fn bearer_token(&self) -> Option<String> {
+        let authorization = self.get_header(AUTHORIZATION)?;
+        authorization
+            .strip_prefix("Bearer ")
+            .map(std::string::ToString::to_string)
     }
 
     fn accepted_content_types(&self) -> Vec<String> {
@@ -155,7 +164,7 @@ mod tests {
             .body(ResponseBody::empty())
             .unwrap();
         assert_eq!(
-            request.provided_credentials(),
+            request.basic_auth(),
             Some(("user".to_string(), "password".to_string()))
         );
 
@@ -166,7 +175,7 @@ mod tests {
             )
             .body(ResponseBody::empty())
             .unwrap();
-        assert_eq!(request.provided_credentials(), None);
+        assert_eq!(request.basic_auth(), None);
 
         let request = Request::builder()
             .header(
@@ -175,7 +184,7 @@ mod tests {
             )
             .body(ResponseBody::empty())
             .unwrap();
-        assert_eq!(request.provided_credentials(), None);
+        assert_eq!(request.basic_auth(), None);
 
         let request = Request::builder()
             .header(
@@ -184,7 +193,7 @@ mod tests {
             )
             .body(ResponseBody::empty())
             .unwrap();
-        assert_eq!(request.provided_credentials(), None);
+        assert_eq!(request.basic_auth(), None);
 
         let request = Request::builder()
             .header(
@@ -193,7 +202,7 @@ mod tests {
             )
             .body(ResponseBody::empty())
             .unwrap();
-        assert_eq!(request.provided_credentials(), None);
+        assert_eq!(request.basic_auth(), None);
 
         let request = Request::builder()
             .header(
@@ -203,7 +212,7 @@ mod tests {
             .body(ResponseBody::empty())
             .unwrap();
         assert_eq!(
-            request.provided_credentials(),
+            request.basic_auth(),
             Some(("user".to_string(), "password".to_string()))
         );
     }

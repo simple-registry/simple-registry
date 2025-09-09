@@ -1,14 +1,18 @@
 use crate::configuration::IdentityConfig;
+use crate::registry::oidc::OidcValidator;
+use crate::registry::repository::access_policy::OidcClaims;
 use crate::registry::{Error, Registry};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, instrument};
+use tracing::{error, instrument, warn};
 
 pub struct ServerContext {
     pub credentials: HashMap<String, (String, String)>,
     pub timeouts: Vec<Duration>,
     pub registry: Registry,
+    pub oidc_validators: HashMap<String, Arc<OidcValidator>>,
 }
 
 impl ServerContext {
@@ -25,10 +29,13 @@ impl ServerContext {
             );
         }
 
+        let oidc_validators = registry.oidc_validators().clone();
+
         Self {
             credentials,
             timeouts,
             registry,
+            oidc_validators,
         }
     }
 
@@ -58,5 +65,18 @@ impl ServerContext {
             })?;
 
         Ok(Some(identity_id.clone()))
+    }
+
+    #[instrument(skip(self, token))]
+    pub async fn validate_oidc_token(&self, token: &str) -> Result<OidcClaims, Error> {
+        for validator in self.oidc_validators.values() {
+            if let Ok(claims) = validator.validate_token(token).await {
+                return Ok(claims);
+            }
+        }
+
+        Err(Error::Unauthorized(
+            "No OIDC providers configured".to_string(),
+        ))
     }
 }

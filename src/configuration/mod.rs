@@ -7,7 +7,7 @@ use std::path::Path;
 
 mod error;
 
-use crate::registry::{blob_store, cache, metadata_store};
+use crate::registry::{blob_store, cache, metadata_store, oidc};
 pub use error::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -23,6 +23,8 @@ pub struct Configuration {
     pub metadata_store: MetadataStoreConfig,
     #[serde(default)]
     pub identity: HashMap<String, IdentityConfig>, // hashmap of identity_id <-> identity_config (username, password)
+    #[serde(default)]
+    pub oidc: HashMap<String, OidcProviderConfig>,
     #[serde(default)]
     pub repository: HashMap<String, RepositoryConfig>, // hashmap of namespace <-> repository_config
     #[serde(default)]
@@ -136,6 +138,13 @@ pub enum MetadataStoreConfig {
 pub struct IdentityConfig {
     pub username: String,
     pub password: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "provider", rename_all = "lowercase")]
+pub enum OidcProviderConfig {
+    Generic(oidc::generic::ProviderConfig),
+    GitHub(oidc::github::ProviderConfig),
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

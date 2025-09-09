@@ -15,6 +15,7 @@ mod http_client;
 pub mod manifest;
 pub mod metadata_store;
 pub mod oci;
+pub mod oidc;
 mod reader;
 pub mod repository;
 mod response_body;
@@ -27,8 +28,9 @@ pub mod utils;
 mod version;
 
 use crate::configuration;
-use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
+use crate::configuration::{CacheStoreConfig, GlobalConfig, OidcProviderConfig, RepositoryConfig};
 use crate::registry::cache::Cache;
+use crate::registry::oidc::OidcValidator;
 pub use repository::Repository;
 
 use crate::registry::blob_store::BlobStore;
@@ -46,6 +48,7 @@ pub struct Registry {
     blob_store: Arc<dyn BlobStore + Send + Sync>,
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
     auth_token_cache: Box<dyn Cache>,
+    oidc_validators: HashMap<String, Arc<OidcValidator>>,
     repositories: HashMap<String, Repository>,
     update_pull_time: bool,
     scrub_dry_run: bool,
@@ -60,17 +63,24 @@ impl Debug for Registry {
 }
 
 impl Registry {
-    #[instrument(skip(repositories_config, blob_store, metadata_store, auth_token_cache))]
+    #[instrument(skip(
+        repositories_config,
+        blob_store,
+        metadata_store,
+        auth_token_cache,
+        oidc_config
+    ))]
     pub fn new(
         blob_store: Arc<dyn BlobStore + Send + Sync>,
         metadata_store: Arc<dyn MetadataStore + Send + Sync>,
         repositories_config: HashMap<String, RepositoryConfig>,
         global_config: &GlobalConfig,
-        auth_token_cache: CacheStoreConfig,
+        auth_token_cache: &CacheStoreConfig,
+        oidc_config: &HashMap<String, OidcProviderConfig>,
     ) -> Result<Self, configuration::Error> {
-        let auth_token_cache: Box<dyn Cache> =
-            if let CacheStoreConfig::Redis(redis_config) = auth_token_cache {
-                Box::new(cache::redis::Backend::new(redis_config)?)
+        let auth_token_cache_box: Box<dyn Cache> =
+            if let CacheStoreConfig::Redis(ref redis_config) = auth_token_cache {
+                Box::new(cache::redis::Backend::new(redis_config.clone())?)
             } else {
                 Box::new(cache::memory::Backend::new())
             };
@@ -81,11 +91,32 @@ impl Registry {
             repositories.insert(repository_name, res);
         }
 
+        let mut oidc_validators = HashMap::new();
+        for (name, provider_config) in oidc_config {
+            let cache = match &auth_token_cache {
+                CacheStoreConfig::Redis(redis_config) => {
+                    Box::new(cache::redis::Backend::new(redis_config.clone())?) as Box<dyn Cache>
+                }
+                CacheStoreConfig::Memory => Box::new(cache::memory::Backend::new()),
+            };
+
+            let validator = Arc::new(
+                OidcValidator::new(name.clone(), provider_config, cache).map_err(|e| {
+                    configuration::Error::Http(format!(
+                        "Failed to create OIDC validator '{name}': {e}"
+                    ))
+                })?,
+            );
+
+            oidc_validators.insert(name.clone(), validator);
+        }
+
         let res = Self {
             update_pull_time: global_config.update_pull_time,
             blob_store,
             metadata_store,
-            auth_token_cache,
+            auth_token_cache: auth_token_cache_box,
+            oidc_validators,
             repositories,
             scrub_dry_run: true,
             upload_timeout: Duration::days(1),
@@ -116,6 +147,10 @@ impl Registry {
         } else {
             Err(Error::NameInvalid)
         }
+    }
+
+    pub fn oidc_validators(&self) -> &HashMap<String, Arc<OidcValidator>> {
+        &self.oidc_validators
     }
 
     /// Validates a registry request against access control policies.

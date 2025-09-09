@@ -236,12 +236,16 @@ async fn router(
 ) -> Result<Response<ResponseBody>, registry::Error> {
     let path = req.uri().path().to_string();
 
-    if let Some((username, password)) = req.provided_credentials() {
+    if let Some((username, password)) = req.basic_auth() {
         id.id = match context.validate_credentials(&username, &password) {
             Ok(id) => id,
             Err(e) => return Err(e),
         };
         id.username = Some(username);
+    } else if let Some(token) = req.bearer_token() {
+        if !context.oidc_validators.is_empty() {
+            id.oidc = Some(context.validate_oidc_token(&token).await?);
+        }
     }
 
     if ROUTE_API_VERSION_REGEX.is_match(&path) && req.method() == Method::GET {

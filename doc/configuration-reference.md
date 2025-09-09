@@ -124,6 +124,86 @@ key_prefix = "registry-locks"
 - `username` (string): The username for the identity.
 - `password` (string): The argon2 hashed password for the identity.
 
+## OIDC Authentication (`oidc`)
+
+Optional OIDC (OpenID Connect) configuration for JWT-based authentication. When configured, the registry accepts Bearer tokens from multiple identity providers simultaneously.
+
+Each provider is configured under `[oidc.<provider-name>]` with provider-specific settings.
+
+### GitHub Provider
+
+For GitHub Actions OIDC tokens. The provider automatically extracts GitHub-specific fields from the token for use in CEL policies.
+
+Configuration fields:
+- `provider = "github"` (required)
+- `issuer` (optional string): Override default GitHub issuer URL (default: "https://token.actions.githubusercontent.com")
+- `jwks_uri` (optional string): Override default JWKS discovery
+- `jwks_refresh_interval` (u64): JWKS refresh interval in seconds (default: 3600)
+- `required_audience` (optional string): Required audience claim in the JWT token
+- `clock_skew_tolerance` (u64): Clock skew tolerance in seconds (default: 60)
+
+Example:
+```toml
+[oidc.github-actions]
+provider = "github"
+required_audience = "https://github.com/myorg/myrepo"  # Optional
+jwks_refresh_interval = 3600
+clock_skew_tolerance = 60
+```
+
+Example with multiple providers:
+```toml
+[oidc.github-actions]
+provider = "github"
+jwks_refresh_interval = 3600
+
+[oidc.corporate-auth]
+provider = "generic"
+issuer = "https://auth.example.com/realms/myrealm"
+jwks_refresh_interval = 7200
+clock_skew_tolerance = 120
+```
+
+Use CEL expressions in your access policies to restrict access based on GitHub claims:
+```toml
+[repository."myapp".access_policy]
+rules = [
+  # Allow specific repositories using regex
+  '''identity.oidc.claims.repository.matches("^myorg/(app1|app2|app3)$")''',
+  
+  # Allow any repository from an organization
+  '''identity.oidc.claims.repository.startsWith("myorg/")''',
+  
+  # Allow specific actors
+  '''identity.oidc.claims.actor in ["username", "dependabot[bot]"]''',
+  
+  # Allow specific workflows using regex
+  '''identity.oidc.claims.workflow.matches("^\\.github/workflows/(deploy|release)\\.yml$")'''
+]
+```
+
+### Generic Provider
+
+For any OIDC-compliant provider (Google, Okta, Auth0, Keycloak, etc.):
+
+Configuration fields:
+- `provider = "generic"` (required)
+- `issuer` (string): The OIDC issuer URL
+- `jwks_uri` (optional string): Custom JWKS URI if not using standard discovery
+- `jwks_refresh_interval` (u64): JWKS refresh interval in seconds (default: 3600)
+- `required_audience` (optional string): Required audience claim in the JWT token
+- `clock_skew_tolerance` (u64): Clock skew tolerance in seconds (default: 60)
+
+Example:
+```toml
+[oidc.google-cloud]
+provider = "generic"
+issuer = "https://accounts.google.com"
+# jwks_uri = "https://custom.example.com/jwks.json"  # Optional
+jwks_refresh_interval = 3600
+clock_skew_tolerance = 60
+```
+
 ## Repository (`repository."<namespace>"`)
 
 ## Pull-through cache (`repository."<namespace>".upstream`)

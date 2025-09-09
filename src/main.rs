@@ -113,7 +113,8 @@ fn set_config_watcher(
                 metadata_store.clone(),
                 config.repository,
                 &config.global,
-                config.cache_store,
+                &config.cache_store,
+                &config.oidc,
             ) {
                 Ok(registry) => registry,
                 Err(error) => {
@@ -234,7 +235,8 @@ async fn handle_command(
         metadata_store.clone(),
         config.repository,
         &config.global,
-        config.cache_store,
+        &config.cache_store,
+        &config.oidc,
     )?;
 
     match arguments.nested {

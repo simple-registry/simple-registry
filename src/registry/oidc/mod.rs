@@ -1,0 +1,428 @@
+pub mod generic;
+pub mod github;
+
+use crate::configuration::OidcProviderConfig;
+use crate::registry::cache::Cache;
+use crate::registry::http_client::{HttpClient, HttpClientBuilder};
+use crate::registry::repository::access_policy::OidcClaims;
+use crate::registry::Error;
+use async_trait::async_trait;
+use http_body_util::{BodyExt, Empty};
+use hyper::body::Bytes;
+use hyper::{Request, StatusCode};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use serde::{Deserialize, Serialize};
+use serde_json;
+use std::collections::HashMap;
+use tracing::{debug, info};
+
+#[async_trait]
+pub trait OidcProvider: Send + Sync {
+    fn issuer(&self) -> &str;
+
+    fn jwks_uri(&self) -> Option<&str>;
+
+    fn name(&self) -> &'static str;
+
+    fn validate_provider_claims(
+        &self,
+        _claims: &HashMap<String, serde_json::Value>,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+pub fn create_provider(config: &OidcProviderConfig) -> Box<dyn OidcProvider> {
+    match config {
+        OidcProviderConfig::Generic(cfg) => Box::new(generic::Provider::new(cfg.clone())),
+        OidcProviderConfig::GitHub(cfg) => Box::new(github::Provider::new(cfg.clone())),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct OpenIdConfiguration {
+    issuer: String,
+    jwks_uri: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct Jwks {
+    keys: Vec<Jwk>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct Jwk {
+    kty: String,
+    #[serde(rename = "use", skip_serializing_if = "Option::is_none")]
+    key_use: Option<String>,
+    kid: Option<String>,
+    alg: Option<String>,
+    n: Option<String>,
+    e: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    x: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    y: Option<String>,
+}
+
+pub struct OidcValidator {
+    _provider_name: String,
+    jwks_refresh_interval: u64,
+    provider: Box<dyn OidcProvider>,
+    http_client: Box<dyn HttpClient>,
+    cache: Box<dyn Cache>,
+    jwks_cache_key: String,
+    oidc_config_cache_key: String,
+    validation: Validation,
+}
+
+impl OidcValidator {
+    pub fn new(
+        provider_name: String,
+        provider_config: &OidcProviderConfig,
+        cache: Box<dyn Cache>,
+    ) -> Result<Self, Error> {
+        let http_client = HttpClientBuilder::new().build()?;
+
+        let (jwks_refresh_interval, required_audience, clock_skew_tolerance) =
+            match &provider_config {
+                OidcProviderConfig::Generic(cfg) => (
+                    cfg.jwks_refresh_interval,
+                    cfg.required_audience.clone(),
+                    cfg.clock_skew_tolerance,
+                ),
+                OidcProviderConfig::GitHub(cfg) => (
+                    cfg.jwks_refresh_interval,
+                    cfg.required_audience.clone(),
+                    cfg.clock_skew_tolerance,
+                ),
+            };
+
+        let provider = create_provider(provider_config);
+
+        let issuer_hash = provider
+            .issuer()
+            .chars()
+            .fold(0u32, |acc, c| acc.wrapping_mul(31).wrapping_add(c as u32));
+        let jwks_cache_key = format!("oidc:{provider_name}:jwks:{issuer_hash:x}");
+        let oidc_config_cache_key = format!("oidc:{provider_name}:config:{issuer_hash:x}");
+
+        let mut validation = Validation::default();
+        validation.set_issuer(&[provider.issuer()]);
+        if let Some(ref aud) = required_audience {
+            validation.set_audience(&[aud]);
+        } else {
+            validation.validate_aud = false;
+        }
+        validation.leeway = clock_skew_tolerance;
+        validation.validate_exp = true;
+        validation.validate_nbf = true;
+
+        validation.algorithms = vec![
+            Algorithm::RS256,
+            Algorithm::RS384,
+            Algorithm::RS512,
+            Algorithm::ES256,
+            Algorithm::ES384,
+        ];
+
+        Ok(Self {
+            _provider_name: provider_name,
+            jwks_refresh_interval,
+            provider,
+            http_client,
+            cache,
+            jwks_cache_key,
+            oidc_config_cache_key,
+            validation,
+        })
+    }
+
+    pub async fn validate_token(&self, token: &str) -> Result<OidcClaims, Error> {
+        // Decode header to get the kid
+        let header = decode_header(token)
+            .map_err(|e| Error::Unauthorized(format!("Failed to decode JWT header: {e}")))?;
+
+        // Get JWKS
+        let jwks = self.fetch_jwks().await?;
+
+        // Find the matching key
+        let jwk = jwks
+            .keys
+            .iter()
+            .find(|k| k.kid.as_ref() == header.kid.as_ref())
+            .ok_or_else(|| {
+                Error::Unauthorized(format!("No matching key found for kid: {:?}", header.kid))
+            })?;
+
+        let decoding_key = Self::jwk_to_decoding_key(jwk)?;
+
+        let token_data =
+            decode::<HashMap<String, serde_json::Value>>(token, &decoding_key, &self.validation)
+                .map_err(|e| Error::Unauthorized(format!("JWT validation failed: {e}")))?;
+
+        self.provider.validate_provider_claims(&token_data.claims)?;
+
+        debug!(
+            "{} provider: Token validated successfully",
+            self.provider.name()
+        );
+        Ok(OidcClaims {
+            claims: token_data.claims,
+        })
+    }
+
+    fn jwk_to_decoding_key(jwk: &Jwk) -> Result<DecodingKey, Error> {
+        match jwk.kty.as_str() {
+            "RSA" => {
+                let n = jwk
+                    .n
+                    .as_ref()
+                    .ok_or_else(|| Error::Internal("RSA key missing modulus".to_string()))?;
+                let e = jwk
+                    .e
+                    .as_ref()
+                    .ok_or_else(|| Error::Internal("RSA key missing exponent".to_string()))?;
+
+                DecodingKey::from_rsa_components(n, e)
+                    .map_err(|e| Error::Internal(format!("Failed to create RSA key: {e}")))
+            }
+            "EC" => {
+                let x = jwk
+                    .x
+                    .as_ref()
+                    .ok_or_else(|| Error::Internal("EC key missing x coordinate".to_string()))?;
+                let y = jwk
+                    .y
+                    .as_ref()
+                    .ok_or_else(|| Error::Internal("EC key missing y coordinate".to_string()))?;
+
+                DecodingKey::from_ec_components(x, y)
+                    .map_err(|e| Error::Internal(format!("Failed to create EC key: {e}")))
+            }
+            _ => Err(Error::Internal(format!(
+                "Unsupported key type: {}",
+                jwk.kty
+            ))),
+        }
+    }
+
+    async fn fetch_jwks(&self) -> Result<Jwks, Error> {
+        if let Ok(cached) = self.cache.retrieve(&self.jwks_cache_key).await {
+            if let Ok(jwks) = serde_json::from_str::<Jwks>(&cached) {
+                debug!("Using cached JWKS");
+                return Ok(jwks);
+            }
+        }
+
+        let jwks_uri = if let Some(uri) = self.provider.jwks_uri() {
+            uri.to_string()
+        } else {
+            let oidc_config = self.fetch_oidc_configuration().await?;
+            oidc_config.jwks_uri
+        };
+
+        let request = Request::builder()
+            .method("GET")
+            .uri(&jwks_uri)
+            .header("Accept", "application/json")
+            .body(Empty::<Bytes>::new())
+            .map_err(|e| Error::Internal(format!("Failed to build JWKS request: {e}")))?;
+
+        let response = self.http_client.request(request).await?;
+
+        if response.status() != StatusCode::OK {
+            return Err(Error::Internal(format!(
+                "Failed to fetch JWKS: HTTP {}",
+                response.status()
+            )));
+        }
+
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| Error::Internal(format!("Failed to read JWKS response: {e}")))?
+            .to_bytes();
+
+        let jwks: Jwks = serde_json::from_slice(&body)
+            .map_err(|e| Error::Internal(format!("Failed to parse JWKS: {e}")))?;
+
+        // Cache the JWKS
+        let _ = self
+            .cache
+            .store(
+                &self.jwks_cache_key,
+                &serde_json::to_string(&jwks).unwrap(),
+                self.jwks_refresh_interval,
+            )
+            .await;
+
+        info!("Fetched and cached JWKS from {}", jwks_uri);
+        Ok(jwks)
+    }
+
+    async fn fetch_oidc_configuration(&self) -> Result<OpenIdConfiguration, Error> {
+        // Check cache first
+        if let Ok(cached) = self.cache.retrieve(&self.oidc_config_cache_key).await {
+            if let Ok(config) = serde_json::from_str::<OpenIdConfiguration>(&cached) {
+                debug!("Using cached OIDC configuration");
+                return Ok(config);
+            }
+        }
+
+        let discovery_url = format!(
+            "{}/.well-known/openid-configuration",
+            self.provider.issuer()
+        );
+
+        let request = Request::builder()
+            .method("GET")
+            .uri(&discovery_url)
+            .header("Accept", "application/json")
+            .body(Empty::<Bytes>::new())
+            .map_err(|e| Error::Internal(format!("Failed to build OIDC discovery request: {e}")))?;
+
+        let response = self.http_client.request(request).await?;
+
+        if response.status() != StatusCode::OK {
+            return Err(Error::Internal(format!(
+                "Failed to fetch OIDC configuration: HTTP {}",
+                response.status()
+            )));
+        }
+
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| {
+                Error::Internal(format!("Failed to read OIDC configuration response: {e}"))
+            })?
+            .to_bytes();
+
+        let config: OpenIdConfiguration = serde_json::from_slice(&body)
+            .map_err(|e| Error::Internal(format!("Failed to parse OIDC configuration: {e}")))?;
+
+        if config.issuer != self.provider.issuer() {
+            return Err(Error::Internal(format!(
+                "OIDC configuration issuer mismatch: expected {}, got {}",
+                self.provider.issuer(),
+                config.issuer
+            )));
+        }
+
+        // Cache the configuration
+        let _ = self
+            .cache
+            .store(
+                &self.oidc_config_cache_key,
+                &serde_json::to_string(&config).unwrap(),
+                self.jwks_refresh_interval,
+            )
+            .await;
+
+        info!(
+            "Fetched and cached OIDC configuration from {}",
+            discovery_url
+        );
+        Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_generic_provider() {
+        let config = OidcProviderConfig::Generic(crate::registry::oidc::generic::ProviderConfig {
+            issuer: "https://example.com".to_string(),
+            jwks_uri: None,
+            jwks_refresh_interval: 3600,
+            required_audience: Some("test-audience".to_string()),
+            clock_skew_tolerance: 60,
+        });
+
+        let provider = create_provider(&config);
+        assert_eq!(provider.issuer(), "https://example.com");
+        assert_eq!(provider.name(), "Generic OIDC");
+        assert!(provider.jwks_uri().is_none());
+    }
+
+    #[test]
+    fn test_create_github_provider() {
+        let config = OidcProviderConfig::GitHub(crate::registry::oidc::github::ProviderConfig {
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+            jwks_uri: "https://token.actions.githubusercontent.com/.well-known/jwks".to_string(),
+            jwks_refresh_interval: 3600,
+            required_audience: None,
+            clock_skew_tolerance: 60,
+        });
+
+        let provider = create_provider(&config);
+        assert_eq!(
+            provider.issuer(),
+            "https://token.actions.githubusercontent.com"
+        );
+        assert_eq!(provider.name(), "GitHub Actions");
+        assert_eq!(
+            provider.jwks_uri(),
+            Some("https://token.actions.githubusercontent.com/.well-known/jwks")
+        );
+    }
+
+    #[test]
+    fn test_jwk_to_decoding_key_rsa() {
+        let jwk = Jwk {
+            kty: "RSA".to_string(),
+            key_use: Some("sig".to_string()),
+            kid: Some("cc413527-173f-5a05-976e-9c52b1d7b431".to_string()),
+            alg: Some("RS256".to_string()),
+            n: Some("w4M936N3ZxNaEblcUoBm-xu0-V9JxNx5S7TmF0M3SBK-2bmDyAeDdeIOTcIVZHG-ZX9N9W0u1yWafgWewHrsz66BkxXq3bscvQUTAw7W3s6TEeYY7o9shPkFfOiU3x_KYgOo06SpiFdymwJflRs9cnbaU88i5fZJmUepUHVllP2tpPWTi-7UA3AdP3cdcCs5bnFfTRKzH2W0xqKsY_jIG95aQJRBDpbiesefjuyxcQnOv88j9tCKWzHpJzRKYjAUM6OPgN4HYnaSWrPJj1v41eEkFM1kORuj-GSH2qMVD02VklcqaerhQHIqM-RjeHsN7G05YtwYzomE5G-fZuwgvQ".to_string()),
+            e: Some("AQAB".to_string()),
+            x: None,
+            y: None,
+        };
+
+        let result = OidcValidator::jwk_to_decoding_key(&jwk);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_jwk_to_decoding_key_ec() {
+        let jwk = Jwk {
+            kty: "EC".to_string(),
+            key_use: Some("sig".to_string()),
+            kid: Some("test-kid".to_string()),
+            alg: Some("ES256".to_string()),
+            n: None,
+            e: None,
+            x: Some("MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4".to_string()),
+            y: Some("4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM".to_string()),
+        };
+
+        let result = OidcValidator::jwk_to_decoding_key(&jwk);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_jwk_to_decoding_key_unsupported() {
+        let jwk = Jwk {
+            kty: "OKP".to_string(),
+            key_use: Some("sig".to_string()),
+            kid: Some("test-kid".to_string()),
+            alg: Some("EdDSA".to_string()),
+            n: None,
+            e: None,
+            x: None,
+            y: None,
+        };
+
+        let result = OidcValidator::jwk_to_decoding_key(&jwk);
+        assert!(result.is_err());
+        if let Err(Error::Internal(msg)) = result {
+            assert!(msg.contains("Unsupported key type: OKP"));
+        }
+    }
+}

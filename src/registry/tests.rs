@@ -104,7 +104,8 @@ impl FSRegistryTestCase {
             fs_metadata_store.clone() as Arc<dyn metadata_store::MetadataStore + Send + Sync>,
             repositories_config,
             &global,
-            token_cache,
+            &token_cache,
+            &HashMap::default(),
         )
         .unwrap()
         .with_upload_timeout(Duration::seconds(0))
@@ -281,7 +282,8 @@ impl S3RegistryTestCase {
             metadata_store.clone() as Arc<dyn metadata_store::MetadataStore + Send + Sync>,
             repositories_config,
             &global,
-            token_cache,
+            &token_cache,
+            &HashMap::default(),
         )
         .unwrap()
         .with_upload_timeout(Duration::seconds(0))
