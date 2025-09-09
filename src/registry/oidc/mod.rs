@@ -51,18 +51,43 @@ struct Jwks {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct Jwk {
-    kty: String,
-    #[serde(rename = "use", skip_serializing_if = "Option::is_none")]
-    key_use: Option<String>,
-    kid: Option<String>,
-    alg: Option<String>,
-    n: Option<String>,
-    e: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    x: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    y: Option<String>,
+#[serde(tag = "kty")]
+enum Jwk {
+    #[serde(rename = "RSA")]
+    Rsa {
+        #[serde(rename = "use", skip_serializing_if = "Option::is_none")]
+        key_use: Option<String>,
+        kid: Option<String>,
+        alg: Option<String>,
+        n: String,
+        e: String,
+    },
+    #[serde(rename = "EC")]
+    Ec {
+        #[serde(rename = "use", skip_serializing_if = "Option::is_none")]
+        key_use: Option<String>,
+        kid: Option<String>,
+        alg: Option<String>,
+        x: String,
+        y: String,
+    },
+}
+
+impl Jwk {
+    fn kid(&self) -> Option<&str> {
+        match self {
+            Jwk::Rsa { kid, .. } | Jwk::Ec { kid, .. } => kid.as_deref(),
+        }
+    }
+
+    fn to_decoding_key(&self) -> Result<DecodingKey, Error> {
+        match self {
+            Jwk::Rsa { n, e, .. } => DecodingKey::from_rsa_components(n, e)
+                .map_err(|e| Error::Internal(format!("Failed to create RSA key: {e}"))),
+            Jwk::Ec { x, y, .. } => DecodingKey::from_ec_components(x, y)
+                .map_err(|e| Error::Internal(format!("Failed to create EC key: {e}"))),
+        }
+    }
 }
 
 pub struct OidcValidator {
@@ -150,12 +175,12 @@ impl OidcValidator {
         let jwk = jwks
             .keys
             .iter()
-            .find(|k| k.kid.as_ref() == header.kid.as_ref())
+            .find(|k| k.kid() == header.kid.as_deref())
             .ok_or_else(|| {
                 Error::Unauthorized(format!("No matching key found for kid: {:?}", header.kid))
             })?;
 
-        let decoding_key = Self::jwk_to_decoding_key(jwk)?;
+        let decoding_key = jwk.to_decoding_key()?;
 
         let token_data =
             decode::<HashMap<String, serde_json::Value>>(token, &decoding_key, &self.validation)
@@ -172,40 +197,6 @@ impl OidcValidator {
         })
     }
 
-    fn jwk_to_decoding_key(jwk: &Jwk) -> Result<DecodingKey, Error> {
-        match jwk.kty.as_str() {
-            "RSA" => {
-                let n = jwk
-                    .n
-                    .as_ref()
-                    .ok_or_else(|| Error::Internal("RSA key missing modulus".to_string()))?;
-                let e = jwk
-                    .e
-                    .as_ref()
-                    .ok_or_else(|| Error::Internal("RSA key missing exponent".to_string()))?;
-
-                DecodingKey::from_rsa_components(n, e)
-                    .map_err(|e| Error::Internal(format!("Failed to create RSA key: {e}")))
-            }
-            "EC" => {
-                let x = jwk
-                    .x
-                    .as_ref()
-                    .ok_or_else(|| Error::Internal("EC key missing x coordinate".to_string()))?;
-                let y = jwk
-                    .y
-                    .as_ref()
-                    .ok_or_else(|| Error::Internal("EC key missing y coordinate".to_string()))?;
-
-                DecodingKey::from_ec_components(x, y)
-                    .map_err(|e| Error::Internal(format!("Failed to create EC key: {e}")))
-            }
-            _ => Err(Error::Internal(format!(
-                "Unsupported key type: {}",
-                jwk.kty
-            ))),
-        }
-    }
 
     async fn fetch_jwks(&self) -> Result<Jwks, Error> {
         if let Ok(cached) = self.cache.retrieve(&self.jwks_cache_key).await {
@@ -374,55 +365,68 @@ mod tests {
 
     #[test]
     fn test_jwk_to_decoding_key_rsa() {
-        let jwk = Jwk {
-            kty: "RSA".to_string(),
+        let jwk = Jwk::Rsa {
             key_use: Some("sig".to_string()),
             kid: Some("cc413527-173f-5a05-976e-9c52b1d7b431".to_string()),
             alg: Some("RS256".to_string()),
-            n: Some("w4M936N3ZxNaEblcUoBm-xu0-V9JxNx5S7TmF0M3SBK-2bmDyAeDdeIOTcIVZHG-ZX9N9W0u1yWafgWewHrsz66BkxXq3bscvQUTAw7W3s6TEeYY7o9shPkFfOiU3x_KYgOo06SpiFdymwJflRs9cnbaU88i5fZJmUepUHVllP2tpPWTi-7UA3AdP3cdcCs5bnFfTRKzH2W0xqKsY_jIG95aQJRBDpbiesefjuyxcQnOv88j9tCKWzHpJzRKYjAUM6OPgN4HYnaSWrPJj1v41eEkFM1kORuj-GSH2qMVD02VklcqaerhQHIqM-RjeHsN7G05YtwYzomE5G-fZuwgvQ".to_string()),
-            e: Some("AQAB".to_string()),
-            x: None,
-            y: None,
+            n: "w4M936N3ZxNaEblcUoBm-xu0-V9JxNx5S7TmF0M3SBK-2bmDyAeDdeIOTcIVZHG-ZX9N9W0u1yWafgWewHrsz66BkxXq3bscvQUTAw7W3s6TEeYY7o9shPkFfOiU3x_KYgOo06SpiFdymwJflRs9cnbaU88i5fZJmUepUHVllP2tpPWTi-7UA3AdP3cdcCs5bnFfTRKzH2W0xqKsY_jIG95aQJRBDpbiesefjuyxcQnOv88j9tCKWzHpJzRKYjAUM6OPgN4HYnaSWrPJj1v41eEkFM1kORuj-GSH2qMVD02VklcqaerhQHIqM-RjeHsN7G05YtwYzomE5G-fZuwgvQ".to_string(),
+            e: "AQAB".to_string(),
         };
 
-        let result = OidcValidator::jwk_to_decoding_key(&jwk);
+        let result = jwk.to_decoding_key();
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_jwk_to_decoding_key_ec() {
-        let jwk = Jwk {
-            kty: "EC".to_string(),
+        let jwk = Jwk::Ec {
             key_use: Some("sig".to_string()),
             kid: Some("test-kid".to_string()),
             alg: Some("ES256".to_string()),
-            n: None,
-            e: None,
-            x: Some("MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4".to_string()),
-            y: Some("4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM".to_string()),
+            x: "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4".to_string(),
+            y: "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM".to_string(),
         };
 
-        let result = OidcValidator::jwk_to_decoding_key(&jwk);
+        let result = jwk.to_decoding_key();
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_jwk_to_decoding_key_unsupported() {
-        let jwk = Jwk {
-            kty: "OKP".to_string(),
-            key_use: Some("sig".to_string()),
-            kid: Some("test-kid".to_string()),
-            alg: Some("EdDSA".to_string()),
-            n: None,
-            e: None,
-            x: None,
-            y: None,
-        };
+    fn test_jwk_deserialization() {
+        // Test RSA key deserialization
+        let rsa_json = r#"{
+            "kty": "RSA",
+            "use": "sig",
+            "kid": "test-rsa",
+            "alg": "RS256",
+            "n": "xGOr-H7A-PWG3v0lMA",
+            "e": "AQAB"
+        }"#;
+        let jwk: Result<Jwk, _> = serde_json::from_str(rsa_json);
+        assert!(jwk.is_ok());
+        assert!(matches!(jwk.unwrap(), Jwk::Rsa { .. }));
 
-        let result = OidcValidator::jwk_to_decoding_key(&jwk);
-        assert!(result.is_err());
-        if let Err(Error::Internal(msg)) = result {
-            assert!(msg.contains("Unsupported key type: OKP"));
-        }
+        // Test EC key deserialization
+        let ec_json = r#"{
+            "kty": "EC",
+            "use": "sig",
+            "kid": "test-ec",
+            "alg": "ES256",
+            "x": "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4",
+            "y": "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"
+        }"#;
+        let jwk: Result<Jwk, _> = serde_json::from_str(ec_json);
+        assert!(jwk.is_ok());
+        assert!(matches!(jwk.unwrap(), Jwk::Ec { .. }));
+
+        // Test unsupported key type is not deserializable
+        let unsupported_json = r#"{
+            "kty": "OKP",
+            "use": "sig",
+            "kid": "test-okp",
+            "alg": "EdDSA"
+        }"#;
+        let jwk: Result<Jwk, _> = serde_json::from_str(unsupported_json);
+        assert!(jwk.is_err());
     }
 }
