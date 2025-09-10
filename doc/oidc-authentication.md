@@ -22,7 +22,9 @@ OIDC providers are configured under `[oidc.<provider-name>]` sections. Each prov
 # GitHub Actions with defaults (simplest configuration)
 [oidc.github-actions]
 provider = "github"
+```
 
+```toml
 # Or with custom settings
 [oidc.github-actions]
 provider = "github"
@@ -42,7 +44,9 @@ Default values for GitHub provider:
 [oidc.my-provider]
 provider = "generic"
 issuer = "https://auth.example.com"
+```
 
+```toml
 # With all options
 [oidc.my-provider]
 provider = "generic"
@@ -77,6 +81,13 @@ clock_skew_tolerance = 120
 
 Repository and workflow restrictions should be implemented using CEL policies for maximum flexibility. See the Policy Examples section below.
 
+## Authentication Methods
+
+OIDC tokens can be provided in two ways:
+
+1. **Bearer Token** (standard OAuth2): `Authorization: Bearer <jwt-token>`
+2. **Basic Auth** (Docker compatibility): Username must match the provider name configured in `[oidc.<provider-name>]`, password is the JWT token
+
 ## Using OIDC Authentication
 
 ### From GitHub Actions
@@ -103,7 +114,7 @@ jobs:
       - name: Login to Registry
         run: |
           echo $REGISTRY_TOKEN | docker login registry.example.com \
-            --username oauth2 --password-stdin
+            --username github-actions --password-stdin  # username must match provider name
       
       - name: Push Image
         run: docker push registry.example.com/myapp:latest
@@ -115,9 +126,9 @@ jobs:
 # Get token from your OIDC provider
 TOKEN=$(get-oidc-token)  # Provider-specific
 
-# Use with Docker
+# Use with Docker (username must match your provider name)
 echo $TOKEN | docker login registry.example.com \
-  --username oauth2 --password-stdin
+  --username my-provider --password-stdin
 
 # Use with curl
 curl -H "Authorization: Bearer $TOKEN" \
@@ -193,9 +204,18 @@ rules = [
 ]
 ```
 
+## Authentication Flow
+
+The registry processes authentication in this order:
+1. **mTLS** certificates (if present)
+2. **OIDC** validators (Bearer token or Basic auth with matching provider name)
+3. **BasicAuth** validator (username/password from configuration)
+
+Authentication uses fail-open semantics: invalid credentials return NoCredentials rather than errors, allowing the next authentication method to be tried. This enables multiple authentication methods to coexist without conflicts.
+
 ## Security Considerations
 
-1. **Token Validation**: All tokens are properly validated using the `jsonwebtoken` crate:
+1. **Token Validation**: All tokens are properly validated:
    - Cryptographic signature verification against JWKS
    - Support for RSA (RS256, RS384, RS512) and EC (ES256, ES384) algorithms
    - Issuer (`iss`) claim validation

@@ -7,7 +7,7 @@ Implemented
 Simple-registry requires passwords stored as secrets in CI systems. This creates management overhead and security risks. CI/CD platforms provide OIDC tokens that could replace password-based authentication.
 
 ## Decision
-Implemented OIDC token authentication via `Authorization: Bearer <token>` header using the `jsonwebtoken` crate for proper JWT validation with signature verification.
+Implemented OIDC token authentication supporting both `Authorization: Bearer <token>` and Basic authentication (with provider name as username) using the `jsonwebtoken` crate for proper JWT validation with signature verification.
 
 ### Configuration
 ```toml
@@ -33,44 +33,15 @@ rules = [
 ]
 ```
 
-### Implementation Details
+### Key Design Decisions
 
-#### Provider Architecture
-- **Trait-based design**: `OidcProvider` trait for extensibility
-- **Built-in providers**:
-  - `Generic`: Works with any OIDC-compliant provider
-  - `GitHub`: Pre-configured for GitHub Actions with claim validation
-- **Multiple providers**: Support simultaneous providers via HashMap
-
-#### JWT Validation
-- **Proper signature verification**: Using `jsonwebtoken` crate
-- **Key type support**:
-  - RSA keys (RS256, RS384, RS512) via `DecodingKey::from_rsa_components()`
-  - EC keys (ES256, ES384) via `DecodingKey::from_ec_components()`
-- **JWKS handling**:
-  - Automatic JWKS fetching from provider
-  - Caching with configurable refresh interval
-  - OIDC discovery support (.well-known/openid-configuration)
-
-#### Security Features
-- **Standard claim validation**: exp, nbf, iat, iss, aud
-- **Provider-specific validation**: GitHub validates required claims (repository, actor)
-- **Clock skew tolerance**: Configurable per provider
-- **Cache security**: JWKS cached with provider-specific keys
-
-#### Integration Points
-- **Authentication flow**: Bearer token extraction in `request_ext.rs`
-- **Server context**: OIDC validators initialized at startup
-- **Access policy**: Claims available as `identity.oidc.claims` in CEL
-- **Fallback behavior**: Tries all configured validators until one succeeds
-
-### Code Structure
-```
-src/registry/oidc/
-├── mod.rs          # Core validation logic, JWKS fetching
-├── generic.rs      # Generic OIDC provider
-└── github.rs       # GitHub Actions provider
-```
+- **Multiple authentication methods**: Supports both Bearer tokens and Basic auth (with provider name as username) for Docker CLI compatibility
+- **Multiple providers**: Simultaneous support for different OIDC providers (GitHub, generic)
+- **Authentication order**: OIDC validators run before BasicAuth to prevent conflicts
+- **Fail-open semantics**: Invalid tokens return NoCredentials rather than errors, allowing fallback to other authentication methods
+- **Claims in policies**: All JWT claims exposed as `identity.oidc.claims` in CEL expressions for flexible access control
+- **JWKS caching**: Automatic key fetching and caching to minimize network calls
+- **Provider extensibility**: Easy to add new OIDC providers through configuration
 
 ## Consequences
 
@@ -80,6 +51,8 @@ src/registry/oidc/
 - **Fine-grained policies**: Full claim access in CEL expressions
 - **Production ready**: Proper signature verification, not just claim parsing
 - **Extensible**: Easy to add new providers
+- **Docker compatibility**: Basic auth support for Docker CLI integration
+- **Multi-auth support**: Works alongside mTLS and BasicAuth without conflicts
 
 ### Negative
 - **Added dependency**: `jsonwebtoken` crate (well-maintained, widely used)
@@ -91,19 +64,12 @@ src/registry/oidc/
 - **Backward compatible**: No changes to existing authentication
 - **Performance**: JWKS caching minimizes network calls
 
-## Testing
-Unit tests cover:
-- Provider creation (Generic and GitHub)
-- JWK to DecodingKey conversion (RSA and EC)
-- Unsupported key type handling
-- All tests pass with `cargo test --all-targets`
-
 ## Security Considerations
-- **No homebrew crypto**: Uses battle-tested `jsonwebtoken` crate
-- **Signature verification**: Actually validates JWT signatures (not just decoding)
-- **Time-based validation**: Enforces exp, nbf, iat claims
-- **Issuer validation**: Ensures tokens come from expected provider
-- **Audience validation**: Optional but recommended
+- Uses industry-standard `jsonwebtoken` crate for cryptographic operations
+- Validates JWT signatures against provider's JWKS
+- Enforces standard OIDC claims (exp, nbf, iat, iss, aud)
+- Provider-specific validation for enhanced security
+- No credential conflicts due to authentication ordering
 
 ## Alternatives Considered
 - **Custom JWT implementation**: Rejected due to security risks

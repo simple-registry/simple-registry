@@ -9,12 +9,12 @@ A fully OCI-compliant and Docker-compatible container registry.
 - Access control policies
 - Retention policies
 - Native mTLS support
-- OIDC authentication
+- OIDC authentication (Bearer and Basic auth)
 
 ## Properties
 
 - Resource efficient: Asynchronous, Streaming operations
-- Secure: mTLS, OIDC/JWT authentication, authorization policies (powered by CEL)
+- Secure: mTLS, OIDC/JWT authentication (Bearer and Basic auth), authorization policies (powered by CEL)
 - Scalable: light footprint
 - Easy to operate: online garbage collection, auto-reload of configuration and certificates
 - Cross-platform: should be portable on most mainstream operating systems
