@@ -108,6 +108,13 @@ fn set_config_watcher(
                 }
             };
 
+            let oidc_validators =
+                server::ServerContext::build_oidc_validators(&config.oidc, &config.cache_store)
+                    .unwrap_or_else(|e| {
+                        error!("Failed to build OIDC validators: {e}");
+                        Arc::new(Vec::new())
+                    });
+
             let registry = match Registry::new(
                 blob_store.clone(),
                 metadata_store.clone(),
@@ -123,9 +130,12 @@ fn set_config_watcher(
                 }
             };
 
-            if let Err(error) =
-                server.notify_config_change(config.server, &config.identity, registry)
-            {
+            if let Err(error) = server.notify_config_change(
+                config.server,
+                &config.identity,
+                registry,
+                oidc_validators,
+            ) {
                 error!("Failed to notify server of configuration change: {error}");
             } else {
                 info!("Server notified of configuration change");
@@ -230,6 +240,9 @@ async fn handle_command(
     data_store: Arc<dyn BlobStore + Send + Sync>,
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
 ) -> Result<(), command::Error> {
+    let oidc_validators =
+        server::ServerContext::build_oidc_validators(&config.oidc, &config.cache_store)?;
+
     let registry = Registry::new(
         data_store.clone(),
         metadata_store.clone(),
@@ -250,6 +263,7 @@ async fn handle_command(
                 &config.server,
                 &config.identity,
                 registry,
+                oidc_validators.clone(),
             )?);
 
             let _ = set_config_watcher(

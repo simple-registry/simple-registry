@@ -1,7 +1,6 @@
 use crate::command;
 use crate::command::server::{serve_request, ServerContext};
 use crate::configuration::ServerConfig;
-use crate::registry::repository::access_policy::ClientIdentity;
 use arc_swap::ArcSwap;
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
@@ -40,11 +39,7 @@ impl InsecureListener {
             let stream = TokioIo::new(tcp);
             let context = self.context.load();
 
-            tokio::spawn(Box::pin(serve_request(
-                stream,
-                context.clone(),
-                ClientIdentity::default(),
-            )));
+            tokio::spawn(Box::pin(serve_request(stream, context.clone(), None)));
         }
     }
 }

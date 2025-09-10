@@ -1,7 +1,6 @@
 use crate::command;
 use crate::command::server::{serve_request, ServerContext};
 use crate::configuration::{Error, ServerConfig, ServerTlsConfig};
-use crate::registry::repository::access_policy::ClientIdentity;
 use arc_swap::ArcSwap;
 use hyper_util::rt::TokioIo;
 use rustls::server::WebPkiClientVerifier;
@@ -13,8 +12,6 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info};
-use x509_parser::certificate::X509Certificate;
-use x509_parser::prelude::FromDer;
 
 pub struct TlsListener {
     binding_address: SocketAddr,
@@ -101,22 +98,24 @@ impl TlsListener {
             let tls_stream = tls_acceptor.accept(tcp).await;
             drop(tls_acceptor);
 
-            if let Ok(tls) = tls_stream {
-                let (_, session) = tls.get_ref();
+            let Ok(tls) = tls_stream else {
+                continue;
+            };
 
-                let identity = session
-                    .peer_certificates()
-                    .and_then(|certs| certs.first())
-                    .and_then(|cert| X509Certificate::from_der(cert).ok())
-                    .and_then(|(_, cert)| ClientIdentity::from_cert(&cert).ok())
-                    .unwrap_or_default();
+            let (_, session) = tls.get_ref();
+            let peer_certificate = session
+                .peer_certificates()
+                .and_then(|certs| certs.first())
+                .map(|cert| cert.to_vec());
 
-                debug!("Accepted connection from {remote_address}");
-                let stream = TokioIo::new(tls);
-                let context = self.context.load();
-
-                tokio::spawn(Box::pin(serve_request(stream, context.clone(), identity)));
-            }
+            debug!("Accepted connection from {remote_address}");
+            let stream = TokioIo::new(tls);
+            let context = self.context.load();
+            tokio::spawn(Box::pin(serve_request(
+                stream,
+                context.clone(),
+                peer_certificate,
+            )));
         }
     }
 }

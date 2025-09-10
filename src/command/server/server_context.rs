@@ -1,5 +1,7 @@
-use crate::configuration::IdentityConfig;
-use crate::registry::auth::{AuthMiddleware, AuthResult, BasicAuthValidator, OidcValidator};
+use crate::configuration::{CacheStoreConfig, IdentityConfig, OidcProviderConfig};
+use crate::registry::auth::oidc::OidcValidator;
+use crate::registry::auth::{AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator};
+use crate::registry::cache::{self, Cache};
 use crate::registry::repository::access_policy::ClientIdentity;
 use crate::registry::{Error, Registry};
 use hyper::body::Incoming;
@@ -10,65 +12,98 @@ use std::time::Duration;
 use tracing::instrument;
 
 pub struct ServerContext {
-    pub basic_auth_validator: BasicAuthValidator,
+    mtls_middleware: Arc<MtlsValidator>,
+    basic_auth_middleware: Arc<BasicAuthValidator>,
+    oidc_middlewares: Arc<Vec<Arc<OidcValidator>>>,
     pub timeouts: Vec<Duration>,
     pub registry: Registry,
-    pub oidc_validators: HashMap<String, Arc<OidcValidator>>,
     pub credentials: HashMap<String, (String, String)>, // Keep for backwards compatibility
 }
 
 impl ServerContext {
+    pub fn build_oidc_validators(
+        oidc_config: &HashMap<String, OidcProviderConfig>,
+        auth_token_cache: &CacheStoreConfig,
+    ) -> Result<Arc<Vec<Arc<OidcValidator>>>, crate::configuration::Error> {
+        let mut validators = Vec::new();
+        for (name, provider_config) in oidc_config {
+            let cache: Box<dyn Cache> = match auth_token_cache {
+                CacheStoreConfig::Redis(redis_config) => {
+                    Box::new(cache::redis::Backend::new(redis_config.clone())?)
+                }
+                CacheStoreConfig::Memory => Box::new(cache::memory::Backend::new()),
+            };
+
+            let validator = Arc::new(
+                OidcValidator::new(name.clone(), provider_config, cache).map_err(|e| {
+                    crate::configuration::Error::Http(format!(
+                        "Failed to create OIDC validator '{name}': {e}"
+                    ))
+                })?,
+            );
+
+            validators.push(validator);
+        }
+        Ok(Arc::new(validators))
+    }
+
     pub fn new(
         identities: &HashMap<String, IdentityConfig>,
         timeouts: Vec<Duration>,
         registry: Registry,
+        oidc_middlewares: Arc<Vec<Arc<OidcValidator>>>,
     ) -> Self {
-        let basic_auth_validator = BasicAuthValidator::new(identities);
-        let oidc_validators = registry.oidc_validators().clone();
+        let mtls_middleware = Arc::new(MtlsValidator::new());
+        let basic_auth_middleware = Arc::new(BasicAuthValidator::new(identities));
 
-        // Keep credentials for backwards compatibility
-        let mut credentials = HashMap::new();
-        for (identity_id, identity_config) in identities {
-            credentials.insert(
-                identity_config.username.clone(),
-                (identity_id.clone(), identity_config.password.clone()),
-            );
-        }
+        let credentials = identities
+            .iter()
+            .map(|(id, config)| {
+                (
+                    config.username.clone(),
+                    (id.clone(), config.password.clone()),
+                )
+            })
+            .collect();
 
         Self {
-            basic_auth_validator,
+            mtls_middleware,
+            basic_auth_middleware,
+            oidc_middlewares,
             timeouts,
             registry,
-            oidc_validators,
             credentials,
         }
     }
 
-    /// Process authentication middlewares in order
     #[instrument(skip(self, request))]
     pub async fn authenticate_request(
         &self,
         request: &Request<Incoming>,
         identity: &mut ClientIdentity,
     ) -> Result<(), Error> {
-        // Try basic auth first
-        match self.basic_auth_validator.authenticate(request, identity).await {
+        self.mtls_middleware.authenticate(request, identity).await?;
+
+        // Check basic auth
+        match self
+            .basic_auth_middleware
+            .authenticate(request, identity)
+            .await
+        {
             Ok(AuthResult::Authenticated) => return Ok(()),
-            Ok(AuthResult::NoCredentials) => {},  // Continue to next auth method
-            Err(e) => return Err(e),  // Invalid credentials, fail immediately
+            Ok(AuthResult::NoCredentials) => {}
+            Err(e) => return Err(e),
         }
-        
-        // Try OIDC validators
-        for validator in self.oidc_validators.values() {
+
+        // Check OIDC validators (stop on first match)
+        for validator in self.oidc_middlewares.iter() {
             match validator.authenticate(request, identity).await {
                 Ok(AuthResult::Authenticated) => return Ok(()),
-                Ok(AuthResult::NoCredentials) => continue,  // Try next validator
-                Err(e) => return Err(e),  // Invalid token, fail immediately
+                Ok(AuthResult::NoCredentials) => { },
+                Err(e) => return Err(e),
             }
         }
-        
-        // No authentication performed, request continues as anonymous
+
         Ok(())
     }
-
 }

@@ -1,3 +1,4 @@
+use crate::registry::auth::oidc::OidcValidator;
 use crate::{command, configuration, registry};
 use argh::FromArgs;
 use http_body_util::Full;
@@ -25,7 +26,7 @@ mod server_context;
 mod tls_listener;
 
 use crate::command::server::insecure_listener::InsecureListener;
-use crate::command::server::server_context::ServerContext;
+pub use crate::command::server::server_context::ServerContext;
 use crate::command::server::tls_listener::TlsListener;
 use crate::configuration::{IdentityConfig, ServerConfig};
 use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
@@ -78,12 +79,13 @@ impl Command {
         server_config: &ServerConfig,
         identities: &HashMap<String, IdentityConfig>,
         registry: Registry,
+        oidc_validators: Arc<Vec<Arc<OidcValidator>>>,
     ) -> Result<Command, configuration::Error> {
         let timeouts = vec![
             Duration::from_secs(server_config.query_timeout),
             Duration::from_secs(server_config.query_timeout_grace_period),
         ];
-        let context = ServerContext::new(identities, timeouts, registry);
+        let context = ServerContext::new(identities, timeouts, registry, oidc_validators);
 
         let listener = if server_config.tls.is_some() {
             ServiceListener::Secure(TlsListener::new(server_config, context)?)
@@ -99,12 +101,13 @@ impl Command {
         server_config: ServerConfig,
         identities: &HashMap<String, IdentityConfig>,
         registry: Registry,
+        oidc_validators: Arc<Vec<Arc<OidcValidator>>>,
     ) -> Result<(), configuration::Error> {
         let timeouts = vec![
             Duration::from_secs(server_config.query_timeout),
             Duration::from_secs(server_config.query_timeout_grace_period),
         ];
-        let context = ServerContext::new(identities, timeouts, registry);
+        let context = ServerContext::new(identities, timeouts, registry, oidc_validators);
 
         match &self.listener {
             ServiceListener::Insecure(listener) => listener.notify_config_change(context),
@@ -126,13 +129,25 @@ impl Command {
     }
 }
 
-async fn serve_request<S>(stream: TokioIo<S>, context: Arc<ServerContext>, identity: ClientIdentity)
-where
+async fn serve_request<S>(
+    stream: TokioIo<S>,
+    context: Arc<ServerContext>,
+    peer_certificate: Option<Vec<u8>>,
+) where
     S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
+    let context_clone = context.clone();
     let conn = http1::Builder::new().serve_connection(
         stream,
-        service_fn(|request| handle_request(context.clone(), request, identity.clone())),
+        service_fn(move |mut request| {
+            if let Some(ref cert_data) = peer_certificate {
+                use crate::registry::auth::PeerCertificate;
+                request
+                    .extensions_mut()
+                    .insert(PeerCertificate(Arc::new(cert_data.clone())));
+            }
+            handle_request(context_clone.clone(), request, ClientIdentity::default())
+        }),
     );
     pin!(conn);
 
@@ -235,7 +250,6 @@ async fn router(
 ) -> Result<Response<ResponseBody>, registry::Error> {
     let path = req.uri().path().to_string();
 
-    // Use middleware-based authentication
     context.authenticate_request(&req, &mut id).await?;
 
     if ROUTE_API_VERSION_REGEX.is_match(&path) && req.method() == Method::GET {

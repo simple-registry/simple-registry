@@ -58,16 +58,18 @@ impl BasicAuthValidator {
 
 #[async_trait]
 impl AuthMiddleware for BasicAuthValidator {
-    async fn authenticate(&self, request: &Request<Incoming>, identity: &mut ClientIdentity) -> Result<AuthResult, Error> {
-        if let Some((username, password)) = request.basic_auth() {
-            // Credentials were provided, validate them
-            let identity_id = self.validate_credentials(&username, &password)?;
-            identity.id = identity_id;
-            identity.username = Some(username);
-            Ok(AuthResult::Authenticated)
-        } else {
-            // No basic auth credentials in request
-            Ok(AuthResult::NoCredentials)
-        }
+    async fn authenticate(
+        &self,
+        request: &Request<Incoming>,
+        identity: &mut ClientIdentity,
+    ) -> Result<AuthResult, Error> {
+        let Some((username, password)) = request.basic_auth() else {
+            return Ok(AuthResult::NoCredentials);
+        };
+
+        let identity_id = self.validate_credentials(&username, &password)?;
+        identity.id = identity_id;
+        identity.username = Some(username);
+        Ok(AuthResult::Authenticated)
     }
 }

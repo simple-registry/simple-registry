@@ -55,15 +55,17 @@ impl OidcValidator {
 
 #[async_trait]
 impl AuthMiddleware for OidcValidator {
-    async fn authenticate(&self, request: &Request<Incoming>, identity: &mut ClientIdentity) -> Result<AuthResult, Error> {
-        if let Some(token) = request.bearer_token() {
-            // Bearer token was provided, validate it
-            let claims = self.validate_token(&token).await?;
-            identity.oidc = Some(claims);
-            Ok(AuthResult::Authenticated)
-        } else {
-            // No bearer token in request
-            Ok(AuthResult::NoCredentials)
-        }
+    async fn authenticate(
+        &self,
+        request: &Request<Incoming>,
+        identity: &mut ClientIdentity,
+    ) -> Result<AuthResult, Error> {
+        let Some(token) = request.bearer_token() else {
+            return Ok(AuthResult::NoCredentials);
+        };
+
+        let claims = self.validate_token(&token).await?;
+        identity.oidc = Some(claims);
+        Ok(AuthResult::Authenticated)
     }
 }
