@@ -1,4 +1,4 @@
-use crate::registry::reader::HashingReader;
+use crate::registry::blob_store::hashing_reader::HashingReader;
 use tokio::io::{AsyncRead, AsyncReadExt, Take};
 
 /// Splits an `AsyncRead` into fixed-size chunks (last may be smaller).

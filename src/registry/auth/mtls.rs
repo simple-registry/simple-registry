@@ -1,4 +1,4 @@
-use super::{AuthMiddleware, AuthResult};
+use crate::registry::auth::{AuthMiddleware, AuthResult};
 use crate::registry::server::{ClientCertificate, ClientIdentity};
 use crate::registry::Error;
 use async_trait::async_trait;

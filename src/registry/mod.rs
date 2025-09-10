@@ -16,7 +16,6 @@ mod http_client;
 pub mod manifest;
 pub mod metadata_store;
 pub mod oci;
-mod reader;
 pub mod repository;
 mod response_body;
 mod scrub;

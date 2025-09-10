@@ -1,7 +1,6 @@
 pub mod jwk;
 pub mod provider;
 
-use super::{AuthMiddleware, AuthResult};
 use crate::configuration::OidcProviderConfig;
 use crate::registry::cache::Cache;
 use crate::registry::http_client::{HttpClient, HttpClientBuilder};
@@ -13,6 +12,7 @@ use hyper::body::Incoming;
 use hyper::Request;
 
 use crate::registry::auth::oidc::provider::{generic, github};
+use crate::registry::auth::{AuthMiddleware, AuthResult};
 pub use jwk::Jwk;
 pub use provider::OidcProvider;
 

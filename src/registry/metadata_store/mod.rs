@@ -84,9 +84,9 @@ pub trait MetadataStore: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::MetadataStore;
     use crate::registry::blob_store::BlobStore;
     use crate::registry::metadata_store::link_kind::LinkKind;
+    use crate::registry::metadata_store::MetadataStore;
     use crate::registry::oci::Descriptor;
     use crate::registry::utils::sha256_ext::Sha256Ext;
     use chrono::{Duration, Utc};

@@ -1,5 +1,6 @@
 mod error;
 pub mod fs;
+mod hashing_reader;
 pub mod s3;
 
 use crate::registry::oci::Digest;

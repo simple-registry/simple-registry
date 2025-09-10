@@ -1,21 +1,22 @@
+mod chunked_reader;
 #[cfg(test)]
 pub mod tests;
 
-use std::fmt::{Debug, Formatter};
-use std::io::Cursor;
-
+use crate::registry::blob_store::hashing_reader::HashingReader;
 use crate::registry::blob_store::{BlobStore, Error, Reader};
 use crate::registry::data_store;
 use crate::registry::oci::Digest;
-use crate::registry::reader::{ChunkedReader, HashingReader};
 use crate::registry::utils::path_builder;
 use crate::registry::utils::sha256_ext::Sha256Ext;
 use async_trait::async_trait;
 use bytes::Bytes;
 use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
+use chunked_reader::ChunkedReader;
 use serde::Deserialize;
 use sha2::{Digest as ShaDigestTrait, Sha256};
+use std::fmt::{Debug, Formatter};
+use std::io::Cursor;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{debug, instrument};
 

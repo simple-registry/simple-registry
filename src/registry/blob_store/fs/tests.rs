@@ -1,4 +1,4 @@
-use super::Backend;
+use crate::registry::blob_store::fs::Backend;
 use crate::registry::blob_store::tests::{
     test_datastore_blob_operations, test_datastore_list_blobs, test_datastore_list_uploads,
     test_datastore_upload_operations,

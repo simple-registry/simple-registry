@@ -1,5 +1,5 @@
-use super::{AuthMiddleware, AuthResult};
 use crate::configuration::IdentityConfig;
+use crate::registry::auth::{AuthMiddleware, AuthResult};
 use crate::registry::server::ClientIdentity;
 use crate::registry::utils::request_ext::RequestExt;
 use crate::registry::Error;
