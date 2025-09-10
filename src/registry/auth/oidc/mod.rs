@@ -5,7 +5,7 @@ use super::{AuthMiddleware, AuthResult};
 use crate::configuration::OidcProviderConfig;
 use crate::registry::cache::Cache;
 use crate::registry::http_client::{HttpClient, HttpClientBuilder};
-use crate::registry::repository::access_policy::{ClientIdentity, OidcClaims};
+use crate::registry::server::{ClientIdentity, OidcClaims};
 use crate::registry::utils::request_ext::RequestExt;
 use crate::registry::Error;
 use async_trait::async_trait;

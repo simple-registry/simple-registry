@@ -8,6 +8,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use opentelemetry::trace::TraceContextExt;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
@@ -33,7 +34,6 @@ use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
 use crate::registry::blob::QueryBlobParameters;
 use crate::registry::content_discovery::{ReferrerParameters, TagsParameters};
 use crate::registry::manifest::QueryManifestParameters;
-use crate::registry::repository::access_policy::ClientIdentity;
 use crate::registry::upload::{QueryNewUploadParameters, QueryUploadParameters};
 use crate::registry::utils::deserialize_ext::DeserializeExt;
 use crate::registry::{Registry, ResponseBody};
@@ -146,7 +146,7 @@ async fn serve_request<S>(
                     .extensions_mut()
                     .insert(PeerCertificate(Arc::new(cert_data.clone())));
             }
-            handle_request(context_clone.clone(), request, ClientIdentity::default())
+            handle_request(context_clone.clone(), request)
         }),
     );
     pin!(conn);
@@ -190,14 +190,12 @@ async fn serve_request<S>(
 async fn handle_request(
     context: Arc<ServerContext>,
     request: Request<Incoming>,
-    identity: ClientIdentity,
 ) -> Result<Response<ResponseBody>, Infallible> {
     let start_time = Instant::now();
     let method = request.method().to_owned();
     let path = request.uri().path().to_owned();
 
     let trace_id = {
-        use opentelemetry::trace::TraceContextExt;
         let context = Span::current().context();
         let span = context.span();
         let span_context = span.span_context();
@@ -208,7 +206,7 @@ async fn handle_request(
         }
     };
 
-    let response = match router(context.clone(), request, identity).await {
+    let response = match router(context.clone(), request).await {
         Ok(response) => response,
         Err(error) => {
             let details = trace_id
@@ -245,59 +243,126 @@ async fn handle_request(
 #[instrument(skip(context, req))]
 async fn router(
     context: Arc<ServerContext>,
-    req: Request<Incoming>,
-    mut id: ClientIdentity,
+    mut req: Request<Incoming>,
 ) -> Result<Response<ResponseBody>, registry::Error> {
     let path = req.uri().path().to_string();
 
-    context.authenticate_request(&req, &mut id).await?;
+    let identity = context.authenticate_request(&req).await?;
+    req.extensions_mut().insert(identity.clone());
 
     if ROUTE_API_VERSION_REGEX.is_match(&path) && req.method() == Method::GET {
         // TODO: make this part customizable
-        if !context.credentials.is_empty() && id.username.is_none() {
+        if !context.credentials.is_empty() && identity.username.is_none() {
             return Err(registry::Error::Unauthorized(
                 "Access denied (requires credentials)".to_string(),
             ));
         }
-        return context.registry.handle_get_api_version(id).await;
+        return context.registry.handle_get_api_version(&identity).await;
     } else if let Some(params) = QueryNewUploadParameters::from_regex(&path, &ROUTE_UPLOADS_REGEX) {
         if req.method() == Method::POST {
-            return context.registry.handle_start_upload(req, params, id).await;
+            return context
+                .registry
+                .handle_start_upload(req, params, &identity)
+                .await;
         }
     } else if let Some(params) = QueryUploadParameters::from_regex(&path, &ROUTE_UPLOAD_REGEX) {
         match *req.method() {
-            Method::GET => return context.registry.handle_get_upload(params, id).await,
-            Method::PATCH => return context.registry.handle_patch_upload(req, params, id).await,
-            Method::PUT => return context.registry.handle_put_upload(req, params, id).await,
-            Method::DELETE => return context.registry.handle_delete_upload(params, id).await,
+            Method::GET => {
+                return context
+                    .registry
+                    .handle_get_upload(req, params, &identity)
+                    .await
+            }
+            Method::PATCH => {
+                return context
+                    .registry
+                    .handle_patch_upload(req, params, &identity)
+                    .await
+            }
+            Method::PUT => {
+                return context
+                    .registry
+                    .handle_put_upload(req, params, &identity)
+                    .await
+            }
+            Method::DELETE => {
+                return context
+                    .registry
+                    .handle_delete_upload(req, params, &identity)
+                    .await
+            }
             _ => { /* NOOP */ }
         }
     } else if let Some(params) = QueryBlobParameters::from_regex(&path, &ROUTE_BLOB_REGEX) {
         match *req.method() {
-            Method::GET => return context.registry.handle_get_blob(req, params, id).await,
-            Method::HEAD => return context.registry.handle_head_blob(req, params, id).await,
-            Method::DELETE => return context.registry.handle_delete_blob(params, id).await,
+            Method::GET => {
+                return context
+                    .registry
+                    .handle_get_blob(req, params, identity.clone())
+                    .await
+            }
+            Method::HEAD => {
+                return context
+                    .registry
+                    .handle_head_blob(req, params, identity.clone())
+                    .await
+            }
+            Method::DELETE => {
+                return context
+                    .registry
+                    .handle_delete_blob(params, identity.clone())
+                    .await
+            }
             _ => { /* NOOP */ }
         }
     } else if let Some(params) = QueryManifestParameters::from_regex(&path, &ROUTE_MANIFEST_REGEX) {
         match *req.method() {
-            Method::GET => return context.registry.handle_get_manifest(req, params, id).await,
-            Method::HEAD => return context.registry.handle_head_manifest(req, params, id).await,
-            Method::PUT => return context.registry.handle_put_manifest(req, params, id).await,
-            Method::DELETE => return context.registry.handle_delete_manifest(params, id).await,
+            Method::GET => {
+                return context
+                    .registry
+                    .handle_get_manifest(req, params, identity.clone())
+                    .await
+            }
+            Method::HEAD => {
+                return context
+                    .registry
+                    .handle_head_manifest(req, params, identity.clone())
+                    .await
+            }
+            Method::PUT => {
+                return context
+                    .registry
+                    .handle_put_manifest(req, params, identity.clone())
+                    .await
+            }
+            Method::DELETE => {
+                return context
+                    .registry
+                    .handle_delete_manifest(params, identity.clone())
+                    .await
+            }
             _ => { /* NOOP */ }
         }
     } else if let Some(params) = ReferrerParameters::from_regex(&path, &ROUTE_REFERRERS_REGEX) {
         if req.method() == Method::GET {
-            return context.registry.handle_get_referrers(req, params, id).await;
+            return context
+                .registry
+                .handle_get_referrers(req, params, identity.clone())
+                .await;
         }
     } else if ROUTE_CATALOG_REGEX.is_match(&path) {
         if req.method() == Method::GET {
-            return context.registry.handle_list_catalog(req, id).await;
+            return context
+                .registry
+                .handle_list_catalog(req, identity.clone())
+                .await;
         }
     } else if let Some(params) = TagsParameters::from_regex(&path, &ROUTE_LIST_TAGS_REGEX) {
         if req.method() == Method::GET {
-            return context.registry.handle_list_tags(req, params, id).await;
+            return context
+                .registry
+                .handle_list_tags(req, params, identity.clone())
+                .await;
         }
     } else if ROUTE_HEALTHZ_REGEX.is_match(&path) {
         return Response::builder()

@@ -20,6 +20,7 @@ mod reader;
 pub mod repository;
 mod response_body;
 mod scrub;
+pub mod server;
 pub mod task_queue;
 #[cfg(test)]
 mod tests;
@@ -144,8 +145,8 @@ impl Registry {
     #[instrument(skip(repository, request))]
     pub fn validate_request(
         repository: Option<&Repository>,
-        request: &repository::access_policy::ClientRequest,
-        identity: &repository::access_policy::ClientIdentity,
+        request: &server::ClientRequest,
+        identity: &server::ClientIdentity,
     ) -> Result<(), Error> {
         use tracing::debug;
 
@@ -273,7 +274,7 @@ mod test {
         RepositoryAccessPolicyConfig, RepositoryConfig, RepositoryRetentionPolicyConfig,
     };
     use crate::registry::oci::Reference;
-    use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
+    use crate::registry::server::{ClientIdentity, ClientRequest};
     use crate::registry::tests::FSRegistryTestCase;
 
     fn create_default_deny_repo(rules: Vec<String>) -> Repository {

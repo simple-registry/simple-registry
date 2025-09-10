@@ -15,12 +15,9 @@
 //! - `identity`: Client identity information (id, username, certificate details)
 //! - `request`: Request details (action, namespace, digest, reference)
 
-use crate::registry::oci::{Digest, Reference};
+pub use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::Error;
 use cel_interpreter::{Context, Program, Value};
-use serde::Serialize;
-use serde_json;
-use std::collections::HashMap;
 use tracing::{debug, info};
 
 /// Access control policy engine.
@@ -99,195 +96,10 @@ impl AccessPolicy {
     }
 }
 
-/// Client identity information used in access control decisions.
-///
-/// Contains authentication details extracted from basic auth, mTLS certificates, or OIDC tokens.
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct ClientIdentity {
-    pub id: Option<String>,
-    pub username: Option<String>,
-    pub certificate: ClientCertificate,
-    pub oidc: Option<OidcClaims>,
-}
-
-/// Certificate information extracted from client mTLS certificates.
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct ClientCertificate {
-    pub organizations: Vec<String>,
-    pub common_names: Vec<String>,
-}
-
-/// OIDC claims extracted from JWT tokens.
-///
-/// All claims from the token are exposed as-is to allow maximum flexibility
-/// in policy expressions. Standard claims like sub, iss, aud are available
-/// along with any custom claims from the OIDC provider.
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct OidcClaims {
-    pub claims: HashMap<String, serde_json::Value>,
-}
-
-const GET_API_VERSION: &str = "get-api-version";
-const GET_MANIFEST: &str = "get-manifest";
-const GET_BLOB: &str = "get-blob";
-const START_UPLOAD: &str = "start-upload";
-const UPDATE_UPLOAD: &str = "update-upload";
-const COMPLETE_UPLOAD: &str = "complete-upload";
-const CANCEL_UPLOAD: &str = "cancel-upload";
-const GET_UPLOAD: &str = "get-upload";
-const DELETE_BLOB: &str = "delete-blob";
-const PUT_MANIFEST: &str = "put-manifest";
-const DELETE_MANIFEST: &str = "delete-manifest";
-const GET_REFERRERS: &str = "get-referrers";
-const LIST_CATALOG: &str = "list-catalog";
-const LIST_TAGS: &str = "list-tags";
-
-/// Registry operation request details used in access control decisions.
-///
-/// Contains information about the requested action and target resources.
-/// The action field uses static string constants for efficiency.
-#[derive(Debug, Default, Serialize)]
-pub struct ClientRequest {
-    pub action: &'static str,
-    pub namespace: Option<String>,
-    pub digest: Option<String>,
-    pub reference: Option<String>,
-}
-
-impl ClientRequest {
-    pub fn get_api_version() -> Self {
-        Self {
-            action: GET_API_VERSION,
-            ..Self::default()
-        }
-    }
-
-    pub fn get_manifest(namespace: &str, reference: &Reference) -> Self {
-        Self {
-            action: GET_MANIFEST,
-            namespace: Some(namespace.to_string()),
-            reference: Some(reference.to_string()),
-            ..Self::default()
-        }
-    }
-
-    pub fn get_blob(namespace: &str, digest: &Digest) -> Self {
-        Self {
-            action: GET_BLOB,
-            namespace: Some(namespace.to_string()),
-            digest: Some(digest.to_string()),
-            ..Self::default()
-        }
-    }
-
-    pub fn start_upload(name: &str) -> Self {
-        Self {
-            action: START_UPLOAD,
-            namespace: Some(name.to_string()),
-            ..Self::default()
-        }
-    }
-
-    pub fn update_upload(name: &str) -> Self {
-        Self {
-            action: UPDATE_UPLOAD,
-            namespace: Some(name.to_string()),
-            ..Self::default()
-        }
-    }
-
-    pub fn complete_upload(name: &str) -> Self {
-        Self {
-            action: COMPLETE_UPLOAD,
-            namespace: Some(name.to_string()),
-            ..Self::default()
-        }
-    }
-
-    pub fn cancel_upload(name: &str) -> Self {
-        Self {
-            action: CANCEL_UPLOAD,
-            namespace: Some(name.to_string()),
-            ..Self::default()
-        }
-    }
-
-    pub fn get_upload(name: &str) -> Self {
-        Self {
-            action: GET_UPLOAD,
-            namespace: Some(name.to_string()),
-            ..Self::default()
-        }
-    }
-
-    pub fn delete_blob(name: &str, digest: &Digest) -> Self {
-        Self {
-            action: DELETE_BLOB,
-            namespace: Some(name.to_string()),
-            digest: Some(digest.to_string()),
-            ..Self::default()
-        }
-    }
-
-    pub fn put_manifest(name: &str, reference: &Reference) -> Self {
-        Self {
-            action: PUT_MANIFEST,
-            namespace: Some(name.to_string()),
-            reference: Some(reference.to_string()),
-            ..Self::default()
-        }
-    }
-
-    pub fn delete_manifest(name: &str, reference: &Reference) -> Self {
-        Self {
-            action: DELETE_MANIFEST,
-            namespace: Some(name.to_string()),
-            reference: Some(reference.to_string()),
-            ..Self::default()
-        }
-    }
-
-    pub fn get_referrers(name: &str, digest: &Digest) -> Self {
-        Self {
-            action: GET_REFERRERS,
-            namespace: Some(name.to_string()),
-            digest: Some(digest.to_string()),
-            ..Self::default()
-        }
-    }
-
-    pub fn list_catalog() -> Self {
-        Self {
-            action: LIST_CATALOG,
-            ..Self::default()
-        }
-    }
-
-    pub fn list_tags(name: &str) -> Self {
-        Self {
-            action: LIST_TAGS,
-            namespace: Some(name.to_string()),
-            ..Self::default()
-        }
-    }
-
-    pub fn is_write(&self) -> bool {
-        matches!(
-            self.action,
-            START_UPLOAD
-                | UPDATE_UPLOAD
-                | COMPLETE_UPLOAD
-                | CANCEL_UPLOAD
-                | PUT_MANIFEST
-                | DELETE_MANIFEST
-                | DELETE_BLOB
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::oci::{Digest, Reference};
 
     #[test]
     fn test_access_policy_default_allow_no_rules() {
@@ -360,7 +172,7 @@ mod tests {
     #[test]
     fn test_get_api_version() {
         let request = ClientRequest::get_api_version();
-        assert_eq!(request.action, GET_API_VERSION);
+        assert_eq!(request.action, "get-api-version");
         assert!(request.namespace.is_none());
         assert!(request.digest.is_none());
         assert!(request.reference.is_none());
@@ -373,7 +185,7 @@ mod tests {
         let reference = Reference::Tag("tag".to_string());
         let request = ClientRequest::get_manifest(namespace, &reference);
 
-        assert_eq!(request.action, GET_MANIFEST);
+        assert_eq!(request.action, "get-manifest");
         assert_eq!(request.namespace, Some(namespace.to_string()));
         assert_eq!(request.reference, Some(reference.to_string()));
         assert!(request.digest.is_none());
@@ -386,7 +198,7 @@ mod tests {
         let digest = Digest::Sha256("1234567890abcdef".to_string());
         let request = ClientRequest::get_blob(namespace, &digest);
 
-        assert_eq!(request.action, GET_BLOB);
+        assert_eq!(request.action, "get-blob");
         assert_eq!(request.namespace, Some(namespace.to_string()));
         assert_eq!(request.digest, Some(digest.to_string()));
         assert!(request.reference.is_none());
@@ -397,23 +209,23 @@ mod tests {
         let name = "test-upload";
 
         let start_request = ClientRequest::start_upload(name);
-        assert_eq!(start_request.action, START_UPLOAD);
+        assert_eq!(start_request.action, "start-upload");
         assert_eq!(start_request.namespace, Some(name.to_string()));
 
         let update_request = ClientRequest::update_upload(name);
-        assert_eq!(update_request.action, UPDATE_UPLOAD);
+        assert_eq!(update_request.action, "update-upload");
         assert_eq!(update_request.namespace, Some(name.to_string()));
 
         let complete_request = ClientRequest::complete_upload(name);
-        assert_eq!(complete_request.action, COMPLETE_UPLOAD);
+        assert_eq!(complete_request.action, "complete-upload");
         assert_eq!(complete_request.namespace, Some(name.to_string()));
 
         let cancel_request = ClientRequest::cancel_upload(name);
-        assert_eq!(cancel_request.action, CANCEL_UPLOAD);
+        assert_eq!(cancel_request.action, "cancel-upload");
         assert_eq!(cancel_request.namespace, Some(name.to_string()));
 
         let get_request = ClientRequest::get_upload(name);
-        assert_eq!(get_request.action, GET_UPLOAD);
+        assert_eq!(get_request.action, "get-upload");
         assert_eq!(get_request.namespace, Some(name.to_string()));
     }
 
@@ -425,12 +237,12 @@ mod tests {
         let reference = Reference::Tag("tag".to_string());
 
         let delete_blob_request = ClientRequest::delete_blob(name, &digest);
-        assert_eq!(delete_blob_request.action, DELETE_BLOB);
+        assert_eq!(delete_blob_request.action, "delete-blob");
         assert_eq!(delete_blob_request.namespace, Some(name.to_string()));
         assert_eq!(delete_blob_request.digest, Some(digest.to_string()));
 
         let delete_manifest_request = ClientRequest::delete_manifest(name, &reference);
-        assert_eq!(delete_manifest_request.action, DELETE_MANIFEST);
+        assert_eq!(delete_manifest_request.action, "delete-manifest");
         assert_eq!(delete_manifest_request.namespace, Some(name.to_string()));
         assert_eq!(
             delete_manifest_request.reference,
@@ -445,7 +257,7 @@ mod tests {
         let digest = Digest::Sha256("1234567890abcdef".to_string());
         let request = ClientRequest::get_referrers(name, &digest);
 
-        assert_eq!(request.action, GET_REFERRERS);
+        assert_eq!(request.action, "get-referrers");
         assert_eq!(request.namespace, Some(name.to_string()));
         assert_eq!(request.digest, Some(digest.to_string()));
         assert!(request.reference.is_none());
@@ -454,14 +266,14 @@ mod tests {
     #[test]
     fn test_list_operations() {
         let list_catalog_request = ClientRequest::list_catalog();
-        assert_eq!(list_catalog_request.action, LIST_CATALOG);
+        assert_eq!(list_catalog_request.action, "list-catalog");
         assert!(list_catalog_request.namespace.is_none());
         assert!(list_catalog_request.digest.is_none());
         assert!(list_catalog_request.reference.is_none());
 
         let name = "test-namespace";
         let list_tags_request = ClientRequest::list_tags(name);
-        assert_eq!(list_tags_request.action, LIST_TAGS);
+        assert_eq!(list_tags_request.action, "list-tags");
         assert_eq!(list_tags_request.namespace, Some(name.to_string()));
         assert!(list_tags_request.digest.is_none());
         assert!(list_tags_request.reference.is_none());
@@ -469,7 +281,6 @@ mod tests {
 
     #[test]
     fn test_is_write() {
-        use crate::registry::oci::{Digest, Reference};
         let write_actions = [
             ClientRequest::start_upload("test"),
             ClientRequest::update_upload("test"),

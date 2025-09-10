@@ -2,7 +2,7 @@ use super::OidcProvider;
 use crate::registry::auth::oidc::Jwk;
 use crate::registry::cache::Cache;
 use crate::registry::http_client::HttpClient;
-use crate::registry::repository::access_policy::OidcClaims;
+use crate::registry::server::OidcClaims;
 use crate::registry::Error;
 use async_trait::async_trait;
 use http_body_util::{BodyExt, Empty};

@@ -2,7 +2,7 @@ use crate::configuration::{CacheStoreConfig, IdentityConfig, OidcProviderConfig}
 use crate::registry::auth::oidc::OidcValidator;
 use crate::registry::auth::{AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator};
 use crate::registry::cache::{self, Cache};
-use crate::registry::repository::access_policy::ClientIdentity;
+use crate::registry::server::ClientIdentity;
 use crate::registry::{Error, Registry};
 use hyper::body::Incoming;
 use hyper::Request;
@@ -79,30 +79,33 @@ impl ServerContext {
     pub async fn authenticate_request(
         &self,
         request: &Request<Incoming>,
-        identity: &mut ClientIdentity,
-    ) -> Result<(), Error> {
-        self.mtls_middleware.authenticate(request, identity).await?;
+    ) -> Result<ClientIdentity, Error> {
+        let mut identity = ClientIdentity::default();
+
+        self.mtls_middleware
+            .authenticate(request, &mut identity)
+            .await?;
 
         // Check basic auth
         match self
             .basic_auth_middleware
-            .authenticate(request, identity)
+            .authenticate(request, &mut identity)
             .await
         {
-            Ok(AuthResult::Authenticated) => return Ok(()),
+            Ok(AuthResult::Authenticated) => return Ok(identity),
             Ok(AuthResult::NoCredentials) => {}
             Err(e) => return Err(e),
         }
 
         // Check OIDC validators (stop on first match)
         for validator in self.oidc_middlewares.iter() {
-            match validator.authenticate(request, identity).await {
-                Ok(AuthResult::Authenticated) => return Ok(()),
+            match validator.authenticate(request, &mut identity).await {
+                Ok(AuthResult::Authenticated) => return Ok(identity),
                 Ok(AuthResult::NoCredentials) => {}
                 Err(e) => return Err(e),
             }
         }
 
-        Ok(())
+        Ok(identity)
     }
 }

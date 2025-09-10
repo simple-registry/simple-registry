@@ -1,5 +1,5 @@
 use super::{AuthMiddleware, AuthResult};
-use crate::registry::repository::access_policy::{ClientCertificate, ClientIdentity};
+use crate::registry::server::{ClientCertificate, ClientIdentity};
 use crate::registry::Error;
 use async_trait::async_trait;
 use hyper::body::Incoming;

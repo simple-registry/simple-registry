@@ -2,7 +2,7 @@ pub mod basic_auth;
 pub mod mtls;
 pub mod oidc;
 
-use crate::registry::repository::access_policy::ClientIdentity;
+use crate::registry::server::ClientIdentity;
 use crate::registry::Error;
 use async_trait::async_trait;
 use hyper::body::Incoming;

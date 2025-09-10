@@ -1,5 +1,5 @@
 use crate::registry::oci::{Descriptor, Digest, ReferrerList};
-use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
+use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::utils::request_ext::RequestExt;
 use crate::registry::utils::response_ext::ResponseExt;
 use crate::registry::{Error, Registry, ResponseBody};
@@ -198,7 +198,7 @@ mod tests {
     use super::*;
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::oci::Reference;
-    use crate::registry::repository::access_policy::ClientIdentity;
+    use crate::registry::server::ClientIdentity;
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
