@@ -1,11 +1,16 @@
 pub mod jwk;
 pub mod provider;
 
+use super::{AuthMiddleware, AuthResult};
 use crate::configuration::OidcProviderConfig;
 use crate::registry::cache::Cache;
 use crate::registry::http_client::{HttpClient, HttpClientBuilder};
-use crate::registry::repository::access_policy::OidcClaims;
+use crate::registry::repository::access_policy::{ClientIdentity, OidcClaims};
+use crate::registry::utils::request_ext::RequestExt;
 use crate::registry::Error;
+use async_trait::async_trait;
+use hyper::body::Incoming;
+use hyper::Request;
 
 use crate::registry::auth::oidc::provider::{generic, github};
 pub use jwk::Jwk;
@@ -45,5 +50,20 @@ impl OidcValidator {
             self.cache.as_ref(),
         )
         .await
+    }
+}
+
+#[async_trait]
+impl AuthMiddleware for OidcValidator {
+    async fn authenticate(&self, request: &Request<Incoming>, identity: &mut ClientIdentity) -> Result<AuthResult, Error> {
+        if let Some(token) = request.bearer_token() {
+            // Bearer token was provided, validate it
+            let claims = self.validate_token(&token).await?;
+            identity.oidc = Some(claims);
+            Ok(AuthResult::Authenticated)
+        } else {
+            // No bearer token in request
+            Ok(AuthResult::NoCredentials)
+        }
     }
 }

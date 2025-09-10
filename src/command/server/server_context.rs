@@ -1,7 +1,9 @@
 use crate::configuration::IdentityConfig;
-use crate::registry::auth::{BasicAuthValidator, OidcValidator};
-use crate::registry::repository::access_policy::OidcClaims;
+use crate::registry::auth::{AuthMiddleware, AuthResult, BasicAuthValidator, OidcValidator};
+use crate::registry::repository::access_policy::ClientIdentity;
 use crate::registry::{Error, Registry};
+use hyper::body::Incoming;
+use hyper::Request;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,26 +44,31 @@ impl ServerContext {
         }
     }
 
-    #[instrument(skip(self, password))]
-    pub fn validate_credentials(
+    /// Process authentication middlewares in order
+    #[instrument(skip(self, request))]
+    pub async fn authenticate_request(
         &self,
-        username: &str,
-        password: &str,
-    ) -> Result<Option<String>, Error> {
-        self.basic_auth_validator
-            .validate_credentials(username, password)
-    }
-
-    #[instrument(skip(self, token))]
-    pub async fn validate_oidc_token(&self, token: &str) -> Result<OidcClaims, Error> {
+        request: &Request<Incoming>,
+        identity: &mut ClientIdentity,
+    ) -> Result<(), Error> {
+        // Try basic auth first
+        match self.basic_auth_validator.authenticate(request, identity).await {
+            Ok(AuthResult::Authenticated) => return Ok(()),
+            Ok(AuthResult::NoCredentials) => {},  // Continue to next auth method
+            Err(e) => return Err(e),  // Invalid credentials, fail immediately
+        }
+        
+        // Try OIDC validators
         for validator in self.oidc_validators.values() {
-            if let Ok(claims) = validator.validate_token(token).await {
-                return Ok(claims);
+            match validator.authenticate(request, identity).await {
+                Ok(AuthResult::Authenticated) => return Ok(()),
+                Ok(AuthResult::NoCredentials) => continue,  // Try next validator
+                Err(e) => return Err(e),  // Invalid token, fail immediately
             }
         }
-
-        Err(Error::Unauthorized(
-            "No OIDC providers configured".to_string(),
-        ))
+        
+        // No authentication performed, request continues as anonymous
+        Ok(())
     }
+
 }

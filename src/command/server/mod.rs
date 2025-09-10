@@ -35,7 +35,6 @@ use crate::registry::manifest::QueryManifestParameters;
 use crate::registry::repository::access_policy::ClientIdentity;
 use crate::registry::upload::{QueryNewUploadParameters, QueryUploadParameters};
 use crate::registry::utils::deserialize_ext::DeserializeExt;
-use crate::registry::utils::request_ext::RequestExt;
 use crate::registry::{Registry, ResponseBody};
 
 static ROUTE_HEALTHZ_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/healthz$").unwrap());
@@ -236,17 +235,8 @@ async fn router(
 ) -> Result<Response<ResponseBody>, registry::Error> {
     let path = req.uri().path().to_string();
 
-    if let Some((username, password)) = req.basic_auth() {
-        id.id = match context.validate_credentials(&username, &password) {
-            Ok(id) => id,
-            Err(e) => return Err(e),
-        };
-        id.username = Some(username);
-    } else if let Some(token) = req.bearer_token() {
-        if !context.oidc_validators.is_empty() {
-            id.oidc = Some(context.validate_oidc_token(&token).await?);
-        }
-    }
+    // Use middleware-based authentication
+    context.authenticate_request(&req, &mut id).await?;
 
     if ROUTE_API_VERSION_REGEX.is_match(&path) && req.method() == Method::GET {
         // TODO: make this part customizable

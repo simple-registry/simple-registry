@@ -1,6 +1,12 @@
+use super::{AuthMiddleware, AuthResult};
 use crate::configuration::IdentityConfig;
+use crate::registry::repository::access_policy::ClientIdentity;
+use crate::registry::utils::request_ext::RequestExt;
 use crate::registry::Error;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use async_trait::async_trait;
+use hyper::body::Incoming;
+use hyper::Request;
 use std::collections::HashMap;
 use tracing::{error, instrument};
 
@@ -47,5 +53,21 @@ impl BasicAuthValidator {
             })?;
 
         Ok(Some(identity_id.clone()))
+    }
+}
+
+#[async_trait]
+impl AuthMiddleware for BasicAuthValidator {
+    async fn authenticate(&self, request: &Request<Incoming>, identity: &mut ClientIdentity) -> Result<AuthResult, Error> {
+        if let Some((username, password)) = request.basic_auth() {
+            // Credentials were provided, validate them
+            let identity_id = self.validate_credentials(&username, &password)?;
+            identity.id = identity_id;
+            identity.username = Some(username);
+            Ok(AuthResult::Authenticated)
+        } else {
+            // No basic auth credentials in request
+            Ok(AuthResult::NoCredentials)
+        }
     }
 }
