@@ -1,7 +1,7 @@
 use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
 use crate::registry::server::auth::PeerCertificate;
 use crate::registry::server::ServerContext;
-use crate::registry::ResponseBody;
+use crate::registry::{Error, ResponseBody};
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONTENT_TYPE, WWW_AUTHENTICATE};
@@ -22,7 +22,6 @@ use tokio::pin;
 use tracing::{debug, error, info, instrument, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::registry;
 use crate::registry::blob::QueryBlobParameters;
 use crate::registry::content_discovery::{ReferrerParameters, TagsParameters};
 use crate::registry::manifest::QueryManifestParameters;
@@ -162,7 +161,7 @@ async fn handle_request(
 async fn router(
     context: Arc<ServerContext>,
     mut req: Request<Incoming>,
-) -> Result<Response<ResponseBody>, registry::Error> {
+) -> Result<Response<ResponseBody>, Error> {
     let path = req.uri().path().to_string();
 
     let identity = context.authenticate_request(&req).await?;
@@ -171,7 +170,7 @@ async fn router(
     if ROUTE_API_VERSION_REGEX.is_match(&path) && req.method() == Method::GET {
         // TODO: make this part customizable
         if !context.credentials.is_empty() && identity.username.is_none() {
-            return Err(registry::Error::Unauthorized(
+            return Err(Error::Unauthorized(
                 "Access denied (requires credentials)".to_string(),
             ));
         }
@@ -283,59 +282,52 @@ async fn router(
                 .await;
         }
     } else if ROUTE_HEALTHZ_REGEX.is_match(&path) {
-        return Response::builder()
+        return Ok(Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "application/json")
             .body(ResponseBody::Fixed(Full::new(Bytes::from(
                 r#"{"status":"ok"}"#,
-            ))))
-            .map_err(registry::Error::from);
+            ))))?);
     } else if ROUTE_METRICS_REGEX.is_match(&path) {
         let (content_type, metrics) = METRICS_PROVIDER.gather();
 
-        return Response::builder()
+        return Ok(Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, content_type)
-            .body(ResponseBody::Fixed(Full::new(Bytes::from(metrics))))
-            .map_err(registry::Error::from);
+            .body(ResponseBody::Fixed(Full::new(Bytes::from(metrics))))?);
     }
 
     if [Method::GET, Method::HEAD].contains(req.method()) {
-        Err(registry::Error::NotFound)
+        Err(Error::NotFound)
     } else {
-        Err(registry::Error::Unsupported)
+        Err(Error::Unsupported)
     }
 }
 
-pub fn registry_error_to_response_raw<T>(
-    error: &registry::Error,
-    details: T,
-) -> Response<ResponseBody>
+pub fn registry_error_to_response_raw<T>(error: &Error, details: T) -> Response<ResponseBody>
 where
     T: Serialize,
 {
     let (status, code) = match error {
-        registry::Error::BlobUnknown => (StatusCode::NOT_FOUND, "BLOB_UNKNOWN"),
+        Error::BlobUnknown => (StatusCode::NOT_FOUND, "BLOB_UNKNOWN"),
         //RegistryError::BlobUploadInvalid => (StatusCode::BAD_REQUEST, "BLOB_UPLOAD_INVALID"),
-        registry::Error::BlobUploadUnknown => (StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN"),
-        registry::Error::DigestInvalid => (StatusCode::BAD_REQUEST, "DIGEST_INVALID"),
-        registry::Error::ManifestBlobUnknown => (StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN"),
-        registry::Error::ManifestInvalid(_) => (StatusCode::BAD_REQUEST, "MANIFEST_INVALID"),
-        registry::Error::ManifestUnknown => (StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN"),
-        registry::Error::NameInvalid => (StatusCode::BAD_REQUEST, "NAME_INVALID"),
-        registry::Error::NameUnknown => (StatusCode::NOT_FOUND, "NAME_UNKNOWN"),
+        Error::BlobUploadUnknown => (StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN"),
+        Error::DigestInvalid => (StatusCode::BAD_REQUEST, "DIGEST_INVALID"),
+        Error::ManifestBlobUnknown => (StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN"),
+        Error::ManifestInvalid(_) => (StatusCode::BAD_REQUEST, "MANIFEST_INVALID"),
+        Error::ManifestUnknown => (StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN"),
+        Error::NameInvalid => (StatusCode::BAD_REQUEST, "NAME_INVALID"),
+        Error::NameUnknown => (StatusCode::NOT_FOUND, "NAME_UNKNOWN"),
         //RegistryError::SizeInvalid => (StatusCode::BAD_REQUEST, "SIZE_INVALID"),
-        registry::Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
-        registry::Error::Denied(_) => (StatusCode::FORBIDDEN, "DENIED"),
-        registry::Error::Unsupported => (StatusCode::BAD_REQUEST, "UNSUPPORTED"),
+        Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
+        Error::Denied(_) => (StatusCode::FORBIDDEN, "DENIED"),
+        Error::Unsupported => (StatusCode::BAD_REQUEST, "UNSUPPORTED"),
         //RegistryError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "TOOMANYREQUESTS"),
         // Convenience
-        registry::Error::RangeNotSatisfiable => (StatusCode::RANGE_NOT_SATISFIABLE, "SIZE_INVALID"), // Can't find a better code from the OCI spec
+        Error::RangeNotSatisfiable => (StatusCode::RANGE_NOT_SATISFIABLE, "SIZE_INVALID"), // Can't find a better code from the OCI spec
         // Catch-all
-        registry::Error::NotFound => (StatusCode::NOT_FOUND, "NOT_FOUND"),
-        registry::Error::Internal(_) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_SERVER_ERROR")
-        }
+        Error::NotFound => (StatusCode::NOT_FOUND, "NOT_FOUND"),
+        Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_SERVER_ERROR"),
     };
 
     let body = json!({
@@ -350,7 +342,7 @@ where
     let body = Bytes::from(body);
 
     match error {
-        registry::Error::Unauthorized(_) => Response::builder()
+        Error::Unauthorized(_) => Response::builder()
             .status(status)
             .header(CONTENT_TYPE, "application/json")
             .header(

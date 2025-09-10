@@ -1,5 +1,5 @@
-use crate::command;
 use crate::configuration::{Error, ServerConfig, ServerTlsConfig};
+use crate::registry;
 use crate::registry::server::serve_request;
 use crate::registry::server::ServerContext;
 use arc_swap::ArcSwap;
@@ -88,7 +88,7 @@ impl TlsListener {
         Ok(tls_acceptor)
     }
 
-    pub async fn serve(&self) -> Result<(), command::Error> {
+    pub async fn serve(&self) -> Result<(), registry::Error> {
         info!("Listening on {} (mTLS)", self.binding_address);
         let listener = TcpListener::bind(self.binding_address).await?;
 

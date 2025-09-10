@@ -1,7 +1,7 @@
-use crate::command;
 use crate::configuration::ServerConfig;
 use crate::registry::server::serve_request;
 use crate::registry::server::ServerContext;
+use crate::registry::Error;
 use arc_swap::ArcSwap;
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
@@ -28,7 +28,7 @@ impl InsecureListener {
         self.context.store(Arc::new(context));
     }
 
-    pub async fn serve(&self) -> Result<(), command::Error> {
+    pub async fn serve(&self) -> Result<(), Error> {
         info!("Listening on {} (non-TLS)", self.binding_address);
         let listener = TcpListener::bind(self.binding_address).await?;
 

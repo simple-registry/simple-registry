@@ -33,18 +33,12 @@ impl MtlsValidator {
         let organizations = subject
             .iter_organization()
             .map(|o| o.as_str().map(String::from))
-            .collect::<Result<Vec<String>, _>>()
-            .map_err(|_| {
-                Error::Unauthorized("Unable to parse certificate organizations".to_string())
-            })?;
+            .collect::<Result<Vec<String>, _>>()?;
 
         let common_names = subject
             .iter_common_name()
             .map(|o| o.as_str().map(String::from))
-            .collect::<Result<Vec<String>, _>>()
-            .map_err(|_| {
-                Error::Unauthorized("Unable to parse certificate common names".to_string())
-            })?;
+            .collect::<Result<Vec<String>, _>>()?;
 
         Ok(ClientCertificate {
             organizations,
