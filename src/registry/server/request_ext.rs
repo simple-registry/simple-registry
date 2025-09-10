@@ -1,6 +1,4 @@
 use crate::registry::Error;
-use base64::prelude::BASE64_STANDARD;
-use base64::Engine;
 use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use hyper::header::{AsHeaderName, HeaderName, ACCEPT, AUTHORIZATION};
@@ -11,7 +9,7 @@ use std::io;
 use std::sync::LazyLock;
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
-use tracing::{debug, warn};
+use tracing::warn;
 
 static RANGE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:bytes=)?(?P<start>\d+)-(?P<end>\d+)?$").unwrap());
@@ -19,9 +17,6 @@ static RANGE_RE: LazyLock<Regex> =
 pub trait RequestExt {
     fn get_header<K: AsHeaderName>(&self, header: K) -> Option<String>;
     fn query_parameters<D: DeserializeOwned + Default>(&self) -> Result<D, Error>;
-
-    fn basic_auth(&self) -> Option<(String, String)>;
-
     fn bearer_token(&self) -> Option<String>;
 
     fn accepted_content_types(&self) -> Vec<String>;
@@ -49,20 +44,6 @@ impl<T> RequestExt for Request<T> {
             warn!("Failed to parse query parameters: {error}");
             Error::Unsupported
         })
-    }
-
-    fn basic_auth(&self) -> Option<(String, String)> {
-        let Some(authorization) = self.get_header(AUTHORIZATION) else {
-            debug!("No authorization header found");
-            return None;
-        };
-
-        let value = authorization.strip_prefix("Basic ")?;
-        let value = BASE64_STANDARD.decode(value).ok()?;
-        let value = String::from_utf8(value).ok()?;
-
-        let (username, password) = value.split_once(':')?;
-        Some((username.to_string(), password.to_string()))
     }
 
     fn bearer_token(&self) -> Option<String> {
@@ -152,69 +133,6 @@ mod tests {
         assert_eq!(query_parameters.len(), 2);
         assert_eq!(query_parameters.get("foo"), Some(&"bar".to_string()));
         assert_eq!(query_parameters.get("baz"), Some(&"qux".to_string()));
-    }
-
-    #[test]
-    fn test_parse_authorization_header() {
-        let request = Request::builder()
-            .header(
-                AUTHORIZATION,
-                HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA=="),
-            )
-            .body(ResponseBody::empty())
-            .unwrap();
-        assert_eq!(
-            request.basic_auth(),
-            Some(("user".to_string(), "password".to_string()))
-        );
-
-        let request = Request::builder()
-            .header(
-                AUTHORIZATION,
-                HeaderValue::from_static("Bearer dXNlcjpwYXNzd29yZA=="),
-            )
-            .body(ResponseBody::empty())
-            .unwrap();
-        assert_eq!(request.basic_auth(), None);
-
-        let request = Request::builder()
-            .header(
-                AUTHORIZATION,
-                HeaderValue::from_static("Basic dXNlcjpw YXNzd29yZA="),
-            )
-            .body(ResponseBody::empty())
-            .unwrap();
-        assert_eq!(request.basic_auth(), None);
-
-        let request = Request::builder()
-            .header(
-                AUTHORIZATION,
-                HeaderValue::from_static("Basic dXNlcjpwY%%%%XNzd29yZA"),
-            )
-            .body(ResponseBody::empty())
-            .unwrap();
-        assert_eq!(request.basic_auth(), None);
-
-        let request = Request::builder()
-            .header(
-                AUTHORIZATION,
-                HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA==="),
-            )
-            .body(ResponseBody::empty())
-            .unwrap();
-        assert_eq!(request.basic_auth(), None);
-
-        let request = Request::builder()
-            .header(
-                AUTHORIZATION,
-                HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA=="),
-            )
-            .body(ResponseBody::empty())
-            .unwrap();
-        assert_eq!(
-            request.basic_auth(),
-            Some(("user".to_string(), "password".to_string()))
-        );
     }
 
     #[test]
