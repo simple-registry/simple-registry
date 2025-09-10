@@ -11,12 +11,14 @@ use async_trait::async_trait;
 use hyper::body::Incoming;
 use hyper::Request;
 
+use crate::registry::server::auth::basic_auth::extract_basic_auth;
 use crate::registry::server::auth::oidc::provider::{generic, github};
 use crate::registry::server::auth::{AuthMiddleware, AuthResult};
 pub use jwk::Jwk;
 pub use provider::OidcProvider;
 
 pub struct OidcValidator {
+    provider_name: String,
     provider: Box<dyn OidcProvider>,
     http_client: Box<dyn HttpClient>,
     cache: Box<dyn Cache>,
@@ -24,7 +26,7 @@ pub struct OidcValidator {
 
 impl OidcValidator {
     pub fn new(
-        _provider_name: String,
+        provider_name: String,
         provider_config: &OidcProviderConfig,
         cache: Box<dyn Cache>,
     ) -> Result<Self, Error> {
@@ -36,6 +38,7 @@ impl OidcValidator {
         };
 
         Ok(Self {
+            provider_name,
             provider,
             http_client,
             cache,
@@ -60,12 +63,60 @@ impl AuthMiddleware for OidcValidator {
         request: &Request<Incoming>,
         identity: &mut ClientIdentity,
     ) -> Result<AuthResult, Error> {
-        let Some(token) = request.bearer_token() else {
+        let token = if let Some(bearer_token) = request.bearer_token() {
+            bearer_token
+        } else if let Some((username, password)) = extract_basic_auth(request) {
+            if username != self.provider_name {
+                return Ok(AuthResult::NoCredentials);
+            }
+            password
+        } else {
             return Ok(AuthResult::NoCredentials);
         };
 
         let claims = self.validate_token(&token).await?;
         identity.oidc = Some(claims);
         Ok(AuthResult::Authenticated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::ResponseBody;
+    use base64::prelude::BASE64_STANDARD;
+    use base64::Engine;
+    use hyper::header::{HeaderValue, AUTHORIZATION};
+
+    #[test]
+    fn test_oidc_bearer_token() {
+        let request = Request::builder()
+            .header(
+                AUTHORIZATION,
+                HeaderValue::from_static("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"),
+            )
+            .body(ResponseBody::empty())
+            .unwrap();
+
+        assert_eq!(
+            request.bearer_token(),
+            Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9".to_string())
+        );
+    }
+
+    #[test]
+    fn test_oidc_basic_auth() {
+        let credentials = BASE64_STANDARD.encode("github:eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
+        let request = Request::builder()
+            .header(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Basic {credentials}")).unwrap(),
+            )
+            .body(ResponseBody::empty())
+            .unwrap();
+
+        let (username, password) = extract_basic_auth(&request).unwrap();
+        assert_eq!(username, "github");
+        assert_eq!(password, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
     }
 }

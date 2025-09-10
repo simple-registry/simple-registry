@@ -148,9 +148,7 @@ mod tests {
             .unwrap();
         assert_eq!(extract_basic_auth(&request), None);
 
-        let request = Request::builder()
-            .body(ResponseBody::empty())
-            .unwrap();
+        let request = Request::builder().body(ResponseBody::empty()).unwrap();
         assert_eq!(extract_basic_auth(&request), None);
     }
 }

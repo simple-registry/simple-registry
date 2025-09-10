@@ -88,7 +88,17 @@ impl ServerContext {
             .authenticate(request, &mut identity)
             .await?;
 
-        // Check basic auth
+        // Check OIDC validators first (stop on first match)
+        // OIDC is checked first because JWT validation is fast and stateless, and may find
+        // tokens in the Authorization header that are Basic Auth tokens.
+        for validator in self.oidc_middlewares.iter() {
+            match validator.authenticate(request, &mut identity).await {
+                Ok(AuthResult::Authenticated) => return Ok(identity),
+                Ok(AuthResult::NoCredentials) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
         match self
             .basic_auth_middleware
             .authenticate(request, &mut identity)
@@ -97,15 +107,6 @@ impl ServerContext {
             Ok(AuthResult::Authenticated) => return Ok(identity),
             Ok(AuthResult::NoCredentials) => {}
             Err(e) => return Err(e),
-        }
-
-        // Check OIDC validators (stop on first match)
-        for validator in self.oidc_middlewares.iter() {
-            match validator.authenticate(request, &mut identity).await {
-                Ok(AuthResult::Authenticated) => return Ok(identity),
-                Ok(AuthResult::NoCredentials) => {}
-                Err(e) => return Err(e),
-            }
         }
 
         Ok(identity)
