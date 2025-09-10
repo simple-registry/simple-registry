@@ -30,32 +30,25 @@ impl BasicAuthValidator {
         Self { credentials }
     }
 
-    fn deny() -> Error {
-        Error::Unauthorized("Access denied".to_string())
-    }
-
     #[instrument(skip(self, password))]
-    pub fn validate_credentials(
-        &self,
-        username: &str,
-        password: &str,
-    ) -> Result<Option<String>, Error> {
-        let (identity_id, identity_password) =
-            self.credentials.get(username).ok_or_else(Self::deny)?;
+    pub fn validate_credentials(&self, username: &str, password: &str) -> Option<String> {
+        let Some((identity_id, identity_password)) = self.credentials.get(username) else {
+            debug!("Username not found in credentials");
+            return None;
+        };
 
-        let identity_password = PasswordHash::new(identity_password).map_err(|error| {
-            error!("Unable to hash password: {error}");
-            Self::deny()
-        })?;
+        let Ok(identity_password) = PasswordHash::new(identity_password) else {
+            error!("Unable to parse password hash");
+            return None;
+        };
 
-        Argon2::default()
-            .verify_password(password.as_bytes(), &identity_password)
-            .map_err(|error| {
-                error!("Unable to verify password: {error}");
-                Self::deny()
-            })?;
-
-        Ok(Some(identity_id.clone()))
+        match Argon2::default().verify_password(password.as_bytes(), &identity_password) {
+            Ok(()) => Some(identity_id.clone()),
+            Err(error) => {
+                debug!("Password verification failed: {error}");
+                None
+            }
+        }
     }
 }
 
@@ -70,10 +63,14 @@ impl AuthMiddleware for BasicAuthValidator {
             return Ok(AuthResult::NoCredentials);
         };
 
-        let identity_id = self.validate_credentials(&username, &password)?;
-        identity.id = identity_id;
-        identity.username = Some(username);
-        Ok(AuthResult::Authenticated)
+        match self.validate_credentials(&username, &password) {
+            Some(identity_id) => {
+                identity.id = Some(identity_id);
+                identity.username = Some(username);
+                Ok(AuthResult::Authenticated)
+            }
+            None => Ok(AuthResult::NoCredentials),
+        }
     }
 }
 

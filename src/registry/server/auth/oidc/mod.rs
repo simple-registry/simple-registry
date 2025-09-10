@@ -16,6 +16,7 @@ use crate::registry::server::auth::oidc::provider::{generic, github};
 use crate::registry::server::auth::{AuthMiddleware, AuthResult};
 pub use jwk::Jwk;
 pub use provider::OidcProvider;
+use tracing::debug;
 
 pub struct OidcValidator {
     provider_name: String,
@@ -74,9 +75,16 @@ impl AuthMiddleware for OidcValidator {
             return Ok(AuthResult::NoCredentials);
         };
 
-        let claims = self.validate_token(&token).await?;
-        identity.oidc = Some(claims);
-        Ok(AuthResult::Authenticated)
+        match self.validate_token(&token).await {
+            Ok(claims) => {
+                identity.oidc = Some(claims);
+                Ok(AuthResult::Authenticated)
+            }
+            Err(e) => {
+                debug!("OIDC token validation failed: {e}");
+                Ok(AuthResult::NoCredentials)
+            }
+        }
     }
 }
 
