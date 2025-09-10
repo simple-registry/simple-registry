@@ -79,7 +79,7 @@ impl Command {
         server_config: &ServerConfig,
         identities: &HashMap<String, IdentityConfig>,
         registry: Registry,
-        oidc_validators: Arc<Vec<Arc<OidcValidator>>>,
+        oidc_validators: Arc<Vec<OidcValidator>>,
     ) -> Result<Command, configuration::Error> {
         let timeouts = vec![
             Duration::from_secs(server_config.query_timeout),
@@ -101,7 +101,7 @@ impl Command {
         server_config: ServerConfig,
         identities: &HashMap<String, IdentityConfig>,
         registry: Registry,
-        oidc_validators: Arc<Vec<Arc<OidcValidator>>>,
+        oidc_validators: Arc<Vec<OidcValidator>>,
     ) -> Result<(), configuration::Error> {
         let timeouts = vec![
             Duration::from_secs(server_config.query_timeout),

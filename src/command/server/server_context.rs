@@ -14,7 +14,7 @@ use tracing::instrument;
 pub struct ServerContext {
     mtls_middleware: Arc<MtlsValidator>,
     basic_auth_middleware: Arc<BasicAuthValidator>,
-    oidc_middlewares: Arc<Vec<Arc<OidcValidator>>>,
+    oidc_middlewares: Arc<Vec<OidcValidator>>,
     pub timeouts: Vec<Duration>,
     pub registry: Registry,
     pub credentials: HashMap<String, (String, String)>, // Keep for backwards compatibility
@@ -24,7 +24,7 @@ impl ServerContext {
     pub fn build_oidc_validators(
         oidc_config: &HashMap<String, OidcProviderConfig>,
         auth_token_cache: &CacheStoreConfig,
-    ) -> Result<Arc<Vec<Arc<OidcValidator>>>, crate::configuration::Error> {
+    ) -> Result<Arc<Vec<OidcValidator>>, crate::configuration::Error> {
         let mut validators = Vec::new();
         for (name, provider_config) in oidc_config {
             let cache: Box<dyn Cache> = match auth_token_cache {
@@ -34,13 +34,12 @@ impl ServerContext {
                 CacheStoreConfig::Memory => Box::new(cache::memory::Backend::new()),
             };
 
-            let validator = Arc::new(
+            let validator =
                 OidcValidator::new(name.clone(), provider_config, cache).map_err(|e| {
                     crate::configuration::Error::Http(format!(
                         "Failed to create OIDC validator '{name}': {e}"
                     ))
-                })?,
-            );
+                })?;
 
             validators.push(validator);
         }
@@ -51,7 +50,7 @@ impl ServerContext {
         identities: &HashMap<String, IdentityConfig>,
         timeouts: Vec<Duration>,
         registry: Registry,
-        oidc_middlewares: Arc<Vec<Arc<OidcValidator>>>,
+        oidc_middlewares: Arc<Vec<OidcValidator>>,
     ) -> Self {
         let mtls_middleware = Arc::new(MtlsValidator::new());
         let basic_auth_middleware = Arc::new(BasicAuthValidator::new(identities));
@@ -99,7 +98,7 @@ impl ServerContext {
         for validator in self.oidc_middlewares.iter() {
             match validator.authenticate(request, identity).await {
                 Ok(AuthResult::Authenticated) => return Ok(()),
-                Ok(AuthResult::NoCredentials) => { },
+                Ok(AuthResult::NoCredentials) => {}
                 Err(e) => return Err(e),
             }
         }
