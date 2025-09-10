@@ -216,10 +216,9 @@ impl Registry {
         Ok(res)
     }
 
-    #[instrument(skip(self, _request, identity))]
-    pub async fn handle_get_upload<T>(
+    #[instrument(skip(self, identity))]
+    pub async fn handle_get_upload(
         &self,
-        _request: Request<T>,
         parameters: QueryUploadParameters,
         identity: &ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
@@ -337,10 +336,9 @@ impl Registry {
         Ok(res)
     }
 
-    #[instrument(skip(self, _request, identity))]
-    pub async fn handle_delete_upload<T>(
+    #[instrument(skip(self, identity))]
+    pub async fn handle_delete_upload(
         &self,
-        _request: Request<T>,
         parameters: QueryUploadParameters,
         identity: &ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
@@ -710,7 +708,7 @@ mod tests {
 
         let identity = ClientIdentity::default();
         let response = registry
-            .handle_get_upload(request, parameters, &identity)
+            .handle_get_upload(parameters, &identity)
             .await
             .unwrap();
 
@@ -898,7 +896,7 @@ mod tests {
 
         let identity = ClientIdentity::default();
         let response = registry
-            .handle_delete_upload(request, parameters, &identity)
+            .handle_delete_upload(parameters, &identity)
             .await
             .unwrap();
 
