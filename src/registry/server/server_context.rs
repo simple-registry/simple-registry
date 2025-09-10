@@ -1,7 +1,9 @@
 use crate::configuration::{CacheStoreConfig, IdentityConfig, OidcProviderConfig};
-use crate::registry::auth::oidc::OidcValidator;
-use crate::registry::auth::{AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator};
 use crate::registry::cache::{self, Cache};
+use crate::registry::server::auth::oidc::OidcValidator;
+use crate::registry::server::auth::{
+    AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator,
+};
 use crate::registry::server::ClientIdentity;
 use crate::registry::{Error, Registry};
 use hyper::body::Incoming;

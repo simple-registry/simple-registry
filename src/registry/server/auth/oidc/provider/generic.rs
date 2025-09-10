@@ -1,6 +1,6 @@
-use crate::registry::auth::oidc::{Jwk, OidcProvider};
 use crate::registry::cache::Cache;
 use crate::registry::http_client::HttpClient;
+use crate::registry::server::auth::oidc::{Jwk, OidcProvider};
 use crate::registry::server::OidcClaims;
 use crate::registry::Error;
 use async_trait::async_trait;

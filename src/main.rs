@@ -108,12 +108,14 @@ fn set_config_watcher(
                 }
             };
 
-            let oidc_validators =
-                server::ServerContext::build_oidc_validators(&config.oidc, &config.cache_store)
-                    .unwrap_or_else(|e| {
-                        error!("Failed to build OIDC validators: {e}");
-                        Arc::new(Vec::new())
-                    });
+            let oidc_validators = registry::server::ServerContext::build_oidc_validators(
+                &config.oidc,
+                &config.cache_store,
+            )
+            .unwrap_or_else(|e| {
+                error!("Failed to build OIDC validators: {e}");
+                Arc::new(Vec::new())
+            });
 
             let registry = match Registry::new(
                 blob_store.clone(),
@@ -241,7 +243,7 @@ async fn handle_command(
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
 ) -> Result<(), command::Error> {
     let oidc_validators =
-        server::ServerContext::build_oidc_validators(&config.oidc, &config.cache_store)?;
+        registry::server::ServerContext::build_oidc_validators(&config.oidc, &config.cache_store)?;
 
     let registry = Registry::new(
         data_store.clone(),

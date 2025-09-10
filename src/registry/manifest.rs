@@ -1,8 +1,8 @@
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::oci::{Digest, Manifest, Reference};
+use crate::registry::server::request_ext::RequestExt;
+use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::server::{ClientIdentity, ClientRequest};
-use crate::registry::utils::request_ext::RequestExt;
-use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::{Error, Registry, Repository, ResponseBody};
 use http_body_util::BodyExt;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
@@ -559,8 +559,8 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::server::response_ext::IntoAsyncRead;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use crate::registry::utils::response_ext::IntoAsyncRead;
     use http_body_util::Empty;
     use hyper::body::Bytes;
     use hyper::Uri;

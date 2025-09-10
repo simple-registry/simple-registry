@@ -28,8 +28,8 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::server::response_ext::ResponseExt;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use crate::registry::utils::response_ext::ResponseExt;
     use crate::registry::Registry;
 
     async fn test_handle_get_api_version_impl(registry: &Registry) {

@@ -5,7 +5,6 @@ use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
 use tracing::instrument;
 
-pub mod auth;
 pub mod blob;
 pub mod blob_store;
 pub mod cache;
@@ -17,7 +16,6 @@ pub mod manifest;
 pub mod metadata_store;
 pub mod oci;
 pub mod repository;
-mod response_body;
 mod scrub;
 pub mod server;
 pub mod task_queue;
@@ -37,7 +35,7 @@ use crate::registry::metadata_store::MetadataStore;
 pub use crate::registry::task_queue::TaskQueue;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
-pub use response_body::ResponseBody;
+pub use server::response_body::ResponseBody;
 
 static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap()

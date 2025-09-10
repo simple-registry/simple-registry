@@ -1,5 +1,5 @@
-use crate::registry::auth::oidc::provider::generic;
-use crate::registry::auth::oidc::OidcProvider;
+use crate::registry::server::auth::oidc::provider::generic;
+use crate::registry::server::auth::oidc::OidcProvider;
 use crate::registry::Error;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

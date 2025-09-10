@@ -4,15 +4,15 @@ pub mod provider;
 use crate::configuration::OidcProviderConfig;
 use crate::registry::cache::Cache;
 use crate::registry::http_client::{HttpClient, HttpClientBuilder};
+use crate::registry::server::request_ext::RequestExt;
 use crate::registry::server::{ClientIdentity, OidcClaims};
-use crate::registry::utils::request_ext::RequestExt;
 use crate::registry::Error;
 use async_trait::async_trait;
 use hyper::body::Incoming;
 use hyper::Request;
 
-use crate::registry::auth::oidc::provider::{generic, github};
-use crate::registry::auth::{AuthMiddleware, AuthResult};
+use crate::registry::server::auth::oidc::provider::{generic, github};
+use crate::registry::server::auth::{AuthMiddleware, AuthResult};
 pub use jwk::Jwk;
 pub use provider::OidcProvider;
 

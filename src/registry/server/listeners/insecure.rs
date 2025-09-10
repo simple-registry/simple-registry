@@ -1,6 +1,7 @@
 use crate::command;
-use crate::command::server::{serve_request, ServerContext};
 use crate::configuration::ServerConfig;
+use crate::registry::server::serve_request;
+use crate::registry::server::ServerContext;
 use arc_swap::ArcSwap;
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;

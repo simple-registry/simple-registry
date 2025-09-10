@@ -1,6 +1,6 @@
 use crate::registry::oci::Digest;
+use crate::registry::server::request_ext::{IntoAsyncRead, RequestExt};
 use crate::registry::server::{ClientIdentity, ClientRequest};
-use crate::registry::utils::request_ext::{IntoAsyncRead, RequestExt};
 use crate::registry::{Error, Registry, ResponseBody};
 use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE, LOCATION, RANGE};
 use hyper::{body, Request, Response, StatusCode};
@@ -365,9 +365,9 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::server::response_ext::ResponseExt;
     use crate::registry::server::ClientIdentity;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use crate::registry::utils::response_ext::ResponseExt;
     use http_body_util::{BodyExt, Empty};
     use hyper::body::Bytes;
     use hyper::Method;

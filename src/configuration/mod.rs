@@ -7,7 +7,7 @@ use std::path::Path;
 
 mod error;
 
-use crate::registry::auth::oidc;
+use crate::registry::server::auth::oidc;
 use crate::registry::{blob_store, cache, metadata_store};
 pub use error::Error;
 

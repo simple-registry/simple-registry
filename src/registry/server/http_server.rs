@@ -1,6 +1,7 @@
-use crate::registry::auth::oidc::OidcValidator;
-use crate::{command, configuration, registry};
-use argh::FromArgs;
+use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
+use crate::registry::server::auth::PeerCertificate;
+use crate::registry::server::ServerContext;
+use crate::registry::ResponseBody;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONTENT_TYPE, WWW_AUTHENTICATE};
@@ -12,31 +13,21 @@ use opentelemetry::trace::TraceContextExt;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::pin;
 use tracing::{debug, error, info, instrument, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-mod insecure_listener;
-mod server_context;
-mod tls_listener;
-
-use crate::command::server::insecure_listener::InsecureListener;
-pub use crate::command::server::server_context::ServerContext;
-use crate::command::server::tls_listener::TlsListener;
-use crate::configuration::{IdentityConfig, ServerConfig};
-use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
+use crate::registry;
 use crate::registry::blob::QueryBlobParameters;
 use crate::registry::content_discovery::{ReferrerParameters, TagsParameters};
 use crate::registry::manifest::QueryManifestParameters;
 use crate::registry::upload::{QueryNewUploadParameters, QueryUploadParameters};
 use crate::registry::utils::deserialize_ext::DeserializeExt;
-use crate::registry::{Registry, ResponseBody};
 
 static ROUTE_HEALTHZ_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/healthz$").unwrap());
 static ROUTE_METRICS_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/metrics").unwrap());
@@ -57,79 +48,7 @@ static ROUTE_LIST_TAGS_REGEX: LazyLock<Regex> =
 static ROUTE_CATALOG_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^/v2/_catalog$").unwrap());
 
-pub enum ServiceListener {
-    Insecure(InsecureListener),
-    Secure(TlsListener),
-}
-
-#[derive(FromArgs, PartialEq, Debug)]
-#[argh(
-    subcommand,
-    name = "server",
-    description = "Run the registry listeners"
-)]
-pub struct Options {}
-
-pub struct Command {
-    listener: ServiceListener,
-}
-
-impl Command {
-    pub fn new(
-        server_config: &ServerConfig,
-        identities: &HashMap<String, IdentityConfig>,
-        registry: Registry,
-        oidc_validators: Arc<Vec<OidcValidator>>,
-    ) -> Result<Command, configuration::Error> {
-        let timeouts = vec![
-            Duration::from_secs(server_config.query_timeout),
-            Duration::from_secs(server_config.query_timeout_grace_period),
-        ];
-        let context = ServerContext::new(identities, timeouts, registry, oidc_validators);
-
-        let listener = if server_config.tls.is_some() {
-            ServiceListener::Secure(TlsListener::new(server_config, context)?)
-        } else {
-            ServiceListener::Insecure(InsecureListener::new(server_config, context))
-        };
-
-        Ok(Command { listener })
-    }
-
-    pub fn notify_config_change(
-        &self,
-        server_config: ServerConfig,
-        identities: &HashMap<String, IdentityConfig>,
-        registry: Registry,
-        oidc_validators: Arc<Vec<OidcValidator>>,
-    ) -> Result<(), configuration::Error> {
-        let timeouts = vec![
-            Duration::from_secs(server_config.query_timeout),
-            Duration::from_secs(server_config.query_timeout_grace_period),
-        ];
-        let context = ServerContext::new(identities, timeouts, registry, oidc_validators);
-
-        match &self.listener {
-            ServiceListener::Insecure(listener) => listener.notify_config_change(context),
-            ServiceListener::Secure(listener) => {
-                listener.notify_config_change(server_config, context)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn run(&self) -> Result<(), command::Error> {
-        match &self.listener {
-            ServiceListener::Insecure(listener) => listener.serve().await?,
-            ServiceListener::Secure(listener) => listener.serve().await?,
-        }
-
-        Ok(())
-    }
-}
-
-async fn serve_request<S>(
+pub async fn serve_request<S>(
     stream: TokioIo<S>,
     context: Arc<ServerContext>,
     peer_certificate: Option<Vec<u8>>,
@@ -141,7 +60,6 @@ async fn serve_request<S>(
         stream,
         service_fn(move |mut request| {
             if let Some(ref cert_data) = peer_certificate {
-                use crate::registry::auth::PeerCertificate;
                 request
                     .extensions_mut()
                     .insert(PeerCertificate(Arc::new(cert_data.clone())));
@@ -369,7 +287,7 @@ async fn router(
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "application/json")
             .body(ResponseBody::Fixed(Full::new(Bytes::from(
-                "{\"status\":\"ok\"}",
+                r#"{"status":"ok"}"#,
             ))))
             .map_err(registry::Error::from);
     } else if ROUTE_METRICS_REGEX.is_match(&path) {
