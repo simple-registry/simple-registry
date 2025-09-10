@@ -184,12 +184,7 @@ async fn router(
         }
     } else if let Some(params) = QueryUploadParameters::from_regex(&path, &ROUTE_UPLOAD_REGEX) {
         match *req.method() {
-            Method::GET => {
-                return context
-                    .registry
-                    .handle_get_upload(req, params, &identity)
-                    .await
-            }
+            Method::GET => return context.registry.handle_get_upload(params, &identity).await,
             Method::PATCH => {
                 return context
                     .registry
@@ -205,7 +200,7 @@ async fn router(
             Method::DELETE => {
                 return context
                     .registry
-                    .handle_delete_upload(req, params, &identity)
+                    .handle_delete_upload(params, &identity)
                     .await
             }
             _ => { /* NOOP */ }
