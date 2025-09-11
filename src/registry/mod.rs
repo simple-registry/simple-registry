@@ -15,6 +15,7 @@ mod http_client;
 pub mod manifest;
 pub mod metadata_store;
 pub mod oci;
+mod path_builder;
 pub mod repository;
 mod scrub;
 pub mod server;
@@ -22,11 +23,10 @@ pub mod task_queue;
 #[cfg(test)]
 mod tests;
 pub mod upload;
-pub mod utils;
 mod version;
 
 use crate::configuration;
-use crate::configuration::{CacheStoreConfig, GlobalConfig, OidcProviderConfig, RepositoryConfig};
+use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
 use crate::registry::cache::Cache;
 pub use repository::Repository;
 
@@ -59,20 +59,13 @@ impl Debug for Registry {
 }
 
 impl Registry {
-    #[instrument(skip(
-        repositories_config,
-        blob_store,
-        metadata_store,
-        auth_token_cache,
-        _oidc_config
-    ))]
+    #[instrument(skip(repositories_config, blob_store, metadata_store, auth_token_cache,))]
     pub fn new(
         blob_store: Arc<dyn BlobStore + Send + Sync>,
         metadata_store: Arc<dyn MetadataStore + Send + Sync>,
         repositories_config: HashMap<String, RepositoryConfig>,
         global_config: &GlobalConfig,
         auth_token_cache: &CacheStoreConfig,
-        _oidc_config: &HashMap<String, OidcProviderConfig>,
     ) -> Result<Self, configuration::Error> {
         let auth_token_cache_box: Box<dyn Cache> =
             if let CacheStoreConfig::Redis(ref redis_config) = auth_token_cache {
@@ -198,6 +191,26 @@ pub mod test_utils {
             },
         );
         repositories
+    }
+
+    pub fn create_test_registry(
+        blob_store: Arc<dyn BlobStore + Send + Sync>,
+        metadata_store: Arc<dyn MetadataStore + Send + Sync>,
+    ) -> Registry {
+        let repositories_config = create_test_repository_config();
+        let global = GlobalConfig::default();
+        let token_cache = CacheStoreConfig::default();
+
+        Registry::new(
+            blob_store,
+            metadata_store,
+            repositories_config,
+            &global,
+            &token_cache,
+        )
+        .unwrap()
+        .with_upload_timeout(Duration::seconds(0))
+        .with_scrub_dry_run(false)
     }
 
     pub async fn create_test_blob(

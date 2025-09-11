@@ -16,8 +16,8 @@ pub struct Configuration {
     pub server: ServerConfig,
     #[serde(default)]
     pub global: GlobalConfig,
-    #[serde(default)]
-    pub cache_store: CacheStoreConfig,
+    #[serde(default, alias = "cache_store")]
+    pub cache: CacheStoreConfig,
     #[serde(default, alias = "storage")]
     pub blob_store: BlobStorageConfig,
     #[serde(default)]
@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(config.server.port, 8000);
         assert_eq!(config.server.query_timeout, 3600);
         assert_eq!(config.server.query_timeout_grace_period, 60);
-        assert_eq!(config.cache_store, CacheStoreConfig::Memory);
+        assert_eq!(config.cache, CacheStoreConfig::Memory);
 
         assert_eq!(config.blob_store, BlobStorageConfig::default());
 
@@ -289,7 +289,7 @@ mod tests {
     #[tokio::test]
     async fn test_metadata_store_defaults_with_s3_blob_store() {
         // When using S3 blob store and no metadata store is specified,
-        // it should auto-configure S3 metadata store
+        // it should autoconfigure S3 metadata store
         let config = r#"
         [server]
         bind_address = "0.0.0.0"
@@ -304,7 +304,7 @@ mod tests {
 
         let config = Configuration::load_from_str(config).unwrap();
 
-        // Should auto-configure S3 metadata store with same settings
+        // Should autoconfigure S3 metadata store with same settings
         match config.metadata_store {
             MetadataStoreConfig::S3(ref meta_cfg) => {
                 assert_eq!(meta_cfg.bucket, "test-bucket");
@@ -363,7 +363,7 @@ mod tests {
             BlobStorageConfig::S3(_) => panic!("Expected FS blob store from 'storage' field"),
         }
 
-        // Should auto-configure metadata store based on blob store
+        // Should autoconfigure metadata store based on blob store
         match config.metadata_store {
             MetadataStoreConfig::FS(ref cfg) => {
                 assert_eq!(cfg.root_dir, "/data/registry");

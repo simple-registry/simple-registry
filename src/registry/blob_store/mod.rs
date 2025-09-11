@@ -2,6 +2,7 @@ mod error;
 pub mod fs;
 mod hashing_reader;
 pub mod s3;
+mod sha256_ext;
 
 use crate::registry::oci::Digest;
 use async_trait::async_trait;
@@ -69,7 +70,7 @@ pub trait BlobStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::utils::sha256_ext::Sha256Ext;
+    use crate::registry::blob_store::sha256_ext::Sha256Ext;
     use chrono::Duration;
     use sha2::{Digest, Sha256};
     use std::io::Cursor;

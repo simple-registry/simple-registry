@@ -88,47 +88,41 @@ mod tests {
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::metadata_store::MetadataStore;
     use crate::registry::oci::Descriptor;
-    use crate::registry::utils::sha256_ext::Sha256Ext;
     use chrono::{Duration, Utc};
-    use sha2::digest::Update;
-    use sha2::{Digest, Sha256};
     use std::collections::HashMap;
 
-    pub async fn test_datastore_list_namespaces(store: &impl MetadataStore) {
+    pub async fn test_datastore_list_namespaces(b: &impl BlobStore, m: &impl MetadataStore) {
         let namespaces = ["repo1", "repo2", "repo3/nested"];
-        let digest = Sha256::new().digest();
+        let digest = b.create_blob(b"test blob content").await.unwrap();
 
         for namespace in &namespaces {
             let tag_link = LinkKind::Tag("latest".to_string());
-            store
-                .create_link(namespace, &tag_link, &digest)
-                .await
-                .unwrap();
+            m.create_link(namespace, &tag_link, &digest).await.unwrap();
         }
 
         // Test listing all namespaces
-        let (listed_namespaces, token) = store.list_namespaces(10, None).await.unwrap();
+        let (listed_namespaces, token) = m.list_namespaces(10, None).await.unwrap();
         assert_eq!(listed_namespaces, namespaces);
         assert!(token.is_none() || listed_namespaces.len() >= namespaces.len());
 
         // Test pagination (2 items per pages)
-        let (page1, token1) = store.list_namespaces(2, None).await.unwrap();
+        let (page1, token1) = m.list_namespaces(2, None).await.unwrap();
         assert_eq!(page1, ["repo1", "repo2"]);
         assert!(token1.is_some());
 
-        let (page2, token2) = store.list_namespaces(2, token1).await.unwrap();
+        let (page2, token2) = m.list_namespaces(2, token1).await.unwrap();
         assert_eq!(page2, ["repo3/nested"]);
         assert!(token2.is_none());
 
         // Test pagination (1 item per pages)
-        let (page1, token1) = store.list_namespaces(1, None).await.unwrap();
+        let (page1, token1) = m.list_namespaces(1, None).await.unwrap();
         assert_eq!(page1, ["repo1"]);
         assert!(token1.is_some());
 
-        let (page2, token2) = store.list_namespaces(1, token1).await.unwrap();
+        let (page2, token2) = m.list_namespaces(1, token1).await.unwrap();
         assert_eq!(page2, ["repo2"]);
 
-        let (page3, token3) = store.list_namespaces(1, token2).await.unwrap();
+        let (page3, token3) = m.list_namespaces(1, token2).await.unwrap();
         assert_eq!(page3, ["repo3/nested"]);
         assert!(token3.is_none());
 
@@ -139,21 +133,18 @@ mod tests {
         assert_eq!(all_namespaces, namespaces);
     }
 
-    pub async fn test_datastore_list_tags(store: &impl MetadataStore) {
+    pub async fn test_datastore_list_tags(b: &impl BlobStore, m: &impl MetadataStore) {
         let namespace = "test-repo";
-        let digest = Sha256::new().digest();
+        let digest = b.create_blob(b"test blob content").await.unwrap();
 
         let tags = ["latest", "v1.0", "v2.0"];
         for tag in tags {
             let tag_link = LinkKind::Tag(tag.to_string());
-            store
-                .create_link(namespace, &tag_link, &digest)
-                .await
-                .unwrap();
+            m.create_link(namespace, &tag_link, &digest).await.unwrap();
         }
 
         // Test listing all tags
-        let (all_tags, token) = store.list_tags(namespace, 10, None).await.unwrap();
+        let (all_tags, token) = m.list_tags(namespace, 10, None).await.unwrap();
         assert_eq!(all_tags.len(), tags.len());
         for tag in tags {
             assert!(all_tags.contains(&tag.to_string()));
@@ -161,49 +152,43 @@ mod tests {
         assert!(token.is_none());
 
         // Test pagination (2 items per page)
-        let (page1, token1) = store.list_tags(namespace, 2, None).await.unwrap();
+        let (page1, token1) = m.list_tags(namespace, 2, None).await.unwrap();
         assert_eq!(page1.len(), 2);
         assert!(token1.is_some());
 
-        let (page2, token2) = store.list_tags(namespace, 2, token1).await.unwrap();
+        let (page2, token2) = m.list_tags(namespace, 2, token1).await.unwrap();
         assert_eq!(page2.len(), 1);
         assert!(token2.is_none());
 
         // Test pagination (1 item per page)
-        let (page1, token1) = store.list_tags(namespace, 1, None).await.unwrap();
+        let (page1, token1) = m.list_tags(namespace, 1, None).await.unwrap();
         assert_eq!(page1.len(), 1);
         assert!(token1.is_some());
 
-        let (page2, token2) = store.list_tags(namespace, 1, token1).await.unwrap();
+        let (page2, token2) = m.list_tags(namespace, 1, token1).await.unwrap();
         assert_eq!(page2.len(), 1);
         assert!(token2.is_some());
 
-        let (page3, token3) = store.list_tags(namespace, 1, token2).await.unwrap();
+        let (page3, token3) = m.list_tags(namespace, 1, token2).await.unwrap();
         assert_eq!(page3.len(), 1);
         assert!(token3.is_none());
 
         // Test tag deletion
         let delete_tag = "v1.0";
         let tag_link = LinkKind::Tag(delete_tag.to_string());
-        store.delete_link(namespace, &tag_link).await.unwrap();
+        m.delete_link(namespace, &tag_link).await.unwrap();
 
-        let (tags_after_delete, _) = store.list_tags(namespace, 10, None).await.unwrap();
+        let (tags_after_delete, _) = m.list_tags(namespace, 10, None).await.unwrap();
         assert_eq!(tags_after_delete.len(), tags.len() - 1);
         assert!(!tags_after_delete.contains(&delete_tag.to_string()));
     }
 
-    pub async fn test_datastore_list_referrers(
-        blob_store: &impl BlobStore,
-        metadata_store: &impl MetadataStore,
-    ) {
+    pub async fn test_datastore_list_referrers(b: &impl BlobStore, m: &impl MetadataStore) {
         let namespace = "test-repo";
-        // Create base manifest that will be referenced
-        let base_content = b"base manifest content";
-        let base_digest = blob_store.create_blob(base_content).await.unwrap();
+        let base_digest = b.create_blob(b"base manifest content").await.unwrap();
         let base_link = LinkKind::Digest(base_digest.clone());
 
-        metadata_store
-            .create_link(namespace, &base_link, &base_digest)
+        m.create_link(namespace, &base_link, &base_digest)
             .await
             .unwrap();
 
@@ -227,29 +212,22 @@ mod tests {
             }}"#
         );
 
-        let referrer_digest = blob_store
-            .create_blob(referrer_content.as_bytes())
-            .await
-            .unwrap();
+        let referrer_digest = b.create_blob(referrer_content.as_bytes()).await.unwrap();
         let link = LinkKind::Digest(referrer_digest.clone());
 
-        metadata_store
-            .create_link(namespace, &link, &referrer_digest)
+        m.create_link(namespace, &link, &referrer_digest)
             .await
             .unwrap();
 
         // Also add it to the referrers index
         let referrers_link = LinkKind::Referrer(base_digest.clone(), referrer_digest.clone());
 
-        metadata_store
-            .create_link(namespace, &referrers_link, &referrer_digest)
+        m.create_link(namespace, &referrers_link, &referrer_digest)
             .await
             .unwrap();
 
         // Test listing referrers
-        let referrers = metadata_store
-            .list_referrers(namespace, &base_digest, None)
-            .await;
+        let referrers = m.list_referrers(namespace, &base_digest, None).await;
 
         let expected = vec![Descriptor {
             media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
@@ -262,7 +240,7 @@ mod tests {
         assert_eq!(Ok(expected), referrers);
 
         // Test with artifact type filter
-        let filtered_referrers = metadata_store
+        let filtered_referrers = m
             .list_referrers(
                 namespace,
                 &base_digest,
@@ -274,7 +252,7 @@ mod tests {
         assert!(!filtered_referrers.is_empty());
 
         // Test with non-matching artifact type
-        let non_matching_referrers = metadata_store
+        let non_matching_referrers = m
             .list_referrers(
                 namespace,
                 &base_digest,
@@ -286,7 +264,7 @@ mod tests {
         assert!(non_matching_referrers.is_empty());
     }
 
-    pub async fn test_datastore_list_revisions(store: &impl MetadataStore) {
+    pub async fn test_datastore_list_revisions(b: &impl BlobStore, m: &impl MetadataStore) {
         let namespace = "test-repo";
 
         let manifest_contents = [
@@ -297,18 +275,17 @@ mod tests {
 
         let mut digests = Vec::new();
         for content in &manifest_contents {
-            let digest = Sha256::new().chain(content).digest();
+            let digest = b.create_blob(content).await.unwrap();
             digests.push(digest.clone());
 
             let digest_link = LinkKind::Digest(digest.clone());
-            store
-                .create_link(namespace, &digest_link, &digest)
+            m.create_link(namespace, &digest_link, &digest)
                 .await
                 .unwrap();
         }
 
         // Test listing all revisions
-        let (revisions, token) = store.list_revisions(namespace, 10, None).await.unwrap();
+        let (revisions, token) = m.list_revisions(namespace, 10, None).await.unwrap();
         assert_eq!(revisions.len(), digests.len());
         assert!(token.is_none());
         for digest in &digests {
@@ -316,46 +293,43 @@ mod tests {
         }
 
         // Test pagination (2 items per page)
-        let (page1, token1) = store.list_revisions(namespace, 2, None).await.unwrap();
+        let (page1, token1) = m.list_revisions(namespace, 2, None).await.unwrap();
         assert_eq!(page1.len(), 2);
         assert!(token1.is_some());
 
-        let (page2, token2) = store.list_revisions(namespace, 2, token1).await.unwrap();
+        let (page2, token2) = m.list_revisions(namespace, 2, token1).await.unwrap();
         assert_eq!(page2.len(), 1);
         assert!(token2.is_none());
 
         // Test basic pagination (1 item per page)
-        let (page1, token1) = store.list_revisions(namespace, 1, None).await.unwrap();
+        let (page1, token1) = m.list_revisions(namespace, 1, None).await.unwrap();
         assert_eq!(page1.len(), 1);
         assert!(token1.is_some());
 
-        let (page2, token2) = store.list_revisions(namespace, 1, token1).await.unwrap();
+        let (page2, token2) = m.list_revisions(namespace, 1, token1).await.unwrap();
         assert_eq!(page2.len(), 1);
         assert!(token2.is_some());
 
-        let (page3, token3) = store.list_revisions(namespace, 1, token2).await.unwrap();
+        let (page3, token3) = m.list_revisions(namespace, 1, token2).await.unwrap();
         assert_eq!(page3.len(), 1);
         assert!(token3.is_none());
     }
 
-    pub async fn test_datastore_link_operations(store: &impl MetadataStore) {
+    pub async fn test_datastore_link_operations(b: &impl BlobStore, m: &impl MetadataStore) {
         let namespace = "test-namespace";
-        let digest = Sha256::new().digest();
+        let digest = b.create_blob(b"test blob content").await.unwrap();
 
         // Test creating and reading tag link
         let tag = "latest";
         let tag_link = LinkKind::Tag(tag.to_string());
 
-        store
-            .create_link(namespace, &tag_link, &digest)
-            .await
-            .unwrap();
+        m.create_link(namespace, &tag_link, &digest).await.unwrap();
 
-        let read_digest = store.read_link(namespace, &tag_link, false).await.unwrap();
+        let read_digest = m.read_link(namespace, &tag_link, false).await.unwrap();
         assert_eq!(read_digest.target, digest);
 
         // Test reading reference info
-        let ref_info = store.read_link(namespace, &tag_link, false).await.unwrap();
+        let ref_info = m.read_link(namespace, &tag_link, false).await.unwrap();
         let created_at = ref_info.created_at.unwrap();
         assert!(Utc::now().signed_duration_since(created_at) < Duration::seconds(1));
     }

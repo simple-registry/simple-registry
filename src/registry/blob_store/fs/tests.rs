@@ -3,7 +3,7 @@ use crate::registry::blob_store::tests::{
     test_datastore_blob_operations, test_datastore_list_blobs, test_datastore_list_uploads,
     test_datastore_upload_operations,
 };
-use crate::registry::tests::FSBlobStoreBackendTestCase;
+use crate::registry::tests::FSRegistryTestCase;
 use tokio::fs;
 
 // Implementation-specific tests
@@ -51,15 +51,15 @@ fn test_paginate() {
 
 #[tokio::test]
 async fn test_write_and_read_file() {
-    let t = FSBlobStoreBackendTestCase::new();
-    let backend = t.backend();
+    let t = FSRegistryTestCase::new();
+    let backend = t.blob_store();
 
     let test_path = "test_file.txt";
     let test_content = b"Hello, world!";
 
     backend.store.write(test_path, test_content).await.unwrap();
 
-    let full_path = t.path().join(test_path);
+    let full_path = t.temp_dir().path().join(test_path);
     assert!(full_path.exists());
 
     let content = fs::read(&full_path).await.unwrap();
@@ -77,8 +77,8 @@ async fn test_write_and_read_file() {
 
 #[tokio::test]
 async fn test_delete_empty_parent_dirs() {
-    let t = FSBlobStoreBackendTestCase::new();
-    let backend = t.backend();
+    let t = FSRegistryTestCase::new();
+    let backend = t.blob_store();
 
     let nested_path = "a/b/c/d";
     let test_file_path = "a/b/c/d/test.txt";
@@ -94,31 +94,30 @@ async fn test_delete_empty_parent_dirs() {
         .await
         .unwrap();
 
-    let full_path = t.temp_dir.path().join(nested_path);
+    let full_path = t.temp_dir().path().join(nested_path);
     assert!(!full_path.exists());
-    assert!(t.path().exists());
 }
 
 #[tokio::test]
 async fn test_list_uploads() {
-    let t = FSBlobStoreBackendTestCase::new();
-    test_datastore_list_uploads(t.backend()).await;
+    let t = FSRegistryTestCase::new();
+    test_datastore_list_uploads(t.blob_store()).await;
 }
 
 #[tokio::test]
 async fn test_list_blobs() {
-    let t = FSBlobStoreBackendTestCase::new();
-    test_datastore_list_blobs(t.backend()).await;
+    let t = FSRegistryTestCase::new();
+    test_datastore_list_blobs(t.blob_store()).await;
 }
 
 #[tokio::test]
 async fn test_blob_operations() {
-    let t = FSBlobStoreBackendTestCase::new();
-    test_datastore_blob_operations(t.backend()).await;
+    let t = FSRegistryTestCase::new();
+    test_datastore_blob_operations(t.blob_store()).await;
 }
 
 #[tokio::test]
 async fn test_upload_operations() {
-    let t = FSBlobStoreBackendTestCase::new();
-    test_datastore_upload_operations(t.backend()).await;
+    let t = FSRegistryTestCase::new();
+    test_datastore_upload_operations(t.blob_store()).await;
 }

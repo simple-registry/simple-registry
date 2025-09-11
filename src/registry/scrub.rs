@@ -810,7 +810,6 @@ mod tests {
             create_test_repository_config(),
             &GlobalConfig::default(),
             &CacheStoreConfig::default(),
-            &HashMap::default(),
         )
         .unwrap()
         .with_scrub_dry_run(false);
@@ -996,7 +995,6 @@ mod tests {
             create_test_repository_config(),
             &GlobalConfig::default(),
             &CacheStoreConfig::default(),
-            &HashMap::default(),
         )
         .unwrap()
         .with_scrub_dry_run(false);

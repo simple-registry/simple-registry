@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod client_identity;
+mod deserialize_ext;
 pub mod http_server;
 pub mod listeners;
 pub mod request_ext;

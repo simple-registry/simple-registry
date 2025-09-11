@@ -47,13 +47,7 @@ impl OidcValidator {
     }
 
     pub async fn validate_token(&self, token: &str) -> Result<OidcClaims, Error> {
-        provider::generic::validate_oidc_token(
-            self.provider.as_ref(),
-            token,
-            self.http_client.as_ref(),
-            self.cache.as_ref(),
-        )
-        .await
+        generic::validate_oidc_token(&*self.provider, token, &*self.http_client, &*self.cache).await
     }
 }
 

@@ -2,11 +2,10 @@
 pub mod tests;
 
 use crate::registry::blob_store::hashing_reader::HashingReader;
+use crate::registry::blob_store::sha256_ext::Sha256Ext;
 use crate::registry::blob_store::{BlobStore, Error, Reader};
-use crate::registry::data_store;
 use crate::registry::oci::Digest;
-use crate::registry::utils::path_builder;
-use crate::registry::utils::sha256_ext::Sha256Ext;
+use crate::registry::{data_store, path_builder};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;

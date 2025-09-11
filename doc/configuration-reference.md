@@ -38,13 +38,13 @@ This should be set according to the number of CPU cores available on the server.
 - `update_pull_time` (bool): When set to true, the registry will update the pull time metadata for blobs, 
   which is useful for garbage collection and retention policies (default: false).
 
-## Token Cache (`cache_store`)
+## Token and Key Cache (`cache`)
 
-Authentication tokens are cached to reduce unnecessary requests to upstream servers when using a pull-through cache
-configuration.
+Authentication tokens and JWT keys are cached to reduce unnecessary requests to upstream servers when using a pull-through
+cache or OIDC configuration.
 If no configuration is provided, an in-memory cache is used, which is not suitable for multi-replica deployments.
 
-### Redis Cache (`cache_store.redis`)
+### Redis Cache (`cache.redis`)
 
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
 - `key_prefix` (optional string): The key prefix for all cache keys

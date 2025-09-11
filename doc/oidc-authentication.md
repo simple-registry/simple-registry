@@ -185,7 +185,7 @@ Standard OIDC claims available in policies:
 - `iss` - Issuer
 - `aud` - Audience
 - `email` - User email (if provided)
-- `name` - User name (if provided)
+- `name` - Username (if provided)
 - `groups` - User groups (provider-specific)
 - Custom claims from your provider
 

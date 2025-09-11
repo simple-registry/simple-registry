@@ -8,6 +8,7 @@ use crate::configuration::{
 };
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
+use crate::registry::server::ServerContext;
 use crate::registry::{blob_store, metadata_store, Registry};
 use argh::FromArgs;
 use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -108,22 +109,21 @@ fn set_config_watcher(
                 }
             };
 
-            let oidc_validators = registry::server::ServerContext::build_oidc_validators(
-                &config.oidc,
-                &config.cache_store,
-            )
-            .unwrap_or_else(|e| {
-                error!("Failed to build OIDC validators: {e}");
-                Arc::new(Vec::new())
-            });
+            let oidc_validators =
+                match ServerContext::build_oidc_validators(&config.oidc, &config.cache) {
+                    Ok(validators) => validators,
+                    Err(error) => {
+                        error!("Failed to build OIDC validators: {error}");
+                        return;
+                    }
+                };
 
             let registry = match Registry::new(
                 blob_store.clone(),
                 metadata_store.clone(),
                 config.repository,
                 &config.global,
-                &config.cache_store,
-                &config.oidc,
+                &config.cache,
             ) {
                 Ok(registry) => registry,
                 Err(error) => {
@@ -242,16 +242,14 @@ async fn handle_command(
     data_store: Arc<dyn BlobStore + Send + Sync>,
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
 ) -> Result<(), command::Error> {
-    let oidc_validators =
-        registry::server::ServerContext::build_oidc_validators(&config.oidc, &config.cache_store)?;
+    let oidc_validators = ServerContext::build_oidc_validators(&config.oidc, &config.cache)?;
 
     let registry = Registry::new(
         data_store.clone(),
         metadata_store.clone(),
         config.repository,
         &config.global,
-        &config.cache_store,
-        &config.oidc,
+        &config.cache,
     )?;
 
     match arguments.nested {

@@ -698,8 +698,9 @@ mod tests {
         let request = Request::builder()
             .method("GET")
             .uri(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
-            .body(Empty::<Bytes>::new().map_err(|_| unreachable!()).boxed())
-            .unwrap();
+            .body(Empty::<Bytes>::new().map_err(|_| unreachable!()).boxed());
+
+        assert!(request.is_ok());
 
         let parameters = QueryUploadParameters {
             name: namespace.to_string(),
@@ -886,8 +887,9 @@ mod tests {
         let request = Request::builder()
             .method("DELETE")
             .uri(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
-            .body(Empty::<Bytes>::new().map_err(|_| unreachable!()).boxed())
-            .unwrap();
+            .body(Empty::<Bytes>::new().map_err(|_| unreachable!()).boxed());
+
+        assert!(request.is_ok());
 
         let parameters = QueryUploadParameters {
             name: namespace.to_string(),

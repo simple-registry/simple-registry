@@ -196,7 +196,7 @@ async fn fetch_jwks(
     let _ = cache
         .store(
             jwks_cache_key,
-            &serde_json::to_string(&jwks).unwrap(),
+            &serde_json::to_string(&jwks)?,
             provider.jwks_refresh_interval(),
         )
         .await;
@@ -257,7 +257,7 @@ async fn fetch_oidc_configuration(
     let _ = cache
         .store(
             oidc_config_cache_key,
-            &serde_json::to_string(&config).unwrap(),
+            &serde_json::to_string(&config)?,
             provider.jwks_refresh_interval(),
         )
         .await;

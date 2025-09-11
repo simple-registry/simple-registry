@@ -25,8 +25,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::registry::blob::QueryBlobParameters;
 use crate::registry::content_discovery::{ReferrerParameters, TagsParameters};
 use crate::registry::manifest::QueryManifestParameters;
+use crate::registry::server::deserialize_ext::DeserializeExt;
 use crate::registry::upload::{QueryNewUploadParameters, QueryUploadParameters};
-use crate::registry::utils::deserialize_ext::DeserializeExt;
 
 static ROUTE_HEALTHZ_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/healthz$").unwrap());
 static ROUTE_METRICS_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/metrics").unwrap());
@@ -284,7 +284,7 @@ async fn router(
                 r#"{"status":"ok"}"#,
             ))))?);
     } else if ROUTE_METRICS_REGEX.is_match(&path) {
-        let (content_type, metrics) = METRICS_PROVIDER.gather();
+        let (content_type, metrics) = METRICS_PROVIDER.gather()?;
 
         return Ok(Response::builder()
             .status(StatusCode::OK)

@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn test_paginated() {
         let body = ResponseBody::Empty;
-        let link = Some("http://example.com");
+        let link = Some("https://example.com");
         let res = Response::paginated(body, link).unwrap();
 
         assert_eq!(res.status(), StatusCode::OK);
@@ -124,7 +124,7 @@ mod tests {
         );
         assert_eq!(
             res.get_header(LINK),
-            Some(String::from("<http://example.com>; rel=\"next\""))
+            Some(String::from("<https://example.com>; rel=\"next\""))
         );
 
         let body = ResponseBody::Empty;
