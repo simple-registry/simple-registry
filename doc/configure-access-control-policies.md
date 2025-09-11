@@ -4,9 +4,44 @@ Access control Policies are used to control access to the API.
 You can configure Access control Policies to allow or deny access to the API based on a default policy and a set of rules
 expressed as [CEL (the "Common Expression Language")](https://cel.dev/) expressions.
 
-## Policy Configuration
+## Policy Levels
 
-To configure Access control Policies, you need to add a `access_policy` section to the repository configuration.
+Access control policies can be configured at two levels:
+
+1. **Global Policy**: Applies to all repositories in the registry
+2. **Repository Policy**: Applies to a specific repository
+
+### Policy Evaluation Order
+
+When a request is made, policies are evaluated in the following order:
+
+1. Global access policy is evaluated first (if defined)
+2. Repository-specific access policy is evaluated second (if the repository exists)
+
+If either policy denies access, the request is rejected. Both policies must allow access for the request to succeed.
+
+If no policies are defined (neither global nor repository-specific), access is denied by default.
+
+## Global Policy Configuration
+
+To configure a global access policy that applies to all repositories, add an `access_policy` section to the `global` configuration:
+
+```toml
+[global]
+max_concurrent_requests = 4
+max_concurrent_cache_jobs = 4
+
+[global.access_policy]
+default_allow = false
+rules = [
+  "identity.username == 'admin'",
+  "identity.certificate.organizations.contains('infrastructure')"
+]
+```
+
+## Repository Policy Configuration
+
+To configure Access control Policies for a specific repository, add an `access_policy` section to the repository configuration.
 
 This section contains a `default_allow` field and a `rules` field.
 

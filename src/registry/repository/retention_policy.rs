@@ -24,12 +24,20 @@
 //! - `top(tag, list, n)`: Check if tag is in top N of list
 //! - `size(list)`: Get size of a list
 
+use crate::configuration::Error as ConfigError;
 use crate::registry::Error;
 use cel_interpreter::{Context, Program, Value};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::debug;
+
+/// Configuration for retention policies.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct RepositoryRetentionPolicyConfig {
+    #[serde(default)]
+    pub rules: Vec<String>,
+}
 
 /// Manifest image information used in retention decisions.
 #[derive(Debug, Default, Serialize)]
@@ -48,8 +56,33 @@ pub struct RetentionPolicy {
 }
 
 impl RetentionPolicy {
-    pub fn new(rules: Vec<Program>) -> Self {
-        Self { rules }
+    /// Creates a new retention policy from configuration.
+    ///
+    /// Compiles CEL expressions from the configuration into programs.
+    pub fn new(config: &RepositoryRetentionPolicyConfig) -> Result<Self, ConfigError> {
+        let mut compiled_rules = Vec::new();
+
+        for (index, rule) in config.rules.iter().enumerate() {
+            match Program::compile(rule) {
+                Ok(program) => compiled_rules.push(program),
+                Err(e) => {
+                    return Err(ConfigError::PolicyCompilation(format!(
+                        "Failed to compile retention policy rule #{} '{}': {}",
+                        index + 1,
+                        rule,
+                        e
+                    )));
+                }
+            }
+        }
+
+        Ok(Self {
+            rules: compiled_rules,
+        })
+    }
+
+    pub fn has_rules(&self) -> bool {
+        !self.rules.is_empty()
     }
 
     /// Evaluates whether a manifest should be retained.

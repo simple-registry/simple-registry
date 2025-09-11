@@ -187,7 +187,7 @@ impl Registry {
         }
 
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::start_upload(&parameters.name),
             identity,
@@ -223,7 +223,7 @@ impl Registry {
         identity: &ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::get_upload(&parameters.name),
             identity,
@@ -259,7 +259,7 @@ impl Registry {
         T::Error: Send + Sync + std::error::Error + 'static,
     {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::update_upload(&parameters.name),
             identity,
@@ -308,7 +308,7 @@ impl Registry {
         }
 
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::complete_upload(&parameters.name),
             identity,
@@ -343,7 +343,7 @@ impl Registry {
         identity: &ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::cancel_upload(&parameters.name),
             identity,

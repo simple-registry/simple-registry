@@ -37,6 +37,8 @@ This should be set according to the number of CPU cores available on the server.
 - `max_concurrent_cache_jobs` (usize): The maximum number of concurrent cache jobs the server can handle (default: 4).
 - `update_pull_time` (bool): When set to true, the registry will update the pull time metadata for blobs, 
   which is useful for garbage collection and retention policies (default: false).
+- `access_policy` (optional): Global access control policy that applies to all repositories. See Access Policy section below.
+- `retention_policy` (optional): Global retention policy that applies to all repositories. See Retention Policy section below.
 
 ## Token and Key Cache (`cache`)
 

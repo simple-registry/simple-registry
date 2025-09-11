@@ -15,10 +15,21 @@
 //! - `identity`: Client identity information (id, username, certificate details)
 //! - `request`: Request details (action, namespace, digest, reference)
 
+use crate::configuration::Error as ConfigError;
 pub use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::Error;
 use cel_interpreter::{Context, Program, Value};
+use serde::Deserialize;
 use tracing::{debug, info};
+
+/// Configuration for access control policies.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct RepositoryAccessPolicyConfig {
+    #[serde(default)]
+    pub default_allow: bool,
+    #[serde(default)]
+    pub rules: Vec<String>,
+}
 
 /// Access control policy engine.
 ///
@@ -30,11 +41,30 @@ pub struct AccessPolicy {
 }
 
 impl AccessPolicy {
-    pub fn new(default_allow: bool, rules: Vec<Program>) -> Self {
-        Self {
-            default_allow,
-            rules,
+    /// Creates a new access policy from configuration.
+    ///
+    /// Compiles CEL expressions from the configuration into programs.
+    pub fn new(config: &RepositoryAccessPolicyConfig) -> Result<Self, ConfigError> {
+        let mut compiled_rules = Vec::new();
+
+        for (index, rule) in config.rules.iter().enumerate() {
+            match Program::compile(rule) {
+                Ok(program) => compiled_rules.push(program),
+                Err(e) => {
+                    return Err(ConfigError::PolicyCompilation(format!(
+                        "Failed to compile access policy rule #{} '{}': {}",
+                        index + 1,
+                        rule,
+                        e
+                    )));
+                }
+            }
         }
+
+        Ok(Self {
+            default_allow: config.default_allow,
+            rules: compiled_rules,
+        })
     }
 
     /// Evaluates the access policy for a given request and identity.
@@ -103,7 +133,11 @@ mod tests {
 
     #[test]
     fn test_access_policy_default_allow_no_rules() {
-        let policy = AccessPolicy::new(true, vec![]);
+        let config = RepositoryAccessPolicyConfig {
+            default_allow: true,
+            rules: vec![],
+        };
+        let policy = AccessPolicy::new(&config).unwrap();
         let request = ClientRequest::get_api_version();
         let identity = ClientIdentity::default();
 
@@ -113,7 +147,11 @@ mod tests {
 
     #[test]
     fn test_access_policy_default_deny_no_rules() {
-        let policy = AccessPolicy::new(false, vec![]);
+        let config = RepositoryAccessPolicyConfig {
+            default_allow: false,
+            rules: vec![],
+        };
+        let policy = AccessPolicy::new(&config).unwrap();
         let request = ClientRequest::get_api_version();
         let identity = ClientIdentity::default();
 
@@ -123,9 +161,11 @@ mod tests {
 
     #[test]
     fn test_access_policy_default_allow_with_deny_rule() {
-        use cel_interpreter::Program;
-        let program = Program::compile("identity.username == 'forbidden'").unwrap();
-        let policy = AccessPolicy::new(true, vec![program]);
+        let config = RepositoryAccessPolicyConfig {
+            default_allow: true,
+            rules: vec!["identity.username == 'forbidden'".to_string()],
+        };
+        let policy = AccessPolicy::new(&config).unwrap();
 
         let request = ClientRequest::get_api_version();
         let identity = ClientIdentity {
@@ -147,9 +187,11 @@ mod tests {
 
     #[test]
     fn test_access_policy_default_deny_with_allow_rule() {
-        use cel_interpreter::Program;
-        let program = Program::compile("identity.username == 'admin'").unwrap();
-        let policy = AccessPolicy::new(false, vec![program]);
+        let config = RepositoryAccessPolicyConfig {
+            default_allow: false,
+            rules: vec!["identity.username == 'admin'".to_string()],
+        };
+        let policy = AccessPolicy::new(&config).unwrap();
 
         let request = ClientRequest::get_api_version();
         let identity = ClientIdentity {

@@ -13,7 +13,7 @@ impl Registry {
         &self,
         identity: &ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
-        Self::validate_request(None, &ClientRequest::get_api_version(), identity)?;
+        self.validate_request(None, &ClientRequest::get_api_version(), identity)?;
 
         let res = Response::builder()
             .status(StatusCode::OK)

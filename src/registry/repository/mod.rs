@@ -2,7 +2,6 @@ use crate::configuration::{Error, RepositoryConfig, RepositoryUpstreamConfig};
 use crate::registry;
 use crate::registry::cache::Cache;
 use crate::registry::oci::{Digest, Reference};
-use cel_interpreter::Program;
 use hyper::body::Incoming;
 use hyper::{Method, Response};
 use tracing::instrument;
@@ -27,12 +26,8 @@ pub struct Repository {
 
 impl Repository {
     pub fn new(config: RepositoryConfig, name: String) -> Result<Self, Error> {
-        let access_rules = Self::compile_program_vec(&config.access_policy.rules)?;
-        let access_policy = AccessPolicy::new(config.access_policy.default_allow, access_rules);
-
-        let retention_rules = Self::compile_program_vec(&config.retention_policy.rules)?;
-        let retention_policy = RetentionPolicy::new(retention_rules);
-
+        let access_policy = AccessPolicy::new(&config.access_policy)?;
+        let retention_policy = RetentionPolicy::new(&config.retention_policy)?;
         let upstream = Self::build_upstreams(config.upstream)?;
 
         Ok(Self {
@@ -41,13 +36,6 @@ impl Repository {
             access_policy,
             retention_policy,
         })
-    }
-
-    fn compile_program_vec(programs: &[String]) -> Result<Vec<Program>, Error> {
-        Ok(programs
-            .iter()
-            .map(|policy| Program::compile(policy))
-            .collect::<Result<Vec<Program>, _>>()?)
     }
 
     fn build_upstreams(

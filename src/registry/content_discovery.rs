@@ -88,7 +88,7 @@ impl Registry {
         }
 
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::get_referrers(&parameters.name, &parameters.digest),
             &identity,
@@ -140,7 +140,7 @@ impl Registry {
             repositories: Vec<String>,
         }
 
-        Self::validate_request(None, &ClientRequest::list_catalog(), &identity)?;
+        self.validate_request(None, &ClientRequest::list_catalog(), &identity)?;
 
         let query: CatalogQuery = request.query_parameters()?;
 
@@ -172,7 +172,7 @@ impl Registry {
         }
 
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::list_tags(&parameters.name),
             &identity,

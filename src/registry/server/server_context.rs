@@ -19,7 +19,6 @@ pub struct ServerContext {
     oidc_middlewares: Arc<Vec<OidcValidator>>,
     pub timeouts: Vec<Duration>,
     pub registry: Registry,
-    pub credentials: HashMap<String, (String, String)>, // Keep for backwards compatibility
 }
 
 impl ServerContext {
@@ -57,23 +56,12 @@ impl ServerContext {
         let mtls_middleware = Arc::new(MtlsValidator::new());
         let basic_auth_middleware = Arc::new(BasicAuthValidator::new(identities));
 
-        let credentials = identities
-            .iter()
-            .map(|(id, config)| {
-                (
-                    config.username.clone(),
-                    (id.clone(), config.password.clone()),
-                )
-            })
-            .collect();
-
         Self {
             mtls_middleware,
             basic_auth_middleware,
             oidc_middlewares,
             timeouts,
             registry,
-            credentials,
         }
     }
 

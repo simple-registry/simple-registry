@@ -231,7 +231,7 @@ impl Registry {
         identity: ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::get_blob(&parameters.name, &parameters.digest),
             &identity,
@@ -262,7 +262,7 @@ impl Registry {
         identity: ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::delete_blob(&parameters.name, &parameters.digest),
             &identity,
@@ -286,7 +286,7 @@ impl Registry {
         identity: ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::get_blob(&parameters.name, &parameters.digest),
             &identity,

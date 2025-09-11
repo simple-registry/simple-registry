@@ -404,7 +404,7 @@ impl Registry {
         identity: ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::get_manifest(&parameters.name, &parameters.reference),
             &identity,
@@ -445,7 +445,7 @@ impl Registry {
         identity: ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::get_manifest(&parameters.name, &parameters.reference),
             &identity,
@@ -487,7 +487,7 @@ impl Registry {
         T: body::Body,
     {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::put_manifest(&parameters.name, &parameters.reference),
             &identity,
@@ -539,7 +539,7 @@ impl Registry {
         identity: ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::delete_manifest(&parameters.name, &parameters.reference),
             &identity,

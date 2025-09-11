@@ -168,12 +168,6 @@ async fn router(
     req.extensions_mut().insert(identity.clone());
 
     if ROUTE_API_VERSION_REGEX.is_match(&path) && req.method() == Method::GET {
-        // TODO: make this part customizable
-        if !context.credentials.is_empty() && identity.username.is_none() {
-            return Err(Error::Unauthorized(
-                "Access denied (requires credentials)".to_string(),
-            ));
-        }
         return context.registry.handle_get_api_version(&identity).await;
     } else if let Some(params) = QueryNewUploadParameters::from_regex(&path, &ROUTE_UPLOADS_REGEX) {
         if req.method() == Method::POST {

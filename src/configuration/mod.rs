@@ -7,6 +7,8 @@ use std::path::Path;
 
 mod error;
 
+pub use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
+pub use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
 use crate::registry::server::auth::oidc;
 use crate::registry::{blob_store, cache, metadata_store};
 pub use error::Error;
@@ -73,6 +75,10 @@ pub struct GlobalConfig {
     pub max_concurrent_cache_jobs: usize,
     #[serde(default = "GlobalConfig::default_update_pull_time")]
     pub update_pull_time: bool,
+    #[serde(default)]
+    pub access_policy: RepositoryAccessPolicyConfig,
+    #[serde(default)]
+    pub retention_policy: RepositoryRetentionPolicyConfig,
 }
 
 impl Default for GlobalConfig {
@@ -81,6 +87,8 @@ impl Default for GlobalConfig {
             max_concurrent_requests: GlobalConfig::default_max_concurrent_requests(),
             max_concurrent_cache_jobs: GlobalConfig::default_max_concurrent_cache_jobs(),
             update_pull_time: GlobalConfig::default_update_pull_time(),
+            access_policy: RepositoryAccessPolicyConfig::default(),
+            retention_policy: RepositoryRetentionPolicyConfig::default(),
         }
     }
 }
@@ -174,19 +182,6 @@ impl RepositoryUpstreamConfig {
     fn default_max_redirect() -> u8 {
         5
     }
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct RepositoryAccessPolicyConfig {
-    #[serde(default)]
-    pub default_allow: bool,
-    #[serde(default)]
-    pub rules: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct RepositoryRetentionPolicyConfig {
-    pub rules: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
