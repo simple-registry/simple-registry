@@ -158,7 +158,7 @@ fn prepare_with_repository_config(
 ) {
     let mut repositories = HashMap::new();
     for (repository_name, repository_config) in repositories_config {
-        let res = Repository::new(repository_config, repository_name.clone()).unwrap();
+        let res = Repository::new(repository_name.clone(), repository_config).unwrap();
         repositories.insert(repository_name, res);
     }
 

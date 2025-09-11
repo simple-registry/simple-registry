@@ -8,6 +8,7 @@ use tracing::instrument;
 pub mod blob;
 pub mod blob_store;
 pub mod cache;
+pub mod client;
 pub mod content_discovery;
 pub mod data_store;
 mod error;
@@ -79,7 +80,7 @@ impl Registry {
 
         let mut repositories = HashMap::new();
         for (repository_name, repository_config) in repositories_config {
-            let res = Repository::new(repository_config, repository_name.clone())?;
+            let res = Repository::new(repository_name.clone(), repository_config)?;
             repositories.insert(repository_name, res);
         }
 
@@ -272,12 +273,12 @@ pub mod test_utils {
 
         // Create a non-pull-through repository
         let repository = Repository::new(
+            "test-repo".to_string(),
             RepositoryConfig {
                 upstream: Vec::new(),
                 access_policy: RepositoryAccessPolicyConfig::default(),
                 retention_policy: RepositoryRetentionPolicyConfig { rules: Vec::new() },
             },
-            "test-repo".to_string(),
         )
         .unwrap();
 
@@ -335,7 +336,7 @@ mod test {
             ..RepositoryConfig::default()
         };
 
-        Repository::new(config, "policy-deny-repo".to_string()).unwrap()
+        Repository::new("policy-deny-repo".to_string(), config).unwrap()
     }
 
     fn create_default_allow_repo(rules: Vec<String>) -> Repository {
@@ -348,7 +349,7 @@ mod test {
             ..RepositoryConfig::default()
         };
 
-        Repository::new(config, "policy-allow-repo".to_string()).unwrap()
+        Repository::new("policy-allow-repo".to_string(), config).unwrap()
     }
 
     #[tokio::test]

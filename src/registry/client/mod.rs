@@ -1,11 +1,16 @@
+mod authentication_scheme;
+mod bearer_token;
+#[cfg(test)]
+mod tests;
+
 use crate::configuration::RepositoryUpstreamConfig;
-use crate::registry;
 use crate::registry::cache::Cache;
-use crate::registry::http_client::HttpClient;
+use crate::registry::client::authentication_scheme::AuthenticationScheme;
+use crate::registry::client::bearer_token::BearerToken;
+use crate::registry::http_client::{HttpClient, HttpClientBuilder};
 use crate::registry::oci::{Digest, Reference};
-use crate::registry::repository::authentication_scheme::AuthenticationScheme;
-use crate::registry::repository::bearer_token::BearerToken;
 use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
+use crate::{configuration, registry};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use http_body_util::Empty;
@@ -19,36 +24,45 @@ use tokio::io::AsyncReadExt;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
-pub struct RepositoryUpstream {
+pub struct RegistryClient {
     pub url: String,
     pub client: Box<dyn HttpClient>,
     pub basic_auth_header: Option<String>,
 }
 
-impl RepositoryUpstream {
-    pub fn new(config: RepositoryUpstreamConfig, client: Box<dyn HttpClient>) -> Self {
-        let mut upstream = Self {
-            url: config.url,
-            client,
-            basic_auth_header: None,
-        };
+impl RegistryClient {
+    pub fn new(mut config: RepositoryUpstreamConfig) -> Result<Self, configuration::Error> {
+        let server_ca_bundle = config.server_ca_bundle.take();
+        let client_certificate = config.client_certificate.take();
+        let client_private_key = config.client_private_key.take();
 
-        match (config.username, config.password) {
+        let client = HttpClientBuilder::new()
+            .set_server_ca_bundle(server_ca_bundle)
+            .set_client_certificate(client_certificate)
+            .set_client_private_key(client_private_key)
+            .set_max_redirect(config.max_redirect)
+            .build()?;
+
+        let basic_auth_header = match (config.username, config.password) {
             (Some(username), Some(password)) => {
                 let header = format!(
                     "Basic {}",
                     BASE64_STANDARD.encode(format!("{username}:{password}"))
                 );
-
-                upstream.basic_auth_header = Some(header);
+                Some(header)
             }
             (Some(_), None) | (None, Some(_)) => {
                 warn!("Username and password must be both provided");
+                None
             }
-            _ => {}
-        }
+            _ => None,
+        };
 
-        upstream
+        Ok(Self {
+            url: config.url,
+            client,
+            basic_auth_header,
+        })
     }
 
     async fn get_auth_token_from_cache(
@@ -79,19 +93,18 @@ impl RepositoryUpstream {
 
         let auth_location = format!("{realm}?{parameters}");
 
-        let req;
-        if let Some(basic_auth_header) = &self.basic_auth_header {
-            req = request::Builder::new()
+        let req = if let Some(basic_auth_header) = &self.basic_auth_header {
+            request::Builder::new()
                 .method(Method::GET)
                 .uri(&auth_location)
                 .header(AUTHORIZATION, basic_auth_header)
-                .body(Empty::new())?;
+                .body(Empty::new())?
         } else {
-            req = request::Builder::new()
+            request::Builder::new()
                 .method(Method::GET)
                 .uri(&auth_location)
-                .body(Empty::new())?;
-        }
+                .body(Empty::new())?
+        };
 
         debug!("Requesting token from upstream");
         match self.client.request(req).await {
@@ -220,117 +233,5 @@ impl RepositoryUpstream {
     pub fn get_blob_path(&self, local_name: &str, upstream_name: &str, digest: &Digest) -> String {
         let namespace = Self::get_upstream_namespace(local_name, upstream_name);
         format!("{}/v2/{namespace}/blobs/{digest}", self.url)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::registry::cache;
-    use crate::registry::cache::Cache;
-    use async_trait::async_trait;
-    use hyper::body::Bytes;
-    use mockall::*;
-
-    mock! {
-        #[derive(Debug)]
-        pub HttpClientMock {}
-
-        #[async_trait]
-        impl HttpClient for HttpClientMock {
-            async fn request(
-                &self,
-                request: hyper::Request<Empty<Bytes>>
-            ) -> Result<Response<Incoming>, registry::Error>;
-        }
-    }
-
-    fn build_upstream(with_password: bool) -> RepositoryUpstream {
-        let mut username = None;
-        let mut password = None;
-        if with_password {
-            username = Some("username".to_string());
-            password = Some("password".to_string());
-        }
-
-        RepositoryUpstream::new(
-            RepositoryUpstreamConfig {
-                url: "https://example.com".to_string(),
-                max_redirect: 5,
-                server_ca_bundle: None,
-                client_certificate: None,
-                client_private_key: None,
-                username,
-                password,
-            },
-            Box::new(MockHttpClientMock::new()),
-        )
-    }
-
-    #[test]
-    fn test_get_upstream_namespace() {
-        let local_name = "local";
-        let upstream_name = "local/repo";
-
-        let result = RepositoryUpstream::get_upstream_namespace(local_name, upstream_name);
-        assert_eq!(result, "repo");
-
-        let upstream_name = "completely_different";
-        let result = RepositoryUpstream::get_upstream_namespace(local_name, upstream_name);
-        assert_eq!(result, "completely_different");
-    }
-
-    #[tokio::test]
-    async fn test_get_manifest_path() {
-        let repo = build_upstream(true);
-
-        let local_name = "local";
-        let upstream_name = "local/repo";
-        let reference = Reference::from_str("latest").unwrap();
-
-        let path = repo.get_manifest_path(local_name, upstream_name, &reference);
-        assert_eq!(path, "https://example.com/v2/repo/manifests/latest");
-    }
-
-    #[tokio::test]
-    async fn test_get_blob_path() {
-        let repo = build_upstream(false);
-
-        let local_name = "local";
-        let upstream_name = "local/repo";
-        let digest = Digest::try_from(
-            "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-        )
-        .unwrap();
-
-        let path = repo.get_blob_path(local_name, upstream_name, &digest);
-        assert_eq!(path, "https://example.com/v2/repo/blobs/sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-    }
-
-    #[tokio::test]
-    async fn test_get_auth_token_from_cache_success() {
-        const TEST_NAMESPACE: &str = "test-namespace";
-
-        let cache = cache::memory::Backend::new();
-        let upstream = build_upstream(false);
-        let result = upstream
-            .get_auth_token_from_cache(&cache, TEST_NAMESPACE)
-            .await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
-
-        cache
-            .store(TEST_NAMESPACE, "test-token", 3600)
-            .await
-            .unwrap();
-
-        let result = upstream
-            .get_auth_token_from_cache(&cache, TEST_NAMESPACE)
-            .await;
-        assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap(),
-            Some(HeaderValue::from_str("test-token").unwrap())
-        );
     }
 }
