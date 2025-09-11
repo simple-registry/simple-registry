@@ -7,6 +7,28 @@ server_certificate_bundle = "tls.d/server-ca-bundle.pem"
 server_private_key = "tls.d/server-private-key.pem"
 client_ca_bundle   = "tls.d/client-ca-bundle.pem"
 
+# Global configuration options
+[global]
+max_concurrent_requests = 4
+max_concurrent_cache_jobs = 4
+update_pull_time = false
+
+# Optional: Global access policy that applies to all repositories
+# If not defined, repositories without specific policies will deny access
+#[global.access_policy]
+#default_allow = false
+#rules = [
+#    'identity.username == "admin"',
+#    'identity.certificate.organizations.contains("infrastructure")'
+#]
+
+# Optional: Global retention policy that applies to all repositories
+#[global.retention_policy]
+#rules = [
+#    'image.tag == "latest"',
+#    'image.pushed_at > now() - days(90)'
+#]
+
 [blob_store.fs]
 root_dir = "./data-simple-registry"
 
