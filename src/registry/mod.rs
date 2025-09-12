@@ -190,7 +190,10 @@ impl Registry {
 
             let allowed = repository.access_policy.evaluate(request, identity)?;
             if !allowed {
-                log_denial(&format!("repository '{}' policy", repository.name), identity);
+                log_denial(
+                    &format!("repository '{}' policy", repository.name),
+                    identity,
+                );
                 return Err(Error::Unauthorized("Access denied".to_string()));
             }
 
