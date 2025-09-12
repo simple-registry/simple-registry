@@ -3,7 +3,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
-use tracing::instrument;
+use tracing::{debug, instrument, warn};
 
 pub mod blob;
 pub mod blob_store;
@@ -60,6 +60,10 @@ impl Debug for Registry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Registry").finish()
     }
+}
+
+fn log_denial(reason: &str, identity: &server::ClientIdentity) {
+    warn!("Access denied: {} | Identity: {:?}", reason, identity);
 }
 
 impl Registry {
@@ -158,8 +162,6 @@ impl Registry {
         request: &server::ClientRequest,
         identity: &server::ClientIdentity,
     ) -> Result<(), Error> {
-        use tracing::debug;
-
         let Some(namespace) = request.namespace.as_ref() else {
             return Ok(());
         };
@@ -168,11 +170,13 @@ impl Registry {
             debug!("Evaluating global access policy for namespace: {namespace}");
             let allowed = global_policy.evaluate(request, identity)?;
             if !allowed {
+                log_denial("global policy", identity);
                 return Err(Error::Unauthorized(
                     "Access denied by global policy".to_string(),
                 ));
             }
         } else if repository.is_none() {
+            log_denial("no policy defined", identity);
             return Err(Error::Unauthorized(
                 "Access denied (no policy defined)".to_string(),
             ));
@@ -186,6 +190,7 @@ impl Registry {
 
             let allowed = repository.access_policy.evaluate(request, identity)?;
             if !allowed {
+                log_denial(&format!("repository '{}' policy", repository.name), identity);
                 return Err(Error::Unauthorized("Access denied".to_string()));
             }
 
