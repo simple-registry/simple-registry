@@ -3,7 +3,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, info, instrument};
 
 pub mod blob;
 pub mod blob_store;
@@ -63,7 +63,7 @@ impl Debug for Registry {
 }
 
 fn log_denial(reason: &str, identity: &server::ClientIdentity) {
-    warn!("Access denied: {} | Identity: {:?}", reason, identity);
+    info!("Access denied: {reason} | Identity: {identity:?}");
 }
 
 impl Registry {
@@ -190,7 +190,10 @@ impl Registry {
 
             let allowed = repository.access_policy.evaluate(request, identity)?;
             if !allowed {
-                log_denial(&format!("repository '{}' policy", repository.name), identity);
+                log_denial(
+                    &format!("repository '{}' policy", repository.name),
+                    identity,
+                );
                 return Err(Error::Unauthorized("Access denied".to_string()));
             }
 

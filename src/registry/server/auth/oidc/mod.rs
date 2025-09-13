@@ -47,7 +47,14 @@ impl OidcValidator {
     }
 
     pub async fn validate_token(&self, token: &str) -> Result<OidcClaims, Error> {
-        generic::validate_oidc_token(&*self.provider, token, &*self.http_client, &*self.cache).await
+        generic::validate_oidc_token(
+            &self.provider_name,
+            &*self.provider,
+            token,
+            &*self.http_client,
+            &*self.cache,
+        )
+        .await
     }
 }
 
@@ -59,9 +66,18 @@ impl AuthMiddleware for OidcValidator {
         identity: &mut ClientIdentity,
     ) -> Result<AuthResult, Error> {
         let token = if let Some(bearer_token) = request.bearer_token() {
+            debug!(
+                "Found Bearer token for OIDC provider '{}'",
+                self.provider_name
+            );
             bearer_token
         } else if let Some((username, password)) = extract_basic_auth(request) {
+            debug!("Found Basic auth credentials with username '{}'", username);
             if username != self.provider_name {
+                debug!(
+                    "Basic auth username '{}' doesn't match OIDC provider name '{}', skipping",
+                    username, self.provider_name
+                );
                 return Ok(AuthResult::NoCredentials);
             }
             password
@@ -71,12 +87,19 @@ impl AuthMiddleware for OidcValidator {
 
         match self.validate_token(&token).await {
             Ok(claims) => {
+                debug!(
+                    "Successfully validated OIDC token for provider '{}' with claims: {:?}",
+                    self.provider_name, claims
+                );
                 identity.oidc = Some(claims);
                 Ok(AuthResult::Authenticated)
             }
             Err(e) => {
-                debug!("OIDC token validation failed: {e}");
-                Ok(AuthResult::NoCredentials)
+                debug!(
+                    "OIDC token validation failed for provider '{}': {}",
+                    self.provider_name, e
+                );
+                Err(e)
             }
         }
     }

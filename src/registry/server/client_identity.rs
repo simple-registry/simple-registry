@@ -28,6 +28,8 @@ pub struct ClientCertificate {
 /// along with any custom claims from the OIDC provider.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct OidcClaims {
+    pub provider_name: String,
+    pub provider_type: String,
     pub claims: HashMap<String, serde_json::Value>,
 }
 

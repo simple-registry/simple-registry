@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Bytes;
 use hyper::{Request, StatusCode};
-use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
+use jsonwebtoken::{decode, decode_header, Validation};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProviderConfig {
@@ -82,6 +82,7 @@ struct Jwks {
 }
 
 pub async fn validate_oidc_token(
+    provider_name: &str,
     provider: &dyn OidcProvider,
     token: &str,
     http_client: &dyn HttpClient,
@@ -89,6 +90,11 @@ pub async fn validate_oidc_token(
 ) -> Result<OidcClaims, Error> {
     let header = decode_header(token)
         .map_err(|e| Error::Unauthorized(format!("Failed to decode JWT header: {e}")))?;
+
+    debug!(
+        "JWT header: alg={:?}, kid={:?}, typ={:?}",
+        header.alg, header.kid, header.typ
+    );
     let issuer_hash = provider
         .issuer()
         .chars()
@@ -105,6 +111,11 @@ pub async fn validate_oidc_token(
     )
     .await?;
 
+    debug!(
+        "Available JWKs: {:?}",
+        jwks.keys.iter().map(|k| (k.kid(), k)).collect::<Vec<_>>()
+    );
+
     let jwk = jwks
         .keys
         .iter()
@@ -113,9 +124,11 @@ pub async fn validate_oidc_token(
             Error::Unauthorized(format!("No matching key found for kid: {:?}", header.kid))
         })?;
 
+    debug!("Found matching JWK: {:?}", jwk);
+
     let decoding_key = jwk.to_decoding_key()?;
 
-    let mut validation = Validation::default();
+    let mut validation = Validation::new(header.alg);
     validation.set_issuer(&[provider.issuer()]);
     if let Some(aud) = provider.required_audience() {
         validation.set_audience(&[aud]);
@@ -125,22 +138,24 @@ pub async fn validate_oidc_token(
     validation.leeway = provider.clock_skew_tolerance();
     validation.validate_exp = true;
     validation.validate_nbf = true;
-    validation.algorithms = vec![
-        Algorithm::RS256,
-        Algorithm::RS384,
-        Algorithm::RS512,
-        Algorithm::ES256,
-        Algorithm::ES384,
-    ];
+
+    debug!("Validation settings: issuer={:?}, audience={:?}, leeway={}, validate_exp={}, validate_nbf={}, algorithms={:?}",
+          validation.iss, validation.aud, validation.leeway, validation.validate_exp, validation.validate_nbf, validation.algorithms);
 
     let token_data =
-        decode::<HashMap<String, serde_json::Value>>(token, &decoding_key, &validation)
-            .map_err(|e| Error::Unauthorized(format!("JWT validation failed: {e}")))?;
+        decode::<HashMap<String, serde_json::Value>>(token, &decoding_key, &validation).map_err(
+            |e| {
+                warn!("JWT decode failed with error: {:?}", e);
+                Error::Unauthorized(format!("JWT validation failed: {e}"))
+            },
+        )?;
 
     provider.validate_provider_claims(&token_data.claims)?;
 
     debug!("{} provider: Token validated successfully", provider.name());
     Ok(OidcClaims {
+        provider_name: provider_name.to_string(),
+        provider_type: provider.name().to_string(),
         claims: token_data.claims,
     })
 }
@@ -272,6 +287,7 @@ async fn fetch_oidc_configuration(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::Algorithm;
 
     #[test]
     fn test_create_provider() {
@@ -311,5 +327,64 @@ mod tests {
         assert_eq!(provider.jwks_refresh_interval(), 7200);
         assert!(provider.required_audience().is_none());
         assert_eq!(provider.clock_skew_tolerance(), 120);
+    }
+
+    #[test]
+    fn test_validation_new_with_rs256() {
+        let header = jsonwebtoken::Header {
+            alg: Algorithm::RS256,
+            ..Default::default()
+        };
+
+        let validation = Validation::new(header.alg);
+        assert!(validation.algorithms.contains(&Algorithm::RS256));
+        assert_eq!(validation.algorithms.len(), 1);
+    }
+
+    #[test]
+    fn test_validation_algorithms_behavior() {
+        for alg in [
+            Algorithm::RS256,
+            Algorithm::RS384,
+            Algorithm::RS512,
+            Algorithm::ES256,
+            Algorithm::ES384,
+        ] {
+            let validation = Validation::new(alg);
+            assert!(
+                validation.algorithms.contains(&alg),
+                "Algorithm {alg:?} not found in validation.algorithms"
+            );
+            assert_eq!(
+                validation.algorithms.len(),
+                1,
+                "Expected single algorithm, got {:?}",
+                validation.algorithms
+            );
+        }
+    }
+
+    #[test]
+    fn test_github_actions_token_header() {
+        let header = jsonwebtoken::Header {
+            alg: Algorithm::RS256,
+            kid: Some("cc413527-173f-5a05-976e-9c52b1d7b431".to_string()),
+            typ: Some("JWT".to_string()),
+            ..Default::default()
+        };
+
+        let mut validation = Validation::new(header.alg);
+        validation.set_issuer(&["https://token.actions.githubusercontent.com"]);
+        validation.set_audience(&["https://github.com/simple-registry"]);
+        validation.leeway = 60;
+        validation.validate_exp = true;
+        validation.validate_nbf = true;
+
+        assert!(validation.algorithms.contains(&Algorithm::RS256));
+        assert_eq!(validation.algorithms.len(), 1);
+
+        assert!(validation.iss.is_some());
+        assert!(validation.aud.is_some());
+        assert_eq!(validation.leeway, 60);
     }
 }

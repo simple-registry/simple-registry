@@ -20,7 +20,7 @@ pub use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::Error;
 use cel_interpreter::{Context, Program, Value};
 use serde::Deserialize;
-use tracing::{debug, info};
+use tracing::{debug, warn};
 
 /// Configuration for access control policies.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -89,26 +89,42 @@ impl AccessPolicy {
         let context = Self::build_context(request, identity)?;
 
         if self.default_allow {
-            for rule in &self.rules {
-                match rule.execute(&context)? {
-                    Value::Bool(true) => {
-                        info!("Deny rule matched");
+            for (index, rule) in self.rules.iter().enumerate() {
+                let rule_index = index + 1;
+                match rule.execute(&context) {
+                    Ok(Value::Bool(true)) => {
+                        debug!("Deny rule {rule_index} matched");
                         return Ok(false);
                     }
-                    Value::Bool(false) => {}
-                    _ => return Ok(false),
+                    Ok(Value::Bool(false)) => {}
+                    Ok(value) => {
+                        warn!("Access policy deny rule {rule_index} returned non-boolean value: {value:?}, treating as deny");
+                        return Ok(false);
+                    }
+                    Err(e) => {
+                        warn!("Access policy deny rule {rule_index} evaluation failed: {e}, skipping rule");
+                        // Continue to next rule
+                    }
                 }
             }
             Ok(true)
         } else {
-            for rule in &self.rules {
-                match rule.execute(&context)? {
-                    Value::Bool(true) => {
-                        debug!("Allow rule matched");
+            for (index, rule) in self.rules.iter().enumerate() {
+                let rule_index = index + 1;
+                match rule.execute(&context) {
+                    Ok(Value::Bool(true)) => {
+                        debug!("Allow rule #{} matched", index + 1);
                         return Ok(true);
                     }
-                    Value::Bool(false) => {}
-                    _ => return Ok(false),
+                    Ok(Value::Bool(false)) => {}
+                    Ok(value) => {
+                        warn!("Access policy allow rule {rule_index} returned non-boolean value: {value:?}, skipping rule");
+                        // Continue to next rule
+                    }
+                    Err(e) => {
+                        warn!("Access policy allow rule {rule_index} evaluation failed: {e}, skipping rule");
+                        // Continue to next rule
+                    }
                 }
             }
             Ok(false)

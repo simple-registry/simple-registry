@@ -1,6 +1,7 @@
 use crate::registry::Error;
 use jsonwebtoken::DecodingKey;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kty")]
@@ -34,10 +35,16 @@ impl Jwk {
 
     pub fn to_decoding_key(&self) -> Result<DecodingKey, Error> {
         match self {
-            Jwk::Rsa { n, e, .. } => DecodingKey::from_rsa_components(n, e)
-                .map_err(|e| Error::Internal(format!("Failed to create RSA key: {e}"))),
-            Jwk::Ec { x, y, .. } => DecodingKey::from_ec_components(x, y)
-                .map_err(|e| Error::Internal(format!("Failed to create EC key: {e}"))),
+            Jwk::Rsa { n, e, alg, kid, .. } => {
+                debug!("Creating RSA DecodingKey from JWK with alg={alg:?}, kid={kid:?}");
+                DecodingKey::from_rsa_components(n, e)
+                    .map_err(|e| Error::Internal(format!("Failed to create RSA key: {e}")))
+            }
+            Jwk::Ec { x, y, alg, kid, .. } => {
+                debug!("Creating EC DecodingKey from JWK with alg={alg:?}, kid={kid:?}");
+                DecodingKey::from_ec_components(x, y)
+                    .map_err(|e| Error::Internal(format!("Failed to create EC key: {e}")))
+            }
         }
     }
 }
