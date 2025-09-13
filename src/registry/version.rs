@@ -1,4 +1,4 @@
-use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
+use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, ResponseBody};
 use hyper::{Response, StatusCode};
 use tracing::instrument;
@@ -8,12 +8,12 @@ pub const X_POWERED_BY: &str = "X-Powered-By";
 
 impl Registry {
     // API Handlers
-    #[instrument(skip(self))]
+    #[instrument(skip(self, identity))]
     pub async fn handle_get_api_version(
         &self,
-        identity: ClientIdentity,
+        identity: &ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
-        Self::validate_request(None, &ClientRequest::get_api_version(), &identity)?;
+        self.validate_request(None, &ClientRequest::get_api_version(), identity)?;
 
         let res = Response::builder()
             .status(StatusCode::OK)
@@ -28,15 +28,13 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::server::response_ext::ResponseExt;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use crate::registry::utils::response_ext::ResponseExt;
     use crate::registry::Registry;
 
     async fn test_handle_get_api_version_impl(registry: &Registry) {
-        let response = registry
-            .handle_get_api_version(ClientIdentity::default())
-            .await
-            .unwrap();
+        let identity = ClientIdentity::default();
+        let response = registry.handle_get_api_version(&identity).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(

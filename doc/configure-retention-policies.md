@@ -9,9 +9,44 @@ You can configure Retention Policies following a set of rules expressed as [CEL 
 > Currently, this policy is enforced by the `scrub` command, which can be run as a recurrent task (e.g. a systemd timer,
 > a Kubernetes `CronJob`, etc.)
 
-## Policy Configuration
+## Policy Levels
 
-To configure Retention Policies, you need to add a `retention_policy` section to the repository configuration.
+Retention policies can be configured at two levels:
+
+1. **Global Policy**: Applies to all repositories in the registry
+2. **Repository Policy**: Applies to a specific repository
+
+### Policy Evaluation Order
+
+When the scrub operation runs, policies are evaluated in the following order:
+
+1. Global retention policy is evaluated first (if defined)
+2. Repository-specific retention policy is evaluated second (if the repository exists)
+
+A manifest is retained if **either** policy indicates it should be kept. This allows:
+- Global policies to set organization-wide minimum retention requirements
+- Repository-specific policies to extend retention beyond the global baseline
+- If no policies are defined, manifests are kept indefinitely (safe default)
+
+## Global Policy Configuration
+
+To configure a global retention policy that applies to all repositories, add a `retention_policy` section to the `global` configuration:
+
+```toml
+[global]
+max_concurrent_requests = 4
+update_pull_time = true
+
+[global.retention_policy]
+rules = [
+  'image.tag == "latest"',
+  'image.pushed_at > now() - days(30)',
+]
+```
+
+## Repository Policy Configuration
+
+To configure Retention Policies for a specific repository, add a `retention_policy` section to the repository configuration.
 
 This section contains a `rules` field.
 The `rules` field is a list of rules that are evaluated to determine if the manifest should be _kept_ or not.

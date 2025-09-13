@@ -14,5 +14,5 @@ pub trait LockBackend: Send + Sync + Debug {
     type Guard: Send;
 
     /// Acquire an exclusive lock for the given key
-    async fn acquire_lock(&self, key: &str) -> Result<Self::Guard, Error>;
+    async fn acquire(&self, key: &str) -> Result<Self::Guard, Error>;
 }

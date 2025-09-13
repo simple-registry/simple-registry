@@ -1,7 +1,7 @@
 use crate::registry::oci::{Descriptor, Digest, ReferrerList};
-use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
-use crate::registry::utils::request_ext::RequestExt;
-use crate::registry::utils::response_ext::ResponseExt;
+use crate::registry::server::request_ext::RequestExt;
+use crate::registry::server::response_ext::ResponseExt;
+use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, ResponseBody};
 use hyper::header::CONTENT_TYPE;
 use hyper::{Request, Response, StatusCode};
@@ -88,7 +88,7 @@ impl Registry {
         }
 
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::get_referrers(&parameters.name, &parameters.digest),
             &identity,
@@ -140,7 +140,7 @@ impl Registry {
             repositories: Vec<String>,
         }
 
-        Self::validate_request(None, &ClientRequest::list_catalog(), &identity)?;
+        self.validate_request(None, &ClientRequest::list_catalog(), &identity)?;
 
         let query: CatalogQuery = request.query_parameters()?;
 
@@ -172,7 +172,7 @@ impl Registry {
         }
 
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::list_tags(&parameters.name),
             &identity,
@@ -198,10 +198,10 @@ mod tests {
     use super::*;
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::oci::Reference;
-    use crate::registry::repository::access_policy::ClientIdentity;
+    use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
+    use crate::registry::server::ClientIdentity;
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
     use http_body_util::Empty;
     use hyper::body::Bytes;
     use hyper::Method;

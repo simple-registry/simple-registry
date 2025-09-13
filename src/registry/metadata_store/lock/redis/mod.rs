@@ -100,7 +100,7 @@ impl Drop for RedisLock {
 impl LockBackend for RedisBackend {
     type Guard = Box<dyn Send>;
 
-    async fn acquire_lock(&self, key: &str) -> Result<Self::Guard, Error> {
+    async fn acquire(&self, key: &str) -> Result<Self::Guard, Error> {
         let lock_key = format!("{}{}", self.key_prefix, key);
         let mut retries = self.max_retries;
         let retry_delay = Duration::from_millis(self.retry_delay_ms);

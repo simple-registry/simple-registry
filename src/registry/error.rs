@@ -164,3 +164,10 @@ impl From<SerializationError> for Error {
         Error::Internal("Serialization error during operations".to_string())
     }
 }
+
+impl From<x509_parser::error::X509Error> for Error {
+    fn from(error: x509_parser::error::X509Error) -> Self {
+        debug!("X509 parsing error: {error}");
+        Error::Unauthorized("Invalid client certificate".to_string())
+    }
+}

@@ -23,7 +23,9 @@ impl Command {
 
         let config = Params::default();
         let argon = argon2::Argon2::new(Algorithm::Argon2id, Version::V0x13, config);
-        let hash = argon.hash_password(password.as_bytes(), &salt).unwrap();
+        let Ok(hash) = argon.hash_password(password.as_bytes(), &salt) else {
+            return Err(command::Error::Fatal("Failed to hash password".to_string()));
+        };
 
         println!("{hash}");
         Ok(())

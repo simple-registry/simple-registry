@@ -1,78 +1,18 @@
-use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
+use crate::configuration::RepositoryConfig;
 use crate::registry::metadata_store;
-use crate::registry::test_utils::create_test_repository_config;
+use crate::registry::test_utils::create_test_registry;
 use crate::registry::{blob_store, Registry, Repository};
 use bytesize::ByteSize;
-use chrono::Duration;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-pub struct FSBlobStoreBackendTestCase {
-    fs_backend: blob_store::fs::Backend,
-    pub temp_dir: TempDir,
-}
-
-impl FSBlobStoreBackendTestCase {
-    pub fn new() -> Self {
-        let temp_dir = TempDir::new().expect("Failed to create temp dir for FSBackendConfig");
-
-        let path = temp_dir.path().to_string_lossy().to_string();
-        let fs_backend = blob_store::fs::Backend::new(blob_store::fs::BackendConfig {
-            root_dir: path,
-            sync_to_disk: false,
-        });
-
-        FSBlobStoreBackendTestCase {
-            fs_backend,
-            temp_dir,
-        }
-    }
-
-    pub fn path(&self) -> &Path {
-        self.temp_dir.path()
-    }
-
-    pub fn backend(&self) -> &blob_store::fs::Backend {
-        &self.fs_backend
-    }
-}
-
-pub struct FSMetadataStoreBackendTestCase {
-    fs_backend: metadata_store::fs::Backend,
-    _temp_dir: TempDir,
-}
-
-impl FSMetadataStoreBackendTestCase {
-    pub fn new() -> Self {
-        let temp_dir = TempDir::new().expect("Failed to create temp dir for FSBackendConfig");
-
-        let path = temp_dir.path().to_string_lossy().to_string();
-        let fs_backend = metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
-            root_dir: path,
-            redis: None,
-            sync_to_disk: false,
-        })
-        .unwrap();
-
-        FSMetadataStoreBackendTestCase {
-            fs_backend,
-            _temp_dir: temp_dir,
-        }
-    }
-
-    pub fn backend(&self) -> &metadata_store::fs::Backend {
-        &self.fs_backend
-    }
-}
-
 pub struct FSRegistryTestCase {
-    fs_blob_store: Arc<blob_store::fs::Backend>,
-    fs_metadata_store: Arc<metadata_store::fs::Backend>,
-    fs_registry: Registry,
-    _temp_dir: TempDir,
+    blob_store: Arc<blob_store::fs::Backend>,
+    metadata_store: Arc<metadata_store::fs::Backend>,
+    registry: Registry,
+    temp_dir: TempDir,
 }
 
 impl FSRegistryTestCase {
@@ -80,158 +20,54 @@ impl FSRegistryTestCase {
         let temp_dir = TempDir::new().expect("Failed to create temp dir for FSBackendConfig");
         let path = temp_dir.path().to_string_lossy().to_string();
 
-        let fs_blob_store = blob_store::fs::Backend::new(blob_store::fs::BackendConfig {
+        let blob_store = blob_store::fs::Backend::new(blob_store::fs::BackendConfig {
             root_dir: path.clone(),
             sync_to_disk: false,
         });
-        let fs_blob_store = Arc::new(fs_blob_store);
+        let blob_store = Arc::new(blob_store);
 
-        let fs_metadata_store =
-            metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
-                root_dir: path,
-                sync_to_disk: false,
-                redis: None,
-            })
-            .unwrap();
-        let fs_metadata_store = Arc::new(fs_metadata_store);
-
-        let repositories_config = create_test_repository_config();
-        let global = GlobalConfig::default();
-        let token_cache = CacheStoreConfig::default();
-
-        let registry = Registry::new(
-            fs_blob_store.clone() as Arc<dyn blob_store::BlobStore + Send + Sync>,
-            fs_metadata_store.clone() as Arc<dyn metadata_store::MetadataStore + Send + Sync>,
-            repositories_config,
-            &global,
-            token_cache,
-        )
-        .unwrap()
-        .with_upload_timeout(Duration::seconds(0))
-        .with_scrub_dry_run(false);
+        let metadata_store = metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
+            root_dir: path,
+            sync_to_disk: false,
+            redis: None,
+        })
+        .unwrap();
+        let metadata_store = Arc::new(metadata_store);
+        let registry = create_test_registry(blob_store.clone(), metadata_store.clone());
 
         Self {
-            fs_blob_store,
-            fs_metadata_store,
-            fs_registry: registry,
-            _temp_dir: temp_dir,
+            blob_store,
+            metadata_store,
+            registry,
+            temp_dir,
         }
     }
 
     pub fn registry(&self) -> &Registry {
-        &self.fs_registry
+        &self.registry
     }
 
     pub fn registry_mut(&mut self) -> &mut Registry {
-        &mut self.fs_registry
+        &mut self.registry
     }
 
     pub fn set_repository_config(
         &mut self,
         repositories_config: HashMap<String, RepositoryConfig>,
     ) {
-        prepare_with_repository_config(&mut self.fs_registry, repositories_config);
+        prepare_with_repository_config(&mut self.registry, repositories_config);
     }
 
     pub fn blob_store(&self) -> &blob_store::fs::Backend {
-        &self.fs_blob_store
+        &self.blob_store
     }
 
     pub fn metadata_store(&self) -> &metadata_store::fs::Backend {
-        &self.fs_metadata_store
-    }
-}
-
-pub struct S3BlobStoreBackendTestCase {
-    key_prefix: String,
-    s3_backend: blob_store::s3::Backend,
-}
-
-impl S3BlobStoreBackendTestCase {
-    pub fn new() -> Self {
-        let key_prefix = format!("test-{}", Uuid::new_v4());
-        let s3_backend = blob_store::s3::Backend::new(blob_store::s3::BackendConfig {
-            access_key_id: "root".to_string(),
-            secret_key: "roottoor".to_string(),
-            endpoint: "http://127.0.0.1:9000".to_string(),
-            region: "region".to_string(),
-            bucket: "registry".to_string(),
-            key_prefix: key_prefix.clone(),
-            multipart_copy_threshold: ByteSize::mb(5),
-            multipart_copy_chunk_size: ByteSize::mb(5),
-            multipart_copy_jobs: 4,
-            multipart_part_size: ByteSize::mb(5),
-        });
-
-        Self {
-            key_prefix,
-            s3_backend,
-        }
+        &self.metadata_store
     }
 
-    pub fn backend(&self) -> &blob_store::s3::Backend {
-        &self.s3_backend
-    }
-}
-
-impl Drop for S3BlobStoreBackendTestCase {
-    fn drop(&mut self) {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let key_prefix = self.key_prefix.clone();
-            let backend = self.s3_backend.clone();
-            handle.spawn(async move {
-                if let Err(e) = backend.store.delete_prefix(&key_prefix).await {
-                    println!("Warning: Failed to clean up S3BlobStoreBackendTestCase data: {e:?}");
-                }
-            });
-        }
-    }
-}
-
-pub struct S3MetadataStoreBackendTestCase {
-    key_prefix: String,
-    s3_backend: metadata_store::s3::Backend,
-}
-
-impl S3MetadataStoreBackendTestCase {
-    pub fn new() -> Self {
-        let key_prefix = format!("test-{}", Uuid::new_v4());
-
-        let s3_backend = metadata_store::s3::Backend::new(metadata_store::s3::BackendConfig {
-            access_key_id: "root".to_string(),
-            secret_key: "roottoor".to_string(),
-            endpoint: "http://127.0.0.1:9000".to_string(),
-            region: "region".to_string(),
-            bucket: "registry".to_string(),
-            key_prefix: key_prefix.clone(),
-            redis: None,
-        })
-        .unwrap();
-
-        Self {
-            key_prefix,
-            s3_backend,
-        }
-    }
-
-    pub fn backend(&self) -> &metadata_store::s3::Backend {
-        &self.s3_backend
-    }
-}
-
-impl Drop for S3MetadataStoreBackendTestCase {
-    fn drop(&mut self) {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let key_prefix = self.key_prefix.clone();
-            let backend = self.s3_backend.clone();
-            handle.spawn(async move {
-                if let Err(e) = backend.store.delete_prefix(&key_prefix).await {
-                    println!(
-                        "Warning: Failed to clean up S3MetadataStoreBackendTestCase data: {e:?}"
-                    );
-                }
-            });
-        }
+    pub fn temp_dir(&self) -> &TempDir {
+        &self.temp_dir
     }
 }
 
@@ -252,7 +88,7 @@ impl S3RegistryTestCase {
             endpoint: "http://127.0.0.1:9000".to_string(),
             region: "region".to_string(),
             bucket: "registry".to_string(),
-            key_prefix: key_prefix.clone(),
+            key_prefix: key_prefix.to_string(),
             multipart_copy_threshold: ByteSize::mb(5),
             multipart_copy_chunk_size: ByteSize::mb(5),
             multipart_copy_jobs: 4,
@@ -266,26 +102,13 @@ impl S3RegistryTestCase {
             endpoint: "http://127.0.0.1:9000".to_string(),
             region: "region".to_string(),
             bucket: "registry".to_string(),
-            key_prefix: key_prefix.clone(),
+            key_prefix: key_prefix.to_string(),
             redis: None,
         })
         .unwrap();
         let metadata_store = Arc::new(metadata_store);
 
-        let repositories_config = create_test_repository_config();
-        let global = GlobalConfig::default();
-        let token_cache = CacheStoreConfig::default();
-
-        let registry = Registry::new(
-            blob_store.clone() as Arc<dyn blob_store::BlobStore + Send + Sync>,
-            metadata_store.clone() as Arc<dyn metadata_store::MetadataStore + Send + Sync>,
-            repositories_config,
-            &global,
-            token_cache,
-        )
-        .unwrap()
-        .with_upload_timeout(Duration::seconds(0))
-        .with_scrub_dry_run(false);
+        let registry = create_test_registry(blob_store.clone(), metadata_store.clone());
 
         Self {
             key_prefix,
@@ -335,7 +158,7 @@ fn prepare_with_repository_config(
 ) {
     let mut repositories = HashMap::new();
     for (repository_name, repository_config) in repositories_config {
-        let res = Repository::new(repository_config, repository_name.clone()).unwrap();
+        let res = Repository::new(repository_name.clone(), repository_config).unwrap();
         repositories.insert(repository_name, res);
     }
 

@@ -4,9 +4,44 @@ Access control Policies are used to control access to the API.
 You can configure Access control Policies to allow or deny access to the API based on a default policy and a set of rules
 expressed as [CEL (the "Common Expression Language")](https://cel.dev/) expressions.
 
-## Policy Configuration
+## Policy Levels
 
-To configure Access control Policies, you need to add a `access_policy` section to the repository configuration.
+Access control policies can be configured at two levels:
+
+1. **Global Policy**: Applies to all repositories in the registry
+2. **Repository Policy**: Applies to a specific repository
+
+### Policy Evaluation Order
+
+When a request is made, policies are evaluated in the following order:
+
+1. Global access policy is evaluated first (if defined)
+2. Repository-specific access policy is evaluated second (if the repository exists)
+
+If either policy denies access, the request is rejected. Both policies must allow access for the request to succeed.
+
+If no policies are defined (neither global nor repository-specific), access is denied by default.
+
+## Global Policy Configuration
+
+To configure a global access policy that applies to all repositories, add an `access_policy` section to the `global` configuration:
+
+```toml
+[global]
+max_concurrent_requests = 4
+max_concurrent_cache_jobs = 4
+
+[global.access_policy]
+default_allow = false
+rules = [
+  "identity.username == 'admin'",
+  "identity.certificate.organizations.contains('infrastructure')"
+]
+```
+
+## Repository Policy Configuration
+
+To configure Access control Policies for a specific repository, add an `access_policy` section to the repository configuration.
 
 This section contains a `default_allow` field and a `rules` field.
 
@@ -36,6 +71,8 @@ The following variables are available in the CEL expressions:
 - `identity.username`: The username for the identity
 - `identity.certificate.common_names`: The list of common names from the client certificate
 - `identity.certificate.organizations`: The list of organizations from the client certificate
+- `identity.oidc`: OIDC token claims (when using OIDC authentication)
+- `identity.oidc.claims`: Map of all JWT claims (e.g., `sub`, `iss`, `email`, etc.)
 - `request.action`: The action being requested
 - `request.namespace`: The repository being accessed
 - `request.digest`: The digest of the blob being accessed
@@ -55,3 +92,86 @@ The `request.action` variable can have the following values:
 - `get-referrers`: Get the referrers of a manifest
 - `list-catalog`: List the catalog
 - `list-tags`: List the tags
+
+## OIDC Authentication Examples
+
+When OIDC authentication is configured, you can use JWT token claims in your policies.
+
+**Note:** CEL supports powerful string matching functions:
+- `.matches(regex)` - Match against a regular expression pattern
+- `.startsWith(prefix)` - Check if string starts with a prefix
+- `.endsWith(suffix)` - Check if string ends with a suffix
+- `.contains(substring)` - Check if string contains a substring
+- `in [list]` - Check if value is in a list
+
+### GitHub Actions Examples
+
+```toml
+[repository."my-app".access_policy]
+default_allow = false
+rules = [
+  # Allow pushes from main branch or release branches
+  "identity.oidc.claims.ref.matches('^refs/heads/(main|release/.*)$') && request.action.startsWith('put-')",
+  
+  # Allow any repository from your organization
+  "identity.oidc.claims.repository.matches('^myorg/.*')",
+  
+  # Allow specific repositories using regex
+  "identity.oidc.claims.repository.matches('^myorg/(app1|app2|app3)$')",
+  
+  # Allow production environment deployments
+  "identity.oidc.claims.environment == 'production'",
+  
+  # Allow specific workflows using regex pattern
+  "identity.oidc.claims.workflow.matches('^\\.github/workflows/(deploy|ci|release)\\.yml$')",
+  
+  # Allow specific actors (users/bots)
+  "identity.oidc.claims.actor in ['myusername', 'dependabot[bot]', 'renovate[bot]']",
+  
+  # Use parsed GitHub fields (automatically extracted)
+  "identity.oidc.claims.github_owner == 'myorg'",
+  "identity.oidc.claims.github_repo.matches('^(app1|app2)$')"
+]
+```
+
+### Generic OIDC Provider Examples
+
+```toml
+[repository."my-registry".access_policy]
+default_allow = false
+rules = [
+  # Allow users with specific email domain
+  "identity.oidc.claims.email.endsWith('@mycompany.com')",
+  
+  # Allow users in specific groups
+  "'registry-admins' in identity.oidc.claims.groups",
+  
+  # Allow specific subject
+  "identity.oidc.claims.sub == 'user-123-456'",
+  
+  # Combine multiple conditions
+  "identity.oidc.claims.email_verified == true && identity.oidc.claims.role == 'developer'"
+]
+```
+
+### Mixed Authentication Examples
+
+You can combine different authentication methods in the same policy:
+
+```toml
+[repository."production".access_policy]
+default_allow = false
+rules = [
+  # Allow basic auth admin user
+  "identity.username == 'admin'",
+  
+  # Allow mTLS with specific organization
+  "identity.certificate.organizations.contains('DevOps')",
+  
+  # Allow GitHub Actions from main branch
+  "identity.oidc != null && identity.oidc.claims.ref == 'refs/heads/main'",
+  
+  # Allow any authenticated OIDC user to pull
+  "identity.oidc != null && request.action.startsWith('get-')"
+]
+```

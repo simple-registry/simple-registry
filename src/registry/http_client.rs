@@ -1,6 +1,6 @@
 use crate::configuration::Error;
 use crate::registry;
-use crate::registry::utils::response_ext::ResponseExt;
+use crate::registry::server::response_ext::ResponseExt;
 use async_trait::async_trait;
 use http_body_util::Empty;
 use hyper::body::{Bytes, Incoming};

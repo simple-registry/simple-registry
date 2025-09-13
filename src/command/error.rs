@@ -4,6 +4,7 @@ use std::{fmt, io};
 
 #[derive(Debug)]
 pub enum Error {
+    Fatal(String),
     IO(io::Error),
     Watcher(String),
     Configuration(configuration::Error),
@@ -15,6 +16,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Error::Fatal(msg) => write!(f, "Fatal error: {msg}"),
             Error::IO(err) => write!(f, "IO error: {err}"),
             Error::Watcher(err) => write!(f, "Watcher error: {err}"),
             Error::Configuration(err) => {

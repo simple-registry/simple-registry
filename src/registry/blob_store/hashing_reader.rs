@@ -1,4 +1,4 @@
-use crate::registry::utils::sha256_ext::Sha256Ext;
+use crate::registry::blob_store::sha256_ext::Sha256Ext;
 use sha2::{Digest, Sha256};
 use std::io;
 use std::pin::Pin;

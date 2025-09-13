@@ -20,6 +20,7 @@ pub enum Error {
     TracingInit(TraceError),
     ExporterInit(ExporterBuildError),
     CELPolicy(cel_interpreter::ParseErrors),
+    PolicyCompilation(String),
 }
 
 impl fmt::Display for Error {
@@ -56,6 +57,9 @@ impl fmt::Display for Error {
             Error::CELPolicy(error) => {
                 write!(f, "CEL policy error")?;
                 write!(f, "{error}")
+            }
+            Error::PolicyCompilation(msg) => {
+                write!(f, "Policy compilation error: {msg}")
             }
         }
     }

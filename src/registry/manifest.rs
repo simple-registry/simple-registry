@@ -1,8 +1,8 @@
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::oci::{Digest, Manifest, Reference};
-use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
-use crate::registry::utils::request_ext::RequestExt;
-use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
+use crate::registry::server::request_ext::RequestExt;
+use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
+use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, Repository, ResponseBody};
 use http_body_util::BodyExt;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
@@ -104,7 +104,7 @@ impl Registry {
         }
 
         let res = repository
-            .query_upstream_manifest(
+            .query_manifest(
                 &*self.auth_token_cache,
                 &Method::HEAD,
                 accepted_mime_types,
@@ -186,7 +186,7 @@ impl Registry {
 
         // TODO: test if upstream manifest has changed or not (if reference is a Reference::Tag)
         let res = repository
-            .query_upstream_manifest(
+            .query_manifest(
                 &*self.auth_token_cache,
                 &Method::GET,
                 accepted_mime_types,
@@ -404,7 +404,7 @@ impl Registry {
         identity: ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::get_manifest(&parameters.name, &parameters.reference),
             &identity,
@@ -445,7 +445,7 @@ impl Registry {
         identity: ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::get_manifest(&parameters.name, &parameters.reference),
             &identity,
@@ -487,7 +487,7 @@ impl Registry {
         T: body::Body,
     {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::put_manifest(&parameters.name, &parameters.reference),
             &identity,
@@ -539,7 +539,7 @@ impl Registry {
         identity: ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::delete_manifest(&parameters.name, &parameters.reference),
             &identity,
@@ -559,8 +559,8 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::server::response_ext::IntoAsyncRead;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use crate::registry::utils::response_ext::IntoAsyncRead;
     use http_body_util::Empty;
     use hyper::body::Bytes;
     use hyper::Uri;
