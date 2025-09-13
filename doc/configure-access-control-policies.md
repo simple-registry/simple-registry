@@ -71,8 +71,10 @@ The following variables are available in the CEL expressions:
 - `identity.username`: The username for the identity
 - `identity.certificate.common_names`: The list of common names from the client certificate
 - `identity.certificate.organizations`: The list of organizations from the client certificate
-- `identity.oidc`: OIDC token claims (when using OIDC authentication)
-- `identity.oidc.claims`: Map of all JWT claims (e.g., `sub`, `iss`, `email`, etc.)
+- `identity.oidc`: OIDC authentication details (when using OIDC authentication)
+- `identity.oidc.provider_name`: The configured provider name (e.g., "github-actions")
+- `identity.oidc.provider_type`: The provider type ("GitHub Actions" or "Generic OIDC")
+- `identity.oidc.claims`: Map of all JWT claims (access with bracket notation: `identity.oidc.claims["claim_name"]`)
 - `request.action`: The action being requested
 - `request.namespace`: The repository being accessed
 - `request.digest`: The digest of the blob being accessed
@@ -110,27 +112,23 @@ When OIDC authentication is configured, you can use JWT token claims in your pol
 [repository."my-app".access_policy]
 default_allow = false
 rules = [
+  # Check for OIDC and provider before accessing claims
+  "identity.oidc != null && identity.oidc.provider_name == 'github-actions' && identity.oidc.claims['repository'].matches('^myorg/.*')",
+
   # Allow pushes from main branch or release branches
-  "identity.oidc.claims.ref.matches('^refs/heads/(main|release/.*)$') && request.action.startsWith('put-')",
-  
-  # Allow any repository from your organization
-  "identity.oidc.claims.repository.matches('^myorg/.*')",
-  
+  "identity.oidc != null && identity.oidc.claims['ref'].matches('^refs/heads/(main|release/.*)$') && request.action.startsWith('put-')",
+
   # Allow specific repositories using regex
-  "identity.oidc.claims.repository.matches('^myorg/(app1|app2|app3)$')",
-  
+  "identity.oidc != null && identity.oidc.claims['repository'].matches('^myorg/(app1|app2|app3)$')",
+
   # Allow production environment deployments
-  "identity.oidc.claims.environment == 'production'",
-  
+  "identity.oidc != null && identity.oidc.claims['environment'] == 'production'",
+
   # Allow specific workflows using regex pattern
-  "identity.oidc.claims.workflow.matches('^\\.github/workflows/(deploy|ci|release)\\.yml$')",
-  
+  "identity.oidc != null && identity.oidc.claims['workflow'].matches('^\\.github/workflows/(deploy|ci|release)\\.yml$')",
+
   # Allow specific actors (users/bots)
-  "identity.oidc.claims.actor in ['myusername', 'dependabot[bot]', 'renovate[bot]']",
-  
-  # Use parsed GitHub fields (automatically extracted)
-  "identity.oidc.claims.github_owner == 'myorg'",
-  "identity.oidc.claims.github_repo.matches('^(app1|app2)$')"
+  "identity.oidc != null && identity.oidc.claims['actor'] in ['myusername', 'dependabot[bot]', 'renovate[bot]']"
 ]
 ```
 
@@ -141,16 +139,16 @@ rules = [
 default_allow = false
 rules = [
   # Allow users with specific email domain
-  "identity.oidc.claims.email.endsWith('@mycompany.com')",
-  
+  "identity.oidc != null && identity.oidc.claims['email'].endsWith('@mycompany.com')",
+
   # Allow users in specific groups
-  "'registry-admins' in identity.oidc.claims.groups",
-  
+  "identity.oidc != null && 'registry-admins' in identity.oidc.claims['groups']",
+
   # Allow specific subject
-  "identity.oidc.claims.sub == 'user-123-456'",
-  
+  "identity.oidc != null && identity.oidc.claims['sub'] == 'user-123-456'",
+
   # Combine multiple conditions
-  "identity.oidc.claims.email_verified == true && identity.oidc.claims.role == 'developer'"
+  "identity.oidc != null && identity.oidc.claims['email_verified'] == true && identity.oidc.claims['role'] == 'developer'"
 ]
 ```
 
@@ -169,9 +167,38 @@ rules = [
   "identity.certificate.organizations.contains('DevOps')",
   
   # Allow GitHub Actions from main branch
-  "identity.oidc != null && identity.oidc.claims.ref == 'refs/heads/main'",
+  "identity.oidc != null && identity.oidc.claims['ref'] == 'refs/heads/main'",
   
   # Allow any authenticated OIDC user to pull
   "identity.oidc != null && request.action.startsWith('get-')"
 ]
 ```
+
+## Policy Evaluation and Error Handling
+
+### Evaluation Behavior
+
+1. **For default-deny policies**: Rules are evaluated until one allows access
+2. **For default-allow policies**: Rules are evaluated until one denies access
+3. **Failed rule evaluation**: If a CEL expression fails (e.g., accessing a field on null), the rule is skipped with a warning log
+
+### Error Handling
+
+CEL policy evaluation errors are handled gracefully:
+
+- **Rule continuation**: When a rule fails, evaluation continues with the next rule
+- **Debug logging**: Enable `RUST_LOG=simple_registry=debug` to see detailed evaluation logs
+
+### Common Pitfalls and Solutions
+
+1. **Accessing OIDC fields when no OIDC auth is present**
+   - Problem: `identity.oidc.provider_name == 'github-actions'` fails when `identity.oidc` is null
+   - Solution: Always check for null first: `identity.oidc != null && identity.oidc.provider_name == 'github-actions'`
+
+2. **Using dot notation for claim access**
+   - Problem: `identity.oidc.claims.repository` may not work correctly
+   - Solution: Use bracket notation: `identity.oidc.claims['repository']`
+
+3. **Non-boolean rule results**
+   - Problem: Rules that don't return boolean values
+   - Solution: Ensure all rules evaluate to true/false

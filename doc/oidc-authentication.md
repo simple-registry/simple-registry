@@ -137,43 +137,60 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 ## Policy Examples
 
+### OIDC Fields in Policies
+
+When OIDC authentication is used, the following fields are available:
+
+- `identity.oidc.provider_name` - The configured provider name (e.g., "github-actions")
+- `identity.oidc.provider_type` - The provider type ("GitHub Actions" or "Generic OIDC")
+- `identity.oidc.claims` - Map of all JWT claims from the token
+
 ### GitHub Actions Claims
 
 GitHub Actions tokens include these claims that can be used in policies:
 
 - `repository` - Full repository name (e.g., "myorg/myrepo")
-- `github_owner` - Repository owner (automatically extracted)
-- `github_repo` - Repository name (automatically extracted)
-- `ref` - Git reference (e.g., "refs/heads/main")
+- `ref` - Git reference (e.g., "refs/heads/main", "refs/tags/v1.0.0", "refs/pull/1/merge", etc.)
 - `sha` - Commit SHA
-- `workflow` - Workflow file path
+- `workflow` - Workflow file name
+- `workflow_ref` - Full workflow reference path
 - `actor` - User who triggered the workflow
-- `environment` - Deployment environment (if applicable)
-- `github_context_type` - Context type (ref, environment, etc.)
-- `github_context_value` - Context value
+- `event_name` - Event that triggered the workflow (push, pull_request, etc.)
+- `run_id` - Unique workflow run ID
+- `run_number` - Workflow run number
+- `repository_owner` - Repository owner
+- `repository_visibility` - Repository visibility (public/private)
 
 Example policies using regex for flexible matching:
 ```toml
 [repository.myapp.access_policy]
+default_allow = false
 rules = [
+    # Check for OIDC presence before accessing fields
+    '''identity.oidc != null &&
+       identity.oidc.provider_name == 'github-actions' &&
+       identity.oidc.claims["repository"].matches("^myorg/.*")''',
+
     # Allow pushes from main branch or release tags
-    '''identity.oidc.claims.ref.matches("^refs/(heads/main|tags/v[0-9]+\\.[0-9]+\\.[0-9]+)$") && 
+    '''identity.oidc != null &&
+       identity.oidc.claims["ref"].matches("^refs/(heads/main|tags/v[0-9]+\\.[0-9]+\\.[0-9]+)$") &&
        request.action.startsWith("put-")''',
-    
-    # Allow any repository from your organization
-    '''identity.oidc.claims.repository.matches("^myorg/.*")''',
-    
+
     # Allow specific repositories using regex
-    '''identity.oidc.claims.repository.matches("^myorg/(app1|app2|staging-.*)")''',
-    
+    '''identity.oidc != null &&
+       identity.oidc.claims["repository"].matches("^myorg/(app1|app2|staging-.*)")''',
+
     # Allow specific workflows
-    '''identity.oidc.claims.workflow.matches("^\\.github/workflows/(deploy|ci)\\.yml$")''',
-    
+    '''identity.oidc != null &&
+       identity.oidc.claims["workflow"].matches("^(deploy|ci)\\.yml$")''',
+
     # Allow specific actors (users/bots)
-    '''identity.oidc.claims.actor in ["myusername", "dependabot[bot]"]''',
-    
+    '''identity.oidc != null &&
+       identity.oidc.claims["actor"] in ["myusername", "dependabot[bot]"]''',
+
     # Allow production environment
-    '''identity.oidc.claims.environment == "production"'''
+    '''identity.oidc != null &&
+       identity.oidc.claims["environment"] == "production"'''
 ]
 ```
 
@@ -215,33 +232,45 @@ Authentication uses fail-open semantics: invalid credentials return NoCredential
 
 ## Security Considerations
 
-1. **Token Validation**: All tokens are properly validated:
-   - Cryptographic signature verification against JWKS
-   - Support for RSA (RS256, RS384, RS512) and EC (ES256, ES384) algorithms
-   - Issuer (`iss`) claim validation
-   - Audience (`aud`) claim validation (if configured)
-   - Expiration (`exp`) claim validation
-   - Not-before (`nbf`) claim validation
-   - Issued-at (`iat`) claim validation
+1. **Token Validation**: All tokens are cryptographically validated:
+   - **Signature Verification**: Tokens must be signed by a key from the provider's official JWKS endpoint
+   - **Algorithm Support**: RSA (RS256, RS384, RS512) and EC (ES256, ES384) algorithms
+   - **Issuer Validation**: The `iss` claim MUST match the configured provider issuer
+   - **Audience Validation**: The `aud` claim is validated if `required_audience` is configured
+   - **Time-based Validation**:
+     - Expiration (`exp`) claim validation
+     - Not-before (`nbf`) claim validation
+     - Clock skew tolerance (default 60 seconds)
 
 2. **JWKS Management**:
-   - Automatic JWKS fetching from provider's JWKS endpoint
-   - OIDC discovery support (.well-known/openid-configuration)
-   - Caching with configurable refresh intervals (default: 1 hour)
+   - JWKS are fetched from the provider's official endpoint (either configured or auto-discovered)
+   - OIDC discovery via `.well-known/openid-configuration`
+   - Cached with configurable refresh intervals (default: 1 hour)
    - Automatic key rotation support
 
-3. **Clock Skew**: Configurable clock skew tolerance (default 60 seconds) to handle time synchronization issues between systems.
+3. **Protection Against Token Attacks**:
+   - **Cannot use arbitrary tokens**: Tokens must be signed by the configured provider's keys
+   - **Cannot modify tokens**: Any modification invalidates the cryptographic signature
+   - **Cannot use expired tokens**: Time-based claims are strictly validated
+   - **Cannot use tokens from other providers**: Issuer validation prevents cross-provider token use
 
-4. **Provider-Specific Validation**: 
+4. **Provider-Specific Validation**:
    - GitHub provider validates required claims (`repository`, `actor`)
    - Generic provider allows custom claim validation via policies
 
-5. **Access Restrictions**: Use CEL policies to implement flexible access controls based on token claims:
+5. **Policy Error Handling**:
+   - CEL policy evaluation errors are logged with warning level
+   - Failed rules are skipped and evaluation continues with the next rule
+   - For default-deny policies: A rule must explicitly allow access
+   - For default-allow policies: A rule can explicitly deny access
+
+6. **Access Restrictions**: Use CEL policies for fine-grained access control:
    - Repository pattern matching with regex
    - Branch/tag restrictions
    - Workflow file validation
    - Actor/user allowlists
    - Environment-based access
+   - Provider-specific restrictions using `provider_name` and `provider_type`
 
 ## Troubleshooting
 
@@ -250,13 +279,24 @@ Authentication uses fail-open semantics: invalid credentials return NoCredential
 - Verify issuer matches configuration
 - Check audience claim if required_audience is set
 - For GitHub tokens, ensure repository and actor claims are present
+- Enable debug logging to see validation details: `RUST_LOG=simple_registry=debug`
 
 ### Policy Not Matching
-- Use `identity.oidc.claims` to access all token claims
+- Use `identity.oidc.claims["claim_name"]` to access token claims (note the bracket notation)
+- Check if OIDC is present before accessing fields: `identity.oidc != null`
 - Check claim names match your provider's format
+- Failed policy rules are logged with warnings showing which rule failed
 - Use CEL playground to test expressions
 
+### Policy Evaluation Errors
+- If a CEL expression fails (e.g., accessing a field on null), the rule is skipped with a warning
+- The system continues evaluating other rules instead of returning 500 errors
+- Check logs for "evaluation failed" messages to debug problematic rules
+- Common issue: Accessing `identity.oidc.provider_name` when no OIDC auth was used
+  - Solution: Add `identity.oidc != null` check first
+
 ### JWKS Errors
-- Ensure issuer URL is correct
+- Ensure issuer URL is correct and accessible
 - Check network connectivity to OIDC provider
 - Verify custom jwks_uri if configured
+- JWKS are cached, so changes may take up to `jwks_refresh_interval` to take effect

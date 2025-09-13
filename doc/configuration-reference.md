@@ -170,19 +170,27 @@ Use CEL expressions in your access policies to restrict access based on GitHub c
 ```toml
 [repository."myapp".access_policy]
 rules = [
-  # Allow specific repositories using regex
-  '''identity.oidc.claims.repository.matches("^myorg/(app1|app2|app3)$")''',
-  
+  # Check OIDC presence and provider
+  '''identity.oidc != null && identity.oidc.provider_name == 'github-actions' ''',
+
+  # Allow specific repositories using regex (use bracket notation for claims)
+  '''identity.oidc != null && identity.oidc.claims["repository"].matches("^myorg/(app1|app2|app3)$")''',
+
   # Allow any repository from an organization
-  '''identity.oidc.claims.repository.startsWith("myorg/")''',
-  
+  '''identity.oidc != null && identity.oidc.claims["repository"].startsWith("myorg/")''',
+
   # Allow specific actors
-  '''identity.oidc.claims.actor in ["username", "dependabot[bot]"]''',
-  
+  '''identity.oidc != null && identity.oidc.claims["actor"] in ["username", "dependabot[bot]"]''',
+
   # Allow specific workflows using regex
-  '''identity.oidc.claims.workflow.matches("^\\.github/workflows/(deploy|release)\\.yml$")'''
+  '''identity.oidc != null && identity.oidc.claims["workflow"].matches("^\\.github/workflows/(deploy|release)\\.yml$")'''
 ]
 ```
+
+**Note:** When using OIDC in policies:
+- Always check `identity.oidc != null` before accessing OIDC fields
+- Use bracket notation for claims: `identity.oidc.claims["claim_name"]`
+- Available fields: `provider_name`, `provider_type`, and `claims` map
 
 ### Generic Provider
 

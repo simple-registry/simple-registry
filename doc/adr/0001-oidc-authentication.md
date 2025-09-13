@@ -27,8 +27,10 @@ jwks_refresh_interval = 3600
 # Repository access policy using OIDC claims
 [repository."myapp".access_policy]
 rules = [
-    """identity.oidc.claims.repository == "myorg/myrepo" &&
-       identity.oidc.claims.actor == "github-actions[bot]" &&
+    """identity.oidc != null &&
+       identity.oidc.provider_name == 'github-actions' &&
+       identity.oidc.claims["repository"] == "myorg/myrepo" &&
+       identity.oidc.claims["actor"] == "github-actions[bot]" &&
        request.action in ["put-manifest", "put-blob"]"""
 ]
 ```
@@ -39,9 +41,11 @@ rules = [
 - **Multiple providers**: Simultaneous support for different OIDC providers (GitHub, generic)
 - **Authentication order**: OIDC validators run before BasicAuth to prevent conflicts
 - **Fail-open semantics**: Invalid tokens return NoCredentials rather than errors, allowing fallback to other authentication methods
-- **Claims in policies**: All JWT claims exposed as `identity.oidc.claims` in CEL expressions for flexible access control
+- **Claims in policies**: All JWT claims exposed as `identity.oidc.claims` map in CEL expressions (use bracket notation)
+- **Provider metadata**: `identity.oidc.provider_name` and `provider_type` fields for provider-specific policies
 - **JWKS caching**: Automatic key fetching and caching to minimize network calls
 - **Provider extensibility**: Easy to add new OIDC providers through configuration
+- **Graceful error handling**: CEL policy evaluation errors are logged but don't cause 500 errors
 
 ## Consequences
 
