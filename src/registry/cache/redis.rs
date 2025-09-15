@@ -2,6 +2,7 @@ use crate::registry::cache::{Cache, Error};
 use async_trait::async_trait;
 use redis::AsyncCommands;
 use serde::Deserialize;
+use tracing::info;
 
 /// Configuration for Redis backend
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -18,6 +19,7 @@ pub struct Backend {
 
 impl Backend {
     pub fn new(config: BackendConfig) -> Result<Self, Error> {
+        info!("Using Redis cache store");
         let client = redis::Client::open(config.url.as_str())?;
         Ok(Backend {
             client,

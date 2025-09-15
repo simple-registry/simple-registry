@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use serde::Deserialize;
 use std::sync::Arc;
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {
@@ -50,6 +50,7 @@ pub struct Backend {
 
 impl Backend {
     pub fn new(config: BackendConfig) -> Result<Self, crate::configuration::Error> {
+        info!("Using S3 metadata-store backend");
         let store = data_store::s3::Backend::new(data_store::s3::BackendConfig {
             access_key_id: config.access_key_id,
             secret_key: config.secret_key,
@@ -62,6 +63,7 @@ impl Backend {
 
         let lock: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync> =
             if let Some(redis_config) = config.redis {
+                info!("Using Redis lock store for S3 metadata-store");
                 let backend = lock::RedisBackend::new(redis_config).map_err(|e| {
                     crate::configuration::Error::MetadataStore(format!(
                         "Failed to initialize Redis lock store: {e}"
@@ -69,6 +71,7 @@ impl Backend {
                 })?;
                 Arc::new(backend)
             } else {
+                info!("Using in-memory lock store for S3 metadata-store");
                 Arc::new(MemoryBackend::new())
             };
 

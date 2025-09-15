@@ -17,7 +17,7 @@ use sha2::{Digest as ShaDigestTrait, Sha256};
 use std::fmt::{Debug, Formatter};
 use std::io::Cursor;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {
@@ -87,6 +87,7 @@ impl Debug for Backend {
 
 impl Backend {
     pub fn new(config: BackendConfig) -> Self {
+        info!("Using S3 blob-store backend");
         #[allow(clippy::cast_possible_truncation)]
         let multipart_part_size = config.multipart_part_size.as_u64() as usize;
         let store = data_store::s3::Backend::new(config.into());

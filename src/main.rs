@@ -206,23 +206,15 @@ fn main() -> Result<(), command::Error> {
         set_tracing(config.observability.clone())?;
 
         let blob_store: Arc<dyn BlobStore + Send + Sync> = match &config.blob_store {
-            BlobStorageConfig::FS(cfg) => {
-                info!("Using filesystem blob-store backend");
-                Arc::new(blob_store::fs::Backend::new(cfg.clone()))
-            }
-            BlobStorageConfig::S3(cfg) => {
-                info!("Using S3 blob-store backend");
-                Arc::new(blob_store::s3::Backend::new(cfg.clone()))
-            }
+            BlobStorageConfig::FS(cfg) => Arc::new(blob_store::fs::Backend::new(cfg.clone())),
+            BlobStorageConfig::S3(cfg) => Arc::new(blob_store::s3::Backend::new(cfg.clone())),
         };
 
         let metadata_store: Arc<dyn MetadataStore + Send + Sync> = match &config.metadata_store {
             MetadataStoreConfig::FS(cfg) => {
-                info!("Using filesystem metadata-store backend");
                 Arc::new(metadata_store::fs::Backend::new(cfg.clone())?)
             }
             MetadataStoreConfig::S3(cfg) => {
-                info!("Using S3 metadata-store backend");
                 Arc::new(metadata_store::s3::Backend::new(cfg.clone())?)
             }
             MetadataStoreConfig::Unspecified => {

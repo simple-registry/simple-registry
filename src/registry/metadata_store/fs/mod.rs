@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {
@@ -40,6 +40,7 @@ pub struct Backend {
 
 impl Backend {
     pub fn new(config: BackendConfig) -> Result<Self, crate::configuration::Error> {
+        info!("Using filesystem metadata-store backend");
         let store = data_store::fs::Backend::new(data_store::fs::BackendConfig {
             root_dir: config.root_dir,
             sync_to_disk: config.sync_to_disk,
@@ -47,6 +48,7 @@ impl Backend {
 
         let lock: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync> =
             if let Some(redis_config) = config.redis {
+                info!("Using Redis lock store for filesystem metadata-store");
                 let backend = lock::RedisBackend::new(redis_config).map_err(|e| {
                     crate::configuration::Error::MetadataStore(format!(
                         "Failed to initialize Redis lock store: {e}"
@@ -54,6 +56,7 @@ impl Backend {
                 })?;
                 Arc::new(backend)
             } else {
+                info!("Using in-memory lock store for filesystem metadata-store");
                 Arc::new(MemoryBackend::new())
             };
 

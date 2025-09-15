@@ -15,7 +15,7 @@ use std::fmt::{Debug, Formatter};
 use std::io::{ErrorKind, SeekFrom};
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncSeekExt};
-use tracing::{error, instrument};
+use tracing::{error, info, instrument};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {
@@ -46,6 +46,7 @@ impl Debug for Backend {
 
 impl Backend {
     pub fn new(config: BackendConfig) -> Self {
+        info!("Using filesystem blob-store backend");
         Self {
             store: data_store::fs::Backend::new(config.into()),
         }
