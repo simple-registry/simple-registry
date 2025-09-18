@@ -1,9 +1,9 @@
 use crate::registry::blob_store::{BlobStore, Reader};
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::oci::Digest;
-use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
-use crate::registry::utils::request_ext::RequestExt;
-use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
+use crate::registry::server::request_ext::RequestExt;
+use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
+use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::{blob_store, task_queue, Error, Registry, Repository, ResponseBody};
 use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use hyper::{Method, Request, Response, StatusCode};
@@ -55,7 +55,7 @@ impl Registry {
         }
 
         let res = repository
-            .query_upstream_blob(
+            .query_blob(
                 &*self.auth_token_cache,
                 &Method::HEAD,
                 accepted_mime_types,
@@ -122,7 +122,7 @@ impl Registry {
 
         // Proxying stream
         let client_stream = repository
-            .query_upstream_blob(
+            .query_blob(
                 &*self.auth_token_cache,
                 &Method::GET,
                 accepted_mime_types,
@@ -137,7 +137,7 @@ impl Registry {
         // Caching stream
         let store = self.blob_store.clone();
         let cache_reader = repository
-            .query_upstream_blob(
+            .query_blob(
                 &*self.auth_token_cache,
                 &Method::GET,
                 accepted_mime_types,
@@ -231,7 +231,7 @@ impl Registry {
         identity: ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::get_blob(&parameters.name, &parameters.digest),
             &identity,
@@ -262,7 +262,7 @@ impl Registry {
         identity: ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::delete_blob(&parameters.name, &parameters.digest),
             &identity,
@@ -286,7 +286,7 @@ impl Registry {
         identity: ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::get_blob(&parameters.name, &parameters.digest),
             &identity,
@@ -335,9 +335,9 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use crate::registry::utils::response_ext::{IntoAsyncRead, ResponseExt};
     use std::io::Cursor;
     use tokio::io::AsyncReadExt;
 

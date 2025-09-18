@@ -1,12 +1,11 @@
 #[cfg(test)]
 pub mod tests;
 
+use crate::registry::blob_store::hashing_reader::HashingReader;
+use crate::registry::blob_store::sha256_ext::Sha256Ext;
 use crate::registry::blob_store::{BlobStore, Error, Reader};
-use crate::registry::data_store;
 use crate::registry::oci::Digest;
-use crate::registry::reader::HashingReader;
-use crate::registry::utils::path_builder;
-use crate::registry::utils::sha256_ext::Sha256Ext;
+use crate::registry::{data_store, path_builder};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -16,7 +15,7 @@ use std::fmt::{Debug, Formatter};
 use std::io::{ErrorKind, SeekFrom};
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncSeekExt};
-use tracing::{error, instrument};
+use tracing::{error, info, instrument};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {
@@ -47,6 +46,7 @@ impl Debug for Backend {
 
 impl Backend {
     pub fn new(config: BackendConfig) -> Self {
+        info!("Using filesystem blob-store backend");
         Self {
             store: data_store::fs::Backend::new(config.into()),
         }

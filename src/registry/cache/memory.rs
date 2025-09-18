@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
+use tracing::info;
 
 #[derive(Debug)]
 pub struct Backend {
@@ -15,6 +16,7 @@ pub struct Backend {
 
 impl Backend {
     pub fn new() -> Self {
+        info!("Using in-memory cache store");
         Backend {
             store: Arc::new(RwLock::new(HashMap::new())),
             counter: Arc::new(AtomicUsize::new(0)),

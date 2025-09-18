@@ -1,6 +1,6 @@
 use crate::registry::oci::Digest;
-use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
-use crate::registry::utils::request_ext::{IntoAsyncRead, RequestExt};
+use crate::registry::server::request_ext::{IntoAsyncRead, RequestExt};
+use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, ResponseBody};
 use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE, LOCATION, RANGE};
 use hyper::{body, Request, Response, StatusCode};
@@ -174,12 +174,12 @@ impl Registry {
     }
 
     // API Handlers
-    #[instrument(skip(self, request))]
+    #[instrument(skip(self, request, identity))]
     pub async fn handle_start_upload<T>(
         &self,
         request: Request<T>,
         parameters: QueryNewUploadParameters,
-        identity: ClientIdentity,
+        identity: &ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         #[derive(Deserialize, Default)]
         struct UploadQuery {
@@ -187,10 +187,10 @@ impl Registry {
         }
 
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::start_upload(&parameters.name),
-            &identity,
+            identity,
         )?;
 
         let query: UploadQuery = request.query_parameters()?;
@@ -216,17 +216,17 @@ impl Registry {
         Ok(res)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, identity))]
     pub async fn handle_get_upload(
         &self,
         parameters: QueryUploadParameters,
-        identity: ClientIdentity,
+        identity: &ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::get_upload(&parameters.name),
-            &identity,
+            identity,
         )?;
 
         let location = format!("/v2/{}/blobs/uploads/{}", parameters.name, parameters.uuid);
@@ -246,12 +246,12 @@ impl Registry {
         Ok(res)
     }
 
-    #[instrument(skip(self, request))]
+    #[instrument(skip(self, request, identity))]
     pub async fn handle_patch_upload<T>(
         &self,
         request: Request<T>,
         parameters: QueryUploadParameters,
-        identity: ClientIdentity,
+        identity: &ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error>
     where
         T: body::Body + Unpin + Sync + Send + 'static,
@@ -259,10 +259,10 @@ impl Registry {
         T::Error: Send + Sync + std::error::Error + 'static,
     {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::update_upload(&parameters.name),
-            &identity,
+            identity,
         )?;
 
         let start_offset = request.range(CONTENT_RANGE)?.map(|(start, _)| start);
@@ -290,12 +290,12 @@ impl Registry {
         Ok(res)
     }
 
-    #[instrument(skip(self, request))]
+    #[instrument(skip(self, request, identity))]
     pub async fn handle_put_upload<T>(
         &self,
         request: Request<T>,
         parameters: QueryUploadParameters,
-        identity: ClientIdentity,
+        identity: &ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error>
     where
         T: body::Body + Unpin + Sync + Send + 'static,
@@ -308,10 +308,10 @@ impl Registry {
         }
 
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::complete_upload(&parameters.name),
-            &identity,
+            identity,
         )?;
 
         let query: CompleteUploadQuery = request.query_parameters()?;
@@ -336,17 +336,17 @@ impl Registry {
         Ok(res)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, identity))]
     pub async fn handle_delete_upload(
         &self,
         parameters: QueryUploadParameters,
-        identity: ClientIdentity,
+        identity: &ClientIdentity,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.validate_namespace(&parameters.name)?;
-        Self::validate_request(
+        self.validate_request(
             Some(repository),
             &ClientRequest::cancel_upload(&parameters.name),
-            &identity,
+            identity,
         )?;
 
         self.delete_upload(&parameters.name, parameters.uuid)
@@ -363,10 +363,10 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::repository::access_policy::ClientIdentity;
+    use crate::registry::server::response_ext::ResponseExt;
+    use crate::registry::server::ClientIdentity;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use crate::registry::utils::response_ext::ResponseExt;
-    use http_body_util::Empty;
+    use http_body_util::{BodyExt, Empty};
     use hyper::body::Bytes;
     use hyper::Method;
     use hyper::Uri;
@@ -623,8 +623,9 @@ mod tests {
             name: namespace.to_string(),
         };
 
+        let identity = ClientIdentity::default();
         let response = registry
-            .handle_start_upload(request, parameters, ClientIdentity::default())
+            .handle_start_upload(request, parameters, &identity)
             .await
             .unwrap();
 
@@ -654,8 +655,9 @@ mod tests {
             name: namespace.to_string(),
         };
 
+        let identity = ClientIdentity::default();
         let response = registry
-            .handle_start_upload(request, parameters, ClientIdentity::default())
+            .handle_start_upload(request, parameters, &identity)
             .await
             .unwrap();
 
@@ -693,13 +695,21 @@ mod tests {
             .await
             .unwrap();
 
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
+            .body(Empty::<Bytes>::new().map_err(|_| unreachable!()).boxed());
+
+        assert!(request.is_ok());
+
         let parameters = QueryUploadParameters {
             name: namespace.to_string(),
             uuid,
         };
 
+        let identity = ClientIdentity::default();
         let response = registry
-            .handle_get_upload(parameters, ClientIdentity::default())
+            .handle_get_upload(parameters, &identity)
             .await
             .unwrap();
 
@@ -755,8 +765,9 @@ mod tests {
             uuid,
         };
 
+        let identity = ClientIdentity::default();
         let response = registry
-            .handle_patch_upload(request, parameters, ClientIdentity::default())
+            .handle_patch_upload(request, parameters, &identity)
             .await
             .unwrap();
 
@@ -829,8 +840,9 @@ mod tests {
             uuid,
         };
 
+        let identity = ClientIdentity::default();
         let response = registry
-            .handle_put_upload(request, parameters, ClientIdentity::default())
+            .handle_put_upload(request, parameters, &identity)
             .await
             .unwrap();
 
@@ -872,13 +884,21 @@ mod tests {
             .await
             .unwrap();
 
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
+            .body(Empty::<Bytes>::new().map_err(|_| unreachable!()).boxed());
+
+        assert!(request.is_ok());
+
         let parameters = QueryUploadParameters {
             name: namespace.to_string(),
             uuid,
         };
 
+        let identity = ClientIdentity::default();
         let response = registry
-            .handle_delete_upload(parameters, ClientIdentity::default())
+            .handle_delete_upload(parameters, &identity)
             .await
             .unwrap();
 

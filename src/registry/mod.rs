@@ -3,11 +3,12 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
-use tracing::instrument;
+use tracing::{debug, info, instrument};
 
 pub mod blob;
 pub mod blob_store;
 pub mod cache;
+pub mod client;
 pub mod content_discovery;
 pub mod data_store;
 mod error;
@@ -15,28 +16,28 @@ mod http_client;
 pub mod manifest;
 pub mod metadata_store;
 pub mod oci;
-mod reader;
+mod path_builder;
 pub mod repository;
-mod response_body;
 mod scrub;
+pub mod server;
 pub mod task_queue;
 #[cfg(test)]
 mod tests;
 pub mod upload;
-pub mod utils;
 mod version;
 
 use crate::configuration;
 use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
 use crate::registry::cache::Cache;
 pub use repository::Repository;
+use repository::{AccessPolicy, RetentionPolicy};
 
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
 pub use crate::registry::task_queue::TaskQueue;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
-pub use response_body::ResponseBody;
+pub use server::response_body::ResponseBody;
 
 static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap()
@@ -47,6 +48,8 @@ pub struct Registry {
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
     auth_token_cache: Box<dyn Cache>,
     repositories: HashMap<String, Repository>,
+    global_access_policy: Option<AccessPolicy>,
+    global_retention_policy: Option<RetentionPolicy>,
     update_pull_time: bool,
     scrub_dry_run: bool,
     upload_timeout: Duration,
@@ -59,34 +62,52 @@ impl Debug for Registry {
     }
 }
 
+fn log_denial(reason: &str, identity: &server::ClientIdentity) {
+    info!("Access denied: {reason} | Identity: {identity:?}");
+}
+
 impl Registry {
-    #[instrument(skip(repositories_config, blob_store, metadata_store, auth_token_cache))]
+    #[instrument(skip(repositories_config, blob_store, metadata_store, auth_token_cache,))]
     pub fn new(
         blob_store: Arc<dyn BlobStore + Send + Sync>,
         metadata_store: Arc<dyn MetadataStore + Send + Sync>,
         repositories_config: HashMap<String, RepositoryConfig>,
         global_config: &GlobalConfig,
-        auth_token_cache: CacheStoreConfig,
+        auth_token_cache: &CacheStoreConfig,
     ) -> Result<Self, configuration::Error> {
-        let auth_token_cache: Box<dyn Cache> =
-            if let CacheStoreConfig::Redis(redis_config) = auth_token_cache {
-                Box::new(cache::redis::Backend::new(redis_config)?)
+        let auth_token_cache_box: Box<dyn Cache> =
+            if let CacheStoreConfig::Redis(ref redis_config) = auth_token_cache {
+                Box::new(cache::redis::Backend::new(redis_config.clone())?)
             } else {
                 Box::new(cache::memory::Backend::new())
             };
 
         let mut repositories = HashMap::new();
         for (repository_name, repository_config) in repositories_config {
-            let res = Repository::new(repository_config, repository_name.clone())?;
+            let res = Repository::new(repository_name.clone(), repository_config)?;
             repositories.insert(repository_name, res);
         }
+
+        let global_access_policy = if global_config.access_policy.rules.is_empty() {
+            None
+        } else {
+            Some(AccessPolicy::new(&global_config.access_policy)?)
+        };
+
+        let global_retention_policy = if global_config.retention_policy.rules.is_empty() {
+            None
+        } else {
+            Some(RetentionPolicy::new(&global_config.retention_policy)?)
+        };
 
         let res = Self {
             update_pull_time: global_config.update_pull_time,
             blob_store,
             metadata_store,
-            auth_token_cache,
+            auth_token_cache: auth_token_cache_box,
             repositories,
+            global_access_policy,
+            global_retention_policy,
             scrub_dry_run: true,
             upload_timeout: Duration::days(1),
             task_queue: TaskQueue::new(global_config.max_concurrent_cache_jobs)?,
@@ -122,8 +143,9 @@ impl Registry {
     ///
     /// This method:
     /// 1. Checks if the request has a namespace (repository name)
-    /// 2. Evaluates the repository's access policy
-    /// 3. Enforces pull-through cache write restrictions
+    /// 2. Evaluates global access policy first (if defined)
+    /// 3. Evaluates the repository's access policy
+    /// 4. Enforces pull-through cache write restrictions
     ///
     /// # Arguments
     /// * `repository` - The target repository (if it exists)
@@ -133,40 +155,57 @@ impl Registry {
     /// # Returns
     /// * `Ok(())` if the request is allowed
     /// * `Err(Error::Unauthorized)` if the request is denied
-    #[instrument(skip(repository, request))]
+    #[instrument(skip(self, repository, request))]
     pub fn validate_request(
+        &self,
         repository: Option<&Repository>,
-        request: &repository::access_policy::ClientRequest,
-        identity: &repository::access_policy::ClientIdentity,
+        request: &server::ClientRequest,
+        identity: &server::ClientIdentity,
     ) -> Result<(), Error> {
-        use tracing::debug;
-
         let Some(namespace) = request.namespace.as_ref() else {
             return Ok(());
         };
 
-        let Some(repository) = repository else {
-            return Ok(());
-        };
-
-        debug!(
-            "Evaluating access policy for namespace: {namespace} ({})",
-            repository.name
-        );
-
-        let allowed = repository.access_policy.evaluate(request, identity)?;
-
-        if !allowed {
-            return Err(Error::Unauthorized("Access denied".to_string()));
+        if let Some(ref global_policy) = self.global_access_policy {
+            debug!("Evaluating global access policy for namespace: {namespace}");
+            let allowed = global_policy.evaluate(request, identity)?;
+            if !allowed {
+                log_denial("global policy", identity);
+                return Err(Error::Unauthorized(
+                    "Access denied by global policy".to_string(),
+                ));
+            }
+        } else if repository.is_none() {
+            log_denial("no policy defined", identity);
+            return Err(Error::Unauthorized(
+                "Access denied (no policy defined)".to_string(),
+            ));
         }
 
-        if repository.is_pull_through() && request.is_write() {
-            Err(Error::Unauthorized(
-                "Write operations are not supported on pull-through cache repositories".to_string(),
-            ))
-        } else {
-            Ok(())
+        if let Some(repository) = repository {
+            debug!(
+                "Evaluating repository access policy for namespace: {namespace} ({})",
+                repository.name
+            );
+
+            let allowed = repository.access_policy.evaluate(request, identity)?;
+            if !allowed {
+                log_denial(
+                    &format!("repository '{}' policy", repository.name),
+                    identity,
+                );
+                return Err(Error::Unauthorized("Access denied".to_string()));
+            }
+
+            if repository.is_pull_through() && request.is_write() {
+                return Err(Error::Unauthorized(
+                    "Write operations are not supported on pull-through cache repositories"
+                        .to_string(),
+                ));
+            }
         }
+
+        Ok(())
     }
 }
 
@@ -192,6 +231,26 @@ pub mod test_utils {
             },
         );
         repositories
+    }
+
+    pub fn create_test_registry(
+        blob_store: Arc<dyn BlobStore + Send + Sync>,
+        metadata_store: Arc<dyn MetadataStore + Send + Sync>,
+    ) -> Registry {
+        let repositories_config = create_test_repository_config();
+        let global = GlobalConfig::default();
+        let token_cache = CacheStoreConfig::default();
+
+        Registry::new(
+            blob_store,
+            metadata_store,
+            repositories_config,
+            &global,
+            &token_cache,
+        )
+        .unwrap()
+        .with_upload_timeout(Duration::seconds(0))
+        .with_scrub_dry_run(false)
     }
 
     pub async fn create_test_blob(
@@ -222,12 +281,12 @@ pub mod test_utils {
 
         // Create a non-pull-through repository
         let repository = Repository::new(
+            "test-repo".to_string(),
             RepositoryConfig {
                 upstream: Vec::new(),
                 access_policy: RepositoryAccessPolicyConfig::default(),
                 retention_policy: RepositoryRetentionPolicyConfig { rules: Vec::new() },
             },
-            "test-repo".to_string(),
         )
         .unwrap();
 
@@ -262,11 +321,18 @@ pub mod test_utils {
 mod test {
     use super::*;
     use crate::configuration::{
-        RepositoryAccessPolicyConfig, RepositoryConfig, RepositoryRetentionPolicyConfig,
+        CacheStoreConfig, GlobalConfig, RepositoryAccessPolicyConfig, RepositoryConfig,
+        RepositoryRetentionPolicyConfig,
+    };
+    use crate::registry::blob_store::fs::{Backend as FSBlobStore, BackendConfig as FSBlobConfig};
+    use crate::registry::metadata_store::fs::{
+        Backend as FSMetadataStore, BackendConfig as FSMetadataConfig,
     };
     use crate::registry::oci::Reference;
-    use crate::registry::repository::access_policy::{ClientIdentity, ClientRequest};
+    use crate::registry::server::{ClientIdentity, ClientRequest};
     use crate::registry::tests::FSRegistryTestCase;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn create_default_deny_repo(rules: Vec<String>) -> Repository {
         let config = RepositoryConfig {
@@ -278,7 +344,7 @@ mod test {
             ..RepositoryConfig::default()
         };
 
-        Repository::new(config, "policy-deny-repo".to_string()).unwrap()
+        Repository::new("policy-deny-repo".to_string(), config).unwrap()
     }
 
     fn create_default_allow_repo(rules: Vec<String>) -> Repository {
@@ -291,19 +357,24 @@ mod test {
             ..RepositoryConfig::default()
         };
 
-        Repository::new(config, "policy-allow-repo".to_string()).unwrap()
+        Repository::new("policy-allow-repo".to_string(), config).unwrap()
     }
 
     #[tokio::test]
     async fn test_validate_request_no_namespace() {
+        let t = FSRegistryTestCase::new();
         let request = ClientRequest::list_catalog();
         let identity = ClientIdentity::default();
 
-        assert!(Registry::validate_request(None, &request, &identity).is_ok());
+        assert!(t
+            .registry()
+            .validate_request(None, &request, &identity)
+            .is_ok());
     }
 
     #[tokio::test]
     async fn test_validate_request_no_repository() {
+        let t = FSRegistryTestCase::new();
         let reference = Reference::Tag("latest".to_string());
 
         let request = ClientRequest::get_manifest("policy-deny-repo", &reference);
@@ -312,7 +383,11 @@ mod test {
             ..ClientIdentity::default()
         };
 
-        assert!(Registry::validate_request(None, &request, &identity).is_ok());
+        // No repository and no global policy - should deny
+        assert!(t
+            .registry()
+            .validate_request(None, &request, &identity)
+            .is_err());
 
         let request = ClientRequest::get_manifest("policy-deny-repo", &reference);
         let identity = ClientIdentity {
@@ -320,7 +395,11 @@ mod test {
             ..ClientIdentity::default()
         };
 
-        assert!(Registry::validate_request(None, &request, &identity).is_ok());
+        // No repository and no global policy - should deny
+        assert!(t
+            .registry()
+            .validate_request(None, &request, &identity)
+            .is_err());
     }
 
     #[tokio::test]
@@ -343,7 +422,10 @@ mod test {
             .validate_namespace("policy-allow-repo")
             .unwrap();
 
-        assert!(Registry::validate_request(Some(repository), &request, &identity).is_ok());
+        assert!(t
+            .registry()
+            .validate_request(Some(repository), &request, &identity)
+            .is_ok());
     }
 
     #[tokio::test]
@@ -363,7 +445,10 @@ mod test {
         };
         let repository = t.registry().validate_namespace("policy-deny-repo").unwrap();
 
-        assert!(Registry::validate_request(Some(repository), &request, &identity).is_err());
+        assert!(t
+            .registry()
+            .validate_request(Some(repository), &request, &identity)
+            .is_err());
     }
 
     #[tokio::test]
@@ -387,7 +472,10 @@ mod test {
             .validate_namespace("policy-allow-repo")
             .unwrap();
 
-        assert!(Registry::validate_request(Some(repository), &request, &identity).is_ok());
+        assert!(t
+            .registry()
+            .validate_request(Some(repository), &request, &identity)
+            .is_ok());
 
         let request = ClientRequest::get_manifest("policy-allow-repo", &reference);
         let identity = ClientIdentity {
@@ -399,7 +487,10 @@ mod test {
             .validate_namespace("policy-allow-repo")
             .unwrap();
 
-        assert!(Registry::validate_request(Some(repository), &request, &identity).is_err());
+        assert!(t
+            .registry()
+            .validate_request(Some(repository), &request, &identity)
+            .is_err());
     }
 
     #[tokio::test]
@@ -420,7 +511,10 @@ mod test {
         };
         let repository = t.registry().validate_namespace("policy-deny-repo").unwrap();
 
-        assert!(Registry::validate_request(Some(repository), &request, &identity).is_ok());
+        assert!(t
+            .registry()
+            .validate_request(Some(repository), &request, &identity)
+            .is_ok());
 
         let request = ClientRequest::get_manifest("policy-deny-repo", &reference);
         let identity = ClientIdentity {
@@ -429,6 +523,129 @@ mod test {
         };
         let repository = t.registry().validate_namespace("policy-deny-repo").unwrap();
 
-        assert!(Registry::validate_request(Some(repository), &request, &identity).is_err());
+        assert!(t
+            .registry()
+            .validate_request(Some(repository), &request, &identity)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_global_access_policy_deny() {
+        let global_config = GlobalConfig {
+            access_policy: RepositoryAccessPolicyConfig {
+                default_allow: false,
+                rules: vec!["identity.username == 'admin'".to_string()],
+            },
+            ..Default::default()
+        };
+
+        let temp_dir = std::env::temp_dir().to_string_lossy().to_string();
+        let blob_config = FSBlobConfig {
+            root_dir: temp_dir.clone(),
+            sync_to_disk: false,
+        };
+        let blob_store = Arc::new(FSBlobStore::new(blob_config));
+        let metadata_config = FSMetadataConfig {
+            root_dir: temp_dir,
+            redis: None,
+            sync_to_disk: false,
+        };
+        let metadata_store = Arc::new(FSMetadataStore::new(metadata_config).unwrap());
+        let registry = Registry::new(
+            blob_store,
+            metadata_store,
+            HashMap::new(),
+            &global_config,
+            &CacheStoreConfig::Memory,
+        )
+        .unwrap();
+
+        let reference = Reference::Tag("latest".to_string());
+        let request = ClientRequest::get_manifest("test-namespace", &reference);
+
+        // Admin should be allowed by global policy
+        let identity = ClientIdentity {
+            username: Some("admin".to_string()),
+            ..ClientIdentity::default()
+        };
+        assert!(registry.validate_request(None, &request, &identity).is_ok());
+
+        // Non-admin should be denied by global policy
+        let identity = ClientIdentity {
+            username: Some("user".to_string()),
+            ..ClientIdentity::default()
+        };
+        assert!(registry
+            .validate_request(None, &request, &identity)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_global_and_repository_policies() {
+        let global_config = GlobalConfig {
+            access_policy: RepositoryAccessPolicyConfig {
+                default_allow: true,
+                rules: vec!["identity.username == 'banned'".to_string()],
+            },
+            ..Default::default()
+        };
+
+        let temp_dir = std::env::temp_dir().to_string_lossy().to_string();
+        let blob_config = FSBlobConfig {
+            root_dir: temp_dir.clone(),
+            sync_to_disk: false,
+        };
+        let blob_store = Arc::new(FSBlobStore::new(blob_config));
+        let metadata_config = FSMetadataConfig {
+            root_dir: temp_dir,
+            redis: None,
+            sync_to_disk: false,
+        };
+        let metadata_store = Arc::new(FSMetadataStore::new(metadata_config).unwrap());
+        let mut registry = Registry::new(
+            blob_store,
+            metadata_store,
+            HashMap::new(),
+            &global_config,
+            &CacheStoreConfig::Memory,
+        )
+        .unwrap();
+
+        // Add a repository with specific policy
+        registry.repositories.insert(
+            "restricted-repo".to_string(),
+            create_default_deny_repo(vec!["identity.username == 'special'".to_string()]),
+        );
+
+        let reference = Reference::Tag("latest".to_string());
+        let request = ClientRequest::get_manifest("restricted-repo", &reference);
+        let repository = registry.validate_namespace("restricted-repo").unwrap();
+
+        // Banned user should be denied by global policy
+        let identity = ClientIdentity {
+            username: Some("banned".to_string()),
+            ..ClientIdentity::default()
+        };
+        assert!(registry
+            .validate_request(Some(repository), &request, &identity)
+            .is_err());
+
+        // Special user should be allowed (passes both global and repo policies)
+        let identity = ClientIdentity {
+            username: Some("special".to_string()),
+            ..ClientIdentity::default()
+        };
+        assert!(registry
+            .validate_request(Some(repository), &request, &identity)
+            .is_ok());
+
+        // Regular user should be denied by repository policy
+        let identity = ClientIdentity {
+            username: Some("regular".to_string()),
+            ..ClientIdentity::default()
+        };
+        assert!(registry
+            .validate_request(Some(repository), &request, &identity)
+            .is_err());
     }
 }

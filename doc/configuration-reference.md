@@ -37,14 +37,16 @@ This should be set according to the number of CPU cores available on the server.
 - `max_concurrent_cache_jobs` (usize): The maximum number of concurrent cache jobs the server can handle (default: 4).
 - `update_pull_time` (bool): When set to true, the registry will update the pull time metadata for blobs, 
   which is useful for garbage collection and retention policies (default: false).
+- `access_policy` (optional): Global access control policy that applies to all repositories. See Access Policy section below.
+- `retention_policy` (optional): Global retention policy that applies to all repositories. See Retention Policy section below.
 
-## Token Cache (`cache_store`)
+## Token and Key Cache (`cache`)
 
-Authentication tokens are cached to reduce unnecessary requests to upstream servers when using a pull-through cache
-configuration.
+Authentication tokens and JWT keys are cached to reduce unnecessary requests to upstream servers when using a pull-through
+cache or OIDC configuration.
 If no configuration is provided, an in-memory cache is used, which is not suitable for multi-replica deployments.
 
-### Redis Cache (`cache_store.redis`)
+### Redis Cache (`cache.redis`)
 
 - `url` (string): The URL for the Redis server (e.g., `redis://localhost:6379`)
 - `key_prefix` (optional string): The key prefix for all cache keys
@@ -123,6 +125,94 @@ key_prefix = "registry-locks"
 - `<identity-id>` (string): The identity ID can be any string. It is used to reference the identity in the repository configuration.
 - `username` (string): The username for the identity.
 - `password` (string): The argon2 hashed password for the identity.
+
+## OIDC Authentication (`oidc`)
+
+Optional OIDC (OpenID Connect) configuration for JWT-based authentication. When configured, the registry accepts Bearer tokens from multiple identity providers simultaneously.
+
+Each provider is configured under `[oidc.<provider-name>]` with provider-specific settings.
+
+### GitHub Provider
+
+For GitHub Actions OIDC tokens. The provider automatically extracts GitHub-specific fields from the token for use in CEL policies.
+
+Configuration fields:
+- `provider = "github"` (required)
+- `issuer` (optional string): Override default GitHub issuer URL (default: "https://token.actions.githubusercontent.com")
+- `jwks_uri` (optional string): Override default JWKS discovery
+- `jwks_refresh_interval` (u64): JWKS refresh interval in seconds (default: 3600)
+- `required_audience` (optional string): Required audience claim in the JWT token
+- `clock_skew_tolerance` (u64): Clock skew tolerance in seconds (default: 60)
+
+Example:
+```toml
+[oidc.github-actions]
+provider = "github"
+required_audience = "https://github.com/myorg/myrepo"  # Optional
+jwks_refresh_interval = 3600
+clock_skew_tolerance = 60
+```
+
+Example with multiple providers:
+```toml
+[oidc.github-actions]
+provider = "github"
+jwks_refresh_interval = 3600
+
+[oidc.corporate-auth]
+provider = "generic"
+issuer = "https://auth.example.com/realms/myrealm"
+jwks_refresh_interval = 7200
+clock_skew_tolerance = 120
+```
+
+Use CEL expressions in your access policies to restrict access based on GitHub claims:
+```toml
+[repository."myapp".access_policy]
+rules = [
+  # Check OIDC presence and provider
+  '''identity.oidc != null && identity.oidc.provider_name == 'github-actions' ''',
+
+  # Allow specific repositories using regex (use bracket notation for claims)
+  '''identity.oidc != null && identity.oidc.claims["repository"].matches("^myorg/(app1|app2|app3)$")''',
+
+  # Allow any repository from an organization
+  '''identity.oidc != null && identity.oidc.claims["repository"].startsWith("myorg/")''',
+
+  # Allow specific actors
+  '''identity.oidc != null && identity.oidc.claims["actor"] in ["username", "dependabot[bot]"]''',
+
+  # Allow specific workflows using regex
+  '''identity.oidc != null && identity.oidc.claims["workflow"].matches("^\\.github/workflows/(deploy|release)\\.yml$")'''
+]
+```
+
+**Note:** When using OIDC in policies:
+- Always check `identity.oidc != null` before accessing OIDC fields
+- Use bracket notation for claims: `identity.oidc.claims["claim_name"]`
+- Available fields: `provider_name`, `provider_type`, and `claims` map
+
+### Generic Provider
+
+For any OIDC-compliant provider (Google, Okta, Auth0, Keycloak, etc.):
+
+Configuration fields:
+- `provider = "generic"` (required)
+- `issuer` (string): The OIDC issuer URL
+- `jwks_uri` (optional string): Custom JWKS URI if not using standard discovery
+- `jwks_refresh_interval` (u64): JWKS refresh interval in seconds (default: 3600)
+- `required_audience` (optional string): Required audience claim in the JWT token
+- `clock_skew_tolerance` (u64): Clock skew tolerance in seconds (default: 60)
+
+Example:
+```toml
+[oidc.google-cloud]
+provider = "generic"
+issuer = "https://accounts.google.com"
+# jwks_uri = "https://custom.example.com/jwks.json"  # Optional
+jwks_refresh_interval = 3600
+clock_skew_tolerance = 60
+```
 
 ## Repository (`repository."<namespace>"`)
 

@@ -63,26 +63,48 @@ impl Registry {
         for (tag, info) in &tags {
             debug!("'{namespace}': Checking tag '{tag}' for retention");
 
-            let Some((_, found_repository)) = self
-                .repositories
-                .iter()
-                .find(|(repository, _)| namespace.starts_with(*repository))
-            else {
-                warn!("Unable to find repository for namespace: {namespace}");
-                return Ok(());
-            };
-
             let manifest = ManifestImage {
                 tag: Some(tag.to_string()),
                 pushed_at: info.created_at.map(|t| t.timestamp()).unwrap_or_default(),
                 last_pulled_at: info.accessed_at.map(|t| t.timestamp()).unwrap_or_default(),
             };
 
-            if !found_repository.retention_policy.should_retain(
-                &manifest,
-                &last_pushed,
-                &last_pulled,
-            )? {
+            let mut should_retain = false;
+
+            if let Some(ref global_policy) = self.global_retention_policy {
+                debug!("Evaluating global retention policy for {namespace}:{tag}");
+                if global_policy.should_retain(&manifest, &last_pushed, &last_pulled)? {
+                    debug!("Global retention policy says to retain {namespace}:{tag}");
+                    should_retain = true;
+                }
+            }
+
+            let mut has_repo_policy = false;
+            if let Some((_, found_repository)) = self
+                .repositories
+                .iter()
+                .find(|(repository, _)| namespace.starts_with(*repository))
+            {
+                if found_repository.retention_policy.has_rules() {
+                    has_repo_policy = true;
+                    debug!("Evaluating repository retention policy for {namespace}:{tag}");
+                    if found_repository.retention_policy.should_retain(
+                        &manifest,
+                        &last_pushed,
+                        &last_pulled,
+                    )? {
+                        debug!("Repository retention policy says to retain {namespace}:{tag}");
+                        should_retain = true;
+                    }
+                }
+            }
+
+            if self.global_retention_policy.is_none() && !has_repo_policy {
+                debug!("No retention policies defined, keeping {namespace}:{tag} by default");
+                should_retain = true;
+            }
+
+            if !should_retain {
                 info!("Available for cleanup: {namespace}:{tag}");
                 if !self.scrub_dry_run {
                     let reference = Reference::Tag(tag.to_string());
@@ -368,16 +390,21 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::configuration::RepositoryRetentionPolicyConfig;
     use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
+    use crate::registry::blob_store;
+    use crate::registry::metadata_store;
+    use crate::registry::repository::RetentionPolicy;
     use crate::registry::test_utils::{create_test_manifest, create_test_repository_config};
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use std::slice;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     #[test]
     fn test_retention_policy_no_rules() {
-        use crate::registry::repository::RetentionPolicy;
-        let policy = RetentionPolicy::new(vec![]);
+        let config = RepositoryRetentionPolicyConfig { rules: vec![] };
+        let policy = RetentionPolicy::new(&config).unwrap();
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
             pushed_at: 1_710_441_600,
@@ -388,10 +415,10 @@ mod tests {
 
     #[test]
     fn test_retention_policy_not_purged() {
-        use crate::registry::repository::RetentionPolicy;
-        use cel_interpreter::Program;
-        let policies = vec![Program::compile("image.tag == 'latest'").unwrap()];
-        let policy = RetentionPolicy::new(policies);
+        let config = RepositoryRetentionPolicyConfig {
+            rules: vec!["image.tag == 'latest'".to_string()],
+        };
+        let policy = RetentionPolicy::new(&config).unwrap();
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
             pushed_at: 1_710_441_600,
@@ -402,10 +429,10 @@ mod tests {
 
     #[test]
     fn test_retention_policy_purged() {
-        use crate::registry::repository::RetentionPolicy;
-        use cel_interpreter::Program;
-        let policies = vec![Program::compile("image.tag == 'latest'").unwrap()];
-        let policy = RetentionPolicy::new(policies);
+        let config = RepositoryRetentionPolicyConfig {
+            rules: vec!["image.tag == 'latest'".to_string()],
+        };
+        let policy = RetentionPolicy::new(&config).unwrap();
         let manifest = ManifestImage {
             tag: Some("x".to_string()),
             pushed_at: 1_710_441_600,
@@ -416,10 +443,10 @@ mod tests {
 
     #[test]
     fn test_retention_policy_invalid() {
-        use crate::registry::repository::RetentionPolicy;
-        use cel_interpreter::Program;
-        let policies = vec![Program::compile("image.tag").unwrap()];
-        let policy = RetentionPolicy::new(policies);
+        let config = RepositoryRetentionPolicyConfig {
+            rules: vec!["image.tag".to_string()],
+        };
+        let policy = RetentionPolicy::new(&config).unwrap();
         let manifest = ManifestImage {
             tag: None,
             pushed_at: 1_710_441_600,
@@ -430,10 +457,10 @@ mod tests {
 
     #[test]
     fn test_function_now_days() {
-        use crate::registry::repository::RetentionPolicy;
-        use cel_interpreter::Program;
-        let policies = vec![Program::compile("now() + days(15) == now() + 86400 * 15").unwrap()];
-        let policy = RetentionPolicy::new(policies);
+        let config = RepositoryRetentionPolicyConfig {
+            rules: vec!["now() + days(15) == now() + 86400 * 15".to_string()],
+        };
+        let policy = RetentionPolicy::new(&config).unwrap();
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
             pushed_at: 1_710_441_600,
@@ -444,10 +471,10 @@ mod tests {
 
     #[test]
     fn test_function_top_last_pushed() {
-        use crate::registry::repository::RetentionPolicy;
-        use cel_interpreter::Program;
-        let policies = vec![Program::compile("top(image.tag, last_pushed, 1)").unwrap()];
-        let policy = RetentionPolicy::new(policies);
+        let config = RepositoryRetentionPolicyConfig {
+            rules: vec!["top(image.tag, last_pushed, 1)".to_string()],
+        };
+        let policy = RetentionPolicy::new(&config).unwrap();
 
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
@@ -470,10 +497,10 @@ mod tests {
 
     #[test]
     fn test_function_top_last_pulled() {
-        use crate::registry::repository::RetentionPolicy;
-        use cel_interpreter::Program;
-        let policies = vec![Program::compile("top(image.tag, last_pulled, 1)").unwrap()];
-        let policy = RetentionPolicy::new(policies);
+        let config = RepositoryRetentionPolicyConfig {
+            rules: vec!["top(image.tag, last_pulled, 1)".to_string()],
+        };
+        let policy = RetentionPolicy::new(&config).unwrap();
 
         let manifest = ManifestImage {
             tag: Some("latest".to_string()),
@@ -569,6 +596,132 @@ mod tests {
         let mut t = S3RegistryTestCase::new();
         t.set_repository_config(repositories_config());
         test_enforce_retention_impl(t.registry()).await;
+    }
+
+    fn setup_test_registry_with_policies() -> Registry {
+        let global_config = GlobalConfig {
+            retention_policy: RepositoryRetentionPolicyConfig {
+                rules: vec!["image.tag == 'latest'".to_string()],
+            },
+            ..Default::default()
+        };
+
+        let temp_dir = std::env::temp_dir().to_string_lossy().to_string();
+        let blob_store = Arc::new(blob_store::fs::Backend::new(
+            blob_store::fs::BackendConfig {
+                root_dir: temp_dir.clone(),
+                sync_to_disk: false,
+            },
+        ));
+        let metadata_store = Arc::new(
+            metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
+                root_dir: temp_dir,
+                redis: None,
+                sync_to_disk: false,
+            })
+            .unwrap(),
+        );
+
+        let mut repositories_config = create_test_repository_config();
+        repositories_config
+            .get_mut("test-repo")
+            .unwrap()
+            .retention_policy
+            .rules = vec!["image.tag == 'v1.0'".to_string()];
+
+        let mut registry = Registry::new(
+            blob_store,
+            metadata_store,
+            repositories_config,
+            &global_config,
+            &CacheStoreConfig::Memory,
+        )
+        .unwrap();
+        registry.scrub_dry_run = false;
+        registry
+    }
+
+    #[tokio::test]
+    async fn test_global_and_repo_retention_or_logic() {
+        let registry = setup_test_registry_with_policies();
+
+        let namespace = "test-repo";
+
+        // Push three manifests with different tags
+        let (manifest1, media_type1) = create_test_manifest();
+        registry
+            .put_manifest(
+                namespace,
+                Reference::Tag("latest".to_string()),
+                Some(&media_type1),
+                &manifest1,
+            )
+            .await
+            .unwrap();
+
+        let (manifest2, media_type2) = create_test_manifest();
+        registry
+            .put_manifest(
+                namespace,
+                Reference::Tag("v1.0".to_string()),
+                Some(&media_type2),
+                &manifest2,
+            )
+            .await
+            .unwrap();
+
+        let (manifest3, media_type3) = create_test_manifest();
+        registry
+            .put_manifest(
+                namespace,
+                Reference::Tag("old".to_string()),
+                Some(&media_type3),
+                &manifest3,
+            )
+            .await
+            .unwrap();
+
+        // Run retention enforcement
+        println!("Running retention enforcement...");
+        registry.enforce_retention(namespace).await.unwrap();
+
+        // Get repository for get_manifest calls
+        let repository = registry.validate_namespace(namespace).unwrap();
+        let accepted_types = vec![];
+
+        // Verify 'latest' is kept (global policy)
+        assert!(registry
+            .get_manifest(
+                repository,
+                &accepted_types,
+                namespace,
+                Reference::Tag("latest".to_string())
+            )
+            .await
+            .is_ok());
+
+        // Verify 'v1.0' is kept (repository policy)
+        assert!(registry
+            .get_manifest(
+                repository,
+                &accepted_types,
+                namespace,
+                Reference::Tag("v1.0".to_string())
+            )
+            .await
+            .is_ok());
+
+        // Verify 'old' tag is removed
+        let old_result = registry
+            .get_manifest(
+                repository,
+                &accepted_types,
+                namespace,
+                Reference::Tag("old".to_string()),
+            )
+            .await;
+        println!("Old tag result: {:?}", old_result.is_ok());
+        assert!(old_result.is_err(), "Old tag should have been removed");
     }
 
     async fn test_scrub_uploads_impl(registry: &Registry) {
@@ -809,7 +962,7 @@ mod tests {
             registry.metadata_store.clone(),
             create_test_repository_config(),
             &GlobalConfig::default(),
-            CacheStoreConfig::default(),
+            &CacheStoreConfig::default(),
         )
         .unwrap()
         .with_scrub_dry_run(false);
@@ -994,7 +1147,7 @@ mod tests {
             registry.metadata_store.clone(),
             create_test_repository_config(),
             &GlobalConfig::default(),
-            CacheStoreConfig::default(),
+            &CacheStoreConfig::default(),
         )
         .unwrap()
         .with_scrub_dry_run(false);

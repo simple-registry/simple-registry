@@ -15,7 +15,7 @@ When mTLS is enabled in the configuration, there is 3 possible scenarios when a 
 2. The client presents a certificate, but it is not valid (e.g. expired, not signed by a trusted CA), in this case
    simple-registry will reject the request.
 3. The client presents a valid certificate, in this case simple-registry will extract the Organization (O) and the
-   Common Names from the certificate, and expose them as informations in the fields of the `identity.certificate`
+   Common Names from the certificate, and expose them as information in the fields of the `identity.certificate`
    variable.
 
 ## Prerequisites
@@ -24,7 +24,7 @@ When mTLS is enabled in the configuration, there is 3 possible scenarios when a 
 - A container runtime
 - A server certificate and its private key for the server certificate (e.g. coming from Let's Encrypt or from an
   internal PKI)
-- A client CA certificate to trust (this must be coming from a internal PKI)
+- A client CA certificate to trust (this must be coming from an internal PKI)
 - A client certificate and its private key for the client certificate
 
 > [!NOTE]

@@ -1,4 +1,5 @@
 use crate::configuration;
+use crate::registry::Error;
 use prometheus::{
     register_histogram_with_registry, register_int_counter_with_registry,
     register_int_gauge_with_registry,
@@ -71,11 +72,13 @@ impl MetricsProvider {
         })
     }
 
-    pub fn gather(&self) -> (String, Vec<u8>) {
+    pub fn gather(&self) -> Result<(String, Vec<u8>), Error> {
         let mut buffer = vec![];
         let encoder = TextEncoder::new();
         let metric_families = self.registry.gather();
-        encoder.encode(&metric_families, &mut buffer).unwrap();
-        (encoder.format_type().to_string(), buffer)
+        encoder
+            .encode(&metric_families, &mut buffer)
+            .map_err(|error| Error::Internal(format!("Unable to encode metrics: {error}")))?;
+        Ok((encoder.format_type().to_string(), buffer))
     }
 }

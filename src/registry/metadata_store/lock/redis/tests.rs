@@ -16,12 +16,12 @@ async fn test_acquire_lock() {
 
     // Step 1: Acquire the lock
     let lock = redis_backend
-        .acquire_lock("test_key")
+        .acquire("test_key")
         .await
         .expect("Failed to acquire initial lock");
 
     // Step 2: Check the lock exists (another instance can't acquire it)
-    let lock_attempt = redis_backend2.acquire_lock("test_key").await;
+    let lock_attempt = redis_backend2.acquire("test_key").await;
     assert!(
         lock_attempt.is_err(),
         "Should not be able to acquire an already held lock"
@@ -32,7 +32,7 @@ async fn test_acquire_lock() {
 
     // Step 4: Check the lock doesn't exist anymore (can acquire it again)
     let new_lock = redis_backend
-        .acquire_lock("test_key")
+        .acquire("test_key")
         .await
         .expect("Should be able to acquire lock after it was released");
 

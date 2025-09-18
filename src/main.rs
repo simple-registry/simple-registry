@@ -8,6 +8,7 @@ use crate::configuration::{
 };
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
+use crate::registry::server::ServerContext;
 use crate::registry::{blob_store, metadata_store, Registry};
 use argh::FromArgs;
 use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -108,12 +109,21 @@ fn set_config_watcher(
                 }
             };
 
+            let oidc_validators =
+                match ServerContext::build_oidc_validators(&config.oidc, &config.cache) {
+                    Ok(validators) => validators,
+                    Err(error) => {
+                        error!("Failed to build OIDC validators: {error}");
+                        return;
+                    }
+                };
+
             let registry = match Registry::new(
                 blob_store.clone(),
                 metadata_store.clone(),
                 config.repository,
                 &config.global,
-                config.cache_store,
+                &config.cache,
             ) {
                 Ok(registry) => registry,
                 Err(error) => {
@@ -122,9 +132,12 @@ fn set_config_watcher(
                 }
             };
 
-            if let Err(error) =
-                server.notify_config_change(config.server, &config.identity, registry)
-            {
+            if let Err(error) = server.notify_config_change(
+                config.server,
+                &config.identity,
+                registry,
+                oidc_validators,
+            ) {
                 error!("Failed to notify server of configuration change: {error}");
             } else {
                 info!("Server notified of configuration change");
@@ -193,23 +206,15 @@ fn main() -> Result<(), command::Error> {
         set_tracing(config.observability.clone())?;
 
         let blob_store: Arc<dyn BlobStore + Send + Sync> = match &config.blob_store {
-            BlobStorageConfig::FS(cfg) => {
-                info!("Using filesystem blob-store backend");
-                Arc::new(blob_store::fs::Backend::new(cfg.clone()))
-            }
-            BlobStorageConfig::S3(cfg) => {
-                info!("Using S3 blob-store backend");
-                Arc::new(blob_store::s3::Backend::new(cfg.clone()))
-            }
+            BlobStorageConfig::FS(cfg) => Arc::new(blob_store::fs::Backend::new(cfg.clone())),
+            BlobStorageConfig::S3(cfg) => Arc::new(blob_store::s3::Backend::new(cfg.clone())),
         };
 
         let metadata_store: Arc<dyn MetadataStore + Send + Sync> = match &config.metadata_store {
             MetadataStoreConfig::FS(cfg) => {
-                info!("Using filesystem metadata-store backend");
                 Arc::new(metadata_store::fs::Backend::new(cfg.clone())?)
             }
             MetadataStoreConfig::S3(cfg) => {
-                info!("Using S3 metadata-store backend");
                 Arc::new(metadata_store::s3::Backend::new(cfg.clone())?)
             }
             MetadataStoreConfig::Unspecified => {
@@ -229,12 +234,14 @@ async fn handle_command(
     data_store: Arc<dyn BlobStore + Send + Sync>,
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
 ) -> Result<(), command::Error> {
+    let oidc_validators = ServerContext::build_oidc_validators(&config.oidc, &config.cache)?;
+
     let registry = Registry::new(
         data_store.clone(),
         metadata_store.clone(),
         config.repository,
         &config.global,
-        config.cache_store,
+        &config.cache,
     )?;
 
     match arguments.nested {
@@ -248,6 +255,7 @@ async fn handle_command(
                 &config.server,
                 &config.identity,
                 registry,
+                oidc_validators.clone(),
             )?);
 
             let _ = set_config_watcher(

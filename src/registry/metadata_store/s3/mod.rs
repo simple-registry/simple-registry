@@ -1,7 +1,6 @@
 #[cfg(test)]
 pub mod tests;
 
-use crate::registry::data_store;
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::lock::{self, LockBackend, MemoryBackend};
 use crate::registry::metadata_store::{BlobIndex, Error};
@@ -9,12 +8,12 @@ use crate::registry::metadata_store::{
     BlobIndexOperation, LinkMetadata, LockConfig, MetadataStore,
 };
 use crate::registry::oci::{Descriptor, Digest, Manifest};
-use crate::registry::utils::path_builder;
+use crate::registry::{data_store, path_builder};
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde::Deserialize;
 use std::sync::Arc;
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {
@@ -46,11 +45,12 @@ impl From<BackendConfig> for data_store::s3::BackendConfig {
 #[derive(Clone)]
 pub struct Backend {
     pub store: data_store::s3::Backend,
-    lock_store: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync>,
+    lock: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync>,
 }
 
 impl Backend {
     pub fn new(config: BackendConfig) -> Result<Self, crate::configuration::Error> {
+        info!("Using S3 metadata-store backend");
         let store = data_store::s3::Backend::new(data_store::s3::BackendConfig {
             access_key_id: config.access_key_id,
             secret_key: config.secret_key,
@@ -61,8 +61,9 @@ impl Backend {
             ..Default::default()
         });
 
-        let lock_store: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync> =
+        let lock: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync> =
             if let Some(redis_config) = config.redis {
+                info!("Using Redis lock store for S3 metadata-store");
                 let backend = lock::RedisBackend::new(redis_config).map_err(|e| {
                     crate::configuration::Error::MetadataStore(format!(
                         "Failed to initialize Redis lock store: {e}"
@@ -70,10 +71,11 @@ impl Backend {
                 })?;
                 Arc::new(backend)
             } else {
+                info!("Using in-memory lock store for S3 metadata-store");
                 Arc::new(MemoryBackend::new())
             };
 
-        Ok(Self { store, lock_store })
+        Ok(Self { store, lock })
     }
 }
 
@@ -346,20 +348,12 @@ impl MetadataStore for Backend {
         link: &LinkKind,
         digest: &Digest,
     ) -> Result<LinkMetadata, Error> {
-        let _guard = self
-            .lock_store
-            .acquire_lock(&link.to_string())
-            .await
-            .map_err(|e| Error::StorageBackend(e.to_string()))?;
+        let _guard = self.lock.acquire(&link.to_string()).await?;
         let link_data = self.read_link_reference(namespace, link).await;
 
         if let Ok(link_data) = link_data {
             if &link_data.target != digest {
-                let _blob_guard = self
-                    .lock_store
-                    .acquire_lock(link_data.target.as_str())
-                    .await
-                    .map_err(|e| Error::StorageBackend(e.to_string()))?;
+                let _blob_guard = self.lock.acquire(link_data.target.as_str()).await?;
                 self.update_blob_index(
                     namespace,
                     &link_data.target,
@@ -367,20 +361,12 @@ impl MetadataStore for Backend {
                 )
                 .await?;
 
-                let _blob_guard = self
-                    .lock_store
-                    .acquire_lock(digest.as_str())
-                    .await
-                    .map_err(|e| Error::StorageBackend(e.to_string()))?;
+                let _blob_guard = self.lock.acquire(digest.as_str()).await?;
                 self.update_blob_index(namespace, digest, BlobIndexOperation::Insert(link.clone()))
                     .await?;
             }
         } else {
-            let _blob_guard = self
-                .lock_store
-                .acquire_lock(digest.as_str())
-                .await
-                .map_err(|e| Error::StorageBackend(e.to_string()))?;
+            let _blob_guard = self.lock.acquire(digest.as_str()).await?;
             self.update_blob_index(namespace, digest, BlobIndexOperation::Insert(link.clone()))
                 .await?;
         }
@@ -398,11 +384,7 @@ impl MetadataStore for Backend {
         link: &LinkKind,
         update_access_time: bool,
     ) -> Result<LinkMetadata, Error> {
-        let _guard = self
-            .lock_store
-            .acquire_lock(&link.to_string())
-            .await
-            .map_err(|e| Error::StorageBackend(e.to_string()))?;
+        let _guard = self.lock.acquire(&link.to_string()).await?;
 
         if update_access_time {
             let link_data = self.read_link_reference(namespace, link).await?.accessed();
@@ -416,11 +398,7 @@ impl MetadataStore for Backend {
 
     #[instrument(skip(self))]
     async fn delete_link(&self, namespace: &str, link: &LinkKind) -> Result<(), Error> {
-        let _guard = self
-            .lock_store
-            .acquire_lock(&link.to_string())
-            .await
-            .map_err(|e| Error::StorageBackend(e.to_string()))?;
+        let _guard = self.lock.acquire(&link.to_string()).await?;
         let metadata = self.read_link_reference(namespace, link).await;
 
         let digest = match metadata {
@@ -429,11 +407,7 @@ impl MetadataStore for Backend {
             Err(e) => return Err(e),
         };
 
-        let _blob_guard = self
-            .lock_store
-            .acquire_lock(digest.as_str())
-            .await
-            .map_err(|e| Error::StorageBackend(e.to_string()))?;
+        let _blob_guard = self.lock.acquire(digest.as_str()).await?;
         self.delete_link_reference(namespace, link).await?;
         self.update_blob_index(namespace, &digest, BlobIndexOperation::Remove(link.clone()))
             .await?;

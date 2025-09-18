@@ -35,12 +35,10 @@ impl MemoryBackend {
 impl LockBackend for MemoryBackend {
     type Guard = Box<dyn Send>;
 
-    async fn acquire_lock(&self, key: &str) -> Result<Self::Guard, Error> {
+    async fn acquire(&self, key: &str) -> Result<Self::Guard, Error> {
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
 
         let mut locks = self.locks.lock().await;
-
-        // Cleanup every 10000 locks
         if count % 10000 == 0 {
             locks.retain(|_, weak| weak.upgrade().is_some());
         }

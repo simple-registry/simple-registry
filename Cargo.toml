@@ -25,12 +25,13 @@ hex = "0.4"
 http-body-util = "0.1"
 humantime = "2.2"
 hyper = { version = "1.7" , features = ["full"]}
-hyper-util = { version = "0.1", features = ["tokio", "server-graceful"] }
 hyper-rustls = "0.27"
+hyper-util = { version = "0.1", features = ["tokio", "server-graceful"] }
+jsonwebtoken = "9.3"
 notify = "8.2"
 opentelemetry = "0.30"
-opentelemetry-otlp = { version = "0.30" , features = ["grpc-tonic"]}
 opentelemetry_sdk = { version = "0.30", features = ["rt-tokio", "metrics"] }
+opentelemetry-otlp = { version = "0.30" , features = ["grpc-tonic"]}
 opentelemetry-semantic-conventions = { version = "0.30", features = ["semconv_experimental"] }
 opentelemetry-stdout = "0.30"
 prometheus = "0.14"
@@ -50,8 +51,8 @@ tokio-rustls = "0.26"
 tokio-util = { version = "0.7", features = ["io-util"] }
 toml = "0.9"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-opentelemetry = "0.31"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
 x509-parser = "0.18"
 

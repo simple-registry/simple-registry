@@ -7,6 +7,9 @@ use std::path::Path;
 
 mod error;
 
+pub use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
+pub use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
+use crate::registry::server::auth::oidc;
 use crate::registry::{blob_store, cache, metadata_store};
 pub use error::Error;
 
@@ -15,14 +18,16 @@ pub struct Configuration {
     pub server: ServerConfig,
     #[serde(default)]
     pub global: GlobalConfig,
-    #[serde(default)]
-    pub cache_store: CacheStoreConfig,
+    #[serde(default, alias = "cache_store")]
+    pub cache: CacheStoreConfig,
     #[serde(default, alias = "storage")]
     pub blob_store: BlobStorageConfig,
     #[serde(default)]
     pub metadata_store: MetadataStoreConfig,
     #[serde(default)]
     pub identity: HashMap<String, IdentityConfig>, // hashmap of identity_id <-> identity_config (username, password)
+    #[serde(default)]
+    pub oidc: HashMap<String, OidcProviderConfig>,
     #[serde(default)]
     pub repository: HashMap<String, RepositoryConfig>, // hashmap of namespace <-> repository_config
     #[serde(default)]
@@ -70,6 +75,10 @@ pub struct GlobalConfig {
     pub max_concurrent_cache_jobs: usize,
     #[serde(default = "GlobalConfig::default_update_pull_time")]
     pub update_pull_time: bool,
+    #[serde(default)]
+    pub access_policy: RepositoryAccessPolicyConfig,
+    #[serde(default)]
+    pub retention_policy: RepositoryRetentionPolicyConfig,
 }
 
 impl Default for GlobalConfig {
@@ -78,6 +87,8 @@ impl Default for GlobalConfig {
             max_concurrent_requests: GlobalConfig::default_max_concurrent_requests(),
             max_concurrent_cache_jobs: GlobalConfig::default_max_concurrent_cache_jobs(),
             update_pull_time: GlobalConfig::default_update_pull_time(),
+            access_policy: RepositoryAccessPolicyConfig::default(),
+            retention_policy: RepositoryRetentionPolicyConfig::default(),
         }
     }
 }
@@ -138,6 +149,13 @@ pub struct IdentityConfig {
     pub password: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "provider", rename_all = "lowercase")]
+pub enum OidcProviderConfig {
+    Generic(oidc::provider::generic::ProviderConfig),
+    GitHub(oidc::provider::github::ProviderConfig),
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RepositoryConfig {
     #[serde(default)]
@@ -164,19 +182,6 @@ impl RepositoryUpstreamConfig {
     fn default_max_redirect() -> u8 {
         5
     }
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct RepositoryAccessPolicyConfig {
-    #[serde(default)]
-    pub default_allow: bool,
-    #[serde(default)]
-    pub rules: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct RepositoryRetentionPolicyConfig {
-    pub rules: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -267,7 +272,7 @@ mod tests {
         assert_eq!(config.server.port, 8000);
         assert_eq!(config.server.query_timeout, 3600);
         assert_eq!(config.server.query_timeout_grace_period, 60);
-        assert_eq!(config.cache_store, CacheStoreConfig::Memory);
+        assert_eq!(config.cache, CacheStoreConfig::Memory);
 
         assert_eq!(config.blob_store, BlobStorageConfig::default());
 
@@ -279,7 +284,7 @@ mod tests {
     #[tokio::test]
     async fn test_metadata_store_defaults_with_s3_blob_store() {
         // When using S3 blob store and no metadata store is specified,
-        // it should auto-configure S3 metadata store
+        // it should autoconfigure S3 metadata store
         let config = r#"
         [server]
         bind_address = "0.0.0.0"
@@ -294,7 +299,7 @@ mod tests {
 
         let config = Configuration::load_from_str(config).unwrap();
 
-        // Should auto-configure S3 metadata store with same settings
+        // Should autoconfigure S3 metadata store with same settings
         match config.metadata_store {
             MetadataStoreConfig::S3(ref meta_cfg) => {
                 assert_eq!(meta_cfg.bucket, "test-bucket");
@@ -353,7 +358,7 @@ mod tests {
             BlobStorageConfig::S3(_) => panic!("Expected FS blob store from 'storage' field"),
         }
 
-        // Should auto-configure metadata store based on blob store
+        // Should autoconfigure metadata store based on blob store
         match config.metadata_store {
             MetadataStoreConfig::FS(ref cfg) => {
                 assert_eq!(cfg.root_dir, "/data/registry");
