@@ -2,15 +2,17 @@ use bytesize::ByteSize;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
-use std::net::IpAddr;
 use std::path::Path;
 
 mod error;
+pub mod registry;
+pub mod watcher;
 
-pub use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
-pub use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
+use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
+use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
 use crate::registry::server::auth::oidc;
-use crate::registry::{blob_store, cache, metadata_store};
+use crate::registry::server::listeners::{insecure, tls};
+use crate::registry::{blob_store, cache, client, metadata_store};
 pub use error::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -35,36 +37,10 @@ pub struct Configuration {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct ServerConfig {
-    pub bind_address: IpAddr,
-    #[serde(default = "ServerConfig::default_port")]
-    pub port: u16,
-    #[serde(default = "ServerConfig::default_query_timeout")]
-    pub query_timeout: u64,
-    #[serde(default = "ServerConfig::default_query_timeout_grace_period")]
-    pub query_timeout_grace_period: u64,
-    pub tls: Option<ServerTlsConfig>,
-}
-
-impl ServerConfig {
-    fn default_port() -> u16 {
-        8000
-    }
-
-    fn default_query_timeout() -> u64 {
-        3600
-    }
-
-    fn default_query_timeout_grace_period() -> u64 {
-        60
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct ServerTlsConfig {
-    pub server_certificate_bundle: String,
-    pub server_private_key: String,
-    pub client_ca_bundle: Option<String>,
+#[serde(untagged)]
+pub enum ServerConfig {
+    Tls(tls::Config),
+    Insecure(insecure::Config),
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -159,29 +135,11 @@ pub enum OidcProviderConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct RepositoryConfig {
     #[serde(default)]
-    pub upstream: Vec<RepositoryUpstreamConfig>,
+    pub upstream: Vec<client::ClientConfig>,
     #[serde(default)]
     pub access_policy: RepositoryAccessPolicyConfig,
     #[serde(default)]
     pub retention_policy: RepositoryRetentionPolicyConfig,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct RepositoryUpstreamConfig {
-    pub url: String,
-    #[serde(default = "RepositoryUpstreamConfig::default_max_redirect")]
-    pub max_redirect: u8,
-    pub server_ca_bundle: Option<String>,
-    pub client_certificate: Option<String>,
-    pub client_private_key: Option<String>,
-    pub username: Option<String>,
-    pub password: Option<String>,
-}
-
-impl RepositoryUpstreamConfig {
-    fn default_max_redirect() -> u8 {
-        5
-    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -267,13 +225,17 @@ mod tests {
         assert_eq!(config.global.max_concurrent_cache_jobs, 4);
         assert!(!config.global.update_pull_time);
 
-        let bind_address = config.server.bind_address.to_string();
-        assert_eq!(bind_address, "0.0.0.0".to_string());
-        assert_eq!(config.server.port, 8000);
-        assert_eq!(config.server.query_timeout, 3600);
-        assert_eq!(config.server.query_timeout_grace_period, 60);
-        assert_eq!(config.cache, CacheStoreConfig::Memory);
+        let ServerConfig::Insecure(server_config) = config.server else {
+            panic!("Expected Insecure server config");
+        };
 
+        let bind_address = server_config.bind_address.to_string();
+        assert_eq!(bind_address, "0.0.0.0".to_string());
+        assert_eq!(server_config.port, 8000);
+        assert_eq!(server_config.query_timeout, 3600);
+        assert_eq!(server_config.query_timeout_grace_period, 60);
+
+        assert_eq!(config.cache, CacheStoreConfig::Memory);
         assert_eq!(config.blob_store, BlobStorageConfig::default());
 
         assert!(config.identity.is_empty());
@@ -364,6 +326,31 @@ mod tests {
                 assert_eq!(cfg.root_dir, "/data/registry");
             }
             _ => panic!("Expected FS metadata store to be auto-configured"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tls_config_detection() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+        port = 8000
+
+        [server.tls]
+        server_certificate_bundle = "server.pem"
+        server_private_key = "server.key"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+
+        match config.server {
+            ServerConfig::Tls(tls_config) => {
+                assert_eq!(tls_config.tls.server_certificate_bundle, "server.pem");
+                assert_eq!(tls_config.tls.server_private_key, "server.key");
+            }
+            ServerConfig::Insecure(_) => {
+                panic!("Expected TLS server config but got Insecure");
+            }
         }
     }
 

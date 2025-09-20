@@ -6,10 +6,11 @@ use crate::registry::metadata_store::Error;
 use async_trait::async_trait;
 use redis::Client;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::{sleep, spawn, JoinHandle};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use tracing::debug;
 
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
@@ -26,11 +27,11 @@ pub struct LockConfig {
 
 impl LockConfig {
     fn default_max_retries() -> u32 {
-        10000
+        100
     }
 
     fn default_retry_delay_ms() -> u64 {
-        100
+        10
     }
 }
 
@@ -69,30 +70,20 @@ impl RedisBackend {
 }
 
 struct RedisLock {
+    refresh_handle: JoinHandle<()>,
+    stop_notify: Arc<Notify>,
     client: Arc<Client>,
     key: String,
-    refresh_handle: Mutex<Option<JoinHandle<()>>>,
-    stop_signal: Arc<AtomicBool>,
-}
-
-impl RedisLock {
-    fn release(&self) {
-        if let Ok(mut handle) = self.refresh_handle.lock() {
-            if let Some(h) = handle.take() {
-                self.stop_signal.store(true, Ordering::Relaxed);
-                let _ = h.join();
-            }
-        }
-
-        if let Ok(mut conn) = self.client.get_connection() {
-            let _: redis::RedisResult<()> = redis::cmd("DEL").arg(&self.key).query(&mut conn);
-        }
-    }
 }
 
 impl Drop for RedisLock {
     fn drop(&mut self) {
-        self.release();
+        self.stop_notify.notify_one();
+        self.refresh_handle.abort();
+
+        if let Ok(mut conn) = self.client.get_connection() {
+            let _: redis::RedisResult<()> = redis::cmd("DEL").arg(&self.key).query(&mut conn);
+        }
     }
 }
 
@@ -119,37 +110,40 @@ impl LockBackend for RedisBackend {
                 .await?;
 
             if acquired {
-                // Start refresh task
-                let stop_signal = Arc::new(AtomicBool::new(false));
+                let stop_notify = Arc::new(Notify::new());
                 let client = self.client.clone();
-                let key_clone = lock_key.clone();
+                let key = lock_key.clone();
                 let ttl = self.ttl;
-                let stop_signal_clone = stop_signal.clone();
+                let refresh_interval = Duration::from_secs((ttl / 2) as u64);
+                let stop_notify_clone = stop_notify.clone();
 
-                let refresh_handle = spawn(move || {
-                    let Ok(mut conn) = client.get_connection() else {
+                let refresh_handle = tokio::spawn(async move {
+                    let Ok(mut conn) = client.get_multiplexed_async_connection().await else {
                         return;
                     };
 
-                    let refresh_interval = Duration::from_secs((ttl / 2) as u64);
-
-                    while !stop_signal_clone.load(Ordering::Relaxed) {
-                        sleep(refresh_interval);
-                        if stop_signal_clone.load(Ordering::Relaxed) {
-                            break;
+                    loop {
+                        tokio::select! {
+                            () = sleep(refresh_interval) => {
+                                let _: redis::RedisResult<()> = redis::cmd("EXPIRE")
+                                    .arg(&key)
+                                    .arg(ttl)
+                                    .query_async(&mut conn)
+                                    .await;
+                            }
+                            () = stop_notify_clone.notified() => {
+                                // Stop signal received
+                                break;
+                            }
                         }
-                        let _: redis::RedisResult<()> = redis::cmd("EXPIRE")
-                            .arg(&key_clone)
-                            .arg(ttl)
-                            .query(&mut conn);
                     }
                 });
 
                 let lock = Box::new(RedisLock {
+                    refresh_handle,
+                    stop_notify,
                     client: self.client.clone(),
                     key: lock_key,
-                    refresh_handle: Mutex::new(Some(refresh_handle)),
-                    stop_signal,
                 });
 
                 return Ok(lock as Box<dyn Send>);

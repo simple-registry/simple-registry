@@ -390,10 +390,10 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::RepositoryRetentionPolicyConfig;
     use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
     use crate::registry::blob_store;
     use crate::registry::metadata_store;
+    use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
     use crate::registry::repository::RetentionPolicy;
     use crate::registry::test_utils::{create_test_manifest, create_test_repository_config};
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};

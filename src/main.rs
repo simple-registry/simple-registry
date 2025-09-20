@@ -2,27 +2,17 @@
 #![warn(clippy::pedantic)]
 
 use crate::command::{argon, scrub, server};
-use crate::configuration::{
-    BlobStorageConfig, Configuration, Error, MetadataStoreConfig, ObservabilityConfig,
-    ServerTlsConfig,
-};
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
+use crate::configuration::registry::create_registry;
+use crate::configuration::watcher::ConfigWatcher;
+use crate::configuration::{Configuration, ObservabilityConfig};
 use crate::registry::server::ServerContext;
-use crate::registry::{blob_store, metadata_store, Registry};
 use argh::FromArgs;
-use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::trace::{RandomIdGenerator, Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
-use opentelemetry_semantic_conventions::attribute::SERVICE_VERSION;
-use opentelemetry_stdout as stdout;
-use std::path::Path;
 use std::sync::Arc;
-use tracing::{error, info, warn};
-use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 
@@ -31,158 +21,55 @@ mod configuration;
 mod metrics_provider;
 mod registry;
 
-fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), Error> {
-    let _ = SdkTracerProvider::builder()
-        .with_simple_exporter(stdout::SpanExporter::default())
-        .build();
+fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), configuration::Error> {
+    if let Some(ObservabilityConfig {
+        tracing: Some(tracing_config),
+    }) = config
+    {
+        let resource = Resource::builder()
+            .with_service_name(env!("CARGO_PKG_NAME"))
+            .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
+            .build();
+        let otlp_exporter = SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&tracing_config.endpoint)
+            .with_timeout(std::time::Duration::from_secs(10))
+            .build()?;
 
-    let resource = Resource::builder()
-        .with_service_name(env!("CARGO_PKG_NAME"))
-        .with_attribute(KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")))
-        .build();
+        let tracer_provider = SdkTracerProvider::builder()
+            .with_batch_exporter(otlp_exporter)
+            .with_id_generator(RandomIdGenerator::default())
+            .with_resource(resource)
+            .with_sampler(Sampler::TraceIdRatioBased(tracing_config.sampling_rate))
+            .build();
 
-    let subscriber = tracing_subscriber::registry()
-        .with(EnvFilter::from_default_env())
-        .with(tracing_subscriber::fmt::layer().json());
+        let tracer = tracer_provider.tracer("simple-registry");
+        let _ = global::set_tracer_provider(tracer_provider);
+        let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
-    if let Some(observability_config) = config {
-        if let Some(tracing_config) = observability_config.tracing {
-            let sampling_rate = tracing_config.sampling_rate;
-            let sampler = Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(sampling_rate)));
-
-            let endpoint = tracing_config.endpoint;
-            let exporter = SpanExporter::builder()
-                .with_tonic()
-                .with_endpoint(endpoint)
-                .build()?;
-
-            let provider = SdkTracerProvider::builder()
-                .with_id_generator(RandomIdGenerator::default())
-                .with_resource(resource)
-                .with_sampler(sampler)
-                .with_batch_exporter(exporter)
-                .build();
-
-            let tracer = provider.tracer(env!("CARGO_PKG_NAME"));
-            global::set_tracer_provider(provider);
-
-            subscriber.with(OpenTelemetryLayer::new(tracer)).init();
-
-            info!(
-                "Enabled tracing with sampling rate: {}",
-                tracing_config.sampling_rate
-            );
-
-            return Ok(());
-        }
+        let _ = tracing_subscriber::registry()
+            .with(EnvFilter::from_default_env())
+            .with(tracing_subscriber::fmt::layer().json())
+            .with(telemetry)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::registry()
+            .with(EnvFilter::from_default_env())
+            .with(tracing_subscriber::fmt::layer().json())
+            .try_init();
     }
-
-    subscriber.init();
     Ok(())
-}
-
-fn set_config_watcher(
-    blob_store: Arc<dyn BlobStore + Send + Sync>,
-    metadata_store: Arc<dyn MetadataStore + Send + Sync>,
-    config_path: &str,
-    tls_config: Option<ServerTlsConfig>,
-    server: &Arc<server::Command>,
-) -> Result<RecommendedWatcher, command::Error> {
-    info!("Setting up file system watcher for configuration file");
-    let server_watcher = server.clone();
-    let config_watcher_path = config_path.to_string();
-    let mut config_watcher = recommended_watcher(move |event: notify::Result<Event>| {
-        info!("Configuration file changed");
-        let server = server_watcher.clone();
-        let config_path = config_watcher_path.clone();
-        let Ok(event) = event else {
-            error!("Failed to watch configuration file: {event:?}");
-            return;
-        };
-
-        if event.kind.is_modify() {
-            let config = match Configuration::load(config_path) {
-                Ok(config) => config,
-                Err(error) => {
-                    error!("Failed to reload configuration: {error}");
-                    return;
-                }
-            };
-
-            let oidc_validators =
-                match ServerContext::build_oidc_validators(&config.oidc, &config.cache) {
-                    Ok(validators) => validators,
-                    Err(error) => {
-                        error!("Failed to build OIDC validators: {error}");
-                        return;
-                    }
-                };
-
-            let registry = match Registry::new(
-                blob_store.clone(),
-                metadata_store.clone(),
-                config.repository,
-                &config.global,
-                &config.cache,
-            ) {
-                Ok(registry) => registry,
-                Err(error) => {
-                    error!("Failed to create registry with new configuration: {error}");
-                    return;
-                }
-            };
-
-            if let Err(error) = server.notify_config_change(
-                config.server,
-                &config.identity,
-                registry,
-                oidc_validators,
-            ) {
-                error!("Failed to notify server of configuration change: {error}");
-            } else {
-                info!("Server notified of configuration change");
-            }
-        }
-    })?;
-
-    config_watcher.watch(Path::new(&config_path), RecursiveMode::NonRecursive)?;
-
-    if let Some(tls_config) = tls_config {
-        config_watcher.watch(
-            Path::new(&tls_config.server_certificate_bundle),
-            RecursiveMode::NonRecursive,
-        )?;
-        config_watcher.watch(
-            Path::new(&tls_config.server_private_key),
-            RecursiveMode::NonRecursive,
-        )?;
-        if let Some(client_ca) = tls_config.client_ca_bundle {
-            config_watcher.watch(Path::new(&client_ca), RecursiveMode::NonRecursive)?;
-        }
-    }
-
-    Ok(config_watcher)
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
 /// An OCI-compliant and docker-compatible registry service
 struct GlobalArguments {
-    #[argh(
-        option,
-        short = 'c',
-        default = "GlobalArguments::default_config_path()"
-    )]
+    #[argh(option, short = 'c', default = "String::from(\"config.toml\")")]
     /// the path to the configuration file, defaults to `config.toml`
     config: String,
 
     #[argh(subcommand)]
-    nested: SubCommand,
-}
-
-impl GlobalArguments {
-    fn default_config_path() -> String {
-        "config.toml".to_string()
-    }
+    subcommand: SubCommand,
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -194,57 +81,28 @@ enum SubCommand {
 }
 
 fn main() -> Result<(), command::Error> {
-    let arguments: GlobalArguments = argh::from_env();
-    let config = Configuration::load(&arguments.config)?;
+    let cli_args: GlobalArguments = argh::from_env();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let config = Configuration::load(&cli_args.config)?;
+
+    tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.global.max_concurrent_requests)
         .enable_all()
-        .build()?;
-
-    runtime.block_on(async move {
-        set_tracing(config.observability.clone())?;
-
-        let blob_store: Arc<dyn BlobStore + Send + Sync> = match &config.blob_store {
-            BlobStorageConfig::FS(cfg) => Arc::new(blob_store::fs::Backend::new(cfg.clone())),
-            BlobStorageConfig::S3(cfg) => Arc::new(blob_store::s3::Backend::new(cfg.clone())),
-        };
-
-        let metadata_store: Arc<dyn MetadataStore + Send + Sync> = match &config.metadata_store {
-            MetadataStoreConfig::FS(cfg) => {
-                Arc::new(metadata_store::fs::Backend::new(cfg.clone())?)
-            }
-            MetadataStoreConfig::S3(cfg) => {
-                Arc::new(metadata_store::s3::Backend::new(cfg.clone())?)
-            }
-            MetadataStoreConfig::Unspecified => {
-                unreachable!(
-                    "Metadata store should have been resolved during configuration loading"
-                )
-            }
-        };
-
-        handle_command(config, arguments, blob_store, metadata_store).await
-    })
+        .build()
+        .expect("Failed to create Tokio runtime")
+        .block_on(run_command(cli_args, config))
 }
 
-async fn handle_command(
+async fn run_command(
+    cli_args: GlobalArguments,
     config: Configuration,
-    arguments: GlobalArguments,
-    data_store: Arc<dyn BlobStore + Send + Sync>,
-    metadata_store: Arc<dyn MetadataStore + Send + Sync>,
 ) -> Result<(), command::Error> {
+    set_tracing(config.observability.clone())?;
+
     let oidc_validators = ServerContext::build_oidc_validators(&config.oidc, &config.cache)?;
+    let registry = create_registry(&config)?;
 
-    let registry = Registry::new(
-        data_store.clone(),
-        metadata_store.clone(),
-        config.repository,
-        &config.global,
-        &config.cache,
-    )?;
-
-    match arguments.nested {
+    match cli_args.subcommand {
         SubCommand::Argon(_) => argon::Command::run(),
         SubCommand::Scrub(scrub_options) => {
             let scrub = scrub::Command::new(&scrub_options, registry);
@@ -255,16 +113,10 @@ async fn handle_command(
                 &config.server,
                 &config.identity,
                 registry,
-                oidc_validators.clone(),
+                oidc_validators,
             )?);
 
-            let _ = set_config_watcher(
-                data_store,
-                metadata_store,
-                &arguments.config,
-                config.server.tls,
-                &server,
-            )?;
+            let _watcher = ConfigWatcher::new(&cli_args.config, server.clone())?;
             server.run().await
         }
     }

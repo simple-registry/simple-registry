@@ -3,7 +3,6 @@ mod bearer_token;
 #[cfg(test)]
 mod tests;
 
-use crate::configuration::RepositoryUpstreamConfig;
 use crate::registry::cache::Cache;
 use crate::registry::client::authentication_scheme::AuthenticationScheme;
 use crate::registry::client::bearer_token::BearerToken;
@@ -18,10 +17,29 @@ use hyper::body::Incoming;
 use hyper::header::{HeaderValue, ACCEPT, AUTHORIZATION, WWW_AUTHENTICATE};
 use hyper::http::request;
 use hyper::{HeaderMap, Method, Response, StatusCode};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, error, info, warn};
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ClientConfig {
+    pub url: String,
+    #[serde(default = "ClientConfig::default_max_redirect")]
+    pub max_redirect: u8,
+    pub server_ca_bundle: Option<String>,
+    pub client_certificate: Option<String>,
+    pub client_private_key: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+impl ClientConfig {
+    fn default_max_redirect() -> u8 {
+        5
+    }
+}
 
 #[derive(Debug)]
 pub struct RegistryClient {
@@ -31,7 +49,7 @@ pub struct RegistryClient {
 }
 
 impl RegistryClient {
-    pub fn new(mut config: RepositoryUpstreamConfig) -> Result<Self, configuration::Error> {
+    pub fn new(mut config: ClientConfig) -> Result<Self, configuration::Error> {
         let server_ca_bundle = config.server_ca_bundle.take();
         let client_certificate = config.client_certificate.take();
         let client_private_key = config.client_private_key.take();

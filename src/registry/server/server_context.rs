@@ -10,14 +10,12 @@ use hyper::body::Incoming;
 use hyper::Request;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::instrument;
 
 pub struct ServerContext {
     mtls_middleware: Arc<MtlsValidator>,
     basic_auth_middleware: Arc<BasicAuthValidator>,
     oidc_middlewares: Arc<Vec<OidcValidator>>,
-    pub timeouts: Vec<Duration>,
     pub registry: Registry,
 }
 
@@ -49,7 +47,6 @@ impl ServerContext {
 
     pub fn new(
         identities: &HashMap<String, IdentityConfig>,
-        timeouts: Vec<Duration>,
         registry: Registry,
         oidc_middlewares: Arc<Vec<OidcValidator>>,
     ) -> Self {
@@ -60,7 +57,6 @@ impl ServerContext {
             mtls_middleware,
             basic_auth_middleware,
             oidc_middlewares,
-            timeouts,
             registry,
         }
     }

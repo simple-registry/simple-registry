@@ -1,4 +1,4 @@
-use crate::configuration::{Error, ServerConfig, ServerTlsConfig};
+use crate::configuration::Error;
 use crate::registry;
 use crate::registry::server::serve_request;
 use crate::registry::server::ServerContext;
@@ -8,47 +8,94 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::RootCertStore;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use std::net::SocketAddr;
+use serde::Deserialize;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info};
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Config {
+    pub bind_address: IpAddr,
+    #[serde(default = "Config::default_port")]
+    pub port: u16,
+    #[serde(default = "Config::default_query_timeout")]
+    pub query_timeout: u64,
+    #[serde(default = "Config::default_query_timeout_grace_period")]
+    pub query_timeout_grace_period: u64,
+    pub tls: ServerTlsConfig,
+}
+
+impl Config {
+    fn default_port() -> u16 {
+        8000
+    }
+
+    fn default_query_timeout() -> u64 {
+        3600
+    }
+
+    fn default_query_timeout_grace_period() -> u64 {
+        60
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ServerTlsConfig {
+    pub server_certificate_bundle: String,
+    pub server_private_key: String,
+    pub client_ca_bundle: Option<String>,
+}
 
 pub struct TlsListener {
     binding_address: SocketAddr,
     tls_acceptor: ArcSwap<TlsAcceptor>,
     context: ArcSwap<ServerContext>,
+    timeouts: ArcSwap<[Duration; 2]>,
 }
 
 impl TlsListener {
-    pub fn new(server_config: &ServerConfig, context: ServerContext) -> Result<Self, Error> {
-        let tls_config = server_config.tls.as_ref().ok_or_else(|| {
-            Error::MissingExpectedTLSSection("TLS configuration is missing".to_string())
-        })?;
-
-        let binding_address = SocketAddr::new(server_config.bind_address, server_config.port);
-        let tls_acceptor = ArcSwap::new(Arc::new(Self::build_tls_acceptor(tls_config)?));
+    pub fn new(config: &Config, context: ServerContext) -> Result<Self, Error> {
+        let binding_address = SocketAddr::new(config.bind_address, config.port);
+        let tls_acceptor = ArcSwap::from_pointee(Self::build_tls_acceptor(&config.tls)?);
+        let timeouts = [
+            Duration::from_secs(config.query_timeout),
+            Duration::from_secs(config.query_timeout_grace_period),
+        ];
 
         Ok(Self {
             binding_address,
             tls_acceptor,
-            context: ArcSwap::new(Arc::new(context)),
+            context: ArcSwap::from_pointee(context),
+            timeouts: ArcSwap::from_pointee(timeouts),
         })
     }
 
     pub fn notify_config_change(
         &self,
-        server_config: ServerConfig,
+        config: &Config,
         context: ServerContext,
     ) -> Result<(), Error> {
-        let tls_config = server_config.tls.ok_or_else(|| {
-            Error::MissingExpectedTLSSection("TLS configuration is missing".to_string())
-        })?;
+        let acceptor = Arc::new(Self::build_tls_acceptor(&config.tls)?);
+        self.tls_acceptor.store(acceptor);
 
-        let tls_acceptor = Arc::new(Self::build_tls_acceptor(&tls_config)?);
-        self.tls_acceptor.store(tls_acceptor);
+        let timeouts = [
+            Duration::from_secs(config.query_timeout),
+            Duration::from_secs(config.query_timeout_grace_period),
+        ];
 
+        self.timeouts.store(Arc::new(timeouts));
         self.context.store(Arc::new(context));
+
+        Ok(())
+    }
+
+    pub fn notify_tls_config_change(&self, config: &ServerTlsConfig) -> Result<(), Error> {
+        let acceptor = Arc::new(Self::build_tls_acceptor(config)?);
+        self.tls_acceptor.store(acceptor);
+
         Ok(())
     }
 
@@ -112,10 +159,13 @@ impl TlsListener {
             debug!("Accepted connection from {remote_address}");
             let stream = TokioIo::new(tls);
             let context = self.context.load();
+            let timeouts = self.timeouts.load().clone();
+
             tokio::spawn(Box::pin(serve_request(
                 stream,
                 context.clone(),
                 peer_certificate,
+                timeouts,
             )));
         }
     }
