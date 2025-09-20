@@ -11,7 +11,6 @@ pub enum Error {
     Cache(cache::Error),
     MetadataStore(String),
     Io(io::Error),
-    MissingExpectedTLSSection(String),
     ConfigurationFileFormat(String),
     StreamingChunkSize(String),
     Http(String),
@@ -29,9 +28,6 @@ impl fmt::Display for Error {
             Error::Cache(err) => write!(f, "Cache error: {err}"),
             Error::MetadataStore(err) => write!(f, "Metadata store error: {err}"),
             Error::Io(err) => write!(f, "IO error: {err}"),
-            Error::MissingExpectedTLSSection(error) => {
-                write!(f, "Missing expected TLS section: {error}")
-            }
             Error::ConfigurationFileFormat(error) => {
                 write!(f, "Configuration file format error.")?;
                 write!(f, "{error}")

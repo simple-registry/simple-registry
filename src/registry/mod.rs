@@ -212,9 +212,10 @@ impl Registry {
 #[cfg(test)]
 pub mod test_utils {
     use super::*;
-    use crate::configuration::{RepositoryAccessPolicyConfig, RepositoryRetentionPolicyConfig};
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::oci::Digest;
+    use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
+    use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
     use serde_json::json;
 
     pub fn create_test_repository_config() -> HashMap<String, RepositoryConfig> {
@@ -320,15 +321,14 @@ pub mod test_utils {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::configuration::{
-        CacheStoreConfig, GlobalConfig, RepositoryAccessPolicyConfig, RepositoryConfig,
-        RepositoryRetentionPolicyConfig,
-    };
+    use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
     use crate::registry::blob_store::fs::{Backend as FSBlobStore, BackendConfig as FSBlobConfig};
     use crate::registry::metadata_store::fs::{
         Backend as FSMetadataStore, BackendConfig as FSMetadataConfig,
     };
     use crate::registry::oci::Reference;
+    use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
+    use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
     use crate::registry::server::{ClientIdentity, ClientRequest};
     use crate::registry::tests::FSRegistryTestCase;
     use std::collections::HashMap;

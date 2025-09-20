@@ -16,7 +16,7 @@ use serde_json::json;
 use std::convert::Infallible;
 use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::pin;
 use tracing::{debug, error, info, instrument, Span};
@@ -51,6 +51,7 @@ pub async fn serve_request<S>(
     stream: TokioIo<S>,
     context: Arc<ServerContext>,
     peer_certificate: Option<Vec<u8>>,
+    timeouts: Arc<[Duration; 2]>,
 ) where
     S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
@@ -74,7 +75,7 @@ pub async fn serve_request<S>(
             .unwrap_or(i64::MAX),
     );
 
-    for (iter, sleep_duration) in context.timeouts.iter().enumerate() {
+    for (iter, sleep_duration) in timeouts.iter().enumerate() {
         debug!("iter = {iter} sleep_duration = {sleep_duration:?}");
         tokio::select! {
             res = conn.as_mut() => {
