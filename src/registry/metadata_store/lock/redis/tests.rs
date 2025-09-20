@@ -8,7 +8,7 @@ async fn test_acquire_lock() {
         ttl: 2,
         key_prefix: "test_acquire_lock_".to_owned(),
         max_retries: 0, // No retries for this test
-        retry_delay_ms: 100,
+        retry_delay_ms: 5,
     };
 
     let redis_backend = RedisBackend::new(config.clone()).expect("Failed to create RedisBackend");
