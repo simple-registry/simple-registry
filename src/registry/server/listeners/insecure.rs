@@ -63,8 +63,8 @@ impl InsecureListener {
 
         Self {
             binding_address,
-            context: ArcSwap::new(Arc::new(context)),
-            timeouts: ArcSwap::new(Arc::new(timeouts)),
+            context: ArcSwap::from_pointee(context),
+            timeouts: ArcSwap::from_pointee(timeouts),
         }
     }
 
