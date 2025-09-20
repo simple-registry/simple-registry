@@ -55,13 +55,7 @@ impl Registry {
         }
 
         let res = repository
-            .query_blob(
-                &*self.auth_token_cache,
-                &Method::HEAD,
-                accepted_mime_types,
-                namespace,
-                &digest,
-            )
+            .query_blob(&Method::HEAD, accepted_mime_types, namespace, &digest)
             .await?;
 
         let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
@@ -122,13 +116,7 @@ impl Registry {
 
         // Proxying stream
         let client_stream = repository
-            .query_blob(
-                &*self.auth_token_cache,
-                &Method::GET,
-                accepted_mime_types,
-                namespace,
-                digest,
-            )
+            .query_blob(&Method::GET, accepted_mime_types, namespace, digest)
             .await?;
         let total_length = client_stream.parse_header(CONTENT_LENGTH)?;
         let client_stream = client_stream.into_async_read();
@@ -137,13 +125,7 @@ impl Registry {
         // Caching stream
         let store = self.blob_store.clone();
         let cache_reader = repository
-            .query_blob(
-                &*self.auth_token_cache,
-                &Method::GET,
-                accepted_mime_types,
-                namespace,
-                digest,
-            )
+            .query_blob(&Method::GET, accepted_mime_types, namespace, digest)
             .await?
             .into_async_read();
         let cache_namespace = namespace.to_string();
