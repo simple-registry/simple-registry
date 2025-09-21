@@ -46,7 +46,6 @@ static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub struct Registry {
     blob_store: Arc<dyn BlobStore + Send + Sync>,
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
-    auth_token_cache: Box<dyn Cache>,
     repositories: HashMap<String, Repository>,
     global_access_policy: Option<AccessPolicy>,
     global_retention_policy: Option<RetentionPolicy>,
@@ -75,16 +74,20 @@ impl Registry {
         global_config: &GlobalConfig,
         auth_token_cache: &CacheStoreConfig,
     ) -> Result<Self, configuration::Error> {
-        let auth_token_cache_box: Box<dyn Cache> =
+        let auth_token_cache_arc: Arc<dyn Cache> =
             if let CacheStoreConfig::Redis(ref redis_config) = auth_token_cache {
-                Box::new(cache::redis::Backend::new(redis_config.clone())?)
+                Arc::new(cache::redis::Backend::new(redis_config.clone())?)
             } else {
-                Box::new(cache::memory::Backend::new())
+                Arc::new(cache::memory::Backend::new())
             };
 
         let mut repositories = HashMap::new();
         for (repository_name, repository_config) in repositories_config {
-            let res = Repository::new(repository_name.clone(), repository_config)?;
+            let res = Repository::new(
+                repository_name.clone(),
+                repository_config,
+                &auth_token_cache_arc,
+            )?;
             repositories.insert(repository_name, res);
         }
 
@@ -104,7 +107,6 @@ impl Registry {
             update_pull_time: global_config.update_pull_time,
             blob_store,
             metadata_store,
-            auth_token_cache: auth_token_cache_box,
             repositories,
             global_access_policy,
             global_retention_policy,
@@ -281,6 +283,7 @@ pub mod test_utils {
         assert!(namespace_links.contains(&tag_link));
 
         // Create a non-pull-through repository
+        let cache: Arc<dyn Cache> = Arc::new(cache::memory::Backend::new());
         let repository = Repository::new(
             "test-repo".to_string(),
             RepositoryConfig {
@@ -288,6 +291,7 @@ pub mod test_utils {
                 access_policy: RepositoryAccessPolicyConfig::default(),
                 retention_policy: RepositoryRetentionPolicyConfig { rules: Vec::new() },
             },
+            &cache,
         )
         .unwrap();
 
@@ -344,7 +348,8 @@ mod test {
             ..RepositoryConfig::default()
         };
 
-        Repository::new("policy-deny-repo".to_string(), config).unwrap()
+        let cache: Arc<dyn Cache> = Arc::new(cache::memory::Backend::new());
+        Repository::new("policy-deny-repo".to_string(), config, &cache).unwrap()
     }
 
     fn create_default_allow_repo(rules: Vec<String>) -> Repository {
@@ -357,7 +362,8 @@ mod test {
             ..RepositoryConfig::default()
         };
 
-        Repository::new("policy-allow-repo".to_string(), config).unwrap()
+        let cache: Arc<dyn Cache> = Arc::new(cache::memory::Backend::new());
+        Repository::new("policy-allow-repo".to_string(), config, &cache).unwrap()
     }
 
     #[tokio::test]

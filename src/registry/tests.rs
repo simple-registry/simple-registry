@@ -1,4 +1,6 @@
 use crate::configuration::RepositoryConfig;
+use crate::registry::cache;
+use crate::registry::cache::Cache;
 use crate::registry::metadata_store;
 use crate::registry::test_utils::create_test_registry;
 use crate::registry::{blob_store, Registry, Repository};
@@ -156,9 +158,10 @@ fn prepare_with_repository_config(
     registry: &mut Registry,
     repositories_config: HashMap<String, RepositoryConfig>,
 ) {
+    let cache: Arc<dyn Cache> = Arc::new(cache::memory::Backend::new());
     let mut repositories = HashMap::new();
     for (repository_name, repository_config) in repositories_config {
-        let res = Repository::new(repository_name.clone(), repository_config).unwrap();
+        let res = Repository::new(repository_name.clone(), repository_config, &cache).unwrap();
         repositories.insert(repository_name, res);
     }
 

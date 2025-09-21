@@ -4,6 +4,7 @@ use crate::registry::cache::Cache;
 use crate::registry::oci::{Digest, Reference};
 use hyper::body::Incoming;
 use hyper::{Method, Response};
+use std::sync::Arc;
 use tracing::instrument;
 
 pub mod access_policy;
@@ -21,10 +22,14 @@ pub struct Repository {
 }
 
 impl Repository {
-    pub fn new(name: String, config: RepositoryConfig) -> Result<Self, Error> {
+    pub fn new(
+        name: String,
+        config: RepositoryConfig,
+        cache: &Arc<dyn Cache>,
+    ) -> Result<Self, Error> {
         let mut upstreams = Vec::new();
         for config in config.upstream {
-            upstreams.push(RegistryClient::new(config)?);
+            upstreams.push(RegistryClient::new(config, cache.clone())?);
         }
 
         let access_policy = AccessPolicy::new(&config.access_policy)?;
@@ -45,7 +50,6 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn query_blob(
         &self,
-        auth_token_cache: &dyn Cache,
         method: &Method,
         accepted_mime_types: &[String],
         namespace: &str,
@@ -54,15 +58,7 @@ impl Repository {
         let mut response = Err(registry::Error::ManifestUnknown);
         for upstream in &self.upstreams {
             let location = upstream.get_blob_path(&self.name, namespace, digest);
-            response = upstream
-                .query(
-                    auth_token_cache,
-                    namespace,
-                    method,
-                    accepted_mime_types,
-                    &location,
-                )
-                .await;
+            response = upstream.query(method, accepted_mime_types, &location).await;
             if response.is_ok() {
                 break;
             }
@@ -73,7 +69,6 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn query_manifest(
         &self,
-        auth_token_cache: &dyn Cache,
         method: &Method,
         accepted_mime_types: &[String],
         namespace: &str,
@@ -81,16 +76,7 @@ impl Repository {
     ) -> Result<Response<Incoming>, registry::Error> {
         for upstream in &self.upstreams {
             let location = upstream.get_manifest_path(&self.name, namespace, reference);
-            if let Ok(response) = upstream
-                .query(
-                    auth_token_cache,
-                    namespace,
-                    method,
-                    accepted_mime_types,
-                    &location,
-                )
-                .await
-            {
+            if let Ok(response) = upstream.query(method, accepted_mime_types, &location).await {
                 return Ok(response);
             }
         }

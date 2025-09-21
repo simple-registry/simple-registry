@@ -85,7 +85,7 @@ pub async fn validate_oidc_token(
     provider_name: &str,
     provider: &dyn OidcProvider,
     token: &str,
-    http_client: &dyn HttpClient,
+    http_client: &HttpClient,
     cache: &dyn Cache,
 ) -> Result<OidcClaims, Error> {
     let header = decode_header(token)
@@ -162,7 +162,7 @@ pub async fn validate_oidc_token(
 
 async fn fetch_jwks(
     provider: &dyn OidcProvider,
-    http_client: &dyn HttpClient,
+    http_client: &HttpClient,
     cache: &dyn Cache,
     jwks_cache_key: &str,
     oidc_config_cache_key: &str,
@@ -222,7 +222,7 @@ async fn fetch_jwks(
 
 async fn fetch_oidc_configuration(
     provider: &dyn OidcProvider,
-    http_client: &dyn HttpClient,
+    http_client: &HttpClient,
     cache: &dyn Cache,
     oidc_config_cache_key: &str,
 ) -> Result<OpenIdConfiguration, Error> {

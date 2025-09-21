@@ -3,7 +3,7 @@ pub mod provider;
 
 use crate::configuration::OidcProviderConfig;
 use crate::registry::cache::Cache;
-use crate::registry::http_client::{HttpClient, HttpClientBuilder};
+use crate::registry::http_client::{HttpClient, HttpClientConfig};
 use crate::registry::server::request_ext::RequestExt;
 use crate::registry::server::{ClientIdentity, OidcClaims};
 use crate::registry::Error;
@@ -21,7 +21,7 @@ use tracing::debug;
 pub struct OidcValidator {
     provider_name: String,
     provider: Box<dyn OidcProvider>,
-    http_client: Box<dyn HttpClient>,
+    http_client: HttpClient,
     cache: Box<dyn Cache>,
 }
 
@@ -31,7 +31,7 @@ impl OidcValidator {
         provider_config: &OidcProviderConfig,
         cache: Box<dyn Cache>,
     ) -> Result<Self, Error> {
-        let http_client = HttpClientBuilder::new().build()?;
+        let http_client = HttpClient::new(HttpClientConfig::default())?;
 
         let provider: Box<dyn OidcProvider> = match provider_config {
             OidcProviderConfig::Generic(cfg) => Box::new(generic::Provider::new(cfg.clone())),
@@ -51,7 +51,7 @@ impl OidcValidator {
             &self.provider_name,
             &*self.provider,
             token,
-            &*self.http_client,
+            &self.http_client,
             &*self.cache,
         )
         .await
