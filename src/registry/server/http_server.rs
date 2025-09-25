@@ -31,7 +31,6 @@ pub async fn serve_request<S>(
 ) where
     S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
-    let context_clone = context.clone();
     let conn = http1::Builder::new().serve_connection(
         stream,
         service_fn(move |mut request| {
@@ -39,7 +38,7 @@ pub async fn serve_request<S>(
                 let peer_certificate = PeerCertificate(Arc::new(cert_data.clone()));
                 request.extensions_mut().insert(peer_certificate);
             }
-            handle_request(context_clone.clone(), request)
+            handle_request(Arc::clone(&context), request)
         }),
     );
     pin!(conn);
@@ -99,11 +98,11 @@ async fn handle_request(
         }
     };
 
-    let response = match router(context.clone(), request).await {
+    let response = match router(Arc::clone(&context), request).await {
         Ok(response) => response,
         Err(error) => {
             let details = trace_id
-                .clone()
+                .as_ref()
                 .map(|trace_id| json!({"trace_id": trace_id}))
                 .unwrap_or(json!({}));
             registry_error_to_response_raw(&error, details)
@@ -119,9 +118,11 @@ async fn handle_request(
         .metric_http_request_duration
         .observe(elapsed);
 
-    let log = trace_id
-        .map(|trace_id| format!("{trace_id} {elapsed:?} - {status} {method} {path}"))
-        .unwrap_or(format!("{elapsed:?} - {status} {method} {path}"));
+    let log = if let Some(trace_id) = trace_id {
+        format!("{trace_id} {elapsed:?} - {status} {method} {path}")
+    } else {
+        format!("{elapsed:?} - {status} {method} {path}")
+    };
 
     if status.is_server_error() {
         error!("{log}");

@@ -166,12 +166,15 @@ mod tests {
         let reference = Reference::from_str("v1.0.0").unwrap();
         let route = Route::GetManifest {
             namespace: "library/nginx",
-            reference: reference.clone(),
+            reference,
         };
         let json = serde_json::to_value(&route).unwrap();
         assert_eq!(json["action"], "get-manifest");
         assert_eq!(json["namespace"], "library/nginx");
-        assert_eq!(json["reference"], serde_json::to_value(&reference).unwrap());
+        assert_eq!(
+            json["reference"],
+            serde_json::to_value(Reference::from_str("v1.0.0").unwrap()).unwrap()
+        );
         assert_eq!(json.get("digest"), None);
 
         // Test get-blob with namespace and digest
@@ -181,12 +184,21 @@ mod tests {
         .unwrap();
         let route = Route::GetBlob {
             namespace: "library/nginx",
-            digest: digest.clone(),
+            digest,
         };
         let json = serde_json::to_value(&route).unwrap();
         assert_eq!(json["action"], "get-blob");
         assert_eq!(json["namespace"], "library/nginx");
-        assert_eq!(json["digest"], serde_json::to_value(&digest).unwrap());
+        assert_eq!(
+            json["digest"],
+            serde_json::to_value(
+                Digest::from_str(
+                    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                )
+                .unwrap()
+            )
+            .unwrap()
+        );
         assert_eq!(json.get("reference"), None);
 
         // Test start-upload with namespace
@@ -290,26 +302,39 @@ mod tests {
         // Test routes with namespace and digest
         let digest = Digest::from_str(
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        ).unwrap();
+        )
+        .unwrap();
         let route = Route::GetBlob {
             namespace: "test-repo",
-            digest: digest.clone(),
+            digest,
         };
         let json = serde_json::to_value(&route).unwrap();
         assert_eq!(json["action"], "get-blob");
         assert_eq!(json["namespace"], "test-repo");
-        assert_eq!(json["digest"], serde_json::to_value(&digest).unwrap());
+        assert_eq!(
+            json["digest"],
+            serde_json::to_value(
+                Digest::from_str(
+                    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                )
+                .unwrap()
+            )
+            .unwrap()
+        );
 
         // Test routes with namespace and reference
         let reference = Reference::from_str("v1.0.0").unwrap();
         let route = Route::PutManifest {
             namespace: "test-repo",
-            reference: reference.clone(),
+            reference,
         };
         let json = serde_json::to_value(&route).unwrap();
         assert_eq!(json["action"], "put-manifest");
         assert_eq!(json["namespace"], "test-repo");
-        assert_eq!(json["reference"], serde_json::to_value(&reference).unwrap());
+        assert_eq!(
+            json["reference"],
+            serde_json::to_value(Reference::from_str("v1.0.0").unwrap()).unwrap()
+        );
 
         // Test routes with UUID
         let uuid = Uuid::nil();
@@ -320,10 +345,11 @@ mod tests {
         let json = serde_json::to_value(&route).unwrap();
         assert_eq!(json["action"], "get-upload");
         assert_eq!(json["namespace"], "test-repo");
-        assert_eq!(json["uuid"], serde_json::to_value(&uuid).unwrap());
+        assert_eq!(json["uuid"], serde_json::to_value(Uuid::nil()).unwrap());
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_all_actions_have_correct_names() {
         // Verify all action names match the expected format from ClientRequest
         let test_cases = vec![

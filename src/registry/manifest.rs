@@ -84,7 +84,7 @@ impl Registry {
         namespace: &str,
         reference: Reference,
     ) -> Result<HeadManifestResponse, Error> {
-        let local_manifest = self.head_local_manifest(namespace, reference.clone()).await;
+        let local_manifest = self.head_local_manifest(namespace, &reference).await;
 
         if let Ok(response) = local_manifest {
             return Ok(response);
@@ -103,12 +103,7 @@ impl Registry {
 
         // Store locally before returning
         let _ = self
-            .get_manifest(
-                repository,
-                accepted_mime_types,
-                namespace,
-                reference.clone(),
-            )
+            .get_manifest(repository, accepted_mime_types, namespace, reference)
             .await?;
 
         Ok(HeadManifestResponse {
@@ -121,9 +116,9 @@ impl Registry {
     async fn head_local_manifest(
         &self,
         namespace: &str,
-        reference: Reference,
+        reference: &Reference,
     ) -> Result<HeadManifestResponse, Error> {
-        let blob_link = reference.into();
+        let blob_link = reference.clone().into();
         let link = self
             .metadata_store
             .read_link(namespace, &blob_link, self.update_pull_time)
@@ -179,7 +174,7 @@ impl Registry {
         let mut content = Vec::new();
         res.into_async_read().read_to_end(&mut content).await?;
 
-        self.put_manifest(namespace, reference.clone(), media_type.as_ref(), &content)
+        self.put_manifest(namespace, &reference, media_type.as_ref(), &content)
             .await?;
 
         Ok(GetManifestResponse {
@@ -217,7 +212,7 @@ impl Registry {
     pub async fn put_manifest(
         &self,
         namespace: &str,
-        reference: Reference,
+        reference: &Reference,
         content_type: Option<&String>,
         body: &[u8],
     ) -> Result<PutManifestResponse, Error> {
@@ -227,7 +222,7 @@ impl Registry {
             Reference::Tag(tag) => {
                 let digest = self.blob_store.create_blob(body).await?;
 
-                let link = LinkKind::Tag(tag);
+                let link = LinkKind::Tag(tag.clone());
                 self.metadata_store
                     .create_link(namespace, &link, &digest)
                     .await?;
@@ -242,7 +237,7 @@ impl Registry {
             Reference::Digest(provided_digest) => {
                 let digest = self.blob_store.create_blob(body).await?;
 
-                if provided_digest != digest {
+                if *provided_digest != digest {
                     warn!("Provided digest does not match calculated digest: {provided_digest} != {digest}");
                     return Err(Error::ManifestInvalid(
                         "Provided digest does not match calculated digest".to_string(),
@@ -289,11 +284,11 @@ impl Registry {
     pub async fn delete_manifest(
         &self,
         namespace: &str,
-        reference: Reference,
+        reference: &Reference,
     ) -> Result<(), Error> {
         match reference {
             Reference::Tag(tag) => {
-                let link = LinkKind::Tag(tag);
+                let link = LinkKind::Tag(tag.clone());
                 self.metadata_store.delete_link(namespace, &link).await?;
             }
             Reference::Digest(digest) => {
@@ -319,7 +314,7 @@ impl Registry {
                             Err(e) => return Err(e.into()),
                         };
 
-                        if link.target == digest {
+                        if link.target == *digest {
                             self.metadata_store
                                 .delete_link(namespace, &link_reference)
                                 .await?;
@@ -454,7 +449,7 @@ impl Registry {
         let location = format!("/v2/{namespace}/manifests/{reference}");
 
         let manifest = self
-            .put_manifest(namespace, reference, Some(&mime_type), &request_body)
+            .put_manifest(namespace, &reference, Some(&mime_type), &request_body)
             .await?;
 
         let res = match manifest.subject {
@@ -480,7 +475,7 @@ impl Registry {
         namespace: &str,
         reference: Reference,
     ) -> Result<Response<ResponseBody>, Error> {
-        self.delete_manifest(namespace, reference).await?;
+        self.delete_manifest(namespace, &reference).await?;
 
         let res = Response::builder()
             .status(StatusCode::ACCEPTED)
@@ -560,7 +555,7 @@ mod tests {
         let response = registry
             .put_manifest(
                 namespace,
-                Reference::Tag(tag.to_string()),
+                &Reference::Tag(tag.to_string()),
                 Some(&media_type),
                 &content,
             )
@@ -587,7 +582,7 @@ mod tests {
         let response = registry
             .put_manifest(
                 namespace,
-                Reference::Digest(digest.clone()),
+                &Reference::Digest(digest.clone()),
                 Some(&media_type),
                 &content,
             )
@@ -618,7 +613,7 @@ mod tests {
         let response = registry
             .put_manifest(
                 namespace,
-                Reference::Tag(tag.to_string()),
+                &Reference::Tag(tag.to_string()),
                 Some(&media_type),
                 &content,
             )
@@ -677,7 +672,7 @@ mod tests {
         let response = registry
             .put_manifest(
                 namespace,
-                Reference::Tag(tag.to_string()),
+                &Reference::Tag(tag.to_string()),
                 Some(&media_type),
                 &content,
             )
@@ -736,7 +731,7 @@ mod tests {
         let response = registry
             .put_manifest(
                 namespace,
-                Reference::Tag(tag.to_string()),
+                &Reference::Tag(tag.to_string()),
                 Some(&media_type),
                 &content,
             )
@@ -745,7 +740,7 @@ mod tests {
 
         // Test delete manifest by tag
         registry
-            .delete_manifest(namespace, Reference::Tag(tag.to_string()))
+            .delete_manifest(namespace, &Reference::Tag(tag.to_string()))
             .await
             .unwrap();
 
@@ -762,7 +757,7 @@ mod tests {
 
         // Test delete manifest by digest
         registry
-            .delete_manifest(namespace, Reference::Digest(response.digest.clone()))
+            .delete_manifest(namespace, &Reference::Digest(response.digest.clone()))
             .await
             .unwrap();
 
@@ -838,7 +833,7 @@ mod tests {
         let put_response = registry
             .put_manifest(
                 namespace,
-                Reference::Tag(tag.to_string()),
+                &Reference::Tag(tag.to_string()),
                 Some(&media_type),
                 &content,
             )
@@ -887,7 +882,7 @@ mod tests {
         let put_response = registry
             .put_manifest(
                 namespace,
-                Reference::Tag(tag.to_string()),
+                &Reference::Tag(tag.to_string()),
                 Some(&media_type),
                 &content,
             )
@@ -989,7 +984,7 @@ mod tests {
         let _put_response = registry
             .put_manifest(
                 namespace,
-                Reference::Tag(tag.to_string()),
+                &Reference::Tag(tag.to_string()),
                 Some(&media_type),
                 &content,
             )

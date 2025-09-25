@@ -320,7 +320,7 @@ mod tests {
         registry
             .put_manifest(
                 namespace,
-                Reference::Digest(base_manifest_digest.clone()),
+                &Reference::Digest(base_manifest_digest.clone()),
                 Some(&media_type),
                 manifest_content.as_bytes(),
             )
@@ -333,7 +333,7 @@ mod tests {
         registry
             .put_manifest(
                 namespace,
-                Reference::Digest(referrer_manifest_digest.clone()),
+                &Reference::Digest(referrer_manifest_digest.clone()),
                 Some(&media_type),
                 manifest_content.as_bytes(),
             )

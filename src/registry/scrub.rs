@@ -108,7 +108,7 @@ impl Registry {
                 info!("Available for cleanup: {namespace}:{tag}");
                 if !self.scrub_dry_run {
                     let reference = Reference::Tag(tag.to_string());
-                    let _ = self.delete_manifest(namespace, reference).await;
+                    let _ = self.delete_manifest(namespace, &reference).await;
 
                     last_pushed.retain(|t| t != tag);
                     last_pulled.retain(|t| t != tag);
@@ -533,7 +533,7 @@ mod tests {
             let response = registry
                 .put_manifest(
                     namespace,
-                    Reference::Tag(tag.to_string()),
+                    &Reference::Tag(tag.to_string()),
                     Some(&media_type),
                     &content,
                 )
@@ -652,7 +652,7 @@ mod tests {
         registry
             .put_manifest(
                 namespace,
-                Reference::Tag("latest".to_string()),
+                &Reference::Tag("latest".to_string()),
                 Some(&media_type1),
                 &manifest1,
             )
@@ -663,7 +663,7 @@ mod tests {
         registry
             .put_manifest(
                 namespace,
-                Reference::Tag("v1.0".to_string()),
+                &Reference::Tag("v1.0".to_string()),
                 Some(&media_type2),
                 &manifest2,
             )
@@ -674,7 +674,7 @@ mod tests {
         registry
             .put_manifest(
                 namespace,
-                Reference::Tag("old".to_string()),
+                &Reference::Tag("old".to_string()),
                 Some(&media_type3),
                 &manifest3,
             )
@@ -766,7 +766,7 @@ mod tests {
         let response = registry
             .put_manifest(
                 namespace,
-                Reference::Tag(tag.to_string()),
+                &Reference::Tag(tag.to_string()),
                 Some(&media_type),
                 &content,
             )
