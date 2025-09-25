@@ -1,10 +1,10 @@
 use crate::registry::Error;
 use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
+use hyper::body::Incoming;
 use hyper::header::{AsHeaderName, HeaderName, ACCEPT, AUTHORIZATION};
-use hyper::Request;
+use hyper::http::request::Parts;
 use regex::Regex;
-use serde::de::DeserializeOwned;
 use std::io;
 use std::sync::LazyLock;
 use tokio::io::AsyncRead;
@@ -14,52 +14,22 @@ use tracing::warn;
 static RANGE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:bytes=)?(?P<start>\d+)-(?P<end>\d+)?$").unwrap());
 
-pub trait RequestExt {
+pub trait HeaderExt {
     fn get_header<K: AsHeaderName>(&self, header: K) -> Option<String>;
-    fn query_parameters<D: DeserializeOwned + Default>(&self) -> Result<D, Error>;
-    fn bearer_token(&self) -> Option<String>;
-
-    fn accepted_content_types(&self) -> Vec<String>;
-
     fn range(&self, header: HeaderName) -> Result<Option<(u64, Option<u64>)>, Error>;
+    fn accepted_content_types(&self) -> Vec<String>;
+    fn bearer_token(&self) -> Option<String>;
 }
 
-impl<T> RequestExt for Request<T> {
+impl HeaderExt for Parts {
     fn get_header<K>(&self, header: K) -> Option<String>
     where
         K: AsHeaderName,
     {
-        self.headers()
+        self.headers
             .get(header)
             .and_then(|header| header.to_str().ok())
             .map(ToString::to_string)
-    }
-
-    fn query_parameters<D: DeserializeOwned + Default>(&self) -> Result<D, Error> {
-        let Some(query) = self.uri().query() else {
-            return Ok(Default::default());
-        };
-
-        serde_urlencoded::from_str(query).map_err(|error| {
-            warn!("Failed to parse query parameters: {error}");
-            Error::Unsupported
-        })
-    }
-
-    fn bearer_token(&self) -> Option<String> {
-        let authorization = self.get_header(AUTHORIZATION)?;
-        authorization
-            .strip_prefix("Bearer ")
-            .map(std::string::ToString::to_string)
-    }
-
-    fn accepted_content_types(&self) -> Vec<String> {
-        self.headers()
-            .get_all(ACCEPT)
-            .iter()
-            .filter_map(|h| h.to_str().ok())
-            .map(ToString::to_string)
-            .collect()
     }
 
     fn range(&self, header: HeaderName) -> Result<Option<(u64, Option<u64>)>, Error> {
@@ -97,17 +67,29 @@ impl<T> RequestExt for Request<T> {
             Ok(Some((start, None)))
         }
     }
+
+    fn accepted_content_types(&self) -> Vec<String> {
+        self.headers
+            .get_all(ACCEPT)
+            .iter()
+            .filter_map(|h| h.to_str().ok())
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    fn bearer_token(&self) -> Option<String> {
+        let authorization = self.get_header(AUTHORIZATION)?;
+        authorization
+            .strip_prefix("Bearer ")
+            .map(std::string::ToString::to_string)
+    }
 }
 
 pub trait IntoAsyncRead {
     fn into_async_read(self) -> impl AsyncRead;
 }
 
-impl<S> IntoAsyncRead for Request<S>
-where
-    S: BodyExt,
-    S::Error: Sync + Send + std::error::Error + 'static,
-{
+impl IntoAsyncRead for Incoming {
     fn into_async_read(self) -> impl AsyncRead {
         let stream = self.into_data_stream().map_err(io::Error::other);
         StreamReader::new(stream)
@@ -119,21 +101,7 @@ mod tests {
     use super::*;
     use crate::registry::ResponseBody;
     use hyper::header::{HeaderValue, RANGE};
-    use std::collections::HashMap;
-    use tokio::io::AsyncReadExt;
-
-    #[test]
-    fn test_query_parameters() {
-        let request = Request::builder()
-            .uri("http://localhost:8080/?foo=bar&baz=qux")
-            .body(())
-            .unwrap();
-
-        let query_parameters: HashMap<String, String> = request.query_parameters().unwrap();
-        assert_eq!(query_parameters.len(), 2);
-        assert_eq!(query_parameters.get("foo"), Some(&"bar".to_string()));
-        assert_eq!(query_parameters.get("baz"), Some(&"qux".to_string()));
-    }
+    use hyper::Request;
 
     #[test]
     fn test_get_accepted_content_type() {
@@ -142,8 +110,9 @@ mod tests {
             .header(ACCEPT, HeaderValue::from_static("application/xml"))
             .header(ACCEPT, HeaderValue::from_static("text/plain"));
         let request = request.body(ResponseBody::empty()).unwrap();
+        let (parts, _) = request.into_parts();
 
-        let result = request.accepted_content_types();
+        let result = parts.accepted_content_types();
         assert_eq!(
             result,
             vec!["application/json", "application/xml", "text/plain"]
@@ -156,8 +125,9 @@ mod tests {
             .header(RANGE, "bytes=0-499")
             .body(())
             .unwrap();
+        let (parts, ()) = request.into_parts();
 
-        let range = request.range(RANGE).unwrap().unwrap();
+        let range = parts.range(RANGE).unwrap().unwrap();
         assert_eq!(range, (0, Some(499)));
     }
 
@@ -167,8 +137,9 @@ mod tests {
             .header(RANGE, "bytes=0-")
             .body(())
             .unwrap();
+        let (parts, ()) = request.into_parts();
 
-        let range = request.range(RANGE).unwrap().unwrap();
+        let range = parts.range(RANGE).unwrap().unwrap();
         assert_eq!(range, (0, None));
     }
 
@@ -178,36 +149,27 @@ mod tests {
             .header(RANGE, "bytes=500-499")
             .body(())
             .unwrap();
+        let (parts, ()) = request.into_parts();
 
-        let range = request.range(RANGE);
+        let range = parts.range(RANGE);
         assert!(range.is_err());
 
         let request = Request::builder()
             .header(RANGE, "bytes=-499")
             .body(())
             .unwrap();
+        let (parts, ()) = request.into_parts();
 
-        let range = request.range(RANGE);
+        let range = parts.range(RANGE);
         assert!(range.is_err());
 
         let request = Request::builder()
             .header(RANGE, "bytes=plouf")
             .body(())
             .unwrap();
+        let (parts, ()) = request.into_parts();
 
-        let range = request.range(RANGE);
+        let range = parts.range(RANGE);
         assert!(range.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_into_async_read() {
-        let mut request = Request::builder()
-            .body(String::from("Hello World!"))
-            .unwrap()
-            .into_async_read();
-
-        let mut buf = Vec::new();
-        request.read_to_end(&mut buf).await.unwrap();
-        assert_eq!(buf, b"Hello World!");
     }
 }

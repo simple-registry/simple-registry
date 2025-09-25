@@ -1,51 +1,27 @@
 use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
 use crate::registry::server::auth::PeerCertificate;
-use crate::registry::server::ServerContext;
+use crate::registry::server::request_ext::{HeaderExt, IntoAsyncRead};
+use crate::registry::server::route::Route;
+use crate::registry::server::{router, ServerContext};
 use crate::registry::{Error, ResponseBody};
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{CONTENT_TYPE, WWW_AUTHENTICATE};
+use hyper::header::{CONTENT_RANGE, CONTENT_TYPE, RANGE, WWW_AUTHENTICATE};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use opentelemetry::trace::TraceContextExt;
-use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
 use std::convert::Infallible;
 use std::fmt::Debug;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::pin;
 use tracing::{debug, error, info, instrument, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-use crate::registry::blob::QueryBlobParameters;
-use crate::registry::content_discovery::{ReferrerParameters, TagsParameters};
-use crate::registry::manifest::QueryManifestParameters;
-use crate::registry::server::deserialize_ext::DeserializeExt;
-use crate::registry::upload::{QueryNewUploadParameters, QueryUploadParameters};
-
-static ROUTE_HEALTHZ_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/healthz$").unwrap());
-static ROUTE_METRICS_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/metrics").unwrap());
-static ROUTE_API_VERSION_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/v2/?$").unwrap());
-static ROUTE_UPLOADS_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^/v2/(?P<name>.+)/blobs/uploads/?$").unwrap());
-static ROUTE_UPLOAD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^/v2/(?P<name>.+)/blobs/uploads/(?P<uuid>[0-9a-fA-F-]+)$").unwrap()
-});
-static ROUTE_BLOB_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^/v2/(?P<name>.+)/blobs/(?P<digest>.+)$").unwrap());
-static ROUTE_MANIFEST_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^/v2/(?P<name>.+)/manifests/(?P<reference>.+)$").unwrap());
-static ROUTE_REFERRERS_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^/v2/(?P<name>.+)/referrers/(?P<digest>.+)$").unwrap());
-static ROUTE_LIST_TAGS_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^/v2/(?P<name>.+)/tags/list$").unwrap());
-static ROUTE_CATALOG_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^/v2/_catalog$").unwrap());
 
 pub async fn serve_request<S>(
     stream: TokioIo<S>,
@@ -60,9 +36,8 @@ pub async fn serve_request<S>(
         stream,
         service_fn(move |mut request| {
             if let Some(ref cert_data) = peer_certificate {
-                request
-                    .extensions_mut()
-                    .insert(PeerCertificate(Arc::new(cert_data.clone())));
+                let peer_certificate = PeerCertificate(Arc::new(cert_data.clone()));
+                request.extensions_mut().insert(peer_certificate);
             }
             handle_request(context_clone.clone(), request)
         }),
@@ -161,136 +136,154 @@ async fn handle_request(
 #[instrument(skip(context, req))]
 async fn router(
     context: Arc<ServerContext>,
-    mut req: Request<Incoming>,
+    req: Request<Incoming>,
 ) -> Result<Response<ResponseBody>, Error> {
-    let path = req.uri().path().to_string();
+    let (parts, incoming) = req.into_parts();
 
-    let identity = context.authenticate_request(&req).await?;
-    req.extensions_mut().insert(identity.clone());
+    let route = router::parse(&parts.method, &parts.uri);
+    let identity = context.authenticate_request(&parts).await?;
+    context.registry.validate_request(&route, &identity).await?;
 
-    if ROUTE_API_VERSION_REGEX.is_match(&path) && req.method() == Method::GET {
-        return context.registry.handle_get_api_version(&identity).await;
-    } else if let Some(params) = QueryNewUploadParameters::from_regex(&path, &ROUTE_UPLOADS_REGEX) {
-        if req.method() == Method::POST {
-            return context
+    match route {
+        Route::Unknown => {
+            if [Method::GET, Method::HEAD].contains(&parts.method) {
+                Err(Error::NotFound)
+            } else {
+                Err(Error::Unsupported)
+            }
+        }
+        Route::ApiVersion => context.registry.handle_get_api_version().await,
+        Route::StartUpload { namespace, digest } => {
+            context
                 .registry
-                .handle_start_upload(req, params, &identity)
-                .await;
+                .handle_start_upload(namespace, digest)
+                .await
         }
-    } else if let Some(params) = QueryUploadParameters::from_regex(&path, &ROUTE_UPLOAD_REGEX) {
-        match *req.method() {
-            Method::GET => return context.registry.handle_get_upload(params, &identity).await,
-            Method::PATCH => {
-                return context
-                    .registry
-                    .handle_patch_upload(req, params, &identity)
-                    .await
-            }
-            Method::PUT => {
-                return context
-                    .registry
-                    .handle_put_upload(req, params, &identity)
-                    .await
-            }
-            Method::DELETE => {
-                return context
-                    .registry
-                    .handle_delete_upload(params, &identity)
-                    .await
-            }
-            _ => { /* NOOP */ }
+        Route::GetUpload { namespace, uuid } => {
+            context.registry.handle_get_upload(namespace, uuid).await
         }
-    } else if let Some(params) = QueryBlobParameters::from_regex(&path, &ROUTE_BLOB_REGEX) {
-        match *req.method() {
-            Method::GET => {
-                return context
-                    .registry
-                    .handle_get_blob(req, params, identity.clone())
-                    .await
-            }
-            Method::HEAD => {
-                return context
-                    .registry
-                    .handle_head_blob(req, params, identity.clone())
-                    .await
-            }
-            Method::DELETE => {
-                return context
-                    .registry
-                    .handle_delete_blob(params, identity.clone())
-                    .await
-            }
-            _ => { /* NOOP */ }
-        }
-    } else if let Some(params) = QueryManifestParameters::from_regex(&path, &ROUTE_MANIFEST_REGEX) {
-        match *req.method() {
-            Method::GET => {
-                return context
-                    .registry
-                    .handle_get_manifest(req, params, identity.clone())
-                    .await
-            }
-            Method::HEAD => {
-                return context
-                    .registry
-                    .handle_head_manifest(req, params, identity.clone())
-                    .await
-            }
-            Method::PUT => {
-                return context
-                    .registry
-                    .handle_put_manifest(req, params, identity.clone())
-                    .await
-            }
-            Method::DELETE => {
-                return context
-                    .registry
-                    .handle_delete_manifest(params, identity.clone())
-                    .await
-            }
-            _ => { /* NOOP */ }
-        }
-    } else if let Some(params) = ReferrerParameters::from_regex(&path, &ROUTE_REFERRERS_REGEX) {
-        if req.method() == Method::GET {
-            return context
+        Route::PatchUpload { namespace, uuid } => {
+            let start_offset = parts.range(CONTENT_RANGE)?.map(|(start, _)| start);
+            let body_stream = incoming.into_async_read();
+
+            context
                 .registry
-                .handle_get_referrers(req, params, identity.clone())
-                .await;
+                .handle_patch_upload(namespace, uuid, start_offset, body_stream)
+                .await
         }
-    } else if ROUTE_CATALOG_REGEX.is_match(&path) {
-        if req.method() == Method::GET {
-            return context
+        Route::PutUpload {
+            namespace,
+            uuid,
+            digest,
+        } => {
+            let body_stream = incoming.into_async_read();
+
+            context
                 .registry
-                .handle_list_catalog(req, identity.clone())
-                .await;
+                .handle_put_upload(namespace, uuid, &digest, body_stream)
+                .await
         }
-    } else if let Some(params) = TagsParameters::from_regex(&path, &ROUTE_LIST_TAGS_REGEX) {
-        if req.method() == Method::GET {
-            return context
+        Route::DeleteUpload { namespace, uuid } => {
+            context.registry.handle_delete_upload(namespace, uuid).await
+        }
+        Route::GetBlob { namespace, digest } => {
+            let mime_types = parts.accepted_content_types();
+            let range = parts.range(RANGE)?;
+
+            context
                 .registry
-                .handle_list_tags(req, params, identity.clone())
-                .await;
+                .handle_get_blob(namespace, &digest, &mime_types, range)
+                .await
         }
-    } else if ROUTE_HEALTHZ_REGEX.is_match(&path) {
-        return Ok(Response::builder()
+        Route::HeadBlob { namespace, digest } => {
+            let mime_types = parts.accepted_content_types();
+
+            context
+                .registry
+                .handle_head_blob(namespace, &digest, &mime_types)
+                .await
+        }
+        Route::DeleteBlob { namespace, digest } => {
+            context
+                .registry
+                .handle_delete_blob(namespace, &digest)
+                .await
+        }
+        Route::GetManifest {
+            namespace,
+            reference,
+        } => {
+            let mime_types = parts.accepted_content_types();
+
+            context
+                .registry
+                .handle_get_manifest(namespace, reference, &mime_types)
+                .await
+        }
+        Route::HeadManifest {
+            namespace,
+            reference,
+        } => {
+            let mime_types = parts.accepted_content_types();
+
+            context
+                .registry
+                .handle_head_manifest(namespace, reference, &mime_types)
+                .await
+        }
+        Route::PutManifest {
+            namespace,
+            reference,
+        } => {
+            let mime_type = parts
+                .get_header(CONTENT_TYPE)
+                .ok_or(Error::ManifestInvalid(
+                    "No Content-Type header provided".to_string(),
+                ))?;
+
+            let body_stream = incoming.into_async_read();
+
+            context
+                .registry
+                .handle_put_manifest(namespace, reference, mime_type, body_stream)
+                .await
+        }
+        Route::DeleteManifest {
+            namespace,
+            reference,
+        } => {
+            context
+                .registry
+                .handle_delete_manifest(namespace, reference)
+                .await
+        }
+        Route::GetReferrer {
+            namespace,
+            digest,
+            artifact_type,
+        } => {
+            context
+                .registry
+                .handle_get_referrers(namespace, &digest, artifact_type)
+                .await
+        }
+        Route::ListCatalog { n, last } => context.registry.handle_list_catalog(n, last).await,
+        Route::ListTags { namespace, n, last } => {
+            context.registry.handle_list_tags(namespace, n, last).await
+        }
+        Route::Healthz => Ok(Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "application/json")
             .body(ResponseBody::Fixed(Full::new(Bytes::from(
                 r#"{"status":"ok"}"#,
-            ))))?);
-    } else if ROUTE_METRICS_REGEX.is_match(&path) {
-        let (content_type, metrics) = METRICS_PROVIDER.gather()?;
-
-        return Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, content_type)
-            .body(ResponseBody::Fixed(Full::new(Bytes::from(metrics))))?);
-    }
-
-    if [Method::GET, Method::HEAD].contains(req.method()) {
-        Err(Error::NotFound)
-    } else {
-        Err(Error::Unsupported)
+            ))))?),
+        Route::Metrics => {
+            let (content_type, metrics) = METRICS_PROVIDER.gather()?;
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, content_type)
+                .body(ResponseBody::Fixed(Full::new(Bytes::from(metrics))))?)
+        }
     }
 }
 

@@ -1,14 +1,14 @@
 use crate::registry::oci::{Digest, Error};
 use regex::Regex;
 use serde::de::Visitor;
-use serde::{de, Deserialize, Deserializer};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::sync::LazyLock;
 
 static TAG_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\w[\w.-]{0,127}$").unwrap());
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum Reference {
     Tag(String),
     Digest(Digest),

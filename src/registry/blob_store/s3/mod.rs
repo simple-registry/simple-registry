@@ -349,7 +349,7 @@ impl BlobStore for Backend {
         &self,
         name: &str,
         uuid: &str,
-        digest: Option<Digest>,
+        digest: Option<&Digest>,
     ) -> Result<Digest, Error> {
         let key = path_builder::upload_path(name, uuid);
 
@@ -393,6 +393,7 @@ impl BlobStore for Backend {
             size += staged_size;
         }
 
+        let digest = digest.cloned();
         let digest = digest.unwrap_or(self.load_hasher(name, uuid, size).await?.digest());
 
         self.store

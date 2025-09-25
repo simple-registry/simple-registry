@@ -552,7 +552,7 @@ mod tests {
         for (tag, digest) in tag_digests {
             let result = registry
                 .get_manifest(
-                    registry.validate_namespace(namespace).unwrap(),
+                    registry.get_repository_for_namespace(namespace).unwrap(),
                     slice::from_ref(&media_type),
                     namespace,
                     Reference::Tag(tag.clone()),
@@ -686,7 +686,7 @@ mod tests {
         registry.enforce_retention(namespace).await.unwrap();
 
         // Get repository for get_manifest calls
-        let repository = registry.validate_namespace(namespace).unwrap();
+        let repository = registry.get_repository_for_namespace(namespace).unwrap();
         let accepted_types = vec![];
 
         // Verify 'latest' is kept (global policy)
@@ -779,7 +779,7 @@ mod tests {
         // Verify manifest still exists
         let manifest = registry
             .get_manifest(
-                registry.validate_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).unwrap(),
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),

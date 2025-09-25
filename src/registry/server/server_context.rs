@@ -6,8 +6,7 @@ use crate::registry::server::auth::{
 };
 use crate::registry::server::ClientIdentity;
 use crate::registry::{Error, Registry};
-use hyper::body::Incoming;
-use hyper::Request;
+use hyper::http::request::Parts;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::instrument;
@@ -61,22 +60,19 @@ impl ServerContext {
         }
     }
 
-    #[instrument(skip(self, request))]
-    pub async fn authenticate_request(
-        &self,
-        request: &Request<Incoming>,
-    ) -> Result<ClientIdentity, Error> {
+    #[instrument(skip(self, parts))]
+    pub async fn authenticate_request(&self, parts: &Parts) -> Result<ClientIdentity, Error> {
         let mut identity = ClientIdentity::default();
 
         self.mtls_middleware
-            .authenticate(request, &mut identity)
+            .authenticate(parts, &mut identity)
             .await?;
 
         // Check OIDC validators first (stop on first match)
         // OIDC is checked first because JWT validation is fast and stateless, and may find
         // tokens in the Authorization header that are Basic Auth tokens.
         for validator in self.oidc_middlewares.iter() {
-            match validator.authenticate(request, &mut identity).await {
+            match validator.authenticate(parts, &mut identity).await {
                 Ok(AuthResult::Authenticated) => return Ok(identity),
                 Ok(AuthResult::NoCredentials) => {}
                 Err(e) => return Err(e),
@@ -85,7 +81,7 @@ impl ServerContext {
 
         match self
             .basic_auth_middleware
-            .authenticate(request, &mut identity)
+            .authenticate(parts, &mut identity)
             .await
         {
             Ok(AuthResult::Authenticated) => return Ok(identity),

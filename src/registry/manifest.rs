@@ -1,14 +1,10 @@
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::oci::{Digest, Manifest, Reference};
-use crate::registry::server::request_ext::RequestExt;
 use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
-use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, Repository, ResponseBody};
-use http_body_util::BodyExt;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
-use hyper::{body, Method, Request, Response, StatusCode};
-use serde::Deserialize;
-use tokio::io::AsyncReadExt;
+use hyper::{Method, Response, StatusCode};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{error, instrument, warn};
 
 pub const OCI_SUBJECT: &str = "OCI-Subject";
@@ -29,12 +25,6 @@ pub struct HeadManifestResponse {
 pub struct PutManifestResponse {
     pub digest: Digest,
     pub subject: Option<Digest>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct QueryManifestParameters {
-    pub name: String,
-    pub reference: Reference,
 }
 
 pub struct ParsedManifestDigests {
@@ -231,8 +221,6 @@ impl Registry {
         content_type: Option<&String>,
         body: &[u8],
     ) -> Result<PutManifestResponse, Error> {
-        self.validate_namespace(namespace)?;
-
         let manifest_digests = parse_manifest_digests(body, content_type)?;
 
         let digest = match reference {
@@ -303,8 +291,6 @@ impl Registry {
         namespace: &str,
         reference: Reference,
     ) -> Result<(), Error> {
-        self.validate_namespace(namespace)?;
-
         match reference {
             Reference::Tag(tag) => {
                 let link = LinkKind::Tag(tag);
@@ -384,27 +370,17 @@ impl Registry {
     }
 
     // API Handlers
-    #[instrument(skip(self, request))]
-    pub async fn handle_head_manifest<T>(
+    #[instrument(skip(self))]
+    pub async fn handle_head_manifest(
         &self,
-        request: Request<T>,
-        parameters: QueryManifestParameters,
-        identity: ClientIdentity,
+        namespace: &str,
+        reference: Reference,
+        mime_types: &[String],
     ) -> Result<Response<ResponseBody>, Error> {
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::get_manifest(&parameters.name, &parameters.reference),
-            &identity,
-        )?;
+        let repository = self.get_repository_for_namespace(namespace)?;
 
         let manifest = self
-            .head_manifest(
-                repository,
-                &request.accepted_content_types(),
-                &parameters.name,
-                parameters.reference,
-            )
+            .head_manifest(repository, mime_types, namespace, reference)
             .await?;
 
         let res = if let Some(media_type) = manifest.media_type {
@@ -425,27 +401,17 @@ impl Registry {
         Ok(res)
     }
 
-    #[instrument(skip(self, request))]
-    pub async fn handle_get_manifest<T>(
+    #[instrument(skip(self))]
+    pub async fn handle_get_manifest(
         &self,
-        request: Request<T>,
-        parameters: QueryManifestParameters,
-        identity: ClientIdentity,
+        namespace: &str,
+        reference: Reference,
+        mime_types: &[String],
     ) -> Result<Response<ResponseBody>, Error> {
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::get_manifest(&parameters.name, &parameters.reference),
-            &identity,
-        )?;
+        let repository = self.get_repository_for_namespace(namespace)?;
 
         let manifest = self
-            .get_manifest(
-                repository,
-                &request.accepted_content_types(),
-                &parameters.name,
-                parameters.reference,
-            )
+            .get_manifest(repository, mime_types, namespace, reference)
             .await?;
 
         let res = if let Some(content_type) = manifest.media_type {
@@ -464,43 +430,31 @@ impl Registry {
         Ok(res)
     }
 
-    #[instrument(skip(self, request))]
-    pub async fn handle_put_manifest<T>(
+    #[instrument(skip(self, body_stream))]
+    pub async fn handle_put_manifest<S>(
         &self,
-        request: Request<T>,
-        parameters: QueryManifestParameters,
-        identity: ClientIdentity,
+        namespace: &str,
+        reference: Reference,
+        mime_type: String,
+        mut body_stream: S,
     ) -> Result<Response<ResponseBody>, Error>
     where
-        T: body::Body,
+        S: AsyncRead + Unpin + Send,
     {
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::put_manifest(&parameters.name, &parameters.reference),
-            &identity,
-        )?;
+        let mut request_body = String::new();
 
-        let content_type = request
-            .get_header(CONTENT_TYPE)
-            .ok_or(Error::ManifestInvalid(
-                "No Content-Type header provided".to_string(),
-            ))?;
+        body_stream
+            .read_to_string(&mut request_body)
+            .await
+            .map_err(|_| {
+                Error::ManifestInvalid("Unable to retrieve manifest from client query".to_string())
+            })?;
+        let request_body = request_body.into_bytes();
 
-        let request_body = request.into_body().collect().await.map_err(|_| {
-            Error::ManifestInvalid("Unable to retrieve manifest from client query".to_string())
-        })?;
-        let body = request_body.to_bytes();
-
-        let location = format!("/v2/{}/manifests/{}", parameters.name, parameters.reference);
+        let location = format!("/v2/{namespace}/manifests/{reference}");
 
         let manifest = self
-            .put_manifest(
-                &parameters.name,
-                parameters.reference,
-                Some(&content_type),
-                &body,
-            )
+            .put_manifest(namespace, reference, Some(&mime_type), &request_body)
             .await?;
 
         let res = match manifest.subject {
@@ -523,18 +477,10 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn handle_delete_manifest(
         &self,
-        parameters: QueryManifestParameters,
-        identity: ClientIdentity,
+        namespace: &str,
+        reference: Reference,
     ) -> Result<Response<ResponseBody>, Error> {
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::delete_manifest(&parameters.name, &parameters.reference),
-            &identity,
-        )?;
-
-        self.delete_manifest(&parameters.name, parameters.reference)
-            .await?;
+        self.delete_manifest(namespace, reference).await?;
 
         let res = Response::builder()
             .status(StatusCode::ACCEPTED)
@@ -549,10 +495,8 @@ mod tests {
     use super::*;
     use crate::registry::server::response_ext::IntoAsyncRead;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use http_body_util::Empty;
-    use hyper::body::Bytes;
-    use hyper::Uri;
     use serde_json::json;
+    use std::io::Cursor;
     use std::slice;
     use tokio::io::AsyncReadExt;
 
@@ -626,7 +570,7 @@ mod tests {
         // Verify manifest was stored
         let stored_manifest = registry
             .get_manifest(
-                registry.validate_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).unwrap(),
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
@@ -684,7 +628,7 @@ mod tests {
         // Test get manifest by tag
         let manifest = registry
             .get_manifest(
-                registry.validate_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).unwrap(),
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
@@ -699,7 +643,7 @@ mod tests {
         // Test get manifest by digest
         let manifest = registry
             .get_manifest(
-                registry.validate_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).unwrap(),
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Digest(response.digest.clone()),
@@ -743,7 +687,7 @@ mod tests {
         // Test head manifest by tag
         let manifest = registry
             .head_manifest(
-                registry.validate_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).unwrap(),
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
@@ -758,7 +702,7 @@ mod tests {
         // Test head manifest by digest
         let manifest = registry
             .head_manifest(
-                registry.validate_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).unwrap(),
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Digest(response.digest.clone()),
@@ -808,7 +752,7 @@ mod tests {
         // Verify tag is deleted
         assert!(registry
             .get_manifest(
-                registry.validate_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).unwrap(),
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
@@ -825,7 +769,7 @@ mod tests {
         // Verify digest is deleted
         assert!(registry
             .get_manifest(
-                registry.validate_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).unwrap(),
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Digest(response.digest),
@@ -901,24 +845,12 @@ mod tests {
             .await
             .unwrap();
 
-        let uri = Uri::builder()
-            .path_and_query(format!("/v2/{namespace}/manifests/{tag}"))
-            .build()
-            .unwrap();
+        let mime_types = Vec::new();
 
-        let request = Request::builder()
-            .method(Method::HEAD)
-            .uri(uri)
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-
-        let parameters = QueryManifestParameters {
-            name: namespace.to_string(),
-            reference: Reference::Tag(tag.to_string()),
-        };
+        let reference = Reference::Tag(tag.to_string());
 
         let response = registry
-            .handle_head_manifest(request, parameters, ClientIdentity::default())
+            .handle_head_manifest(namespace, reference, &mime_types)
             .await
             .unwrap();
 
@@ -962,24 +894,11 @@ mod tests {
             .await
             .unwrap();
 
-        let uri = Uri::builder()
-            .path_and_query(format!("/v2/{namespace}/manifests/{tag}"))
-            .build()
-            .unwrap();
-
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-
-        let parameters = QueryManifestParameters {
-            name: namespace.to_string(),
-            reference: Reference::Tag(tag.to_string()),
-        };
+        let reference = Reference::Tag(tag.to_string());
+        let accepted_mime_types = Vec::new();
 
         let response = registry
-            .handle_get_manifest(request, parameters, ClientIdentity::default())
+            .handle_get_manifest(namespace, reference, &accepted_mime_types)
             .await
             .unwrap();
 
@@ -1014,27 +933,18 @@ mod tests {
         let tag = "latest";
         let (content, media_type) = create_test_manifest();
 
-        let uri = Uri::builder()
-            .path_and_query(format!("/v2/{namespace}/manifests/{tag}"))
-            .build()?;
+        let reference = Reference::Tag(tag.to_string());
 
-        let request = Request::builder()
-            .method(Method::PUT)
-            .uri(uri)
-            .header(CONTENT_TYPE, &media_type)
-            .body(ResponseBody::fixed(content.clone()))?;
-
-        let parameters = QueryManifestParameters {
-            name: namespace.to_string(),
-            reference: Reference::Tag(tag.to_string()),
-        };
+        let manifest_stream = Cursor::new(content.clone());
 
         let response = registry
-            .handle_put_manifest(request, parameters, ClientIdentity::default())
-            .await?;
+            .handle_put_manifest(namespace, reference, media_type.clone(), manifest_stream)
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::CREATED);
         let digest = response.get_header(DOCKER_CONTENT_DIGEST).unwrap();
+
         assert_eq!(
             response.get_header(LOCATION),
             Some(format!("/v2/{namespace}/manifests/{tag}"))
@@ -1043,12 +953,13 @@ mod tests {
         // Verify manifest was stored
         let stored_manifest = registry
             .get_manifest(
-                registry.validate_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).unwrap(),
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
-            .await?;
+            .await
+            .unwrap();
 
         assert_eq!(stored_manifest.content, content);
         assert_eq!(stored_manifest.media_type.unwrap(), media_type);
@@ -1085,13 +996,10 @@ mod tests {
             .await
             .unwrap();
 
-        let parameters = QueryManifestParameters {
-            name: namespace.to_string(),
-            reference: Reference::Tag(tag.to_string()),
-        };
+        let reference = Reference::Tag(tag.to_string());
 
         let response = registry
-            .handle_delete_manifest(parameters, ClientIdentity::default())
+            .handle_delete_manifest(namespace, reference)
             .await
             .unwrap();
 
@@ -1100,7 +1008,7 @@ mod tests {
         // Verify manifest is deleted
         assert!(registry
             .get_manifest(
-                registry.validate_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).unwrap(),
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),

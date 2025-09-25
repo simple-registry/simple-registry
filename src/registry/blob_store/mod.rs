@@ -49,7 +49,7 @@ pub trait BlobStore: Send + Sync {
         &self,
         namespace: &str,
         uuid: &str,
-        digest: Option<Digest>,
+        digest: Option<&Digest>,
     ) -> Result<Digest, Error>;
 
     async fn delete_upload(&self, namespace: &str, uuid: &str) -> Result<(), Error>;

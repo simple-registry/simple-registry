@@ -1,39 +1,25 @@
 use crate::registry::oci::{Descriptor, Digest, ReferrerList};
-use crate::registry::server::request_ext::RequestExt;
 use crate::registry::server::response_ext::ResponseExt;
-use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, ResponseBody};
 use hyper::header::CONTENT_TYPE;
-use hyper::{Request, Response, StatusCode};
-use serde::{Deserialize, Serialize};
+use hyper::{Response, StatusCode};
+use serde::Serialize;
+use std::fmt::Debug;
 use tracing::instrument;
 
 pub const OCI_FILTERS_APPLIED: &str = "OCI-Filters-Applied";
-
-#[derive(Debug, Deserialize)]
-pub struct ReferrerParameters {
-    pub name: String,
-    pub digest: Digest,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TagsParameters {
-    pub name: String,
-}
 
 impl Registry {
     #[instrument]
     pub async fn get_referrers(
         &self,
         namespace: &str,
-        digest: Digest,
+        digest: &Digest,
         artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, Error> {
-        self.validate_namespace(namespace)?;
-
         Ok(self
             .metadata_store
-            .list_referrers(namespace, &digest, artifact_type)
+            .list_referrers(namespace, digest, artifact_type)
             .await?)
     }
 
@@ -62,8 +48,6 @@ impl Registry {
         n: Option<u16>,
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
-        self.validate_namespace(namespace)?;
-
         let n = n.unwrap_or(100);
 
         let (tags, next_last) = self.metadata_store.list_tags(namespace, n, last).await?;
@@ -74,32 +58,16 @@ impl Registry {
     }
 
     // API Handlers
-    #[instrument(skip(self, request))]
-    pub async fn handle_get_referrers<T>(
+    #[instrument(skip(self))]
+    pub async fn handle_get_referrers(
         &self,
-        request: Request<T>,
-        parameters: ReferrerParameters,
-        identity: ClientIdentity,
+        namespace: &str,
+        digest: &Digest,
+        artifact_type: Option<String>,
     ) -> Result<Response<ResponseBody>, Error> {
-        #[derive(Deserialize, Default)]
-        #[serde(rename_all = "camelCase")]
-        struct GetReferrersQuery {
-            artifact_type: Option<String>,
-        }
+        let query_supplied_artifact_type = artifact_type.is_some();
 
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::get_referrers(&parameters.name, &parameters.digest),
-            &identity,
-        )?;
-
-        let query: GetReferrersQuery = request.query_parameters()?;
-        let query_supplied_artifact_type = query.artifact_type.is_some();
-
-        let manifests = self
-            .get_referrers(&parameters.name, parameters.digest, query.artifact_type)
-            .await?;
+        let manifests = self.get_referrers(namespace, digest, artifact_type).await?;
 
         let referrer_list = ReferrerList {
             manifests,
@@ -123,28 +91,18 @@ impl Registry {
         Ok(res)
     }
 
-    #[instrument(skip(self, request))]
-    pub async fn handle_list_catalog<T>(
+    #[instrument(skip(self))]
+    pub async fn handle_list_catalog(
         &self,
-        request: Request<T>,
-        identity: ClientIdentity,
+        n: Option<u16>,
+        last: Option<String>,
     ) -> Result<Response<ResponseBody>, Error> {
-        #[derive(Debug, Deserialize, Default)]
-        struct CatalogQuery {
-            n: Option<u16>,
-            last: Option<String>,
-        }
-
         #[derive(Serialize, Debug)]
         struct CatalogResponse {
             repositories: Vec<String>,
         }
 
-        self.validate_request(None, &ClientRequest::list_catalog(), &identity)?;
-
-        let query: CatalogQuery = request.query_parameters()?;
-
-        let (repositories, link) = self.list_catalog(query.n, query.last).await?;
+        let (repositories, link) = self.list_catalog(n, last).await?;
 
         let catalog = CatalogResponse { repositories };
         let catalog = serde_json::to_string(&catalog)?;
@@ -152,40 +110,23 @@ impl Registry {
         Response::paginated(ResponseBody::fixed(catalog.into_bytes()), link.as_deref())
     }
 
-    #[instrument(skip(self, request))]
-    pub async fn handle_list_tags<T>(
+    #[instrument(skip(self))]
+    pub async fn handle_list_tags(
         &self,
-        request: Request<T>,
-        parameters: TagsParameters,
-        identity: ClientIdentity,
+        namespace: &str,
+        n: Option<u16>,
+        last: Option<String>,
     ) -> Result<Response<ResponseBody>, Error> {
-        #[derive(Deserialize, Debug, Default)]
-        struct TagsQuery {
-            n: Option<u16>,
-            last: Option<String>,
-        }
-
         #[derive(Serialize, Debug)]
-        struct TagsResponse {
-            name: String,
+        struct TagsResponse<'a> {
+            name: &'a str,
             tags: Vec<String>,
         }
 
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::list_tags(&parameters.name),
-            &identity,
-        )?;
-
-        let query: TagsQuery = request.query_parameters()?;
-
-        let (tags, link) = self
-            .list_tags(&parameters.name, query.n, query.last)
-            .await?;
+        let (tags, link) = self.list_tags(namespace, n, last).await?;
 
         let tag_list = TagsResponse {
-            name: parameters.name.to_string(),
+            name: namespace,
             tags,
         };
         let tag_list = serde_json::to_string(&tag_list)?;
@@ -199,13 +140,8 @@ mod tests {
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::oci::Reference;
     use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
-    use crate::registry::server::ClientIdentity;
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use http_body_util::Empty;
-    use hyper::body::Bytes;
-    use hyper::Method;
-    use hyper::Uri;
     use std::str::FromStr;
     use tokio::io::AsyncReadExt;
 
@@ -240,14 +176,14 @@ mod tests {
 
         // Test empty referrers list
         let referrers = registry
-            .get_referrers(namespace, digest.clone(), None)
+            .get_referrers(namespace, &digest, None)
             .await
             .unwrap();
         assert!(referrers.is_empty());
 
         // Test with artifact type filter
         let referrers = registry
-            .get_referrers(namespace, digest.clone(), Some("test-type".to_string()))
+            .get_referrers(namespace, &digest, Some("test-type".to_string()))
             .await
             .unwrap();
         assert!(referrers.is_empty());
@@ -416,24 +352,8 @@ mod tests {
             .unwrap();
 
         // Test getting referrers
-        let uri = Uri::builder()
-            .path_and_query(format!("/v2/{namespace}/referrers/{base_manifest_digest}"))
-            .build()
-            .unwrap();
-
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-
-        let parameters = ReferrerParameters {
-            name: namespace.to_string(),
-            digest: base_manifest_digest.clone(),
-        };
-
         let response = registry
-            .handle_get_referrers(request, parameters, ClientIdentity::default())
+            .handle_get_referrers(namespace, &base_manifest_digest, None)
             .await
             .unwrap();
 
@@ -477,17 +397,7 @@ mod tests {
                 .unwrap();
         }
 
-        // Test without pagination
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(Uri::from_static("/v2/_catalog"))
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-
-        let response = registry
-            .handle_list_catalog(request, ClientIdentity::default())
-            .await
-            .unwrap();
+        let response = registry.handle_list_catalog(None, None).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         let has_link = response.get_header("Link").is_some();
@@ -505,16 +415,7 @@ mod tests {
         assert!(!has_link);
 
         // Test with pagination
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(Uri::from_static("/v2/_catalog?n=2"))
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-
-        let response = registry
-            .handle_list_catalog(request, ClientIdentity::default())
-            .await
-            .unwrap();
+        let response = registry.handle_list_catalog(Some(2), None).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         let has_link = response.get_header("Link").is_some();
@@ -556,23 +457,8 @@ mod tests {
         }
 
         // Test without pagination
-        let uri = Uri::builder()
-            .path_and_query(format!("/v2/{namespace}/tags/list"))
-            .build()
-            .unwrap();
-
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-
-        let parameters = TagsParameters {
-            name: namespace.to_string(),
-        };
-
         let response = registry
-            .handle_list_tags(request, parameters, ClientIdentity::default())
+            .handle_list_tags(namespace, None, None)
             .await
             .unwrap();
 
@@ -596,23 +482,8 @@ mod tests {
         assert!(!has_link);
 
         // Test with pagination
-        let uri = Uri::builder()
-            .path_and_query(format!("/v2/{namespace}/tags/list?n=2"))
-            .build()
-            .unwrap();
-
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-
-        let parameters = TagsParameters {
-            name: namespace.to_string(),
-        };
-
         let response = registry
-            .handle_list_tags(request, parameters, ClientIdentity::default())
+            .handle_list_tags(namespace, Some(2), None)
             .await
             .unwrap();
 

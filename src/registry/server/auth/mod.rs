@@ -5,10 +5,8 @@ pub mod oidc;
 use crate::registry::server::ClientIdentity;
 use crate::registry::Error;
 use async_trait::async_trait;
-use hyper::body::Incoming;
-use hyper::Request;
-
 pub use basic_auth::BasicAuthValidator;
+use hyper::http::request::Parts;
 pub use mtls::{MtlsValidator, PeerCertificate};
 
 /// Result of authentication attempt
@@ -31,7 +29,7 @@ pub trait AuthMiddleware: Send + Sync {
     /// - `Err(Error)` if credentials were found but invalid (should fail the request)
     async fn authenticate(
         &self,
-        request: &Request<Incoming>,
+        parts: &Parts,
         identity: &mut ClientIdentity,
     ) -> Result<AuthResult, Error>;
 }

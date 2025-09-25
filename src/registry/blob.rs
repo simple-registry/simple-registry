@@ -1,13 +1,10 @@
 use crate::registry::blob_store::{BlobStore, Reader};
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::oci::Digest;
-use crate::registry::server::request_ext::RequestExt;
 use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
-use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::{blob_store, task_queue, Error, Registry, Repository, ResponseBody};
-use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
-use hyper::{Method, Request, Response, StatusCode};
-use serde::Deserialize;
+use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
+use hyper::{Method, Response, StatusCode};
 use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
@@ -30,12 +27,6 @@ pub struct HeadBlobResponse {
     pub size: u64,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct QueryBlobParameters {
-    pub name: String,
-    pub digest: Digest,
-}
-
 impl Registry {
     #[instrument(skip(repository))]
     pub async fn head_blob(
@@ -43,19 +34,22 @@ impl Registry {
         repository: &Repository,
         accepted_mime_types: &[String],
         namespace: &str,
-        digest: Digest,
+        digest: &Digest,
     ) -> Result<HeadBlobResponse, Error> {
-        let local_blob = self.blob_store.get_blob_size(&digest).await;
+        let local_blob = self.blob_store.get_blob_size(digest).await;
 
         if let Ok(size) = local_blob {
-            return Ok(HeadBlobResponse { digest, size });
+            return Ok(HeadBlobResponse {
+                digest: digest.clone(),
+                size,
+            });
         } else if !repository.is_pull_through() {
-            warn!("Blob not found locally: {}", digest);
+            warn!("Blob not found locally: {digest}");
             return Err(Error::BlobUnknown);
         }
 
         let res = repository
-            .query_blob(&Method::HEAD, accepted_mime_types, namespace, &digest)
+            .query_blob(&Method::HEAD, accepted_mime_types, namespace, digest)
             .await?;
 
         let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
@@ -68,7 +62,7 @@ impl Registry {
         storage_engine: Arc<dyn BlobStore + Send + Sync>,
         stream: impl AsyncRead + Send + Sync + Unpin + 'static,
         namespace: String,
-        digest: Digest,
+        digest: &Digest,
     ) -> Result<(), Error> {
         let session_id = Uuid::new_v4().to_string();
 
@@ -105,7 +99,7 @@ impl Registry {
         if let Ok(response) = local_blob {
             return Ok(response);
         } else if !repository.is_pull_through() {
-            warn!("Blob not found locally: {}", digest);
+            warn!("Blob not found locally: {digest}");
             return Err(Error::BlobUnknown);
         }
 
@@ -129,13 +123,16 @@ impl Registry {
             .await?
             .into_async_read();
         let cache_namespace = namespace.to_string();
+
+        let task_key = format!("{cache_namespace}/{digest}");
+
         let cache_digest = digest.clone();
 
-        let task_key = format!("{cache_namespace}/{cache_digest}");
-        self.task_queue.submit(&task_key, async {
+        self.task_queue.submit(&task_key, async move {
             let digest_string = cache_digest.to_string();
+
             debug!("Fetching blob: {digest_string}");
-            Self::copy_blob(store, cache_reader, cache_namespace, cache_digest)
+            Self::copy_blob(store, cache_reader, cache_namespace, &cache_digest)
                 .await
                 .map_err(|e| task_queue::Error::TaskExecution(e.to_string()))?;
 
@@ -187,15 +184,13 @@ impl Registry {
     }
 
     #[instrument]
-    pub async fn delete_blob(&self, namespace: &str, digest: Digest) -> Result<(), Error> {
-        self.validate_namespace(namespace)?;
-
+    pub async fn delete_blob(&self, namespace: &str, digest: &Digest) -> Result<(), Error> {
         let link = LinkKind::Layer(digest.clone());
         if let Err(error) = self.metadata_store.delete_link(namespace, &link).await {
             warn!("Failed to delete layer link: {error}");
         }
 
-        let link = LinkKind::Config(digest);
+        let link = LinkKind::Config(digest.clone());
         if let Err(error) = self.metadata_store.delete_link(namespace, &link).await {
             warn!("Failed to delete config link: {error}");
         }
@@ -205,27 +200,17 @@ impl Registry {
 
     // API Handlers
 
-    #[instrument(skip(self, request))]
-    pub async fn handle_head_blob<T>(
+    #[instrument(skip(self))]
+    pub async fn handle_head_blob(
         &self,
-        request: Request<T>,
-        parameters: QueryBlobParameters,
-        identity: ClientIdentity,
+        namespace: &str,
+        digest: &Digest,
+        mime_types: &[String],
     ) -> Result<Response<ResponseBody>, Error> {
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::get_blob(&parameters.name, &parameters.digest),
-            &identity,
-        )?;
+        let repository = self.get_repository_for_namespace(namespace)?;
 
         let blob = self
-            .head_blob(
-                repository,
-                &request.accepted_content_types(),
-                &parameters.name,
-                parameters.digest,
-            )
+            .head_blob(repository, mime_types, namespace, digest)
             .await?;
 
         let res = Response::builder()
@@ -240,18 +225,10 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn handle_delete_blob(
         &self,
-        parameters: QueryBlobParameters,
-        identity: ClientIdentity,
+        namespace: &str,
+        digest: &Digest,
     ) -> Result<Response<ResponseBody>, Error> {
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::delete_blob(&parameters.name, &parameters.digest),
-            &identity,
-        )?;
-
-        self.delete_blob(&parameters.name, parameters.digest)
-            .await?;
+        self.delete_blob(namespace, digest).await?;
 
         let res = Response::builder()
             .status(StatusCode::ACCEPTED)
@@ -260,28 +237,18 @@ impl Registry {
         Ok(res)
     }
 
-    #[instrument(skip(self, request))]
-    pub async fn handle_get_blob<T>(
+    #[instrument(skip(self))]
+    pub async fn handle_get_blob(
         &self,
-        request: Request<T>,
-        parameters: QueryBlobParameters,
-        identity: ClientIdentity,
+        namespace: &str,
+        digest: &Digest,
+        mime_types: &[String],
+        range: Option<(u64, Option<u64>)>,
     ) -> Result<Response<ResponseBody>, Error> {
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::get_blob(&parameters.name, &parameters.digest),
-            &identity,
-        )?;
+        let repository = self.get_repository_for_namespace(namespace)?;
 
         let res = match self
-            .get_blob(
-                repository,
-                &request.accepted_content_types(),
-                &parameters.name,
-                &parameters.digest,
-                request.range(RANGE)?,
-            )
+            .get_blob(repository, mime_types, namespace, digest, range)
             .await?
         {
             GetBlobResponse::RangedReader(reader, (start, end), total_length) => {
@@ -291,7 +258,7 @@ impl Registry {
 
                 Response::builder()
                     .status(StatusCode::PARTIAL_CONTENT)
-                    .header(DOCKER_CONTENT_DIGEST, parameters.digest.to_string())
+                    .header(DOCKER_CONTENT_DIGEST, digest.to_string())
                     .header(ACCEPT_RANGES, "bytes")
                     .header(CONTENT_LENGTH, length.to_string())
                     .header(CONTENT_RANGE, range)
@@ -299,7 +266,7 @@ impl Registry {
             }
             GetBlobResponse::Reader(stream, total_length) => Response::builder()
                 .status(StatusCode::OK)
-                .header(DOCKER_CONTENT_DIGEST, parameters.digest.to_string())
+                .header(DOCKER_CONTENT_DIGEST, digest.to_string())
                 .header(ACCEPT_RANGES, "bytes")
                 .header(CONTENT_LENGTH, total_length)
                 .body(ResponseBody::streaming(stream))?,
@@ -329,7 +296,7 @@ mod tests {
 
         let (digest, repository) = create_test_blob(registry, namespace, content).await;
         let response = registry
-            .head_blob(&repository, &[], namespace, digest.clone())
+            .head_blob(&repository, &[], namespace, &digest)
             .await
             .unwrap();
 
@@ -464,10 +431,7 @@ mod tests {
         assert!(namespace_links.contains(&config_link));
 
         // Delete the blob
-        registry
-            .delete_blob(namespace, digest.clone())
-            .await
-            .unwrap();
+        registry.delete_blob(namespace, &digest).await.unwrap();
 
         // Verify links are deleted
         assert!(registry
@@ -505,14 +469,9 @@ mod tests {
         let storage_engine = registry.blob_store.clone();
 
         // Test copy_blob
-        Registry::copy_blob(
-            storage_engine,
-            stream,
-            namespace.to_string(),
-            digest.clone(),
-        )
-        .await
-        .unwrap();
+        Registry::copy_blob(storage_engine, stream, namespace.to_string(), &digest)
+            .await
+            .unwrap();
 
         // Verify the blob was copied correctly
         let stored_content = registry.blob_store.read_blob(&digest).await.unwrap();
@@ -537,24 +496,10 @@ mod tests {
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
-        let uri = hyper::Uri::builder()
-            .path_and_query(format!("/v2/{namespace}/blobs/{digest}"))
-            .build()
-            .unwrap();
-
-        let request = Request::builder()
-            .method(Method::HEAD)
-            .uri(uri)
-            .body(ResponseBody::empty())
-            .unwrap();
-
-        let parameters = QueryBlobParameters {
-            name: namespace.to_string(),
-            digest: digest.clone(),
-        };
+        let accepted_content_types = Vec::new();
 
         let response = registry
-            .handle_head_blob(request, parameters, ClientIdentity::default())
+            .handle_head_blob(namespace, &digest, &accepted_content_types)
             .await
             .unwrap();
 
@@ -621,13 +566,8 @@ mod tests {
         // Verify blob exists
         assert!(registry.blob_store.read_blob(&digest).await.is_ok());
 
-        let parameters = QueryBlobParameters {
-            name: namespace.to_string(),
-            digest: digest.clone(),
-        };
-
         let response = registry
-            .handle_delete_blob(parameters, ClientIdentity::default())
+            .handle_delete_blob(namespace, &digest)
             .await
             .unwrap();
 
@@ -682,24 +622,10 @@ mod tests {
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
-        let uri = hyper::Uri::builder()
-            .path_and_query(format!("/v2/{namespace}/blobs/{digest}"))
-            .build()
-            .unwrap();
-
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .body(ResponseBody::empty())
-            .unwrap();
-
-        let parameters = QueryBlobParameters {
-            name: namespace.to_string(),
-            digest: digest.clone(),
-        };
+        let accepted_content_types = Vec::new();
 
         let response = registry
-            .handle_get_blob(request, parameters, ClientIdentity::default())
+            .handle_get_blob(namespace, &digest, &accepted_content_types, None)
             .await
             .unwrap();
 
@@ -737,25 +663,11 @@ mod tests {
         let content = b"test blob content";
         let (digest, _) = create_test_blob(registry, namespace, content).await;
 
-        let uri = hyper::Uri::builder()
-            .path_and_query(format!("/v2/{namespace}/blobs/{digest}"))
-            .build()
-            .unwrap();
-
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .header(RANGE, "bytes=5-10")
-            .body(ResponseBody::empty())
-            .unwrap();
-
-        let parameters = QueryBlobParameters {
-            name: namespace.to_string(),
-            digest: digest.clone(),
-        };
+        let accepted_content_types = Vec::new();
+        let range = Some((5, Some(10)));
 
         let response = registry
-            .handle_get_blob(request, parameters, ClientIdentity::default())
+            .handle_get_blob(namespace, &digest, &accepted_content_types, range)
             .await
             .unwrap();
 

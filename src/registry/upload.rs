@@ -1,10 +1,7 @@
 use crate::registry::oci::Digest;
-use crate::registry::server::request_ext::{IntoAsyncRead, RequestExt};
-use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, ResponseBody};
-use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE, LOCATION, RANGE};
-use hyper::{body, Request, Response, StatusCode};
-use serde::Deserialize;
+use hyper::header::{CONTENT_LENGTH, LOCATION, RANGE};
+use hyper::{Response, StatusCode};
 use tokio::io::AsyncRead;
 use tracing::{error, instrument, warn};
 use uuid::Uuid;
@@ -17,17 +14,6 @@ pub enum StartUploadResponse {
     Session(String, String),
 }
 
-#[derive(Debug, Deserialize)]
-pub struct QueryNewUploadParameters {
-    pub name: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct QueryUploadParameters {
-    pub name: String,
-    pub uuid: Uuid,
-}
-
 impl Registry {
     #[instrument]
     pub async fn start_upload(
@@ -35,8 +21,6 @@ impl Registry {
         namespace: &str,
         digest: Option<Digest>,
     ) -> Result<StartUploadResponse, Error> {
-        self.validate_namespace(namespace)?;
-
         if let Some(digest) = digest {
             if self.blob_store.get_blob_size(&digest).await.is_ok() {
                 return Ok(StartUploadResponse::ExistingBlob(digest));
@@ -63,8 +47,6 @@ impl Registry {
     where
         S: AsyncRead + Unpin + Send + Sync + 'static,
     {
-        self.validate_namespace(namespace)?;
-
         let session_id = session_id.to_string();
         if let Some(start_offset) = start_offset {
             let (_, size, _) = self
@@ -102,14 +84,12 @@ impl Registry {
         &self,
         namespace: &str,
         session_id: Uuid,
-        digest: Digest,
+        digest: &Digest,
         stream: S,
     ) -> Result<(), Error>
     where
         S: AsyncRead + Unpin + Send + Sync + 'static,
     {
-        self.validate_namespace(namespace)?;
-
         let session_id = session_id.to_string();
 
         let append = self
@@ -127,7 +107,7 @@ impl Registry {
             .read_upload_summary(namespace, &session_id)
             .await?;
 
-        if upload_digest != digest {
+        if &upload_digest != digest {
             warn!("Expected digest '{digest}', got '{upload_digest}'");
             return Err(Error::DigestInvalid);
         }
@@ -144,8 +124,6 @@ impl Registry {
 
     #[instrument]
     pub async fn delete_upload(&self, namespace: &str, session_id: Uuid) -> Result<(), Error> {
-        self.validate_namespace(namespace)?;
-
         let uuid = session_id.to_string();
         self.blob_store.delete_upload(namespace, &uuid).await?;
 
@@ -158,8 +136,6 @@ impl Registry {
         namespace: &str,
         session_id: Uuid,
     ) -> Result<u64, Error> {
-        self.validate_namespace(namespace)?;
-
         let uuid = session_id.to_string();
         let (_, size, _) = self
             .blob_store
@@ -174,35 +150,16 @@ impl Registry {
     }
 
     // API Handlers
-    #[instrument(skip(self, request, identity))]
-    pub async fn handle_start_upload<T>(
+    #[instrument(skip(self))]
+    pub async fn handle_start_upload(
         &self,
-        request: Request<T>,
-        parameters: QueryNewUploadParameters,
-        identity: &ClientIdentity,
+        namespace: &str,
+        digest: Option<Digest>,
     ) -> Result<Response<ResponseBody>, Error> {
-        #[derive(Deserialize, Default)]
-        struct UploadQuery {
-            digest: Option<String>,
-        }
-
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::start_upload(&parameters.name),
-            identity,
-        )?;
-
-        let query: UploadQuery = request.query_parameters()?;
-        let digest = query
-            .digest
-            .map(|s| Digest::try_from(s.as_str()))
-            .transpose()?;
-
-        let res = match self.start_upload(&parameters.name, digest).await? {
+        let res = match self.start_upload(namespace, digest).await? {
             StartUploadResponse::ExistingBlob(digest) => Response::builder()
                 .status(StatusCode::CREATED)
-                .header(LOCATION, format!("/v2/{}/blobs/{digest}", parameters.name))
+                .header(LOCATION, format!("/v2/{namespace}/blobs/{digest}"))
                 .header(DOCKER_CONTENT_DIGEST, digest.to_string())
                 .body(ResponseBody::empty())?,
             StartUploadResponse::Session(location, session_uuid) => Response::builder()
@@ -216,141 +173,80 @@ impl Registry {
         Ok(res)
     }
 
-    #[instrument(skip(self, identity))]
+    #[instrument(skip(self))]
     pub async fn handle_get_upload(
         &self,
-        parameters: QueryUploadParameters,
-        identity: &ClientIdentity,
+        namespace: &str,
+        uuid: Uuid,
     ) -> Result<Response<ResponseBody>, Error> {
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::get_upload(&parameters.name),
-            identity,
-        )?;
-
-        let location = format!("/v2/{}/blobs/uploads/{}", parameters.name, parameters.uuid);
-
-        let range_max = self
-            .get_upload_range_max(&parameters.name, parameters.uuid)
-            .await?;
-        let range_max = format!("0-{range_max}");
+        let range_max = self.get_upload_range_max(namespace, uuid).await?;
 
         let res = Response::builder()
             .status(StatusCode::NO_CONTENT)
-            .header(LOCATION, location)
-            .header(RANGE, range_max)
-            .header(DOCKER_UPLOAD_UUID, parameters.uuid.to_string())
+            .header(LOCATION, format!("/v2/{namespace}/blobs/uploads/{uuid}"))
+            .header(RANGE, format!("0-{range_max}"))
+            .header(DOCKER_UPLOAD_UUID, uuid.to_string())
             .body(ResponseBody::empty())?;
 
         Ok(res)
     }
 
-    #[instrument(skip(self, request, identity))]
-    pub async fn handle_patch_upload<T>(
+    #[instrument(skip(self, body_stream))]
+    pub async fn handle_patch_upload<S>(
         &self,
-        request: Request<T>,
-        parameters: QueryUploadParameters,
-        identity: &ClientIdentity,
+        namespace: &str,
+        uuid: Uuid,
+        start_offset: Option<u64>,
+        body_stream: S,
     ) -> Result<Response<ResponseBody>, Error>
     where
-        T: body::Body + Unpin + Sync + Send + 'static,
-        T::Data: Send + Sync,
-        T::Error: Send + Sync + std::error::Error + 'static,
+        S: AsyncRead + Unpin + Send + Sync + 'static,
     {
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::update_upload(&parameters.name),
-            identity,
-        )?;
-
-        let start_offset = request.range(CONTENT_RANGE)?.map(|(start, _)| start);
-
-        let location = format!("/v2/{}/blobs/uploads/{}", &parameters.name, parameters.uuid);
-
         let range_max = self
-            .patch_upload(
-                &parameters.name,
-                parameters.uuid,
-                start_offset,
-                request.into_async_read(),
-            )
+            .patch_upload(namespace, uuid, start_offset, body_stream)
             .await?;
-        let range_max = format!("0-{range_max}");
 
         let res = Response::builder()
             .status(StatusCode::ACCEPTED)
-            .header(LOCATION, location)
-            .header(RANGE, range_max)
+            .header(LOCATION, format!("/v2/{namespace}/blobs/uploads/{uuid}"))
+            .header(RANGE, format!("0-{range_max}"))
             .header(CONTENT_LENGTH, 0)
-            .header(DOCKER_UPLOAD_UUID, parameters.uuid.to_string())
+            .header(DOCKER_UPLOAD_UUID, uuid.to_string())
             .body(ResponseBody::empty())?;
 
         Ok(res)
     }
 
-    #[instrument(skip(self, request, identity))]
-    pub async fn handle_put_upload<T>(
+    #[instrument(skip(self, body_reader))]
+    pub async fn handle_put_upload<S>(
         &self,
-        request: Request<T>,
-        parameters: QueryUploadParameters,
-        identity: &ClientIdentity,
+        namespace: &str,
+        uuid: Uuid,
+        digest: &Digest,
+        body_reader: S,
     ) -> Result<Response<ResponseBody>, Error>
     where
-        T: body::Body + Unpin + Sync + Send + 'static,
-        T::Data: Send + Sync,
-        T::Error: Send + Sync + std::error::Error + 'static,
+        S: AsyncRead + Unpin + Send + Sync + 'static,
     {
-        #[derive(Deserialize, Default)]
-        struct CompleteUploadQuery {
-            digest: String,
-        }
-
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::complete_upload(&parameters.name),
-            identity,
-        )?;
-
-        let query: CompleteUploadQuery = request.query_parameters()?;
-        let digest = Digest::try_from(query.digest.as_str())?;
-
-        self.complete_upload(
-            &parameters.name,
-            parameters.uuid,
-            digest,
-            request.into_async_read(),
-        )
-        .await?;
-
-        let location = format!("/v2/{}/blobs/{}", &parameters.name, query.digest);
+        self.complete_upload(namespace, uuid, digest, body_reader)
+            .await?;
 
         let res = Response::builder()
             .status(StatusCode::CREATED)
-            .header(LOCATION, location)
-            .header(DOCKER_CONTENT_DIGEST, query.digest)
+            .header(LOCATION, format!("/v2/{namespace}/blobs/{digest}"))
+            .header(DOCKER_CONTENT_DIGEST, digest.to_string())
             .body(ResponseBody::empty())?;
 
         Ok(res)
     }
 
-    #[instrument(skip(self, identity))]
+    #[instrument(skip(self))]
     pub async fn handle_delete_upload(
         &self,
-        parameters: QueryUploadParameters,
-        identity: &ClientIdentity,
+        namespace: &str,
+        uuid: Uuid,
     ) -> Result<Response<ResponseBody>, Error> {
-        let repository = self.validate_namespace(&parameters.name)?;
-        self.validate_request(
-            Some(repository),
-            &ClientRequest::cancel_upload(&parameters.name),
-            identity,
-        )?;
-
-        self.delete_upload(&parameters.name, parameters.uuid)
-            .await?;
+        self.delete_upload(namespace, uuid).await?;
 
         let res = Response::builder()
             .status(StatusCode::NO_CONTENT)
@@ -364,12 +260,7 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::registry::server::response_ext::ResponseExt;
-    use crate::registry::server::ClientIdentity;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use http_body_util::{BodyExt, Empty};
-    use hyper::body::Bytes;
-    use hyper::Method;
-    use hyper::Uri;
     use std::io::Cursor;
     use uuid::Uuid;
 
@@ -495,7 +386,7 @@ mod tests {
         // Complete upload with empty stream since content is already written
         let empty_stream = Cursor::new(Vec::new());
         registry
-            .complete_upload(namespace, session_id, upload_digest.clone(), empty_stream)
+            .complete_upload(namespace, session_id, &upload_digest, empty_stream)
             .await
             .unwrap();
 
@@ -608,26 +499,7 @@ mod tests {
         let namespace = "test-repo";
 
         // Test start upload without digest
-        let uri = Uri::builder()
-            .path_and_query(format!("/v2/{namespace}/blobs/uploads/"))
-            .build()
-            .unwrap();
-
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri(uri)
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-
-        let parameters = QueryNewUploadParameters {
-            name: namespace.to_string(),
-        };
-
-        let identity = ClientIdentity::default();
-        let response = registry
-            .handle_start_upload(request, parameters, &identity)
-            .await
-            .unwrap();
+        let response = registry.handle_start_upload(namespace, None).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let location = response.get_header(LOCATION).unwrap();
@@ -640,24 +512,8 @@ mod tests {
         let content = b"test content";
         let digest = registry.blob_store.create_blob(content).await.unwrap();
 
-        let uri = Uri::builder()
-            .path_and_query(format!("/v2/{namespace}/blobs/uploads/?digest={digest}"))
-            .build()
-            .unwrap();
-
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri(uri)
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-
-        let parameters = QueryNewUploadParameters {
-            name: namespace.to_string(),
-        };
-
-        let identity = ClientIdentity::default();
         let response = registry
-            .handle_start_upload(request, parameters, &identity)
+            .handle_start_upload(namespace, Some(digest.clone()))
             .await
             .unwrap();
 
@@ -695,23 +551,7 @@ mod tests {
             .await
             .unwrap();
 
-        let request = Request::builder()
-            .method("GET")
-            .uri(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
-            .body(Empty::<Bytes>::new().map_err(|_| unreachable!()).boxed());
-
-        assert!(request.is_ok());
-
-        let parameters = QueryUploadParameters {
-            name: namespace.to_string(),
-            uuid,
-        };
-
-        let identity = ClientIdentity::default();
-        let response = registry
-            .handle_get_upload(parameters, &identity)
-            .await
-            .unwrap();
+        let response = registry.handle_get_upload(namespace, uuid).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
@@ -748,26 +588,8 @@ mod tests {
             .await
             .unwrap();
 
-        let uri = Uri::builder()
-            .path_and_query(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
-            .build()
-            .unwrap();
-
-        let request = Request::builder()
-            .method(Method::PATCH)
-            .uri(uri)
-            .header(CONTENT_RANGE, "0-0")
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-
-        let parameters = QueryUploadParameters {
-            name: namespace.to_string(),
-            uuid,
-        };
-
-        let identity = ClientIdentity::default();
         let response = registry
-            .handle_patch_upload(request, parameters, &identity)
+            .handle_patch_upload(namespace, uuid, Some(0), Cursor::new(Vec::new()))
             .await
             .unwrap();
 
@@ -822,39 +644,20 @@ mod tests {
             .await
             .unwrap();
 
-        let uri = Uri::builder()
-            .path_and_query(format!(
-                "/v2/{namespace}/blobs/uploads/{uuid}?digest={digest}"
-            ))
-            .build()
-            .unwrap();
+        let body_stream = Cursor::new(Vec::new());
 
-        let request = Request::builder()
-            .method(Method::PUT)
-            .uri(uri)
-            .body(Empty::<Bytes>::new())
-            .unwrap();
-
-        let parameters = QueryUploadParameters {
-            name: namespace.to_string(),
-            uuid,
-        };
-
-        let identity = ClientIdentity::default();
         let response = registry
-            .handle_put_upload(request, parameters, &identity)
+            .handle_put_upload(namespace, uuid, &digest, body_stream)
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::CREATED);
-        assert_eq!(
-            response.get_header(LOCATION),
-            Some(format!("/v2/{namespace}/blobs/{digest}"))
-        );
-        assert_eq!(
-            response.get_header(DOCKER_CONTENT_DIGEST),
-            Some(digest.to_string())
-        );
+
+        let location = response.get_header(LOCATION);
+        assert_eq!(location, Some(format!("/v2/{namespace}/blobs/{digest}")));
+
+        let response_digest = response.get_header(DOCKER_CONTENT_DIGEST);
+        assert_eq!(response_digest, Some(digest.to_string()));
 
         // Verify blob exists
         let stored_content = registry.blob_store.read_blob(&digest).await.unwrap();
@@ -884,21 +687,8 @@ mod tests {
             .await
             .unwrap();
 
-        let request = Request::builder()
-            .method("DELETE")
-            .uri(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
-            .body(Empty::<Bytes>::new().map_err(|_| unreachable!()).boxed());
-
-        assert!(request.is_ok());
-
-        let parameters = QueryUploadParameters {
-            name: namespace.to_string(),
-            uuid,
-        };
-
-        let identity = ClientIdentity::default();
         let response = registry
-            .handle_delete_upload(parameters, &identity)
+            .handle_delete_upload(namespace, uuid)
             .await
             .unwrap();
 

@@ -4,16 +4,14 @@ pub mod provider;
 use crate::configuration::OidcProviderConfig;
 use crate::registry::cache::Cache;
 use crate::registry::http_client::{HttpClient, HttpClientConfig};
-use crate::registry::server::request_ext::RequestExt;
-use crate::registry::server::{ClientIdentity, OidcClaims};
-use crate::registry::Error;
-use async_trait::async_trait;
-use hyper::body::Incoming;
-use hyper::Request;
-
 use crate::registry::server::auth::basic_auth::extract_basic_auth;
 use crate::registry::server::auth::oidc::provider::{generic, github};
 use crate::registry::server::auth::{AuthMiddleware, AuthResult};
+use crate::registry::server::request_ext::HeaderExt;
+use crate::registry::server::{ClientIdentity, OidcClaims};
+use crate::registry::Error;
+use async_trait::async_trait;
+use hyper::http::request::Parts;
 pub use jwk::Jwk;
 pub use provider::OidcProvider;
 use tracing::debug;
@@ -62,16 +60,16 @@ impl OidcValidator {
 impl AuthMiddleware for OidcValidator {
     async fn authenticate(
         &self,
-        request: &Request<Incoming>,
+        parts: &Parts,
         identity: &mut ClientIdentity,
     ) -> Result<AuthResult, Error> {
-        let token = if let Some(bearer_token) = request.bearer_token() {
+        let token = if let Some(bearer_token) = parts.bearer_token() {
             debug!(
                 "Found Bearer token for OIDC provider '{}'",
                 self.provider_name
             );
             bearer_token
-        } else if let Some((username, password)) = extract_basic_auth(request) {
+        } else if let Some((username, password)) = extract_basic_auth(parts) {
             debug!("Found Basic auth credentials with username '{}'", username);
             if username != self.provider_name {
                 debug!(
@@ -112,6 +110,7 @@ mod tests {
     use base64::prelude::BASE64_STANDARD;
     use base64::Engine;
     use hyper::header::{HeaderValue, AUTHORIZATION};
+    use hyper::Request;
 
     #[test]
     fn test_oidc_bearer_token() {
@@ -123,8 +122,10 @@ mod tests {
             .body(ResponseBody::empty())
             .unwrap();
 
+        let (parts, _) = request.into_parts();
+
         assert_eq!(
-            request.bearer_token(),
+            parts.bearer_token(),
             Some("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9".to_string())
         );
     }
@@ -140,7 +141,9 @@ mod tests {
             .body(ResponseBody::empty())
             .unwrap();
 
-        let (username, password) = extract_basic_auth(&request).unwrap();
+        let (parts, _) = request.into_parts();
+
+        let (username, password) = extract_basic_auth(&parts).unwrap();
         assert_eq!(username, "github");
         assert_eq!(password, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
     }
