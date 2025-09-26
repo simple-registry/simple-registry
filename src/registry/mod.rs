@@ -3,7 +3,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
-use tracing::{debug, info, instrument};
+use tracing::{debug, error, info, instrument};
 
 pub mod blob;
 pub mod blob_store;
@@ -49,6 +49,8 @@ pub struct Registry {
     repositories: HashMap<String, Repository>,
     global_access_policy: Option<AccessPolicy>,
     global_retention_policy: Option<RetentionPolicy>,
+    global_immutable_tags: bool,
+    global_immutable_tags_exclusions: Vec<Regex>,
     update_pull_time: bool,
     scrub_dry_run: bool,
     upload_timeout: Duration,
@@ -103,6 +105,18 @@ impl Registry {
             Some(RetentionPolicy::new(&global_config.retention_policy)?)
         };
 
+        let global_immutable_tags_exclusions = global_config
+            .immutable_tags_exclusions
+            .iter()
+            .filter_map(|p| match Regex::new(p) {
+                Ok(regex) => Some(regex),
+                Err(e) => {
+                    error!("Invalid global regex pattern '{}': {}", p, e);
+                    None
+                }
+            })
+            .collect();
+
         let res = Self {
             update_pull_time: global_config.update_pull_time,
             blob_store,
@@ -110,6 +124,8 @@ impl Registry {
             repositories,
             global_access_policy,
             global_retention_policy,
+            global_immutable_tags: global_config.immutable_tags,
+            global_immutable_tags_exclusions,
             scrub_dry_run: true,
             upload_timeout: Duration::days(1),
             task_queue: TaskQueue::new(global_config.max_concurrent_cache_jobs)?,
@@ -203,6 +219,26 @@ impl Registry {
 
         Ok(())
     }
+
+    fn is_tag_mutable(&self, repository: &Repository, tag: &str) -> bool {
+        let immutable = if repository.immutable_tags {
+            true
+        } else {
+            self.global_immutable_tags
+        };
+
+        if !immutable {
+            return true;
+        }
+
+        let exclusions = if repository.immutable_tags_exclusions.is_empty() {
+            &self.global_immutable_tags_exclusions
+        } else {
+            &repository.immutable_tags_exclusions
+        };
+
+        exclusions.iter().any(|pattern| pattern.is_match(tag))
+    }
 }
 
 #[cfg(test)]
@@ -284,6 +320,8 @@ pub mod test_utils {
                 upstream: Vec::new(),
                 access_policy: RepositoryAccessPolicyConfig::default(),
                 retention_policy: RepositoryRetentionPolicyConfig { rules: Vec::new() },
+                immutable_tags: false,
+                immutable_tags_exclusions: Vec::new(),
             },
             &cache,
         )

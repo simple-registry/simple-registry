@@ -224,6 +224,21 @@ impl Registry {
 
         match reference {
             Reference::Tag(tag) => {
+                let repository = self.get_repository_for_namespace(namespace)?;
+
+                let tag_link = LinkKind::Tag(tag.clone());
+                if let Ok(existing_link) = self
+                    .metadata_store
+                    .read_link(namespace, &tag_link, false)
+                    .await
+                {
+                    if existing_link.target != digest && !self.is_tag_mutable(repository, tag) {
+                        return Err(Error::TagImmutable(format!(
+                            "Tag '{tag}' is immutable and cannot be overwritten"
+                        )));
+                    }
+                }
+
                 links.push((LinkKind::Tag(tag.clone()), digest.clone()));
                 links.push((LinkKind::Digest(digest.clone()), digest.clone()));
             }
@@ -1011,5 +1026,94 @@ mod tests {
     async fn test_handle_delete_manifest_s3() {
         let t = S3RegistryTestCase::new();
         test_handle_delete_manifest_impl(t.registry()).await;
+    }
+
+    async fn test_immutable_tags_impl(test_case: &mut FSRegistryTestCase) {
+        let namespace = "test-repo";
+        let (content, media_type) = create_test_manifest();
+
+        let mut repositories_config = crate::registry::test_utils::create_test_repository_config();
+        repositories_config
+            .get_mut("test-repo")
+            .unwrap()
+            .immutable_tags = true;
+        repositories_config
+            .get_mut("test-repo")
+            .unwrap()
+            .immutable_tags_exclusions = vec!["^latest$".to_string(), "^dev-.*".to_string()];
+
+        test_case.set_repository_config(repositories_config);
+        let registry = test_case.registry();
+
+        let immutable_tag = "v1.0.0";
+        let _ = registry
+            .put_manifest(
+                namespace,
+                &Reference::Tag(immutable_tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
+            .await
+            .unwrap();
+
+        let new_content = b"different content";
+        let result = registry
+            .put_manifest(
+                namespace,
+                &Reference::Tag(immutable_tag.to_string()),
+                Some(&media_type),
+                new_content,
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::TagImmutable(_))));
+
+        let mutable_tag = "latest";
+        let _ = registry
+            .put_manifest(
+                namespace,
+                &Reference::Tag(mutable_tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
+            .await
+            .unwrap();
+
+        let result = registry
+            .put_manifest(
+                namespace,
+                &Reference::Tag(mutable_tag.to_string()),
+                Some(&media_type),
+                new_content,
+            )
+            .await;
+        assert!(result.is_ok());
+
+        let dev_tag = "dev-feature-123";
+        let _ = registry
+            .put_manifest(
+                namespace,
+                &Reference::Tag(dev_tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
+            .await
+            .unwrap();
+
+        let result = registry
+            .put_manifest(
+                namespace,
+                &Reference::Tag(dev_tag.to_string()),
+                Some(&media_type),
+                new_content,
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_immutable_tags_fs() {
+        let mut t = FSRegistryTestCase::new();
+        test_immutable_tags_impl(&mut t).await;
     }
 }

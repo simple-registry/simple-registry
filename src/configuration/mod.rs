@@ -55,6 +55,10 @@ pub struct GlobalConfig {
     pub access_policy: RepositoryAccessPolicyConfig,
     #[serde(default)]
     pub retention_policy: RepositoryRetentionPolicyConfig,
+    #[serde(default)]
+    pub immutable_tags: bool,
+    #[serde(default)]
+    pub immutable_tags_exclusions: Vec<String>,
 }
 
 impl Default for GlobalConfig {
@@ -65,6 +69,8 @@ impl Default for GlobalConfig {
             update_pull_time: GlobalConfig::default_update_pull_time(),
             access_policy: RepositoryAccessPolicyConfig::default(),
             retention_policy: RepositoryRetentionPolicyConfig::default(),
+            immutable_tags: false,
+            immutable_tags_exclusions: Vec::new(),
         }
     }
 }
@@ -140,6 +146,10 @@ pub struct RepositoryConfig {
     pub access_policy: RepositoryAccessPolicyConfig,
     #[serde(default)]
     pub retention_policy: RepositoryRetentionPolicyConfig,
+    #[serde(default)]
+    pub immutable_tags: bool,
+    #[serde(default)]
+    pub immutable_tags_exclusions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

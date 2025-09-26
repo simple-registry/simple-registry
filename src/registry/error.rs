@@ -20,6 +20,7 @@ pub enum Error {
     NameInvalid,
     NameUnknown,
     //SizeInvalid,
+    TagImmutable(String),
     Unauthorized(String),
     Denied(String),
     Unsupported,
@@ -47,7 +48,7 @@ impl Display for Error {
             Error::NameInvalid => write!(f, "invalid repository name"),
             Error::NameUnknown => write!(f, "repository name not known to registry"),
             //RegistryError::SizeInvalid => "provided length did not match content length",
-            Error::Unauthorized(s) | Error::Denied(s) => write!(f, "{s}"),
+            Error::TagImmutable(s) | Error::Unauthorized(s) | Error::Denied(s) => write!(f, "{s}"),
             Error::Unsupported => write!(f, "the operation is unsupported"),
             //RegistryError::TooManyRequests => "too many requests",
             // Convenience

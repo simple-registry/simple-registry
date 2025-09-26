@@ -4,8 +4,9 @@ use crate::registry::cache::Cache;
 use crate::registry::oci::{Digest, Reference};
 use hyper::body::Incoming;
 use hyper::{Method, Response};
+use regex::Regex;
 use std::sync::Arc;
-use tracing::instrument;
+use tracing::{error, instrument};
 
 pub mod access_policy;
 pub mod retention_policy;
@@ -19,6 +20,8 @@ pub struct Repository {
     pub upstreams: Vec<RegistryClient>,
     pub access_policy: AccessPolicy,
     pub retention_policy: RetentionPolicy,
+    pub immutable_tags: bool,
+    pub immutable_tags_exclusions: Vec<Regex>,
 }
 
 impl Repository {
@@ -35,11 +38,25 @@ impl Repository {
         let access_policy = AccessPolicy::new(&config.access_policy)?;
         let retention_policy = RetentionPolicy::new(&config.retention_policy)?;
 
+        let immutable_tags_exclusions = config
+            .immutable_tags_exclusions
+            .into_iter()
+            .filter_map(|p| match Regex::new(&p) {
+                Ok(regex) => Some(regex),
+                Err(e) => {
+                    error!("Invalid regex pattern '{}': {}", p, e);
+                    None
+                }
+            })
+            .collect();
+
         Ok(Self {
             name,
             upstreams,
             access_policy,
             retention_policy,
+            immutable_tags: config.immutable_tags,
+            immutable_tags_exclusions,
         })
     }
 
