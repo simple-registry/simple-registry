@@ -1,15 +1,14 @@
 use crate::configuration::IdentityConfig;
 use crate::registry::server::auth::{AuthMiddleware, AuthResult};
-use crate::registry::server::request_ext::RequestExt;
+use crate::registry::server::request_ext::HeaderExt;
 use crate::registry::server::ClientIdentity;
 use crate::registry::Error;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use async_trait::async_trait;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use hyper::body::Incoming;
 use hyper::header::AUTHORIZATION;
-use hyper::Request;
+use hyper::http::request::Parts;
 use std::collections::HashMap;
 use tracing::{debug, error, instrument};
 
@@ -56,10 +55,10 @@ impl BasicAuthValidator {
 impl AuthMiddleware for BasicAuthValidator {
     async fn authenticate(
         &self,
-        request: &Request<Incoming>,
+        parts: &Parts,
         identity: &mut ClientIdentity,
     ) -> Result<AuthResult, Error> {
-        let Some((username, password)) = extract_basic_auth(request) else {
+        let Some((username, password)) = extract_basic_auth(parts) else {
             return Ok(AuthResult::NoCredentials);
         };
 
@@ -75,8 +74,8 @@ impl AuthMiddleware for BasicAuthValidator {
 }
 
 /// Extracts Basic authentication credentials from the Authorization header.
-pub fn extract_basic_auth<T>(request: &Request<T>) -> Option<(String, String)> {
-    let Some(authorization) = request.get_header(AUTHORIZATION) else {
+pub fn extract_basic_auth(parts: &Parts) -> Option<(String, String)> {
+    let Some(authorization) = parts.get_header(AUTHORIZATION) else {
         debug!("No authorization header found");
         return None;
     };
@@ -94,6 +93,7 @@ mod tests {
     use super::*;
     use crate::registry::ResponseBody;
     use hyper::header::HeaderValue;
+    use hyper::Request;
 
     #[test]
     fn test_extract_basic_auth() {
@@ -104,8 +104,10 @@ mod tests {
             )
             .body(ResponseBody::empty())
             .unwrap();
+        let (parts, _) = request.into_parts();
+
         assert_eq!(
-            extract_basic_auth(&request),
+            extract_basic_auth(&parts),
             Some(("user".to_string(), "password".to_string()))
         );
 
@@ -116,7 +118,9 @@ mod tests {
             )
             .body(ResponseBody::empty())
             .unwrap();
-        assert_eq!(extract_basic_auth(&request), None);
+        let (parts, _) = request.into_parts();
+
+        assert_eq!(extract_basic_auth(&parts), None);
 
         let request = Request::builder()
             .header(
@@ -125,7 +129,9 @@ mod tests {
             )
             .body(ResponseBody::empty())
             .unwrap();
-        assert_eq!(extract_basic_auth(&request), None);
+        let (parts, _) = request.into_parts();
+
+        assert_eq!(extract_basic_auth(&parts), None);
 
         let request = Request::builder()
             .header(
@@ -134,7 +140,9 @@ mod tests {
             )
             .body(ResponseBody::empty())
             .unwrap();
-        assert_eq!(extract_basic_auth(&request), None);
+        let (parts, _) = request.into_parts();
+
+        assert_eq!(extract_basic_auth(&parts), None);
 
         let request = Request::builder()
             .header(
@@ -143,9 +151,12 @@ mod tests {
             )
             .body(ResponseBody::empty())
             .unwrap();
-        assert_eq!(extract_basic_auth(&request), None);
+        let (parts, _) = request.into_parts();
+
+        assert_eq!(extract_basic_auth(&parts), None);
 
         let request = Request::builder().body(ResponseBody::empty()).unwrap();
-        assert_eq!(extract_basic_auth(&request), None);
+        let (parts, _) = request.into_parts();
+        assert_eq!(extract_basic_auth(&parts), None);
     }
 }

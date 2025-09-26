@@ -16,7 +16,8 @@
 //! - `request`: Request details (action, namespace, digest, reference)
 
 use crate::configuration::Error as ConfigError;
-pub use crate::registry::server::{ClientIdentity, ClientRequest};
+use crate::registry::server::route::Route;
+pub use crate::registry::server::ClientIdentity;
 use crate::registry::Error;
 use cel_interpreter::{Context, Program, Value};
 use serde::Deserialize;
@@ -70,18 +71,14 @@ impl AccessPolicy {
     /// Evaluates the access policy for a given request and identity.
     ///
     /// # Arguments
-    /// * `request` - The client request containing action and resource information
+    /// * `request` - The validation info containing action and resource information
     /// * `identity` - The client identity containing authentication information
     ///
     /// # Returns
     /// * `Ok(true)` if access should be granted
     /// * `Ok(false)` if access should be denied
     /// * `Err` if policy evaluation fails
-    pub fn evaluate(
-        &self,
-        request: &ClientRequest,
-        identity: &ClientIdentity,
-    ) -> Result<bool, Error> {
+    pub fn evaluate(&self, request: &Route, identity: &ClientIdentity) -> Result<bool, Error> {
         if self.rules.is_empty() {
             return Ok(self.default_allow);
         }
@@ -132,7 +129,7 @@ impl AccessPolicy {
     }
 
     fn build_context<'a>(
-        request: &'a ClientRequest,
+        request: &'a Route,
         identity: &'a ClientIdentity,
     ) -> Result<Context<'a>, Error> {
         let mut context = Context::default();
@@ -145,7 +142,7 @@ impl AccessPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::oci::{Digest, Reference};
+    use crate::registry::server::route::Route;
 
     #[test]
     fn test_access_policy_default_allow_no_rules() {
@@ -154,7 +151,7 @@ mod tests {
             rules: vec![],
         };
         let policy = AccessPolicy::new(&config).unwrap();
-        let request = ClientRequest::get_api_version();
+        let request = Route::ApiVersion;
         let identity = ClientIdentity::default();
 
         let result = policy.evaluate(&request, &identity);
@@ -168,7 +165,7 @@ mod tests {
             rules: vec![],
         };
         let policy = AccessPolicy::new(&config).unwrap();
-        let request = ClientRequest::get_api_version();
+        let request = Route::ApiVersion;
         let identity = ClientIdentity::default();
 
         let result = policy.evaluate(&request, &identity);
@@ -183,7 +180,7 @@ mod tests {
         };
         let policy = AccessPolicy::new(&config).unwrap();
 
-        let request = ClientRequest::get_api_version();
+        let request = Route::ApiVersion;
         let identity = ClientIdentity {
             username: Some("forbidden".to_string()),
             ..ClientIdentity::default()
@@ -209,7 +206,7 @@ mod tests {
         };
         let policy = AccessPolicy::new(&config).unwrap();
 
-        let request = ClientRequest::get_api_version();
+        let request = Route::ApiVersion;
         let identity = ClientIdentity {
             username: Some("admin".to_string()),
             ..ClientIdentity::default()
@@ -225,154 +222,5 @@ mod tests {
 
         let result = policy.evaluate(&request, &identity);
         assert!(!result.unwrap());
-    }
-
-    #[test]
-    fn test_get_api_version() {
-        let request = ClientRequest::get_api_version();
-        assert_eq!(request.action, "get-api-version");
-        assert!(request.namespace.is_none());
-        assert!(request.digest.is_none());
-        assert!(request.reference.is_none());
-    }
-
-    #[test]
-    fn test_get_manifest() {
-        use crate::registry::oci::Reference;
-        let namespace = "test-namespace";
-        let reference = Reference::Tag("tag".to_string());
-        let request = ClientRequest::get_manifest(namespace, &reference);
-
-        assert_eq!(request.action, "get-manifest");
-        assert_eq!(request.namespace, Some(namespace.to_string()));
-        assert_eq!(request.reference, Some(reference.to_string()));
-        assert!(request.digest.is_none());
-    }
-
-    #[test]
-    fn test_get_blob() {
-        use crate::registry::oci::Digest;
-        let namespace = "test-namespace";
-        let digest = Digest::Sha256("1234567890abcdef".to_string());
-        let request = ClientRequest::get_blob(namespace, &digest);
-
-        assert_eq!(request.action, "get-blob");
-        assert_eq!(request.namespace, Some(namespace.to_string()));
-        assert_eq!(request.digest, Some(digest.to_string()));
-        assert!(request.reference.is_none());
-    }
-
-    #[test]
-    fn test_upload_operations() {
-        let name = "test-upload";
-
-        let start_request = ClientRequest::start_upload(name);
-        assert_eq!(start_request.action, "start-upload");
-        assert_eq!(start_request.namespace, Some(name.to_string()));
-
-        let update_request = ClientRequest::update_upload(name);
-        assert_eq!(update_request.action, "update-upload");
-        assert_eq!(update_request.namespace, Some(name.to_string()));
-
-        let complete_request = ClientRequest::complete_upload(name);
-        assert_eq!(complete_request.action, "complete-upload");
-        assert_eq!(complete_request.namespace, Some(name.to_string()));
-
-        let cancel_request = ClientRequest::cancel_upload(name);
-        assert_eq!(cancel_request.action, "cancel-upload");
-        assert_eq!(cancel_request.namespace, Some(name.to_string()));
-
-        let get_request = ClientRequest::get_upload(name);
-        assert_eq!(get_request.action, "get-upload");
-        assert_eq!(get_request.namespace, Some(name.to_string()));
-    }
-
-    #[test]
-    fn test_delete_operations() {
-        use crate::registry::oci::{Digest, Reference};
-        let name = "test-namespace";
-        let digest = Digest::Sha256("1234567890abcdef".to_string());
-        let reference = Reference::Tag("tag".to_string());
-
-        let delete_blob_request = ClientRequest::delete_blob(name, &digest);
-        assert_eq!(delete_blob_request.action, "delete-blob");
-        assert_eq!(delete_blob_request.namespace, Some(name.to_string()));
-        assert_eq!(delete_blob_request.digest, Some(digest.to_string()));
-
-        let delete_manifest_request = ClientRequest::delete_manifest(name, &reference);
-        assert_eq!(delete_manifest_request.action, "delete-manifest");
-        assert_eq!(delete_manifest_request.namespace, Some(name.to_string()));
-        assert_eq!(
-            delete_manifest_request.reference,
-            Some(reference.to_string())
-        );
-    }
-
-    #[test]
-    fn test_get_referrers() {
-        use crate::registry::oci::Digest;
-        let name = "test-namespace";
-        let digest = Digest::Sha256("1234567890abcdef".to_string());
-        let request = ClientRequest::get_referrers(name, &digest);
-
-        assert_eq!(request.action, "get-referrers");
-        assert_eq!(request.namespace, Some(name.to_string()));
-        assert_eq!(request.digest, Some(digest.to_string()));
-        assert!(request.reference.is_none());
-    }
-
-    #[test]
-    fn test_list_operations() {
-        let list_catalog_request = ClientRequest::list_catalog();
-        assert_eq!(list_catalog_request.action, "list-catalog");
-        assert!(list_catalog_request.namespace.is_none());
-        assert!(list_catalog_request.digest.is_none());
-        assert!(list_catalog_request.reference.is_none());
-
-        let name = "test-namespace";
-        let list_tags_request = ClientRequest::list_tags(name);
-        assert_eq!(list_tags_request.action, "list-tags");
-        assert_eq!(list_tags_request.namespace, Some(name.to_string()));
-        assert!(list_tags_request.digest.is_none());
-        assert!(list_tags_request.reference.is_none());
-    }
-
-    #[test]
-    fn test_is_write() {
-        let write_actions = [
-            ClientRequest::start_upload("test"),
-            ClientRequest::update_upload("test"),
-            ClientRequest::complete_upload("test"),
-            ClientRequest::cancel_upload("test"),
-            ClientRequest::put_manifest("test", &Reference::Tag("tag".to_string())),
-            ClientRequest::delete_manifest("test", &Reference::Tag("tag".to_string())),
-            ClientRequest::delete_blob("test", &Digest::Sha256("1234567890abcdef".to_string())),
-        ];
-
-        let read_actions = [
-            ClientRequest::get_api_version(),
-            ClientRequest::get_manifest("test", &Reference::Tag("tag".to_string())),
-            ClientRequest::get_blob("test", &Digest::Sha256("1234567890abcdef".to_string())),
-            ClientRequest::get_upload("test"),
-            ClientRequest::get_referrers("test", &Digest::Sha256("1234567890abcdef".to_string())),
-            ClientRequest::list_catalog(),
-            ClientRequest::list_tags("test"),
-        ];
-
-        for request in write_actions {
-            assert!(
-                request.is_write(),
-                "{} should be a write operation",
-                request.action
-            );
-        }
-
-        for request in read_actions {
-            assert!(
-                !request.is_write(),
-                "{} should not be a write operation",
-                request.action
-            );
-        }
     }
 }

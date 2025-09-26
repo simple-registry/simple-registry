@@ -75,16 +75,22 @@ The following variables are available in the CEL expressions:
 - `identity.oidc.provider_name`: The configured provider name (e.g., "github-actions")
 - `identity.oidc.provider_type`: The provider type ("GitHub Actions" or "Generic OIDC")
 - `identity.oidc.claims`: Map of all JWT claims (access with bracket notation: `identity.oidc.claims["claim_name"]`)
-- `request.action`: The action being requested
-- `request.namespace`: The repository being accessed
-- `request.digest`: The digest of the blob being accessed
-- `request.reference`: The reference of the item being accessed
+- `request.action`: The action being requested (always present)
+- `request.namespace`: The repository being accessed (on repository-specific operations)
+- `request.digest`: The digest of the blob/manifest (on blob and some manifest operations)
+- `request.reference`: The tag or digest reference (on manifest operations)
+- `request.uuid`: Upload session UUID (on upload operations)
+- `request.n`: Maximum number of results for pagination (optional)
+- `request.last`: Last result marker for pagination (optional)
+- `request.artifact_type`: Filter for referrer queries (optional)
 
 ### Actions
 
 The `request.action` variable can have the following values:
+- `healthz`: Health check endpoint
+- `metrics`: Metrics endpoint
 - `get-api-version`: Get the API version
-- `start-upload`, `update-upload`, `complete-upload`, `get-upload`: Upload a blob
+- `start-upload`, `update-upload`, `complete-upload`, `get-upload`: Upload operations
 - `cancel-upload`: Delete a pending upload
 - `get-blob`: Download a blob
 - `delete-blob`: Delete a blob
@@ -94,6 +100,7 @@ The `request.action` variable can have the following values:
 - `get-referrers`: Get the referrers of a manifest
 - `list-catalog`: List the catalog
 - `list-tags`: List the tags
+- `unknown`: Unknown/invalid request
 
 ## OIDC Authentication Examples
 

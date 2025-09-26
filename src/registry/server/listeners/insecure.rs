@@ -82,8 +82,8 @@ impl InsecureListener {
 
             debug!("Accepted connection from {remote_address}");
             let stream = TokioIo::new(tcp);
-            let context = self.context.load().clone();
-            let timeouts = self.timeouts.load().clone();
+            let context = Arc::clone(&self.context.load());
+            let timeouts = Arc::clone(&self.timeouts.load());
 
             tokio::spawn(Box::pin(serve_request(stream, context, None, timeouts)));
         }

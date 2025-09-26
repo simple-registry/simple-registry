@@ -31,7 +31,7 @@ impl LinkMetadata {
                 Digest::try_from(target.as_str()).map_err(|e| Error::InvalidData(e.to_string()))?;
 
             Ok(LinkMetadata {
-                target: target.clone(),
+                target,
                 created_at: Some(Utc::now()),
                 accessed_at: None,
             })

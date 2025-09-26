@@ -1,4 +1,3 @@
-use crate::registry::server::{ClientIdentity, ClientRequest};
 use crate::registry::{Error, Registry, ResponseBody};
 use hyper::{Response, StatusCode};
 use tracing::instrument;
@@ -7,14 +6,8 @@ pub const DOCKER_DISTRIBUTION_API_VERSION: &str = "Docker-Distribution-API-Versi
 pub const X_POWERED_BY: &str = "X-Powered-By";
 
 impl Registry {
-    // API Handlers
-    #[instrument(skip(self, identity))]
-    pub async fn handle_get_api_version(
-        &self,
-        identity: &ClientIdentity,
-    ) -> Result<Response<ResponseBody>, Error> {
-        self.validate_request(None, &ClientRequest::get_api_version(), identity)?;
-
+    #[instrument(skip(self))]
+    pub async fn handle_get_api_version(&self) -> Result<Response<ResponseBody>, Error> {
         let res = Response::builder()
             .status(StatusCode::OK)
             .header(DOCKER_DISTRIBUTION_API_VERSION, "registry/2.0")
@@ -33,8 +26,7 @@ mod tests {
     use crate::registry::Registry;
 
     async fn test_handle_get_api_version_impl(registry: &Registry) {
-        let identity = ClientIdentity::default();
-        let response = registry.handle_get_api_version(&identity).await.unwrap();
+        let response = registry.handle_get_api_version().await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(

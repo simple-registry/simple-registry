@@ -242,7 +242,7 @@ impl BlobStore for Backend {
         &self,
         name: &str,
         uuid: &str,
-        digest: Option<Digest>,
+        digest: Option<&Digest>,
     ) -> Result<Digest, Error> {
         let path = path_builder::upload_path(name, uuid);
         let size = match self.store.file_size(&path).await {
@@ -252,7 +252,7 @@ impl BlobStore for Backend {
         };
 
         let digest = if let Some(digest) = digest {
-            digest
+            digest.clone()
         } else {
             self.load_hasher(name, uuid, size).await?.digest()
         };

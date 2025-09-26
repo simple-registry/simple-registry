@@ -108,7 +108,7 @@ impl Registry {
                 info!("Available for cleanup: {namespace}:{tag}");
                 if !self.scrub_dry_run {
                     let reference = Reference::Tag(tag.to_string());
-                    let _ = self.delete_manifest(namespace, reference).await;
+                    let _ = self.delete_manifest(namespace, &reference).await;
 
                     last_pushed.retain(|t| t != tag);
                     last_pulled.retain(|t| t != tag);
@@ -533,7 +533,7 @@ mod tests {
             let response = registry
                 .put_manifest(
                     namespace,
-                    Reference::Tag(tag.to_string()),
+                    &Reference::Tag(tag.to_string()),
                     Some(&media_type),
                     &content,
                 )
@@ -552,7 +552,7 @@ mod tests {
         for (tag, digest) in tag_digests {
             let result = registry
                 .get_manifest(
-                    registry.validate_namespace(namespace).unwrap(),
+                    registry.get_repository_for_namespace(namespace).unwrap(),
                     slice::from_ref(&media_type),
                     namespace,
                     Reference::Tag(tag.clone()),
@@ -652,7 +652,7 @@ mod tests {
         registry
             .put_manifest(
                 namespace,
-                Reference::Tag("latest".to_string()),
+                &Reference::Tag("latest".to_string()),
                 Some(&media_type1),
                 &manifest1,
             )
@@ -663,7 +663,7 @@ mod tests {
         registry
             .put_manifest(
                 namespace,
-                Reference::Tag("v1.0".to_string()),
+                &Reference::Tag("v1.0".to_string()),
                 Some(&media_type2),
                 &manifest2,
             )
@@ -674,7 +674,7 @@ mod tests {
         registry
             .put_manifest(
                 namespace,
-                Reference::Tag("old".to_string()),
+                &Reference::Tag("old".to_string()),
                 Some(&media_type3),
                 &manifest3,
             )
@@ -686,7 +686,7 @@ mod tests {
         registry.enforce_retention(namespace).await.unwrap();
 
         // Get repository for get_manifest calls
-        let repository = registry.validate_namespace(namespace).unwrap();
+        let repository = registry.get_repository_for_namespace(namespace).unwrap();
         let accepted_types = vec![];
 
         // Verify 'latest' is kept (global policy)
@@ -766,7 +766,7 @@ mod tests {
         let response = registry
             .put_manifest(
                 namespace,
-                Reference::Tag(tag.to_string()),
+                &Reference::Tag(tag.to_string()),
                 Some(&media_type),
                 &content,
             )
@@ -779,7 +779,7 @@ mod tests {
         // Verify manifest still exists
         let manifest = registry
             .get_manifest(
-                registry.validate_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).unwrap(),
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),

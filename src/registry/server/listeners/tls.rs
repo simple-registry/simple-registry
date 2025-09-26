@@ -158,12 +158,12 @@ impl TlsListener {
 
             debug!("Accepted connection from {remote_address}");
             let stream = TokioIo::new(tls);
-            let context = self.context.load();
-            let timeouts = self.timeouts.load().clone();
+            let context = Arc::clone(&self.context.load());
+            let timeouts = Arc::clone(&self.timeouts.load());
 
             tokio::spawn(Box::pin(serve_request(
                 stream,
-                context.clone(),
+                context,
                 peer_certificate,
                 timeouts,
             )));

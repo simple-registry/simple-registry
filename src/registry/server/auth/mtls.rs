@@ -2,8 +2,7 @@ use crate::registry::server::auth::{AuthMiddleware, AuthResult};
 use crate::registry::server::{ClientCertificate, ClientIdentity};
 use crate::registry::Error;
 use async_trait::async_trait;
-use hyper::body::Incoming;
-use hyper::Request;
+use hyper::http::request::Parts;
 use std::sync::Arc;
 use tracing::{debug, instrument};
 use x509_parser::certificate::X509Certificate;
@@ -55,13 +54,13 @@ impl Default for MtlsValidator {
 
 #[async_trait]
 impl AuthMiddleware for MtlsValidator {
-    #[instrument(skip(self, request, identity))]
+    #[instrument(skip(self, parts, identity))]
     async fn authenticate(
         &self,
-        request: &Request<Incoming>,
+        parts: &Parts,
         identity: &mut ClientIdentity,
     ) -> Result<AuthResult, Error> {
-        let Some(peer_cert) = request.extensions().get::<PeerCertificate>() else {
+        let Some(peer_cert) = parts.extensions.get::<PeerCertificate>() else {
             return Ok(AuthResult::NoCredentials);
         };
 
