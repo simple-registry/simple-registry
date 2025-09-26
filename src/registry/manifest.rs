@@ -2,6 +2,7 @@ use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::oci::{Digest, Manifest, Reference};
 use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::{Error, Registry, Repository, ResponseBody};
+use futures_util::future;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
 use hyper::{Method, Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -217,62 +218,50 @@ impl Registry {
         body: &[u8],
     ) -> Result<PutManifestResponse, Error> {
         let manifest_digests = parse_manifest_digests(body, content_type)?;
+        let digest = self.blob_store.create_blob(body).await?;
 
-        let digest = match reference {
+        let mut links: Vec<(LinkKind, Digest)> = Vec::new();
+
+        match reference {
             Reference::Tag(tag) => {
-                let digest = self.blob_store.create_blob(body).await?;
-
-                let link = LinkKind::Tag(tag.clone());
-                self.metadata_store
-                    .create_link(namespace, &link, &digest)
-                    .await?;
-
-                let link = LinkKind::Digest(digest.clone());
-                self.metadata_store
-                    .create_link(namespace, &link, &digest)
-                    .await?;
-
-                digest
+                links.push((LinkKind::Tag(tag.clone()), digest.clone()));
+                links.push((LinkKind::Digest(digest.clone()), digest.clone()));
             }
             Reference::Digest(provided_digest) => {
-                let digest = self.blob_store.create_blob(body).await?;
-
-                if *provided_digest != digest {
-                    warn!("Provided digest does not match calculated digest: {provided_digest} != {digest}");
+                if provided_digest != &digest {
+                    warn!("Provided digest does not match computed digest: {provided_digest} != {digest}");
                     return Err(Error::ManifestInvalid(
-                        "Provided digest does not match calculated digest".to_string(),
+                        "Provided digest does not match computed digest".to_string(),
                     ));
                 }
-
-                let link = LinkKind::Digest(digest.clone());
-                self.metadata_store
-                    .create_link(namespace, &link, &digest)
-                    .await?;
-
-                digest
+                links.push((LinkKind::Digest(digest.clone()), digest.clone()));
             }
-        };
+        }
 
         if let Some(subject) = &manifest_digests.subject {
-            let link = LinkKind::Referrer(subject.clone(), digest.clone());
-            self.metadata_store
-                .create_link(namespace, &link, &digest)
-                .await?;
+            links.push((
+                LinkKind::Referrer(subject.clone(), digest.clone()),
+                digest.clone(),
+            ));
         }
 
-        if let Some(config_digest) = manifest_digests.config {
-            let link = LinkKind::Config(config_digest.clone());
-            self.metadata_store
-                .create_link(namespace, &link, &config_digest)
-                .await?;
+        if let Some(config_digest) = &manifest_digests.config {
+            links.push((
+                LinkKind::Config(config_digest.clone()),
+                config_digest.clone(),
+            ));
         }
 
-        for layer_digest in manifest_digests.layers {
-            let link = LinkKind::Layer(layer_digest.clone());
-            self.metadata_store
-                .create_link(namespace, &link, &layer_digest)
-                .await?;
+        for layer_digest in &manifest_digests.layers {
+            links.push((LinkKind::Layer(layer_digest.clone()), layer_digest.clone()));
         }
+
+        let link_futures = links.iter().map(|(link, link_digest)| {
+            self.metadata_store
+                .create_link(namespace, link, link_digest)
+        });
+
+        future::try_join_all(link_futures).await?;
 
         Ok(PutManifestResponse {
             digest,
