@@ -35,10 +35,12 @@ Please refer to the [mTLS documentation](configure-mtls.md) for more information
 - `max_concurrent_requests` (usize): The maximum number of concurrent requests the server can handle (default: 4).
 This should be set according to the number of CPU cores available on the server.
 - `max_concurrent_cache_jobs` (usize): The maximum number of concurrent cache jobs the server can handle (default: 4).
-- `update_pull_time` (bool): When set to true, the registry will update the pull time metadata for blobs, 
+- `update_pull_time` (bool): When set to true, the registry will update the pull time metadata for blobs,
   which is useful for garbage collection and retention policies (default: false).
 - `access_policy` (optional): Global access control policy that applies to all repositories. See Access Policy section below.
 - `retention_policy` (optional): Global retention policy that applies to all repositories. See Retention Policy section below.
+- `immutable_tags` (bool): When true, tags cannot be overwritten once pushed (default: false).
+- `immutable_tags_exclusions` (list of string): Regular expression patterns for tags that remain mutable when immutable_tags is enabled.
 
 ## Token and Key Cache (`cache`)
 
@@ -216,7 +218,12 @@ clock_skew_tolerance = 60
 
 ## Repository (`repository."<namespace>"`)
 
-## Pull-through cache (`repository."<namespace>".upstream`)
+### Repository Options
+
+- `immutable_tags` (bool): When true, tags in this repository cannot be overwritten once pushed (default: inherits from global).
+- `immutable_tags_exclusions` (list of string): Regular expression patterns for tags that remain mutable when immutable_tags is enabled.
+
+### Pull-through cache (`repository."<namespace>".upstream`)
 
 - `url` (string): The URL of the upstream registry
 - `max_redirect` (u8): The maximum number of redirects to follow (default: 5)
@@ -230,9 +237,11 @@ When a non-empty list of upstreams is defined, the registry will act as a pull-t
 repositories.
 
 When pull-through cache is enabled:
-- write operations are disabled for the namespace.
-- read operations are forwarded to the first upstream repository
-- if the first upstream repository is not available, the registry will try the next one in the list
+- Write operations are disabled for the namespace
+- Read operations check the first upstream repository, falling back to subsequent ones if unavailable
+- The registry optimizes queries based on tag immutability:
+  - **Immutable tags**: Served directly from cache without upstream checks once cached
+  - **Mutable tags**: Upstream is checked for updates before serving cached content
 
 On a cache hit, the repository serves the blob directly from its local store without reaching out to upstream servers.
 On a cache miss, the registry initiates a background copy task to fetch and locally cache the content from the upstream
@@ -269,6 +278,10 @@ Please refer to the [Access Control Policies documentation](configure-access-con
 - `rules` (list of string): A list of CEL policies that must be satisfied to _keep_ an image in the registry.
 
 Please refer to the [Retention Policies documentation](configure-retention-policies.md) for more information.
+
+### Immutable Tags
+
+Please refer to the [Immutable Tags documentation](configure-immutable-tags.md) for detailed configuration and usage information.
 
 ## Tracing (`observability.tracing`)
 
