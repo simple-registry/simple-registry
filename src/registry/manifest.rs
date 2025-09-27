@@ -4,7 +4,7 @@ use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::{Error, Registry, Repository, ResponseBody};
 use futures_util::future;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
-use hyper::{Method, Response, StatusCode};
+use hyper::{Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{error, instrument, warn};
 
@@ -81,36 +81,45 @@ impl Registry {
     pub async fn head_manifest(
         &self,
         repository: &Repository,
-        accepted_mime_types: &[String],
+        accepted_types: &[String],
         namespace: &str,
         reference: Reference,
     ) -> Result<HeadManifestResponse, Error> {
-        let local_manifest = self.head_local_manifest(namespace, &reference).await;
-
-        if let Ok(response) = local_manifest {
-            return Ok(response);
-        } else if !repository.is_pull_through() {
-            error!("Failed to head local manifest: {namespace}:{reference}");
-            return Err(Error::ManifestUnknown);
+        let manifest = self.head_local_manifest(namespace, &reference).await;
+        if !repository.is_pull_through() {
+            return manifest.map_err(|_| {
+                error!("Failed to head local manifest: {namespace}:{reference}");
+                Error::ManifestUnknown
+            });
         }
 
-        let res = repository
-            .query_manifest(&Method::HEAD, accepted_mime_types, namespace, &reference)
-            .await?;
+        if let Ok(manifest) = manifest {
+            if let Reference::Tag(tag) = &reference {
+                if self.is_tag_mutable(repository, tag) {
+                    let (_, digest, _) = repository
+                        .head_manifest(accepted_types, namespace, &reference)
+                        .await?;
+                    if digest == manifest.digest {
+                        return Ok(manifest);
+                    }
+                } else {
+                    return Ok(manifest);
+                }
+            } else {
+                return Ok(manifest);
+            }
+        }
 
-        let media_type = res.get_header(CONTENT_TYPE);
-        let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
-        let size = res.parse_header(CONTENT_LENGTH)?;
+        // pull from upstream
 
-        // Store locally before returning
-        let _ = self
-            .get_manifest(repository, accepted_mime_types, namespace, reference)
+        let res = self
+            .get_manifest(repository, accepted_types, namespace, reference)
             .await?;
 
         Ok(HeadManifestResponse {
-            media_type,
-            digest,
-            size,
+            media_type: res.media_type,
+            digest: res.digest,
+            size: res.content.len(),
         })
     }
 
@@ -151,22 +160,38 @@ impl Registry {
     pub async fn get_manifest(
         &self,
         repository: &Repository,
-        accepted_mime_types: &[String],
+        accepted_types: &[String],
         namespace: &str,
         reference: Reference,
     ) -> Result<GetManifestResponse, Error> {
-        let local_manifest = self.get_local_manifest(namespace, &reference).await;
-
-        if let Ok(response) = local_manifest {
-            return Ok(response);
-        } else if !repository.is_pull_through() {
-            error!("Failed to get local manifest: {namespace}:{reference}");
-            return Err(Error::ManifestUnknown);
+        let manifest = self.get_local_manifest(namespace, &reference).await;
+        if !repository.is_pull_through() {
+            return manifest.map_err(|_| {
+                error!("Failed to get local manifest: {namespace}:{reference}");
+                Error::ManifestUnknown
+            });
         }
 
-        // TODO: test if upstream manifest has changed or not (if reference is a Reference::Tag)
+        if let Ok(manifest) = manifest {
+            if let Reference::Tag(tag) = &reference {
+                if self.is_tag_mutable(repository, tag) {
+                    let (_, digest, _) = repository
+                        .head_manifest(accepted_types, namespace, &reference)
+                        .await?;
+                    if digest == manifest.digest {
+                        return Ok(manifest);
+                    }
+                } else {
+                    return Ok(manifest);
+                }
+            }
+            return Ok(manifest);
+        }
+
+        // pull from upstream
+
         let res = repository
-            .query_manifest(&Method::GET, accepted_mime_types, namespace, &reference)
+            .get_manifest(accepted_types, namespace, &reference)
             .await?;
 
         let media_type = res.get_header(CONTENT_TYPE);
@@ -894,10 +919,10 @@ mod tests {
             .unwrap();
 
         let reference = Reference::Tag(tag.to_string());
-        let accepted_mime_types = Vec::new();
+        let accepted_types = Vec::new();
 
         let response = registry
-            .handle_get_manifest(namespace, reference, &accepted_mime_types)
+            .handle_get_manifest(namespace, reference, &accepted_types)
             .await
             .unwrap();
 
@@ -939,7 +964,7 @@ mod tests {
         let response = registry
             .handle_put_manifest(namespace, reference, media_type.clone(), manifest_stream)
             .await
-            .unwrap();
+            .expect("put manifest failed");
 
         assert_eq!(response.status(), StatusCode::CREATED);
         let digest = response.get_header(DOCKER_CONTENT_DIGEST).unwrap();
@@ -950,15 +975,18 @@ mod tests {
         );
 
         // Verify manifest was stored
+        let repository = registry
+            .get_repository_for_namespace(namespace)
+            .expect("get repository failed");
         let stored_manifest = registry
             .get_manifest(
-                registry.get_repository_for_namespace(namespace).unwrap(),
+                repository,
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
             )
             .await
-            .unwrap();
+            .expect("get manifest failed");
 
         assert_eq!(stored_manifest.content, content);
         assert_eq!(stored_manifest.media_type.unwrap(), media_type);
@@ -1115,5 +1143,68 @@ mod tests {
     async fn test_immutable_tags_fs() {
         let mut t = FSRegistryTestCase::new();
         test_immutable_tags_impl(&mut t).await;
+    }
+
+    async fn test_pull_through_cache_optimization_impl(test_case: &mut FSRegistryTestCase) {
+        let namespace = "test-repo";
+        let (content, media_type) = create_test_manifest();
+
+        let mut repositories_config = crate::registry::test_utils::create_test_repository_config();
+        let repo_config = repositories_config.get_mut("test-repo").unwrap();
+        repo_config.immutable_tags = true;
+        repo_config.immutable_tags_exclusions = vec!["^latest$".to_string()];
+
+        test_case.set_repository_config(repositories_config);
+        let registry = test_case.registry();
+
+        let immutable_tag = "v1.0.0";
+        let put_result = registry
+            .put_manifest(
+                namespace,
+                &Reference::Tag(immutable_tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
+            .await;
+        assert!(put_result.is_ok());
+
+        let repository = registry.get_repository_for_namespace(namespace).unwrap();
+
+        let get_result = registry
+            .get_manifest(
+                repository,
+                slice::from_ref(&media_type),
+                namespace,
+                Reference::Tag(immutable_tag.to_string()),
+            )
+            .await;
+        assert!(get_result.is_ok());
+
+        let mutable_tag = "latest";
+        let _ = registry
+            .put_manifest(
+                namespace,
+                &Reference::Tag(mutable_tag.to_string()),
+                Some(&media_type),
+                &content,
+            )
+            .await
+            .unwrap();
+
+        let get_mutable = registry
+            .get_manifest(
+                repository,
+                slice::from_ref(&media_type),
+                namespace,
+                Reference::Tag(mutable_tag.to_string()),
+            )
+            .await;
+        assert!(get_mutable.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pull_through_cache_optimization_fs() {
+        let mut t = FSRegistryTestCase::new();
+        test_pull_through_cache_optimization_impl(&mut t).await;
     }
 }
