@@ -3,7 +3,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
-use tracing::{debug, info, instrument};
+use tracing::{debug, error, info, instrument};
 
 pub mod blob;
 pub mod blob_store;
@@ -49,6 +49,8 @@ pub struct Registry {
     repositories: HashMap<String, Repository>,
     global_access_policy: Option<AccessPolicy>,
     global_retention_policy: Option<RetentionPolicy>,
+    global_immutable_tags: bool,
+    global_immutable_tags_exclusions: Vec<Regex>,
     update_pull_time: bool,
     scrub_dry_run: bool,
     upload_timeout: Duration,
@@ -103,6 +105,18 @@ impl Registry {
             Some(RetentionPolicy::new(&global_config.retention_policy)?)
         };
 
+        let global_immutable_tags_exclusions = global_config
+            .immutable_tags_exclusions
+            .iter()
+            .filter_map(|p| match Regex::new(p) {
+                Ok(regex) => Some(regex),
+                Err(e) => {
+                    error!("Invalid global regex pattern '{}': {}", p, e);
+                    None
+                }
+            })
+            .collect();
+
         let res = Self {
             update_pull_time: global_config.update_pull_time,
             blob_store,
@@ -110,6 +124,8 @@ impl Registry {
             repositories,
             global_access_policy,
             global_retention_policy,
+            global_immutable_tags: global_config.immutable_tags,
+            global_immutable_tags_exclusions,
             scrub_dry_run: true,
             upload_timeout: Duration::days(1),
             task_queue: TaskQueue::new(global_config.max_concurrent_cache_jobs)?,
@@ -133,7 +149,10 @@ impl Registry {
         if NAMESPACE_RE.is_match(namespace) {
             self.repositories
                 .iter()
-                .find(|(repository, _)| namespace.starts_with(*repository))
+                .find(|(repository, _)| {
+                    namespace == repository.as_str()
+                        || namespace.starts_with(&format!("{repository}/"))
+                })
                 .map(|(_, repository)| repository)
                 .ok_or(Error::NameUnknown)
         } else {
@@ -202,6 +221,22 @@ impl Registry {
         }
 
         Ok(())
+    }
+
+    fn is_tag_mutable(&self, repository: &Repository, tag: &str) -> bool {
+        let immutable = repository.immutable_tags || self.global_immutable_tags;
+
+        if !immutable {
+            return true;
+        }
+
+        let exclusions = if repository.immutable_tags_exclusions.is_empty() {
+            &self.global_immutable_tags_exclusions
+        } else {
+            &repository.immutable_tags_exclusions
+        };
+
+        exclusions.iter().any(|pattern| pattern.is_match(tag))
     }
 }
 
@@ -284,6 +319,8 @@ pub mod test_utils {
                 upstream: Vec::new(),
                 access_policy: RepositoryAccessPolicyConfig::default(),
                 retention_policy: RepositoryRetentionPolicyConfig { rules: Vec::new() },
+                immutable_tags: false,
+                immutable_tags_exclusions: Vec::new(),
             },
             &cache,
         )
@@ -653,5 +690,87 @@ mod test {
             ..ClientIdentity::default()
         };
         assert!(registry.validate_request(&route, &identity).await.is_err());
+    }
+
+    #[test]
+    fn test_namespace_to_repository_matching() {
+        use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
+        use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
+        use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
+
+        let blob_store = Arc::new(blob_store::fs::Backend::new(
+            blob_store::fs::BackendConfig {
+                root_dir: "/tmp/test".into(),
+                sync_to_disk: false,
+            },
+        ));
+
+        let metadata_store = Arc::new(
+            metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
+                root_dir: "/tmp/test".into(),
+                sync_to_disk: false,
+                redis: None,
+            })
+            .unwrap(),
+        );
+
+        let mut repositories_config = HashMap::new();
+        repositories_config.insert(
+            "test".to_string(),
+            RepositoryConfig {
+                upstream: vec![],
+                access_policy: RepositoryAccessPolicyConfig::default(),
+                retention_policy: RepositoryRetentionPolicyConfig::default(),
+                immutable_tags: false,
+                immutable_tags_exclusions: vec![],
+            },
+        );
+        repositories_config.insert(
+            "test-immutable".to_string(),
+            RepositoryConfig {
+                upstream: vec![],
+                access_policy: RepositoryAccessPolicyConfig::default(),
+                retention_policy: RepositoryRetentionPolicyConfig::default(),
+                immutable_tags: true,
+                immutable_tags_exclusions: vec![],
+            },
+        );
+
+        let global_config = GlobalConfig::default();
+
+        let registry = Registry::new(
+            blob_store,
+            metadata_store,
+            repositories_config,
+            &global_config,
+            &CacheStoreConfig::Memory,
+        )
+        .unwrap();
+
+        // Exact match should work
+        assert!(registry.get_repository_for_namespace("test").is_ok());
+        assert!(registry
+            .get_repository_for_namespace("test-immutable")
+            .is_ok());
+
+        // Path prefix should work
+        assert!(registry.get_repository_for_namespace("test/foo").is_ok());
+        assert!(registry
+            .get_repository_for_namespace("test/foo/bar")
+            .is_ok());
+        assert!(registry
+            .get_repository_for_namespace("test-immutable/foo")
+            .is_ok());
+
+        // Non-path prefix should NOT match
+        assert!(registry.get_repository_for_namespace("testing").is_err());
+        assert!(registry.get_repository_for_namespace("test123").is_err());
+        assert!(registry.get_repository_for_namespace("test_foo").is_err());
+
+        // Unknown namespaces should fail
+        assert!(registry.get_repository_for_namespace("unknown").is_err());
+        assert!(registry
+            .get_repository_for_namespace("unknown/foo")
+            .is_err());
     }
 }

@@ -303,6 +303,7 @@ where
         Error::NameInvalid => (StatusCode::BAD_REQUEST, "NAME_INVALID"),
         Error::NameUnknown => (StatusCode::NOT_FOUND, "NAME_UNKNOWN"),
         //RegistryError::SizeInvalid => (StatusCode::BAD_REQUEST, "SIZE_INVALID"),
+        Error::TagImmutable(_) => (StatusCode::CONFLICT, "TAG_IMMUTABLE"),
         Error::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
         Error::Denied(_) => (StatusCode::FORBIDDEN, "DENIED"),
         Error::Unsupported => (StatusCode::BAD_REQUEST, "UNSUPPORTED"),

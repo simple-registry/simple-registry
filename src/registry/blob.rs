@@ -4,7 +4,7 @@ use crate::registry::oci::Digest;
 use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::{blob_store, task_queue, Error, Registry, Repository, ResponseBody};
 use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
-use hyper::{Method, Response, StatusCode};
+use hyper::{Response, StatusCode};
 use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
@@ -32,29 +32,28 @@ impl Registry {
     pub async fn head_blob(
         &self,
         repository: &Repository,
-        accepted_mime_types: &[String],
+        accepted_types: &[String],
         namespace: &str,
         digest: &Digest,
     ) -> Result<HeadBlobResponse, Error> {
-        let local_blob = self.blob_store.get_blob_size(digest).await;
+        let blob = self.blob_store.get_blob_size(digest).await;
 
-        if let Ok(size) = local_blob {
-            return Ok(HeadBlobResponse {
+        match blob {
+            Ok(size) => Ok(HeadBlobResponse {
                 digest: digest.clone(),
                 size,
-            });
-        } else if !repository.is_pull_through() {
-            warn!("Blob not found locally: {digest}");
-            return Err(Error::BlobUnknown);
+            }),
+            Err(_) if repository.is_pull_through() => {
+                let (digest, size) = repository
+                    .head_blob(accepted_types, namespace, digest)
+                    .await?;
+                Ok(HeadBlobResponse { digest, size })
+            }
+            Err(e) => {
+                warn!("Blob with digest {digest} not found: {e}");
+                Err(Error::BlobUnknown)
+            }
         }
-
-        let res = repository
-            .query_blob(&Method::HEAD, accepted_mime_types, namespace, digest)
-            .await?;
-
-        let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
-        let size = res.parse_header(CONTENT_LENGTH)?;
-        Ok(HeadBlobResponse { digest, size })
     }
 
     #[instrument(skip(storage_engine, stream))]
@@ -89,7 +88,7 @@ impl Registry {
     pub async fn get_blob(
         &self,
         repository: &Repository,
-        accepted_mime_types: &[String],
+        accepted_types: &[String],
         namespace: &str,
         digest: &Digest,
         range: Option<(u64, Option<u64>)>,
@@ -110,7 +109,7 @@ impl Registry {
 
         // Proxying stream
         let client_stream = repository
-            .query_blob(&Method::GET, accepted_mime_types, namespace, digest)
+            .get_blob(accepted_types, namespace, digest)
             .await?;
         let total_length = client_stream.parse_header(CONTENT_LENGTH)?;
         let client_stream = client_stream.into_async_read();
@@ -119,7 +118,7 @@ impl Registry {
         // Caching stream
         let store = self.blob_store.clone();
         let cache_reader = repository
-            .query_blob(&Method::GET, accepted_mime_types, namespace, digest)
+            .get_blob(accepted_types, namespace, digest)
             .await?
             .into_async_read();
         let cache_namespace = namespace.to_string();

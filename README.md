@@ -6,6 +6,7 @@ A fully OCI-compliant and Docker-compatible container registry.
 
 - Online garbage collection
 - Pull-through cache
+- Immutable tags with configurable exclusions
 - Access control policies
 - Retention policies
 - Native mTLS support
@@ -53,6 +54,8 @@ In addition to the standard distribution endpoints, Simple-Registry provides the
 ## Configuration
 
 - [Configuration Reference](doc/configuration-reference.md)
+- [Pull-Through Cache documentation](doc/configure-pull-through-cache.md)
+- [Immutable Tags documentation](doc/configure-immutable-tags.md)
 - [Access Control Policies documentation](doc/configure-access-control-policies.md)
 - [Retention Policies documentation](doc/configure-retention-policies.md)
 - [mTLS documentation](doc/configure-mtls.md)
