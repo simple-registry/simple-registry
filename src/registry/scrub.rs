@@ -390,7 +390,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
+    use crate::configuration::{AuthConfig, CacheStoreConfig, GlobalConfig, RepositoryConfig};
     use crate::registry::blob_store;
     use crate::registry::metadata_store;
     use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
@@ -635,6 +635,7 @@ mod tests {
             repositories_config,
             &global_config,
             &CacheStoreConfig::Memory,
+            &AuthConfig::default(),
         )
         .unwrap();
         registry.scrub_dry_run = false;
@@ -963,6 +964,7 @@ mod tests {
             create_test_repository_config(),
             &GlobalConfig::default(),
             &CacheStoreConfig::default(),
+            &AuthConfig::default(),
         )
         .unwrap()
         .with_scrub_dry_run(false);
@@ -1148,6 +1150,7 @@ mod tests {
             create_test_repository_config(),
             &GlobalConfig::default(),
             &CacheStoreConfig::default(),
+            &AuthConfig::default(),
         )
         .unwrap()
         .with_scrub_dry_run(false);

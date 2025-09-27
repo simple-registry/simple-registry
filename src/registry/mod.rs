@@ -1,4 +1,5 @@
 use chrono::Duration;
+use hyper::http::request::Parts;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -29,11 +30,14 @@ mod version;
 use crate::configuration;
 use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
 use crate::registry::cache::Cache;
+use crate::registry::server::auth::webhook::WebhookAuthorizer;
 pub use repository::Repository;
 use repository::{AccessPolicy, RetentionPolicy};
 
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
+use crate::registry::server::route::Route;
+use crate::registry::server::ClientIdentity;
 pub use crate::registry::task_queue::TaskQueue;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
@@ -51,6 +55,8 @@ pub struct Registry {
     global_retention_policy: Option<RetentionPolicy>,
     global_immutable_tags: bool,
     global_immutable_tags_exclusions: Vec<Regex>,
+    global_authorization_webhook: Option<String>,
+    webhooks: HashMap<String, Arc<WebhookAuthorizer>>,
     update_pull_time: bool,
     scrub_dry_run: bool,
     upload_timeout: Duration,
@@ -63,18 +69,25 @@ impl Debug for Registry {
     }
 }
 
-fn log_denial(reason: &str, identity: &server::ClientIdentity) {
+fn log_denial(reason: &str, identity: &ClientIdentity) {
     info!("Access denied: {reason} | Identity: {identity:?}");
 }
 
 impl Registry {
-    #[instrument(skip(repositories_config, blob_store, metadata_store, auth_token_cache,))]
+    #[instrument(skip(
+        repositories_config,
+        blob_store,
+        metadata_store,
+        auth_token_cache,
+        auth_config
+    ))]
     pub fn new(
         blob_store: Arc<dyn BlobStore + Send + Sync>,
         metadata_store: Arc<dyn MetadataStore + Send + Sync>,
         repositories_config: HashMap<String, RepositoryConfig>,
         global_config: &GlobalConfig,
         auth_token_cache: &CacheStoreConfig,
+        auth_config: &configuration::AuthConfig,
     ) -> Result<Self, configuration::Error> {
         let auth_token_cache_arc: Arc<dyn Cache> =
             if let CacheStoreConfig::Redis(ref redis_config) = auth_token_cache {
@@ -117,6 +130,22 @@ impl Registry {
             })
             .collect();
 
+        // Initialize webhooks
+        let mut webhooks = HashMap::new();
+        for (name, webhook_config) in &auth_config.webhook {
+            let authorizer = WebhookAuthorizer::new(
+                name.clone(),
+                webhook_config.clone(),
+                auth_token_cache_arc.clone(),
+            )
+            .map_err(|e| {
+                configuration::Error::ConfigurationFileFormat(format!(
+                    "Failed to initialize webhook '{name}': {e}"
+                ))
+            })?;
+            webhooks.insert(name.clone(), Arc::new(authorizer));
+        }
+
         let res = Self {
             update_pull_time: global_config.update_pull_time,
             blob_store,
@@ -126,6 +155,8 @@ impl Registry {
             global_retention_policy,
             global_immutable_tags: global_config.immutable_tags,
             global_immutable_tags_exclusions,
+            global_authorization_webhook: global_config.authorization_webhook.clone(),
+            webhooks,
             scrub_dry_run: true,
             upload_timeout: Duration::days(1),
             task_queue: TaskQueue::new(global_config.max_concurrent_cache_jobs)?,
@@ -176,11 +207,12 @@ impl Registry {
     /// # Returns
     /// * `Ok(())` if the request is allowed
     /// * `Err(Error::Unauthorized)` if the request is denied
-    #[instrument(skip(self))]
+    #[instrument(skip(self, request))]
     pub async fn validate_request(
         &self,
-        route: &server::route::Route<'_>,
-        identity: &server::ClientIdentity,
+        route: &Route<'_>,
+        identity: &ClientIdentity,
+        request: &Parts,
     ) -> Result<(), Error> {
         if let Some(global_policy) = &self.global_access_policy {
             debug!("Evaluating global access policy");
@@ -209,6 +241,29 @@ impl Registry {
                     return Err(Error::Unauthorized("Access denied".to_string()));
                 }
 
+                // Check webhook authorization
+                let webhook_name = repository
+                    .authorization_webhook
+                    .as_ref()
+                    .filter(|name| !name.is_empty())
+                    .or(self.global_authorization_webhook.as_ref());
+
+                if let Some(webhook_name) = webhook_name {
+                    debug!("Evaluating webhook authorization: {}", webhook_name);
+
+                    let webhook = self
+                        .webhooks
+                        .get(webhook_name)
+                        .expect("webhook validated at config load");
+
+                    // Reconstruct a minimal Request from parts for the webhook
+                    let allowed = webhook.authorize(route, identity, request).await?;
+                    if !allowed {
+                        log_denial(&format!("webhook '{webhook_name}'"), identity);
+                        return Err(Error::Unauthorized("Access denied by webhook".to_string()));
+                    }
+                }
+
                 if repository.is_pull_through() && route.is_write() {
                     return Err(Error::Unauthorized(
                         "Write operations are not supported on pull-through cache repositories"
@@ -217,6 +272,22 @@ impl Registry {
                 }
             } else if self.global_access_policy.is_none() {
                 return Err(Error::NotFound);
+            }
+        } else {
+            // For routes without namespace, check global webhook
+            if let Some(webhook_name) = &self.global_authorization_webhook {
+                debug!("Evaluating global webhook authorization: {}", webhook_name);
+
+                let webhook = self
+                    .webhooks
+                    .get(webhook_name)
+                    .expect("webhook validated at config load");
+
+                let allowed = webhook.authorize(route, identity, request).await?;
+                if !allowed {
+                    log_denial(&format!("global webhook '{webhook_name}'"), identity);
+                    return Err(Error::Unauthorized("Access denied by webhook".to_string()));
+                }
             }
         }
 
@@ -279,6 +350,7 @@ pub mod test_utils {
             repositories_config,
             &global,
             &token_cache,
+            &configuration::AuthConfig::default(),
         )
         .unwrap()
         .with_upload_timeout(Duration::seconds(0))
@@ -321,6 +393,7 @@ pub mod test_utils {
                 retention_policy: RepositoryRetentionPolicyConfig { rules: Vec::new() },
                 immutable_tags: false,
                 immutable_tags_exclusions: Vec::new(),
+                authorization_webhook: None,
             },
             &cache,
         )
@@ -366,6 +439,7 @@ mod test {
     use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
     use crate::registry::server::ClientIdentity;
     use crate::registry::tests::FSRegistryTestCase;
+    use hyper::Request;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -400,7 +474,7 @@ mod test {
     #[tokio::test]
     async fn test_validate_request_no_namespace() {
         let t = FSRegistryTestCase::new();
-        let route = server::route::Route::ListCatalog {
+        let route = Route::ListCatalog {
             n: None,
             last: None,
         };
@@ -408,7 +482,7 @@ mod test {
 
         assert!(t
             .registry()
-            .validate_request(&route, &identity)
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
             .await
             .is_ok());
     }
@@ -418,7 +492,7 @@ mod test {
         let t = FSRegistryTestCase::new();
         let reference = Reference::Tag("latest".to_string());
 
-        let route = server::route::Route::GetManifest {
+        let route = Route::GetManifest {
             namespace: "policy-deny-repo",
             reference,
         };
@@ -430,7 +504,7 @@ mod test {
         // No repository and no global policy - should deny
         assert!(t
             .registry()
-            .validate_request(&route, &identity)
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
             .await
             .is_err());
 
@@ -442,7 +516,7 @@ mod test {
         // No repository and no global policy - should deny
         assert!(t
             .registry()
-            .validate_request(&route, &identity)
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
             .await
             .is_err());
     }
@@ -457,7 +531,7 @@ mod test {
             create_default_allow_repo(Vec::new()),
         );
 
-        let route = server::route::Route::GetManifest {
+        let route = Route::GetManifest {
             namespace: "policy-allow-repo",
             reference,
         };
@@ -468,7 +542,7 @@ mod test {
 
         assert!(t
             .registry()
-            .validate_request(&route, &identity)
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
             .await
             .is_ok());
     }
@@ -483,7 +557,7 @@ mod test {
             create_default_deny_repo(Vec::new()),
         );
 
-        let route = server::route::Route::GetManifest {
+        let route = Route::GetManifest {
             namespace: "policy-deny-repo",
             reference,
         };
@@ -494,7 +568,7 @@ mod test {
 
         assert!(t
             .registry()
-            .validate_request(&route, &identity)
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
             .await
             .is_err());
     }
@@ -510,7 +584,7 @@ mod test {
             create_default_allow_repo(rules),
         );
 
-        let route = server::route::Route::GetManifest {
+        let route = Route::GetManifest {
             namespace: "policy-allow-repo",
             reference,
         };
@@ -521,7 +595,7 @@ mod test {
 
         assert!(t
             .registry()
-            .validate_request(&route, &identity)
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
             .await
             .is_ok());
 
@@ -532,7 +606,7 @@ mod test {
 
         assert!(t
             .registry()
-            .validate_request(&route, &identity)
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
             .await
             .is_err());
     }
@@ -548,7 +622,7 @@ mod test {
             create_default_deny_repo(rules),
         );
 
-        let route = server::route::Route::GetManifest {
+        let route = Route::GetManifest {
             namespace: "policy-deny-repo",
             reference,
         };
@@ -559,7 +633,7 @@ mod test {
 
         assert!(t
             .registry()
-            .validate_request(&route, &identity)
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
             .await
             .is_ok());
 
@@ -570,7 +644,7 @@ mod test {
 
         assert!(t
             .registry()
-            .validate_request(&route, &identity)
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
             .await
             .is_err());
     }
@@ -603,11 +677,12 @@ mod test {
             HashMap::new(),
             &global_config,
             &CacheStoreConfig::Memory,
+            &configuration::AuthConfig::default(),
         )
         .unwrap();
 
         let reference = Reference::Tag("latest".to_string());
-        let route = server::route::Route::GetManifest {
+        let route = Route::GetManifest {
             namespace: "test-namespace",
             reference,
         };
@@ -617,14 +692,20 @@ mod test {
             username: Some("admin".to_string()),
             ..ClientIdentity::default()
         };
-        assert!(registry.validate_request(&route, &identity).await.is_ok());
+        assert!(registry
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
+            .await
+            .is_ok());
 
         // Non-admin should be denied by global policy
         let identity = ClientIdentity {
             username: Some("user".to_string()),
             ..ClientIdentity::default()
         };
-        assert!(registry.validate_request(&route, &identity).await.is_err());
+        assert!(registry
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -655,6 +736,7 @@ mod test {
             HashMap::new(),
             &global_config,
             &CacheStoreConfig::Memory,
+            &configuration::AuthConfig::default(),
         )
         .unwrap();
 
@@ -665,7 +747,7 @@ mod test {
         );
 
         let reference = Reference::Tag("latest".to_string());
-        let route = server::route::Route::GetManifest {
+        let route = Route::GetManifest {
             namespace: "restricted-repo",
             reference,
         };
@@ -675,21 +757,30 @@ mod test {
             username: Some("banned".to_string()),
             ..ClientIdentity::default()
         };
-        assert!(registry.validate_request(&route, &identity).await.is_err());
+        assert!(registry
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
+            .await
+            .is_err());
 
         // Special user should be allowed (passes both global and repo policies)
         let identity = ClientIdentity {
             username: Some("special".to_string()),
             ..ClientIdentity::default()
         };
-        assert!(registry.validate_request(&route, &identity).await.is_ok());
+        assert!(registry
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
+            .await
+            .is_ok());
 
         // Regular user should be denied by repository policy
         let identity = ClientIdentity {
             username: Some("regular".to_string()),
             ..ClientIdentity::default()
         };
-        assert!(registry.validate_request(&route, &identity).await.is_err());
+        assert!(registry
+            .validate_request(&route, &identity, &Request::new(()).into_parts().0)
+            .await
+            .is_err());
     }
 
     #[test]
@@ -723,6 +814,7 @@ mod test {
                 retention_policy: RepositoryRetentionPolicyConfig::default(),
                 immutable_tags: false,
                 immutable_tags_exclusions: vec![],
+                authorization_webhook: None,
             },
         );
         repositories_config.insert(
@@ -733,6 +825,7 @@ mod test {
                 retention_policy: RepositoryRetentionPolicyConfig::default(),
                 immutable_tags: true,
                 immutable_tags_exclusions: vec![],
+                authorization_webhook: None,
             },
         );
 
@@ -744,6 +837,7 @@ mod test {
             repositories_config,
             &global_config,
             &CacheStoreConfig::Memory,
+            &configuration::AuthConfig::default(),
         )
         .unwrap();
 

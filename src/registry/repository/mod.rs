@@ -25,6 +25,7 @@ pub struct Repository {
     pub retention_policy: RetentionPolicy,
     pub immutable_tags: bool,
     pub immutable_tags_exclusions: Vec<Regex>,
+    pub authorization_webhook: Option<String>,
 }
 
 impl Repository {
@@ -60,6 +61,7 @@ impl Repository {
             retention_policy,
             immutable_tags: config.immutable_tags,
             immutable_tags_exclusions,
+            authorization_webhook: config.authorization_webhook,
         })
     }
 

@@ -61,8 +61,26 @@ impl ServerContext {
     }
 
     #[instrument(skip(self, parts))]
-    pub async fn authenticate_request(&self, parts: &Parts) -> Result<ClientIdentity, Error> {
+    pub async fn authenticate_request(
+        &self,
+        parts: &Parts,
+        remote_address: Option<std::net::SocketAddr>,
+    ) -> Result<ClientIdentity, Error> {
         let mut identity = ClientIdentity::default();
+
+        if let Some(forwarded_for) = parts.headers.get("X-Forwarded-For") {
+            if let Ok(forwarded_str) = forwarded_for.to_str() {
+                if let Some(first_ip) = forwarded_str.split(',').next() {
+                    identity.client_ip = Some(first_ip.trim().to_string());
+                }
+            }
+        } else if let Some(real_ip) = parts.headers.get("X-Real-IP") {
+            if let Ok(ip_str) = real_ip.to_str() {
+                identity.client_ip = Some(ip_str.to_string());
+            }
+        } else if let Some(addr) = remote_address {
+            identity.client_ip = Some(addr.ip().to_string());
+        }
 
         self.mtls_middleware
             .authenticate(parts, &mut identity)
