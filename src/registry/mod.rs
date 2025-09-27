@@ -149,7 +149,10 @@ impl Registry {
         if NAMESPACE_RE.is_match(namespace) {
             self.repositories
                 .iter()
-                .find(|(repository, _)| namespace.starts_with(*repository))
+                .find(|(repository, _)| {
+                    namespace == repository.as_str()
+                        || namespace.starts_with(&format!("{repository}/"))
+                })
                 .map(|(_, repository)| repository)
                 .ok_or(Error::NameUnknown)
         } else {
@@ -221,11 +224,7 @@ impl Registry {
     }
 
     fn is_tag_mutable(&self, repository: &Repository, tag: &str) -> bool {
-        let immutable = if repository.immutable_tags {
-            true
-        } else {
-            self.global_immutable_tags
-        };
+        let immutable = repository.immutable_tags || self.global_immutable_tags;
 
         if !immutable {
             return true;
@@ -691,5 +690,87 @@ mod test {
             ..ClientIdentity::default()
         };
         assert!(registry.validate_request(&route, &identity).await.is_err());
+    }
+
+    #[test]
+    fn test_namespace_to_repository_matching() {
+        use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
+        use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
+        use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
+
+        let blob_store = Arc::new(blob_store::fs::Backend::new(
+            blob_store::fs::BackendConfig {
+                root_dir: "/tmp/test".into(),
+                sync_to_disk: false,
+            },
+        ));
+
+        let metadata_store = Arc::new(
+            metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
+                root_dir: "/tmp/test".into(),
+                sync_to_disk: false,
+                redis: None,
+            })
+            .unwrap(),
+        );
+
+        let mut repositories_config = HashMap::new();
+        repositories_config.insert(
+            "test".to_string(),
+            RepositoryConfig {
+                upstream: vec![],
+                access_policy: RepositoryAccessPolicyConfig::default(),
+                retention_policy: RepositoryRetentionPolicyConfig::default(),
+                immutable_tags: false,
+                immutable_tags_exclusions: vec![],
+            },
+        );
+        repositories_config.insert(
+            "test-immutable".to_string(),
+            RepositoryConfig {
+                upstream: vec![],
+                access_policy: RepositoryAccessPolicyConfig::default(),
+                retention_policy: RepositoryRetentionPolicyConfig::default(),
+                immutable_tags: true,
+                immutable_tags_exclusions: vec![],
+            },
+        );
+
+        let global_config = GlobalConfig::default();
+
+        let registry = Registry::new(
+            blob_store,
+            metadata_store,
+            repositories_config,
+            &global_config,
+            &CacheStoreConfig::Memory,
+        )
+        .unwrap();
+
+        // Exact match should work
+        assert!(registry.get_repository_for_namespace("test").is_ok());
+        assert!(registry
+            .get_repository_for_namespace("test-immutable")
+            .is_ok());
+
+        // Path prefix should work
+        assert!(registry.get_repository_for_namespace("test/foo").is_ok());
+        assert!(registry
+            .get_repository_for_namespace("test/foo/bar")
+            .is_ok());
+        assert!(registry
+            .get_repository_for_namespace("test-immutable/foo")
+            .is_ok());
+
+        // Non-path prefix should NOT match
+        assert!(registry.get_repository_for_namespace("testing").is_err());
+        assert!(registry.get_repository_for_namespace("test123").is_err());
+        assert!(registry.get_repository_for_namespace("test_foo").is_err());
+
+        // Unknown namespaces should fail
+        assert!(registry.get_repository_for_namespace("unknown").is_err());
+        assert!(registry
+            .get_repository_for_namespace("unknown/foo")
+            .is_err());
     }
 }

@@ -11,7 +11,6 @@ use tracing::{debug, warn};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     BlobUnknown,
-    // BlobUploadInvalid,
     BlobUploadUnknown,
     DigestInvalid,
     ManifestBlobUnknown,
@@ -19,16 +18,11 @@ pub enum Error {
     ManifestUnknown,
     NameInvalid,
     NameUnknown,
-    //SizeInvalid,
     TagImmutable(String),
     Unauthorized(String),
     Denied(String),
     Unsupported,
-    // TooManyRequests,
-    //
-    // Convenience
     RangeNotSatisfiable,
-    // Catch-all
     NotFound,
     Internal(String),
 }
@@ -37,7 +31,6 @@ impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::BlobUnknown => write!(f, "blob unknown to registry"),
-            //RegistryError::BlobUploadInvalid => "blob upload invalid",
             Error::BlobUploadUnknown => write!(f, "blob upload unknown to registry"),
             Error::DigestInvalid => write!(f, "provided digest did not match uploaded content"),
             Error::ManifestBlobUnknown => {
@@ -47,13 +40,9 @@ impl Display for Error {
             Error::ManifestUnknown => write!(f, "manifest unknown to registry"),
             Error::NameInvalid => write!(f, "invalid repository name"),
             Error::NameUnknown => write!(f, "repository name not known to registry"),
-            //RegistryError::SizeInvalid => "provided length did not match content length",
             Error::TagImmutable(s) | Error::Unauthorized(s) | Error::Denied(s) => write!(f, "{s}"),
             Error::Unsupported => write!(f, "the operation is unsupported"),
-            //RegistryError::TooManyRequests => "too many requests",
-            // Convenience
             Error::RangeNotSatisfiable => write!(f, "range not satisfiable"),
-            // Catch-all
             Error::NotFound => write!(f, "resource not found"),
             Error::Internal(s) => write!(f, "internal server error: {s}"),
         }

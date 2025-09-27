@@ -60,15 +60,15 @@ impl RegistryClient {
     pub async fn query(
         &self,
         method: &Method,
-        accepted_mime_types: &[String],
+        accepted_types: &[String],
         location: &str,
     ) -> Result<Response<Incoming>, Error> {
         info!("Requesting from upstream: {location}");
 
         let mut request = Request::builder().method(method).uri(location);
 
-        for mime_type in accepted_mime_types {
-            request = request.header(ACCEPT, mime_type);
+        for accepted_type in accepted_types {
+            request = request.header(ACCEPT, accepted_type);
         }
 
         let request = request.body(Empty::<Bytes>::new())?;

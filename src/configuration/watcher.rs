@@ -1,4 +1,5 @@
 use crate::command::server;
+use crate::configuration::registry::create_registry;
 use crate::configuration::{Configuration, ServerConfig};
 use crate::registry::server::listeners::tls::ServerTlsConfig;
 use crate::registry::server::ServerContext;
@@ -113,7 +114,7 @@ async fn watch_config_loop(
                             }
                         }
 
-                        reload_full_config(&server, &config_path, new_config);
+                        reload_full_config(&server, &config_path, &new_config);
                     } else if event.paths.iter().any(|p| watched_tls_paths.contains(p)) {
                         info!("TLS certificate changed, reloading");
                         reload_tls_only(&server, &config_path);
@@ -131,20 +132,20 @@ async fn watch_config_loop(
     }
 }
 
-fn reload_full_config(server: &Arc<server::Command>, _config_path: &Path, config: Configuration) {
+fn reload_full_config(server: &Arc<server::Command>, _config_path: &Path, config: &Configuration) {
     let Ok(oidc_validators) = ServerContext::build_oidc_validators(&config.oidc, &config.cache)
     else {
         error!("Failed to build OIDC validators");
         return;
     };
 
-    let Ok(registry) = super::registry::create_registry(&config) else {
+    let Ok(registry) = create_registry(config) else {
         error!("Failed to create registry with new configuration");
         return;
     };
 
     if let Err(e) =
-        server.notify_config_change(config.server, &config.identity, registry, oidc_validators)
+        server.notify_config_change(&config.server, &config.identity, registry, oidc_validators)
     {
         error!("Failed to notify server of configuration change: {e}");
     } else {

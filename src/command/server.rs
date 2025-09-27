@@ -49,7 +49,7 @@ impl Command {
 
     pub fn notify_config_change(
         &self,
-        server_config: ServerConfig,
+        server_config: &ServerConfig,
         identities: &HashMap<String, IdentityConfig>,
         registry: Registry,
         oidc_validators: Arc<Vec<OidcValidator>>,
@@ -59,7 +59,7 @@ impl Command {
         match (&self.listener, server_config) {
             (ServiceListener::Insecure(listener), _) => listener.notify_config_change(context),
             (ServiceListener::Secure(listener), ServerConfig::Tls(config)) => {
-                listener.notify_config_change(&config, context)?;
+                listener.notify_config_change(config, context)?;
             }
             _ => {}
         }
