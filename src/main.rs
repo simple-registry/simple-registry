@@ -99,7 +99,7 @@ async fn run_command(
 ) -> Result<(), command::Error> {
     set_tracing(config.observability.clone())?;
 
-    let oidc_validators = ServerContext::build_oidc_validators(&config.oidc, &config.cache)?;
+    let oidc_validators = ServerContext::build_oidc_validators(&config.auth.oidc, &config.cache)?;
     let registry = create_registry(&config)?;
 
     match cli_args.subcommand {
@@ -111,7 +111,7 @@ async fn run_command(
         SubCommand::Serve(_) => {
             let server = Arc::new(server::Command::new(
                 &config.server,
-                &config.identity,
+                &config.auth.identity,
                 registry,
                 oidc_validators,
             )?);

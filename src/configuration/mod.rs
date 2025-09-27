@@ -27,9 +27,7 @@ pub struct Configuration {
     #[serde(default)]
     pub metadata_store: MetadataStoreConfig,
     #[serde(default)]
-    pub identity: HashMap<String, IdentityConfig>, // hashmap of identity_id <-> identity_config (username, password)
-    #[serde(default)]
-    pub oidc: HashMap<String, OidcProviderConfig>,
+    pub auth: AuthConfig,
     #[serde(default)]
     pub repository: HashMap<String, RepositoryConfig>, // hashmap of namespace <-> repository_config
     #[serde(default)]
@@ -123,6 +121,14 @@ pub enum MetadataStoreConfig {
     #[serde(skip_deserializing)]
     #[default]
     Unspecified,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default)]
+    pub identity: HashMap<String, IdentityConfig>,
+    #[serde(default)]
+    pub oidc: HashMap<String, OidcProviderConfig>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -248,7 +254,7 @@ mod tests {
         assert_eq!(config.cache, CacheStoreConfig::Memory);
         assert_eq!(config.blob_store, BlobStorageConfig::default());
 
-        assert!(config.identity.is_empty());
+        assert!(config.auth.identity.is_empty());
         assert!(config.repository.is_empty());
         assert!(config.observability.is_none());
     }
@@ -391,5 +397,29 @@ mod tests {
             }
             _ => panic!("Expected explicitly configured FS metadata store to be preserved"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_auth_section() {
+        // Test auth section configuration
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [auth.identity.user1]
+        username = "bob"
+        password = "password456"
+
+        [auth.oidc.generic]
+        provider = "generic"
+        issuer = "https://example.com"
+        discovery_url = "https://example.com/.well-known/openid-configuration"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert_eq!(config.auth.identity.len(), 1);
+        assert_eq!(config.auth.identity["user1"].username, "bob");
+        assert_eq!(config.auth.oidc.len(), 1);
+        assert!(matches!(config.auth.oidc.get("generic"), Some(OidcProviderConfig::Generic(_))));
     }
 }

@@ -12,11 +12,11 @@ Implemented OIDC token authentication supporting both `Authorization: Bearer <to
 ### Configuration
 ```toml
 # GitHub Actions provider with defaults
-[oidc.github-actions]
+[auth.oidc.github-actions]
 provider = "github"
 
 # Generic OIDC provider
-[oidc.my-provider]
+[auth.oidc.my-provider]
 provider = "generic"
 issuer = "https://auth.example.com"
 jwks_uri = "https://auth.example.com/.well-known/jwks"  # optional, uses discovery if not set

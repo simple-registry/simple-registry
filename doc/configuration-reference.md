@@ -132,7 +132,7 @@ key_prefix = "registry-locks"
 
 Optional OIDC (OpenID Connect) configuration for JWT-based authentication. When configured, the registry accepts Bearer tokens from multiple identity providers simultaneously.
 
-Each provider is configured under `[oidc.<provider-name>]` with provider-specific settings.
+Each provider is configured under `[auth.oidc.<provider-name>]` with provider-specific settings.
 
 ### GitHub Provider
 
@@ -148,7 +148,7 @@ Configuration fields:
 
 Example:
 ```toml
-[oidc.github-actions]
+[auth.oidc.github-actions]
 provider = "github"
 required_audience = "https://github.com/myorg/myrepo"  # Optional
 jwks_refresh_interval = 3600
@@ -157,11 +157,11 @@ clock_skew_tolerance = 60
 
 Example with multiple providers:
 ```toml
-[oidc.github-actions]
+[auth.oidc.github-actions]
 provider = "github"
 jwks_refresh_interval = 3600
 
-[oidc.corporate-auth]
+[auth.oidc.corporate-auth]
 provider = "generic"
 issuer = "https://auth.example.com/realms/myrealm"
 jwks_refresh_interval = 7200
@@ -208,7 +208,7 @@ Configuration fields:
 
 Example:
 ```toml
-[oidc.google-cloud]
+[auth.oidc.google-cloud]
 provider = "generic"
 issuer = "https://accounts.google.com"
 # jwks_uri = "https://custom.example.com/jwks.json"  # Optional
