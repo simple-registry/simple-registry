@@ -11,8 +11,8 @@ use tokio::io::AsyncRead;
 
 pub use error::Error;
 
-pub trait Reader: AsyncRead + Unpin + Send {}
-impl<T> Reader for T where T: AsyncRead + Unpin + Send {}
+pub trait Reader: AsyncRead + Unpin + Send + Sync {}
+impl<T> Reader for T where T: AsyncRead + Unpin + Send + Sync {}
 
 #[async_trait]
 pub trait BlobStore: Send + Sync {

@@ -3,7 +3,6 @@ pub mod provider;
 
 use crate::configuration::OidcProviderConfig;
 use crate::registry::cache::Cache;
-use crate::registry::http_client::{HttpClient, HttpClientConfig};
 use crate::registry::server::auth::basic_auth::extract_basic_auth;
 use crate::registry::server::auth::oidc::provider::{generic, github};
 use crate::registry::server::auth::{AuthMiddleware, AuthResult};
@@ -14,12 +13,15 @@ use async_trait::async_trait;
 use hyper::http::request::Parts;
 pub use jwk::Jwk;
 pub use provider::OidcProvider;
+use reqwest::Client;
+use std::sync::Arc;
+use std::time::Duration;
 use tracing::debug;
 
 pub struct OidcValidator {
     provider_name: String,
     provider: Box<dyn OidcProvider>,
-    http_client: HttpClient,
+    http_client: Arc<Client>,
     cache: Box<dyn Cache>,
 }
 
@@ -29,7 +31,12 @@ impl OidcValidator {
         provider_config: &OidcProviderConfig,
         cache: Box<dyn Cache>,
     ) -> Result<Self, Error> {
-        let http_client = HttpClient::new(HttpClientConfig::default())?;
+        let http_client = Arc::new(
+            Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .map_err(|e| Error::Internal(format!("Failed to build HTTP client: {e}")))?,
+        );
 
         let provider: Box<dyn OidcProvider> = match provider_config {
             OidcProviderConfig::Generic(cfg) => Box::new(generic::Provider::new(cfg.clone())),

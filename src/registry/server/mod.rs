@@ -4,7 +4,6 @@ pub mod http_server;
 pub mod listeners;
 pub mod request_ext;
 pub mod response_body;
-pub mod response_ext;
 pub mod route;
 pub mod router;
 pub mod server_context;

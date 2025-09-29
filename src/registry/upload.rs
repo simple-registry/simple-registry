@@ -259,7 +259,6 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::server::response_ext::ResponseExt;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use std::io::Cursor;
     use uuid::Uuid;
@@ -502,11 +501,28 @@ mod tests {
         let response = registry.handle_start_upload(namespace, None).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let location = response.get_header(LOCATION).unwrap();
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|h| h.to_str().ok())
+            .map(std::string::ToString::to_string)
+            .unwrap();
         assert!(location.starts_with(&format!("/v2/{namespace}/blobs/uploads/")));
-        let uuid = response.get_header(DOCKER_UPLOAD_UUID).unwrap();
+        let uuid = response
+            .headers()
+            .get(DOCKER_UPLOAD_UUID)
+            .and_then(|h| h.to_str().ok())
+            .map(std::string::ToString::to_string)
+            .unwrap();
         assert!(!uuid.is_empty());
-        assert_eq!(response.get_header(RANGE), Some("0-0".to_string()));
+        assert_eq!(
+            response
+                .headers()
+                .get(RANGE)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
+            Some("0-0".to_string())
+        );
 
         // Test start upload with existing blob
         let content = b"test content";
@@ -519,11 +535,19 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(
-            response.get_header(LOCATION),
+            response
+                .headers()
+                .get(LOCATION)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(format!("/v2/{namespace}/blobs/{digest}"))
         );
         assert_eq!(
-            response.get_header(DOCKER_CONTENT_DIGEST),
+            response
+                .headers()
+                .get(DOCKER_CONTENT_DIGEST)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(digest.to_string())
         );
     }
@@ -555,12 +579,27 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
-            response.get_header(LOCATION),
+            response
+                .headers()
+                .get(LOCATION)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
         );
-        assert_eq!(response.get_header(RANGE), Some("0-0".to_string()));
         assert_eq!(
-            response.get_header(DOCKER_UPLOAD_UUID),
+            response
+                .headers()
+                .get(RANGE)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
+            Some("0-0".to_string())
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(DOCKER_UPLOAD_UUID)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(uuid.to_string())
         );
     }
@@ -595,13 +634,35 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         assert_eq!(
-            response.get_header(LOCATION),
+            response
+                .headers()
+                .get(LOCATION)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(format!("/v2/{namespace}/blobs/uploads/{uuid}"))
         );
-        assert_eq!(response.get_header(RANGE), Some("0-0".to_string()));
-        assert_eq!(response.get_header(CONTENT_LENGTH), Some("0".to_string()));
         assert_eq!(
-            response.get_header(DOCKER_UPLOAD_UUID),
+            response
+                .headers()
+                .get(RANGE)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
+            Some("0-0".to_string())
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
+            Some("0".to_string())
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(DOCKER_UPLOAD_UUID)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(uuid.to_string())
         );
     }
@@ -653,10 +714,18 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CREATED);
 
-        let location = response.get_header(LOCATION);
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|h| h.to_str().ok())
+            .map(std::string::ToString::to_string);
         assert_eq!(location, Some(format!("/v2/{namespace}/blobs/{digest}")));
 
-        let response_digest = response.get_header(DOCKER_CONTENT_DIGEST);
+        let response_digest = response
+            .headers()
+            .get(DOCKER_CONTENT_DIGEST)
+            .and_then(|h| h.to_str().ok())
+            .map(std::string::ToString::to_string);
         assert_eq!(response_digest, Some(digest.to_string()));
 
         // Verify blob exists

@@ -21,7 +21,6 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::server::response_ext::ResponseExt;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use crate::registry::Registry;
 
@@ -30,11 +29,19 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            response.get_header(DOCKER_DISTRIBUTION_API_VERSION),
+            response
+                .headers()
+                .get(DOCKER_DISTRIBUTION_API_VERSION)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some("registry/2.0".to_string())
         );
         assert_eq!(
-            response.get_header(X_POWERED_BY),
+            response
+                .headers()
+                .get(X_POWERED_BY)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some("Simple-Registry".to_string())
         );
     }

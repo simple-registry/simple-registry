@@ -2,9 +2,6 @@ use crate::configuration::{Error, RepositoryConfig};
 use crate::registry;
 use crate::registry::cache::Cache;
 use crate::registry::oci::{Digest, Reference};
-use hyper::body::Incoming;
-use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use hyper::{Method, Response};
 use regex::Regex;
 use std::sync::Arc;
 use tracing::{error, instrument};
@@ -12,9 +9,8 @@ use tracing::{error, instrument};
 pub mod access_policy;
 pub mod retention_policy;
 
-use crate::registry::blob::DOCKER_CONTENT_DIGEST;
+use crate::registry::blob_store::Reader;
 use crate::registry::client::RegistryClient;
-use crate::registry::server::response_ext::ResponseExt;
 pub use access_policy::AccessPolicy;
 pub use retention_policy::RetentionPolicy;
 
@@ -78,13 +74,10 @@ impl Repository {
     ) -> Result<(Digest, u64), registry::Error> {
         for upstream in &self.upstreams {
             let location = upstream.get_blob_path(&self.name, namespace, digest);
-            if let Ok(response) = upstream
-                .query(&Method::HEAD, accepted_types, &location)
-                .await
-            {
-                let digest = response.parse_header(DOCKER_CONTENT_DIGEST)?;
-                let size = response.parse_header(CONTENT_LENGTH)?;
-                return Ok((digest, size));
+            let response = upstream.head_blob(accepted_types, &location).await;
+
+            if response.is_ok() {
+                return response;
             }
         }
 
@@ -97,18 +90,15 @@ impl Repository {
         accepted_types: &[String],
         namespace: &str,
         digest: &Digest,
-    ) -> Result<Response<Incoming>, registry::Error> {
-        let mut response = Err(registry::Error::ManifestUnknown);
+    ) -> Result<(u64, Box<dyn Reader>), registry::Error> {
         for upstream in &self.upstreams {
             let location = upstream.get_blob_path(&self.name, namespace, digest);
-            response = upstream
-                .query(&Method::GET, accepted_types, &location)
-                .await;
-            if response.is_ok() {
-                break;
+            if let Ok(response) = upstream.get_blob(accepted_types, &location).await {
+                return Ok(response);
             }
         }
-        response
+
+        Err(registry::Error::ManifestUnknown)
     }
 
     #[instrument(skip(self))]
@@ -120,14 +110,8 @@ impl Repository {
     ) -> Result<(Option<String>, Digest, u64), registry::Error> {
         for upstream in &self.upstreams {
             let location = upstream.get_manifest_path(&self.name, namespace, reference);
-            if let Ok(response) = upstream
-                .query(&Method::HEAD, accepted_types, &location)
-                .await
-            {
-                let media_type = response.get_header(CONTENT_TYPE);
-                let digest = response.parse_header(DOCKER_CONTENT_DIGEST)?;
-                let size = response.parse_header(CONTENT_LENGTH)?;
-                return Ok((media_type, digest, size));
+            if let Ok(response) = upstream.head_manifest(accepted_types, &location).await {
+                return Ok(response);
             }
         }
 
@@ -140,13 +124,10 @@ impl Repository {
         accepted_types: &[String],
         namespace: &str,
         reference: &Reference,
-    ) -> Result<Response<Incoming>, registry::Error> {
+    ) -> Result<(Option<String>, Digest, Vec<u8>), registry::Error> {
         for upstream in &self.upstreams {
             let location = upstream.get_manifest_path(&self.name, namespace, reference);
-            if let Ok(response) = upstream
-                .query(&Method::GET, accepted_types, &location)
-                .await
-            {
+            if let Ok(response) = upstream.get_manifest(accepted_types, &location).await {
                 return Ok(response);
             }
         }

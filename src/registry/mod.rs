@@ -13,7 +13,6 @@ pub mod client;
 pub mod content_discovery;
 pub mod data_store;
 mod error;
-mod http_client;
 pub mod manifest;
 pub mod metadata_store;
 pub mod oci;

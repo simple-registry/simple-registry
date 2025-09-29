@@ -1,24 +1,22 @@
 #[cfg(test)]
 mod tests;
 
-use bytes::Bytes;
+use crate::registry::cache::Cache;
+use crate::registry::error::Error;
+use crate::registry::server::client_identity::ClientIdentity;
+use crate::registry::server::route::Route;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::http::request::Parts;
-use hyper::http::{HeaderMap, Request};
-use hyper::{Method, Uri};
+use hyper::http::HeaderMap;
+use hyper::Uri;
 use prometheus::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
+use reqwest::redirect::Policy;
+use reqwest::{Certificate, Client, Identity};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
-use tokio::time::timeout;
-
-use crate::registry::cache::Cache;
-use crate::registry::error::Error;
-use crate::registry::http_client::{HttpClient, HttpClientConfig};
-use crate::registry::server::client_identity::ClientIdentity;
-use crate::registry::server::route::Route;
 
 static WEBHOOK_REQUESTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
@@ -88,38 +86,39 @@ impl WebhookConfig {
 pub struct WebhookAuthorizer {
     name: String,
     config: WebhookConfig,
-    client: HttpClient,
+    client: Client,
     cache: Arc<dyn Cache>,
 }
 
 impl WebhookAuthorizer {
     pub fn new(name: String, config: WebhookConfig, cache: Arc<dyn Cache>) -> Result<Self, Error> {
-        let (username, password) = match &config.auth {
-            Some(WebhookAuth::BasicAuth { username, password }) => {
-                (Some(username.clone()), Some(password.clone()))
-            }
-            _ => (None, None),
-        };
+        let mut client_builder = Client::builder()
+            .redirect(Policy::none())
+            .timeout(Duration::from_millis(config.timeout_ms));
 
-        let http_config = HttpClientConfig {
-            server_ca_bundle: config
-                .server_ca_bundle
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            client_certificate: config
-                .client_certificate_bundle
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            client_private_key: config
-                .client_private_key
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            username,
-            password,
-            max_redirect: Some(0), // Disable redirects for webhooks
-        };
+        if let Some(ca_bundle) = &config.server_ca_bundle {
+            let cert_pem = std::fs::read(ca_bundle)
+                .map_err(|e| Error::Internal(format!("Failed to read CA bundle: {e}")))?;
+            let cert = Certificate::from_pem(&cert_pem)
+                .map_err(|e| Error::Internal(format!("Failed to parse CA bundle: {e}")))?;
+            client_builder = client_builder.add_root_certificate(cert);
+        }
 
-        let client = HttpClient::new(http_config)
+        if let (Some(cert_path), Some(key_path)) = (
+            &config.client_certificate_bundle,
+            &config.client_private_key,
+        ) {
+            let cert_pem = std::fs::read(cert_path)
+                .map_err(|e| Error::Internal(format!("Failed to read client certificate: {e}")))?;
+            let key_pem = std::fs::read(key_path)
+                .map_err(|e| Error::Internal(format!("Failed to read client key: {e}")))?;
+            let identity = Identity::from_pem(&[cert_pem, key_pem].concat())
+                .map_err(|e| Error::Internal(format!("Failed to create client identity: {e}")))?;
+            client_builder = client_builder.identity(identity);
+        }
+
+        let client = client_builder
+            .build()
             .map_err(|e| Error::Internal(format!("Failed to create HTTP client: {e}")))?;
 
         Ok(Self {
@@ -157,7 +156,7 @@ impl WebhookAuthorizer {
 
         let headers = self.build_headers(route, identity, parts)?;
 
-        let mut req_builder = Request::builder().method(Method::GET).uri(&self.config.url);
+        let mut req_builder = self.client.get(&self.config.url);
 
         for (key, value) in &headers {
             req_builder = req_builder.header(key, value);
@@ -165,26 +164,16 @@ impl WebhookAuthorizer {
 
         if let Some(WebhookAuth::BearerToken(token)) = &self.config.auth {
             req_builder = req_builder.header("Authorization", format!("Bearer {token}"));
+        } else if let Some(WebhookAuth::BasicAuth { username, password }) = &self.config.auth {
+            req_builder = req_builder.basic_auth(username, Some(password));
         }
 
-        let webhook_request = req_builder
-            .body(http_body_util::Empty::<Bytes>::new())
-            .map_err(|e| Error::Internal(format!("Failed to build webhook request: {e}")))?;
-
-        let response = timeout(
-            Duration::from_millis(self.config.timeout_ms),
-            self.client.request(webhook_request),
-        )
-        .await;
+        let response = req_builder.send().await;
 
         let allowed = match response {
-            Ok(Ok(resp)) => resp.status().is_success(),
-            Ok(Err(e)) => {
+            Ok(resp) => resp.status().is_success(),
+            Err(e) => {
                 tracing::warn!(webhook = %self.name, error = %e, "Webhook request failed");
-                false
-            }
-            Err(_) => {
-                tracing::warn!(webhook = %self.name, "Webhook request timed out");
                 false
             }
         };
