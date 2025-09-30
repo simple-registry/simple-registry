@@ -81,6 +81,10 @@ enum SubCommand {
 }
 
 fn main() -> Result<(), command::Error> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let cli_args: GlobalArguments = argh::from_env();
 
     let config = Configuration::load(&cli_args.config)?;

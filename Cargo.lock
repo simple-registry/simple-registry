@@ -856,21 +856,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-channel"
-version = "0.5.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-utils"
-version = "0.8.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
-
-[[package]]
 name = "crypto-bigint"
 version = "0.4.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1459,7 +1444,6 @@ dependencies = [
  "http 1.3.1",
  "hyper 1.7.0",
  "hyper-util",
- "log",
  "rustls 0.23.32",
  "rustls-native-certs 0.8.1",
  "rustls-pki-types",
@@ -2955,13 +2939,11 @@ dependencies = [
  "bytesize",
  "cel-interpreter",
  "chrono",
- "crossbeam-channel",
  "futures-util",
  "hex",
  "http-body-util",
  "humantime",
  "hyper 1.7.0",
- "hyper-rustls 0.27.7",
  "hyper-util",
  "jsonwebtoken",
  "notify",
@@ -2974,7 +2956,6 @@ dependencies = [
  "reqwest",
  "rpassword",
  "rustls 0.23.32",
- "rustls-native-certs 0.8.1",
  "rustls-pki-types",
  "serde",
  "serde_json",
