@@ -45,6 +45,7 @@ pub fn create_registry(config: &Configuration) -> Result<Registry, crate::comman
         config.repository.clone(),
         &config.global,
         &config.cache,
+        &config.auth,
     )
     .map_err(crate::command::Error::Configuration)
 }

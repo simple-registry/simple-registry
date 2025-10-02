@@ -1,6 +1,5 @@
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::oci::{Digest, Manifest, Reference};
-use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::{Error, Registry, Repository, ResponseBody};
 use futures_util::future;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
@@ -190,15 +189,9 @@ impl Registry {
 
         // pull from upstream
 
-        let res = repository
+        let (media_type, digest, content) = repository
             .get_manifest(accepted_types, namespace, &reference)
             .await?;
-
-        let media_type = res.get_header(CONTENT_TYPE);
-        let digest = res.parse_header(DOCKER_CONTENT_DIGEST)?;
-
-        let mut content = Vec::new();
-        res.into_async_read().read_to_end(&mut content).await?;
 
         self.put_manifest(namespace, &reference, media_type.as_ref(), &content)
             .await?;
@@ -517,12 +510,14 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::server::response_ext::IntoAsyncRead;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
+    use futures_util::TryStreamExt;
+    use http_body_util::BodyExt;
     use serde_json::json;
     use std::io::Cursor;
     use std::slice;
     use tokio::io::AsyncReadExt;
+    use tokio_util::io::StreamReader;
 
     fn create_test_manifest() -> (Vec<u8>, String) {
         let manifest = json!({
@@ -880,14 +875,29 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            response.get_header(DOCKER_CONTENT_DIGEST),
+            response
+                .headers()
+                .get(DOCKER_CONTENT_DIGEST)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(put_response.digest.to_string())
         );
         assert_eq!(
-            response.get_header(CONTENT_LENGTH),
+            response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(content.len().to_string())
         );
-        assert_eq!(response.get_header(CONTENT_TYPE), Some(media_type));
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
+            Some(media_type)
+        );
     }
 
     #[tokio::test]
@@ -928,13 +938,25 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            response.get_header(DOCKER_CONTENT_DIGEST),
+            response
+                .headers()
+                .get(DOCKER_CONTENT_DIGEST)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(put_response.digest.to_string())
         );
-        assert_eq!(response.get_header(CONTENT_TYPE), Some(media_type));
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
+            Some(media_type)
+        );
 
         // Read response body
-        let mut reader = response.into_async_read();
+        let stream = response.into_data_stream().map_err(std::io::Error::other);
+        let mut reader = StreamReader::new(stream);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, content);
@@ -967,10 +989,19 @@ mod tests {
             .expect("put manifest failed");
 
         assert_eq!(response.status(), StatusCode::CREATED);
-        let digest = response.get_header(DOCKER_CONTENT_DIGEST).unwrap();
+        let digest = response
+            .headers()
+            .get(DOCKER_CONTENT_DIGEST)
+            .and_then(|h| h.to_str().ok())
+            .map(std::string::ToString::to_string)
+            .unwrap();
 
         assert_eq!(
-            response.get_header(LOCATION),
+            response
+                .headers()
+                .get(LOCATION)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(format!("/v2/{namespace}/manifests/{tag}"))
         );
 

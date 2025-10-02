@@ -11,6 +11,7 @@ pub struct ClientIdentity {
     pub username: Option<String>,
     pub certificate: ClientCertificate,
     pub oidc: Option<OidcClaims>,
+    pub client_ip: Option<String>,
 }
 
 /// Certificate information extracted from client mTLS certificates.

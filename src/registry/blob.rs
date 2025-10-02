@@ -1,7 +1,6 @@
 use crate::registry::blob_store::{BlobStore, Reader};
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::oci::Digest;
-use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
 use crate::registry::{blob_store, task_queue, Error, Registry, Repository, ResponseBody};
 use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
 use hyper::{Response, StatusCode};
@@ -108,30 +107,24 @@ impl Registry {
         }
 
         // Proxying stream
-        let client_stream = repository
+        let (total_length, client_stream) = repository
             .get_blob(accepted_types, namespace, digest)
             .await?;
-        let total_length = client_stream.parse_header(CONTENT_LENGTH)?;
-        let client_stream = client_stream.into_async_read();
-        let client_stream: Box<dyn Reader> = Box::new(client_stream);
 
-        // Caching stream
-        let store = self.blob_store.clone();
-        let cache_reader = repository
+        let (_, caching_stream) = repository
             .get_blob(accepted_types, namespace, digest)
-            .await?
-            .into_async_read();
+            .await?;
         let cache_namespace = namespace.to_string();
 
         let task_key = format!("{cache_namespace}/{digest}");
-
         let cache_digest = digest.clone();
+        let store = self.blob_store.clone();
 
         self.task_queue.submit(&task_key, async move {
             let digest_string = cache_digest.to_string();
 
             debug!("Fetching blob: {digest_string}");
-            Self::copy_blob(store, cache_reader, cache_namespace, &cache_digest)
+            Self::copy_blob(store, caching_stream, cache_namespace, &cache_digest)
                 .await
                 .map_err(|e| task_queue::Error::TaskExecution(e.to_string()))?;
 
@@ -283,11 +276,13 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
+    use futures_util::TryStreamExt;
+    use http_body_util::BodyExt;
     use std::io::Cursor;
     use tokio::io::AsyncReadExt;
+    use tokio_util::io::StreamReader;
 
     async fn test_head_blob_impl(registry: &Registry) {
         let namespace = "test-repo";
@@ -504,11 +499,19 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            response.get_header(DOCKER_CONTENT_DIGEST),
+            response
+                .headers()
+                .get(DOCKER_CONTENT_DIGEST)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(digest.to_string())
         );
         assert_eq!(
-            response.get_header(CONTENT_LENGTH),
+            response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(content.len().to_string())
         );
     }
@@ -630,16 +633,25 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            response.get_header(DOCKER_CONTENT_DIGEST),
+            response
+                .headers()
+                .get(DOCKER_CONTENT_DIGEST)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(digest.to_string())
         );
         assert_eq!(
-            response.get_header(CONTENT_LENGTH),
+            response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(content.len().to_string())
         );
 
         // Read response body
-        let mut reader = response.into_async_read();
+        let stream = response.into_data_stream().map_err(std::io::Error::other);
+        let mut reader = StreamReader::new(stream);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, content);
@@ -672,20 +684,33 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(
-            response.get_header(DOCKER_CONTENT_DIGEST),
+            response
+                .headers()
+                .get(DOCKER_CONTENT_DIGEST)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(digest.to_string())
         );
         assert_eq!(
-            response.get_header(CONTENT_LENGTH),
+            response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some("6".to_string()) // 10 - 5 + 1
         );
         assert_eq!(
-            response.get_header(CONTENT_RANGE),
+            response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|h| h.to_str().ok())
+                .map(std::string::ToString::to_string),
             Some(format!("bytes 5-10/{}", content.len()))
         );
 
         // Read response body
-        let mut reader = response.into_async_read();
+        let stream = response.into_data_stream().map_err(std::io::Error::other);
+        let mut reader = StreamReader::new(stream);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, &content[5..=10]);

@@ -1,4 +1,3 @@
-use crossbeam_channel::{unbounded, Sender};
 use std::{
     collections::HashMap,
     fmt,
@@ -7,7 +6,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
     thread,
 };
-use tokio::runtime;
+use tokio::{runtime, sync::mpsc};
 use tracing::info;
 
 type TaskOutput = Result<(), Error>;
@@ -48,13 +47,13 @@ pub enum TaskStatus {
 }
 
 pub struct TaskQueue {
-    sender: Sender<(String, BoxedTask)>,
+    sender: mpsc::UnboundedSender<(String, BoxedTask)>,
     statuses: Arc<Mutex<HashMap<String, TaskStatus>>>,
 }
 
 impl TaskQueue {
     pub fn new(worker_threads: usize) -> Result<Self, Error> {
-        let (tx, rx) = unbounded::<(String, BoxedTask)>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<(String, BoxedTask)>();
         let statuses = Arc::new(Mutex::new(HashMap::<String, TaskStatus>::new()));
 
         let rt = runtime::Builder::new_multi_thread()
@@ -67,7 +66,7 @@ impl TaskQueue {
 
         thread::spawn(move || {
             rt.block_on(async move {
-                while let Ok((task_id, task)) = rx.recv() {
+                while let Some((task_id, task)) = rx.recv().await {
                     let mut st = statuses_clone.lock().unwrap();
                     st.insert(task_id.clone(), TaskStatus::Running);
                     drop(st);

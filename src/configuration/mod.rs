@@ -11,6 +11,7 @@ pub mod watcher;
 use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
 use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
 use crate::registry::server::auth::oidc;
+use crate::registry::server::auth::webhook::WebhookConfig;
 use crate::registry::server::listeners::{insecure, tls};
 use crate::registry::{blob_store, cache, client, metadata_store};
 pub use error::Error;
@@ -27,9 +28,7 @@ pub struct Configuration {
     #[serde(default)]
     pub metadata_store: MetadataStoreConfig,
     #[serde(default)]
-    pub identity: HashMap<String, IdentityConfig>, // hashmap of identity_id <-> identity_config (username, password)
-    #[serde(default)]
-    pub oidc: HashMap<String, OidcProviderConfig>,
+    pub auth: AuthConfig,
     #[serde(default)]
     pub repository: HashMap<String, RepositoryConfig>, // hashmap of namespace <-> repository_config
     #[serde(default)]
@@ -59,6 +58,7 @@ pub struct GlobalConfig {
     pub immutable_tags: bool,
     #[serde(default)]
     pub immutable_tags_exclusions: Vec<String>,
+    pub authorization_webhook: Option<String>,
 }
 
 impl Default for GlobalConfig {
@@ -71,6 +71,7 @@ impl Default for GlobalConfig {
             retention_policy: RepositoryRetentionPolicyConfig::default(),
             immutable_tags: false,
             immutable_tags_exclusions: Vec::new(),
+            authorization_webhook: None,
         }
     }
 }
@@ -126,6 +127,16 @@ pub enum MetadataStoreConfig {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default)]
+    pub identity: HashMap<String, IdentityConfig>,
+    #[serde(default)]
+    pub oidc: HashMap<String, OidcProviderConfig>,
+    #[serde(default)]
+    pub webhook: HashMap<String, WebhookConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct IdentityConfig {
     pub username: String,
     pub password: String,
@@ -150,6 +161,7 @@ pub struct RepositoryConfig {
     pub immutable_tags: bool,
     #[serde(default)]
     pub immutable_tags_exclusions: Vec<String>,
+    pub authorization_webhook: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -214,7 +226,44 @@ impl Configuration {
                 ));
             }
         }
+
+        config.validate()?;
         Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), Error> {
+        for (name, webhook) in &self.auth.webhook {
+            webhook.validate().map_err(|e| {
+                Error::ConfigurationFileFormat(format!("Invalid webhook '{name}': {e}"))
+            })?;
+        }
+
+        let webhook_names: std::collections::HashSet<&str> = self
+            .auth
+            .webhook
+            .keys()
+            .map(std::string::String::as_str)
+            .collect();
+
+        if let Some(ref webhook_name) = self.global.authorization_webhook {
+            if !webhook_names.contains(webhook_name.as_str()) {
+                return Err(Error::ConfigurationFileFormat(format!(
+                    "Global authorization_webhook '{webhook_name}' not found in auth.webhook definitions"
+                )));
+            }
+        }
+
+        for (repo_name, repo_config) in &self.repository {
+            if let Some(ref webhook_name) = repo_config.authorization_webhook {
+                if !webhook_name.is_empty() && !webhook_names.contains(webhook_name.as_str()) {
+                    return Err(Error::ConfigurationFileFormat(format!(
+                        "Repository '{repo_name}' references undefined webhook '{webhook_name}'"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -248,7 +297,7 @@ mod tests {
         assert_eq!(config.cache, CacheStoreConfig::Memory);
         assert_eq!(config.blob_store, BlobStorageConfig::default());
 
-        assert!(config.identity.is_empty());
+        assert!(config.auth.identity.is_empty());
         assert!(config.repository.is_empty());
         assert!(config.observability.is_none());
     }
@@ -391,5 +440,32 @@ mod tests {
             }
             _ => panic!("Expected explicitly configured FS metadata store to be preserved"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_auth_section() {
+        // Test auth section configuration
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [auth.identity.user1]
+        username = "bob"
+        password = "password456"
+
+        [auth.oidc.generic]
+        provider = "generic"
+        issuer = "https://example.com"
+        discovery_url = "https://example.com/.well-known/openid-configuration"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert_eq!(config.auth.identity.len(), 1);
+        assert_eq!(config.auth.identity["user1"].username, "bob");
+        assert_eq!(config.auth.oidc.len(), 1);
+        assert!(matches!(
+            config.auth.oidc.get("generic"),
+            Some(OidcProviderConfig::Generic(_))
+        ));
     }
 }

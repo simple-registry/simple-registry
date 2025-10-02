@@ -133,7 +133,8 @@ async fn watch_config_loop(
 }
 
 fn reload_full_config(server: &Arc<server::Command>, _config_path: &Path, config: &Configuration) {
-    let Ok(oidc_validators) = ServerContext::build_oidc_validators(&config.oidc, &config.cache)
+    let Ok(oidc_validators) =
+        ServerContext::build_oidc_validators(&config.auth.oidc, &config.cache)
     else {
         error!("Failed to build OIDC validators");
         return;
@@ -144,9 +145,12 @@ fn reload_full_config(server: &Arc<server::Command>, _config_path: &Path, config
         return;
     };
 
-    if let Err(e) =
-        server.notify_config_change(&config.server, &config.identity, registry, oidc_validators)
-    {
+    if let Err(e) = server.notify_config_change(
+        &config.server,
+        &config.auth.identity,
+        registry,
+        oidc_validators,
+    ) {
         error!("Failed to notify server of configuration change: {e}");
     } else {
         info!("Configuration reloaded");

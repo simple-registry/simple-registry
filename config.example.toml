@@ -46,9 +46,20 @@ root_dir = "./data-simple-registry"
 endpoint = "http://127.0.0.1:4317"
 sampling_rate = 1.0
 
-[identity.phil]
+# Authentication configuration
+[auth.identity.phil]
 username = "philippe"
 password = "$argon2id$v=19$m=16,t=2,p=1$MTIzNDU2Nzg$lurg6dYCXXrJP3zaFwu35w" # test
+
+# OIDC provider configuration
+# [auth.oidc.github]
+# provider = "github"
+# issuer = "https://token.actions.githubusercontent.com"
+#
+# [auth.oidc.generic]
+# provider = "generic"
+# issuer = "https://auth.example.com"
+# discovery_url = "https://auth.example.com/.well-known/openid-configuration"
 
 [repository."nginx"]
 

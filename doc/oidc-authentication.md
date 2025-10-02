@@ -14,19 +14,19 @@ Support for any OIDC-compliant provider with configurable issuer and JWKS endpoi
 
 ## Configuration
 
-OIDC providers are configured under `[oidc.<provider-name>]` sections. Each provider requires a `provider` field specifying the type.
+OIDC providers are configured under `[auth.oidc.<provider-name>]` sections. Each provider requires a `provider` field specifying the type.
 
 ### GitHub Actions Provider
 
 ```toml
 # GitHub Actions with defaults (simplest configuration)
-[oidc.github-actions]
+[auth.oidc.github-actions]
 provider = "github"
 ```
 
 ```toml
 # Or with custom settings
-[oidc.github-actions]
+[auth.oidc.github-actions]
 provider = "github"
 required_audience = "https://my-registry.example.com"
 jwks_refresh_interval = 7200  # Default: 3600 seconds
@@ -41,14 +41,14 @@ Default values for GitHub provider:
 
 ```toml
 # Generic provider (required fields)
-[oidc.my-provider]
+[auth.oidc.my-provider]
 provider = "generic"
 issuer = "https://auth.example.com"
 ```
 
 ```toml
 # With all options
-[oidc.my-provider]
+[auth.oidc.my-provider]
 provider = "generic"
 issuer = "https://auth.example.com"
 jwks_uri = "https://auth.example.com/.well-known/jwks"  # Optional: auto-discovered if not set
@@ -61,17 +61,17 @@ clock_skew_tolerance = 120     # Default: 60 seconds
 
 ```toml
 # GitHub Actions provider
-[oidc.github-actions]
+[auth.oidc.github-actions]
 provider = "github"
 
 # Google Cloud provider
-[oidc.google-cloud]
+[auth.oidc.google-cloud]
 provider = "generic"
 issuer = "https://accounts.google.com"
 jwks_uri = "https://www.googleapis.com/oauth2/v3/certs"
 
 # Corporate Keycloak instance
-[oidc.corporate]
+[auth.oidc.corporate]
 provider = "generic"
 issuer = "https://auth.example.com/realms/myrealm"
 required_audience = "internal-registry"
@@ -86,7 +86,7 @@ Repository and workflow restrictions should be implemented using CEL policies fo
 OIDC tokens can be provided in two ways:
 
 1. **Bearer Token** (standard OAuth2): `Authorization: Bearer <jwt-token>`
-2. **Basic Auth** (Docker compatibility): Username must match the provider name configured in `[oidc.<provider-name>]`, password is the JWT token
+2. **Basic Auth** (Docker compatibility): Username must match the provider name configured in `[auth.oidc.<provider-name>]`, password is the JWT token
 
 ## Using OIDC Authentication
 

@@ -130,6 +130,28 @@ impl<'a> Route<'a> {
         }
     }
 
+    pub fn action_name(&self) -> &'static str {
+        match self {
+            Route::ApiVersion => "get-api-version",
+            Route::Healthz => "healthz",
+            Route::Metrics => "metrics",
+            Route::ListCatalog { .. } => "list-catalog",
+            Route::ListTags { .. } => "list-tags",
+            Route::StartUpload { .. } => "start-upload",
+            Route::GetUpload { .. } => "get-upload",
+            Route::PatchUpload { .. } => "patch-upload",
+            Route::PutUpload { .. } => "put-upload",
+            Route::DeleteUpload { .. } => "delete-upload",
+            Route::GetBlob { .. } | Route::HeadBlob { .. } => "get-blob",
+            Route::DeleteBlob { .. } => "delete-blob",
+            Route::GetManifest { .. } | Route::HeadManifest { .. } => "get-manifest",
+            Route::PutManifest { .. } => "put-manifest",
+            Route::DeleteManifest { .. } => "delete-manifest",
+            Route::GetReferrer { .. } => "get-referrers",
+            Route::Unknown => "unknown",
+        }
+    }
+
     pub fn is_write(&self) -> bool {
         matches!(
             self,

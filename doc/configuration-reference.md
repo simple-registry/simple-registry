@@ -41,6 +41,7 @@ This should be set according to the number of CPU cores available on the server.
 - `retention_policy` (optional): Global retention policy that applies to all repositories. See Retention Policy section below.
 - `immutable_tags` (bool): When true, tags cannot be overwritten once pushed (default: false).
 - `immutable_tags_exclusions` (list of string): Regular expression patterns for tags that remain mutable when immutable_tags is enabled.
+- `authorization_webhook` (string): Name of the webhook to use for authorization (optional). References a webhook defined in `auth.webhook.<name>`.
 
 ## Token and Key Cache (`cache`)
 
@@ -122,17 +123,28 @@ ttl = 10
 key_prefix = "registry-locks"
 ```
 
-## Identity (`identity.<identity-id>`)
+## Authentication (`auth`)
+
+The `auth` section contains all authentication-related configuration, including identity providers, OIDC providers, and webhook authorization.
+
+### Basic Authentication (`auth.identity.<identity-id>`)
 
 - `<identity-id>` (string): The identity ID can be any string. It is used to reference the identity in the repository configuration.
 - `username` (string): The username for the identity.
 - `password` (string): The argon2 hashed password for the identity.
 
-## OIDC Authentication (`oidc`)
+Example:
+```toml
+[auth.identity.alice]
+username = "alice"
+password = "$argon2id$v=19$m=4096,t=3,p=1$..."
+```
+
+### OIDC Authentication (`auth.oidc`)
 
 Optional OIDC (OpenID Connect) configuration for JWT-based authentication. When configured, the registry accepts Bearer tokens from multiple identity providers simultaneously.
 
-Each provider is configured under `[oidc.<provider-name>]` with provider-specific settings.
+Each provider is configured under `[auth.oidc.<provider-name>]` with provider-specific settings.
 
 ### GitHub Provider
 
@@ -148,7 +160,7 @@ Configuration fields:
 
 Example:
 ```toml
-[oidc.github-actions]
+[auth.oidc.github-actions]
 provider = "github"
 required_audience = "https://github.com/myorg/myrepo"  # Optional
 jwks_refresh_interval = 3600
@@ -157,11 +169,11 @@ clock_skew_tolerance = 60
 
 Example with multiple providers:
 ```toml
-[oidc.github-actions]
+[auth.oidc.github-actions]
 provider = "github"
 jwks_refresh_interval = 3600
 
-[oidc.corporate-auth]
+[auth.oidc.corporate-auth]
 provider = "generic"
 issuer = "https://auth.example.com/realms/myrealm"
 jwks_refresh_interval = 7200
@@ -208,7 +220,7 @@ Configuration fields:
 
 Example:
 ```toml
-[oidc.google-cloud]
+[auth.oidc.google-cloud]
 provider = "generic"
 issuer = "https://accounts.google.com"
 # jwks_uri = "https://custom.example.com/jwks.json"  # Optional
@@ -216,12 +228,81 @@ jwks_refresh_interval = 3600
 clock_skew_tolerance = 60
 ```
 
+### Webhook Authorization (`auth.webhook.<webhook-name>`)
+
+Webhook authorization allows delegating access control decisions to an external HTTP service.
+
+#### Webhook Configuration
+
+- `url` (string): The URL of the webhook service (required)
+- `timeout_ms` (u64): Request timeout in milliseconds (required)
+- `bearer_token` (string): Bearer token for authentication (optional)
+- `basic_auth` (object): Basic authentication credentials (optional)
+  - `username` (string): Basic auth username
+  - `password` (string): Basic auth password
+- `client_certificate_bundle` (string): Path to client certificate for mTLS (optional)
+- `client_private_key` (string): Path to client private key for mTLS (optional)
+- `server_ca_bundle` (string): Path to CA bundle for server verification (optional)
+- `forward_headers` (list): List of client headers to forward to webhook (optional)
+- `cache_ttl` (u64): Cache duration in seconds (default: 60, set to 0 to disable caching)
+
+#### Authentication Methods
+
+Webhooks support multiple authentication methods that can be combined:
+
+**Bearer Token:**
+```toml
+[auth.webhook.api_service]
+url = "https://api.example.com/authorize"
+timeout_ms = 1000
+bearer_token = "secret-token"
+```
+
+**Basic Authentication:**
+```toml
+[auth.webhook.basic_service]
+url = "https://service.example.com/authorize"
+timeout_ms = 1000
+basic_auth = { username = "user", password = "pass" }
+```
+
+**Mutual TLS:**
+```toml
+[auth.webhook.mtls_service]
+url = "https://secure.example.com/authorize"
+timeout_ms = 1000
+client_certificate_bundle = "/path/to/cert.pem"
+client_private_key = "/path/to/key.pem"
+server_ca_bundle = "/path/to/ca.pem"
+```
+
+#### Using Webhooks
+
+Reference webhooks globally or per-repository:
+
+```toml
+# Global webhook
+[global]
+authorization_webhook = "api_service"
+
+# Repository-specific webhook
+[repository.sensitive]
+authorization_webhook = "mtls_service"
+
+# Disable webhook for a repository
+[repository.public]
+authorization_webhook = ""  # Empty string disables
+```
+
+Please refer to the [Webhook Authorization Documentation](configure-webhook-authorization.md) for more information.
+
 ## Repository (`repository."<namespace>"`)
 
 ### Repository Options
 
 - `immutable_tags` (bool): When true, tags in this repository cannot be overwritten once pushed (default: inherits from global).
 - `immutable_tags_exclusions` (list of string): Regular expression patterns for tags that remain mutable when immutable_tags is enabled.
+- `authorization_webhook` (string): Name of the webhook to use for this repository (optional). Overrides the global webhook setting. Use an empty string `""` to disable webhooks for this repository.
 
 ### Pull-through cache (`repository."<namespace>".upstream`)
 

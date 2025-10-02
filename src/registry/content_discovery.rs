@@ -1,13 +1,31 @@
 use crate::registry::oci::{Descriptor, Digest, ReferrerList};
-use crate::registry::server::response_ext::ResponseExt;
 use crate::registry::{Error, Registry, ResponseBody};
-use hyper::header::CONTENT_TYPE;
+use hyper::header::{CONTENT_TYPE, LINK};
 use hyper::{Response, StatusCode};
 use serde::Serialize;
 use std::fmt::Debug;
 use tracing::instrument;
 
 pub const OCI_FILTERS_APPLIED: &str = "OCI-Filters-Applied";
+
+fn paginated_response(
+    body: ResponseBody,
+    link: Option<&str>,
+) -> Result<Response<ResponseBody>, Error> {
+    let res = match link {
+        Some(link) => Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "application/json")
+            .header(LINK, format!("<{link}>; rel=\"next\""))
+            .body(body)?,
+        None => Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)?,
+    };
+
+    Ok(res)
+}
 
 impl Registry {
     #[instrument]
@@ -107,7 +125,7 @@ impl Registry {
         let catalog = CatalogResponse { repositories };
         let catalog = serde_json::to_string(&catalog)?;
 
-        Response::paginated(ResponseBody::fixed(catalog.into_bytes()), link.as_deref())
+        paginated_response(ResponseBody::fixed(catalog.into_bytes()), link.as_deref())
     }
 
     #[instrument(skip(self))]
@@ -130,7 +148,7 @@ impl Registry {
             tags,
         };
         let tag_list = serde_json::to_string(&tag_list)?;
-        Response::paginated(ResponseBody::fixed(tag_list.into_bytes()), link.as_deref())
+        paginated_response(ResponseBody::fixed(tag_list.into_bytes()), link.as_deref())
     }
 }
 
@@ -139,11 +157,13 @@ mod tests {
     use super::*;
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::oci::Reference;
-    use crate::registry::server::response_ext::{IntoAsyncRead, ResponseExt};
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
+    use futures_util::TryStreamExt;
+    use http_body_util::BodyExt;
     use std::str::FromStr;
     use tokio::io::AsyncReadExt;
+    use tokio_util::io::StreamReader;
 
     #[tokio::test]
     async fn test_get_referrers_fs() {
@@ -358,7 +378,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let mut reader = response.into_async_read();
+        let stream = response.into_data_stream().map_err(std::io::Error::other);
+        let mut reader = StreamReader::new(stream);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         let referrers: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -400,8 +421,9 @@ mod tests {
         let response = registry.handle_list_catalog(None, None).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let has_link = response.get_header("Link").is_some();
-        let mut reader = response.into_async_read();
+        let has_link = response.headers().get("Link").is_some();
+        let stream = response.into_data_stream().map_err(std::io::Error::other);
+        let mut reader = StreamReader::new(stream);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         let catalog: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -418,8 +440,9 @@ mod tests {
         let response = registry.handle_list_catalog(Some(2), None).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let has_link = response.get_header("Link").is_some();
-        let mut reader = response.into_async_read();
+        let has_link = response.headers().get("Link").is_some();
+        let stream = response.into_data_stream().map_err(std::io::Error::other);
+        let mut reader = StreamReader::new(stream);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         let catalog: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -463,8 +486,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let has_link = response.get_header("Link").is_some();
-        let mut reader = response.into_async_read();
+        let has_link = response.headers().get("Link").is_some();
+        let stream = response.into_data_stream().map_err(std::io::Error::other);
+        let mut reader = StreamReader::new(stream);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
 
@@ -488,8 +512,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        let has_link = response.get_header("Link").is_some();
-        let mut reader = response.into_async_read();
+        let has_link = response.headers().get("Link").is_some();
+        let stream = response.into_data_stream().map_err(std::io::Error::other);
+        let mut reader = StreamReader::new(stream);
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         let tag_list: serde_json::Value = serde_json::from_slice(&buf).unwrap();

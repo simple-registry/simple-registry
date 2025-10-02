@@ -1,6 +1,7 @@
 pub mod basic_auth;
 pub mod mtls;
 pub mod oidc;
+pub mod webhook;
 
 use crate::registry::server::ClientIdentity;
 use crate::registry::Error;

@@ -11,11 +11,12 @@ A fully OCI-compliant and Docker-compatible container registry.
 - Retention policies
 - Native mTLS support
 - OIDC authentication (Bearer and Basic auth)
+- Webhook authorization for external policy decisions
 
 ## Properties
 
 - Resource efficient: Asynchronous, Streaming operations
-- Secure: mTLS, OIDC/JWT authentication (Bearer and Basic auth), authorization policies (powered by CEL)
+- Secure: mTLS, OIDC/JWT authentication (Bearer and Basic auth), authorization policies (CEL and webhooks)
 - Scalable: light footprint
 - Easy to operate: online garbage collection, auto-reload of configuration and certificates
 - Cross-platform: should be portable on most mainstream operating systems
@@ -60,6 +61,7 @@ In addition to the standard distribution endpoints, Simple-Registry provides the
 - [Retention Policies documentation](doc/configure-retention-policies.md)
 - [mTLS documentation](doc/configure-mtls.md)
 - [OIDC Authentication documentation](doc/oidc-authentication.md)
+- [Webhook Authorization documentation](doc/configure-webhook-authorization.md)
 
 ## References
 

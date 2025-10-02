@@ -81,6 +81,10 @@ enum SubCommand {
 }
 
 fn main() -> Result<(), command::Error> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let cli_args: GlobalArguments = argh::from_env();
 
     let config = Configuration::load(&cli_args.config)?;
@@ -99,7 +103,7 @@ async fn run_command(
 ) -> Result<(), command::Error> {
     set_tracing(config.observability.clone())?;
 
-    let oidc_validators = ServerContext::build_oidc_validators(&config.oidc, &config.cache)?;
+    let oidc_validators = ServerContext::build_oidc_validators(&config.auth.oidc, &config.cache)?;
     let registry = create_registry(&config)?;
 
     match cli_args.subcommand {
@@ -111,7 +115,7 @@ async fn run_command(
         SubCommand::Serve(_) => {
             let server = Arc::new(server::Command::new(
                 &config.server,
-                &config.identity,
+                &config.auth.identity,
                 registry,
                 oidc_validators,
             )?);

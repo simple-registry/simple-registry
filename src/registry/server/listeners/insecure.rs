@@ -85,7 +85,13 @@ impl InsecureListener {
             let context = Arc::clone(&self.context.load());
             let timeouts = Arc::clone(&self.timeouts.load());
 
-            tokio::spawn(Box::pin(serve_request(stream, context, None, timeouts)));
+            tokio::spawn(Box::pin(serve_request(
+                stream,
+                context,
+                None,
+                timeouts,
+                remote_address,
+            )));
         }
     }
 }

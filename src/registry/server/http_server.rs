@@ -28,6 +28,7 @@ pub async fn serve_request<S>(
     context: Arc<ServerContext>,
     peer_certificate: Option<Vec<u8>>,
     timeouts: Arc<[Duration; 2]>,
+    remote_address: std::net::SocketAddr,
 ) where
     S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
@@ -38,6 +39,7 @@ pub async fn serve_request<S>(
                 let peer_certificate = PeerCertificate(Arc::new(cert_data.clone()));
                 request.extensions_mut().insert(peer_certificate);
             }
+            request.extensions_mut().insert(remote_address);
             handle_request(Arc::clone(&context), request)
         }),
     );
@@ -142,8 +144,12 @@ async fn router(
     let (parts, incoming) = req.into_parts();
 
     let route = router::parse(&parts.method, &parts.uri);
-    let identity = context.authenticate_request(&parts).await?;
-    context.registry.validate_request(&route, &identity).await?;
+    let remote_address = parts.extensions.get::<std::net::SocketAddr>().copied();
+    let identity = context.authenticate_request(&parts, remote_address).await?;
+    context
+        .registry
+        .validate_request(&route, &identity, &parts)
+        .await?;
 
     match route {
         Route::Unknown => {

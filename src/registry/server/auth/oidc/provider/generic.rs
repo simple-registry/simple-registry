@@ -1,13 +1,10 @@
 use crate::registry::cache::Cache;
-use crate::registry::http_client::HttpClient;
 use crate::registry::server::auth::oidc::{Jwk, OidcProvider};
 use crate::registry::server::OidcClaims;
 use crate::registry::Error;
 use async_trait::async_trait;
-use http_body_util::{BodyExt, Empty};
-use hyper::body::Bytes;
-use hyper::{Request, StatusCode};
 use jsonwebtoken::{decode, decode_header, Validation};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
@@ -85,7 +82,7 @@ pub async fn validate_oidc_token(
     provider_name: &str,
     provider: &dyn OidcProvider,
     token: &str,
-    http_client: &HttpClient,
+    client: &Client,
     cache: &dyn Cache,
 ) -> Result<OidcClaims, Error> {
     let header = decode_header(token)
@@ -104,7 +101,7 @@ pub async fn validate_oidc_token(
 
     let jwks = fetch_jwks(
         provider,
-        http_client,
+        client,
         cache,
         &jwks_cache_key,
         &oidc_config_cache_key,
@@ -162,7 +159,7 @@ pub async fn validate_oidc_token(
 
 async fn fetch_jwks(
     provider: &dyn OidcProvider,
-    http_client: &HttpClient,
+    client: &Client,
     cache: &dyn Cache,
     jwks_cache_key: &str,
     oidc_config_cache_key: &str,
@@ -178,34 +175,27 @@ async fn fetch_jwks(
         uri.to_string()
     } else {
         let oidc_config =
-            fetch_oidc_configuration(provider, http_client, cache, oidc_config_cache_key).await?;
+            fetch_oidc_configuration(provider, client, cache, oidc_config_cache_key).await?;
         oidc_config.jwks_uri
     };
 
-    let request = Request::builder()
-        .method("GET")
-        .uri(&jwks_uri)
+    let response = client
+        .get(&jwks_uri)
         .header("Accept", "application/json")
-        .body(Empty::<Bytes>::new())
-        .map_err(|e| Error::Internal(format!("Failed to build JWKS request: {e}")))?;
+        .send()
+        .await
+        .map_err(|e| Error::Internal(format!("Failed to fetch JWKS: {e}")))?;
 
-    let response = http_client.request(request).await?;
-
-    if response.status() != StatusCode::OK {
+    if !response.status().is_success() {
         return Err(Error::Internal(format!(
             "Failed to fetch JWKS: HTTP {}",
             response.status()
         )));
     }
 
-    let body = response
-        .into_body()
-        .collect()
+    let jwks: Jwks = response
+        .json()
         .await
-        .map_err(|e| Error::Internal(format!("Failed to read JWKS response: {e}")))?
-        .to_bytes();
-
-    let jwks: Jwks = serde_json::from_slice(&body)
         .map_err(|e| Error::Internal(format!("Failed to parse JWKS: {e}")))?;
 
     let _ = cache
@@ -222,7 +212,7 @@ async fn fetch_jwks(
 
 async fn fetch_oidc_configuration(
     provider: &dyn OidcProvider,
-    http_client: &HttpClient,
+    client: &Client,
     cache: &dyn Cache,
     oidc_config_cache_key: &str,
 ) -> Result<OpenIdConfiguration, Error> {
@@ -235,30 +225,23 @@ async fn fetch_oidc_configuration(
 
     let discovery_url = format!("{}/.well-known/openid-configuration", provider.issuer());
 
-    let request = Request::builder()
-        .method("GET")
-        .uri(&discovery_url)
+    let response = client
+        .get(&discovery_url)
         .header("Accept", "application/json")
-        .body(Empty::<Bytes>::new())
-        .map_err(|e| Error::Internal(format!("Failed to build OIDC discovery request: {e}")))?;
+        .send()
+        .await
+        .map_err(|e| Error::Internal(format!("Failed to fetch OIDC configuration: {e}")))?;
 
-    let response = http_client.request(request).await?;
-
-    if response.status() != StatusCode::OK {
+    if !response.status().is_success() {
         return Err(Error::Internal(format!(
             "Failed to fetch OIDC configuration: HTTP {}",
             response.status()
         )));
     }
 
-    let body = response
-        .into_body()
-        .collect()
+    let config: OpenIdConfiguration = response
+        .json()
         .await
-        .map_err(|e| Error::Internal(format!("Failed to read OIDC configuration response: {e}")))?
-        .to_bytes();
-
-    let config: OpenIdConfiguration = serde_json::from_slice(&body)
         .map_err(|e| Error::Internal(format!("Failed to parse OIDC configuration: {e}")))?;
 
     if config.issuer != provider.issuer() {
