@@ -150,6 +150,7 @@ fn reload_full_config(server: &Arc<server::Command>, _config_path: &Path, config
         &config.auth.identity,
         registry,
         oidc_validators,
+        config.auth.token.clone(),
     ) {
         error!("Failed to notify server of configuration change: {e}");
     } else {

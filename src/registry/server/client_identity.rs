@@ -1,3 +1,4 @@
+use crate::registry::server::auth::token::AccessEntry;
 use serde::Serialize;
 use serde_json;
 use std::collections::HashMap;
@@ -12,6 +13,8 @@ pub struct ClientIdentity {
     pub certificate: ClientCertificate,
     pub oidc: Option<OidcClaims>,
     pub client_ip: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub token_scopes: Vec<AccessEntry>,
 }
 
 /// Certificate information extracted from client mTLS certificates.

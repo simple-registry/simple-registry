@@ -13,6 +13,13 @@ pub fn parse<'a>(method: &Method, uri: &'a Uri) -> Route<'a> {
         "/healthz" if method == Method::GET => return Route::Healthz,
         "/metrics" if method == Method::GET => return Route::Metrics,
         "/v2" | "/v2/" if method == Method::GET => return Route::ApiVersion,
+        "/v2/token" if method == Method::GET => {
+            let query = params.map(TokenQuery::from_params).unwrap_or_default();
+            return Route::Token {
+                scope: query.scope,
+                expires_in: query.expires_in,
+            };
+        }
         "/v2/_catalog" if method == Method::GET => {
             let (n, last) = if let Some(p) = params.map(PaginationQuery::from_params) {
                 (p.n, p.last)
@@ -56,16 +63,20 @@ pub fn parse<'a>(method: &Method, uri: &'a Uri) -> Route<'a> {
     Route::Unknown
 }
 
+trait QueryFromParams: for<'de> Deserialize<'de> + Default {
+    fn from_params(params: &str) -> Self {
+        serde_urlencoded::from_str(params).ok().unwrap_or_default()
+    }
+}
+
 #[derive(Deserialize, Default)]
 struct DigestQuery {
     digest: Option<String>,
 }
 
-impl DigestQuery {
-    fn from_params(params: &str) -> Self {
-        serde_urlencoded::from_str(params).ok().unwrap_or_default()
-    }
+impl QueryFromParams for DigestQuery {}
 
+impl DigestQuery {
     fn to_digest(&self) -> Option<Digest> {
         self.digest.as_ref().and_then(|d| d.parse().ok())
     }
@@ -77,11 +88,16 @@ struct ArtifactTypeQuery {
     pub artifact_type: Option<String>,
 }
 
-impl ArtifactTypeQuery {
-    fn from_params(params: &str) -> Self {
-        serde_urlencoded::from_str(params).ok().unwrap_or_default()
-    }
+impl QueryFromParams for ArtifactTypeQuery {}
+
+#[derive(Deserialize, Default)]
+struct TokenQuery {
+    #[serde(default)]
+    pub scope: Vec<String>,
+    pub expires_in: Option<u64>,
 }
+
+impl QueryFromParams for TokenQuery {}
 
 #[derive(Deserialize, Default)]
 struct PaginationQuery {
@@ -89,11 +105,7 @@ struct PaginationQuery {
     pub last: Option<String>,
 }
 
-impl PaginationQuery {
-    fn from_params(params: &str) -> Self {
-        serde_urlencoded::from_str(params).ok().unwrap_or_default()
-    }
-}
+impl QueryFromParams for PaginationQuery {}
 
 fn try_parse_uploads<'a>(
     method: &Method,
