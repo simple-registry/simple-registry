@@ -118,6 +118,7 @@ async fn run_command(
                 &config.auth.identity,
                 registry,
                 oidc_validators,
+                config.auth.token.clone(),
             )?);
 
             let _watcher = ConfigWatcher::new(&cli_args.config, server.clone())?;

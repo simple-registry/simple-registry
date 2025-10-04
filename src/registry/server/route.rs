@@ -14,7 +14,8 @@ use uuid::Uuid;
 /// - `n`: Maximum number of results for pagination
 /// - `last`: Last result marker for pagination
 /// - `artifact_type`: Filter for referrer queries
-#[derive(Debug, Serialize)]
+/// - `category`: The action category ("pull", "push", "delete", or None for non-repository operations)
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum Route<'a> {
     Healthz,
@@ -105,6 +106,13 @@ pub enum Route<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         artifact_type: Option<String>,
     },
+    #[serde(rename = "token")]
+    Token {
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        scope: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expires_in: Option<u64>,
+    },
     #[serde(rename = "unknown")]
     Unknown,
 }
@@ -126,7 +134,12 @@ impl<'a> Route<'a> {
             | Route::PutManifest { namespace, .. }
             | Route::DeleteManifest { namespace, .. }
             | Route::GetReferrer { namespace, .. } => Some(namespace),
-            _ => None,
+            Route::ListCatalog { .. }
+            | Route::Healthz
+            | Route::Metrics
+            | Route::ApiVersion
+            | Route::Token { .. }
+            | Route::Unknown => None,
         }
     }
 
@@ -148,6 +161,7 @@ impl<'a> Route<'a> {
             Route::PutManifest { .. } => "put-manifest",
             Route::DeleteManifest { .. } => "delete-manifest",
             Route::GetReferrer { .. } => "get-referrers",
+            Route::Token { .. } => "token",
             Route::Unknown => "unknown",
         }
     }
@@ -163,6 +177,29 @@ impl<'a> Route<'a> {
                 | Route::DeleteManifest { .. }
                 | Route::DeleteBlob { .. }
         )
+    }
+
+    pub fn category(&self) -> Option<&'static str> {
+        match self {
+            Route::GetManifest { .. }
+            | Route::HeadManifest { .. }
+            | Route::GetBlob { .. }
+            | Route::HeadBlob { .. }
+            | Route::ListTags { .. }
+            | Route::GetReferrer { .. } => Some("pull"),
+
+            Route::PutManifest { .. }
+            | Route::StartUpload { .. }
+            | Route::GetUpload { .. }
+            | Route::PatchUpload { .. }
+            | Route::PutUpload { .. } => Some("push"),
+
+            Route::DeleteManifest { .. }
+            | Route::DeleteBlob { .. }
+            | Route::DeleteUpload { .. } => Some("delete"),
+
+            _ => None,
+        }
     }
 }
 
@@ -254,6 +291,76 @@ mod tests {
         // n and last are now included when present
         assert_eq!(json["n"], 10);
         assert_eq!(json["last"], "library/alpine");
+    }
+
+    #[test]
+    fn test_category() {
+        assert_eq!(
+            Route::GetManifest {
+                namespace: "test",
+                reference: Reference::Tag("v1".to_string()),
+            }
+            .category(),
+            Some("pull")
+        );
+
+        assert_eq!(
+            Route::ListTags {
+                namespace: "test",
+                n: None,
+                last: None,
+            }
+            .category(),
+            Some("pull")
+        );
+
+        assert_eq!(
+            Route::GetBlob {
+                namespace: "test",
+                digest: Digest::Sha256("abc".to_string()),
+            }
+            .category(),
+            Some("pull")
+        );
+
+        assert_eq!(
+            Route::PutManifest {
+                namespace: "test",
+                reference: Reference::Tag("v1".to_string()),
+            }
+            .category(),
+            Some("push")
+        );
+
+        assert_eq!(
+            Route::StartUpload {
+                namespace: "test",
+                digest: None,
+            }
+            .category(),
+            Some("push")
+        );
+
+        assert_eq!(
+            Route::DeleteManifest {
+                namespace: "test",
+                reference: Reference::Tag("v1".to_string()),
+            }
+            .category(),
+            Some("delete")
+        );
+
+        assert_eq!(
+            Route::DeleteBlob {
+                namespace: "test",
+                digest: Digest::Sha256("abc".to_string()),
+            }
+            .category(),
+            Some("delete")
+        );
+
+        assert_eq!(Route::Healthz.category(), None);
+        assert_eq!(Route::ApiVersion.category(), None);
     }
 
     #[test]

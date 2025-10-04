@@ -1,4 +1,5 @@
 use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
+use crate::registry::server::auth::token::{route_requires_scope, route_to_scope};
 use crate::registry::server::auth::PeerCertificate;
 use crate::registry::server::request_ext::{HeaderExt, IntoAsyncRead};
 use crate::registry::server::route::Route;
@@ -55,9 +56,6 @@ pub async fn serve_request<S>(
         debug!("iter = {iter} sleep_duration = {sleep_duration:?}");
         tokio::select! {
             res = conn.as_mut() => {
-                // Polling the connection returned a result.
-                // In this case print either the successful or error result for the connection
-                // and break out of the loop.
                 match res {
                     Ok(()) => debug!("after polling conn, no error"),
                     Err(error) =>  debug!("error serving connection: {error}"),
@@ -65,8 +63,6 @@ pub async fn serve_request<S>(
                 break;
             }
             () = tokio::time::sleep(*sleep_duration) => {
-                // tokio::time::sleep returned a result.
-                // Call graceful_shutdown on the connection and continue the loop.
                 debug!("iter = {iter} got timeout_interval, calling conn.graceful_shutdown");
                 conn.as_mut().graceful_shutdown();
             }
@@ -107,7 +103,7 @@ async fn handle_request(
                 .as_ref()
                 .map(|trace_id| json!({"trace_id": trace_id}))
                 .unwrap_or(json!({}));
-            registry_error_to_response_raw(&error, details)
+            registry_error_to_response_raw(&error, details, &context)
         }
     };
 
@@ -144,8 +140,29 @@ async fn router(
     let (parts, incoming) = req.into_parts();
 
     let route = router::parse(&parts.method, &parts.uri);
+
+    if let Route::Token { scope, expires_in } = route {
+        return context.handle_token(&parts, scope, expires_in).await;
+    }
+
     let remote_address = parts.extensions.get::<std::net::SocketAddr>().copied();
     let identity = context.authenticate_request(&parts, remote_address).await?;
+
+    if !identity.token_scopes.is_empty() {
+        let has_required_scope = identity
+            .token_scopes
+            .iter()
+            .any(|scope| route_requires_scope(&route, scope));
+
+        if !has_required_scope {
+            if let Some(required_scope) = route_to_scope(&route) {
+                return Err(Error::Unauthorized(format!(
+                    "Token missing required scope: {required_scope}"
+                )));
+            }
+        }
+    }
+
     context
         .registry
         .validate_request(&route, &identity, &parts)
@@ -160,6 +177,7 @@ async fn router(
             }
         }
         Route::ApiVersion => context.registry.handle_get_api_version().await,
+        Route::Token { .. } => unreachable!("Token route handled above"),
         Route::StartUpload { namespace, digest } => {
             context
                 .registry
@@ -294,7 +312,11 @@ async fn router(
     }
 }
 
-pub fn registry_error_to_response_raw<T>(error: &Error, details: T) -> Response<ResponseBody>
+pub fn registry_error_to_response_raw<T>(
+    error: &Error,
+    details: T,
+    context: &ServerContext,
+) -> Response<ResponseBody>
 where
     T: Serialize,
 {
@@ -333,15 +355,20 @@ where
     let body = Bytes::from(body);
 
     match error {
-        Error::Unauthorized(_) => Response::builder()
-            .status(status)
-            .header(CONTENT_TYPE, "application/json")
-            .header(
-                WWW_AUTHENTICATE,
-                r#"Basic realm="Simple Registry", charset="UTF-8""#,
-            )
-            .body(ResponseBody::Fixed(Full::new(body)))
-            .unwrap(),
+        Error::Unauthorized(_) => {
+            let www_auth = if context.token_signer.is_some() {
+                r#"Bearer realm="/v2/token",service="simple-registry""#.to_string()
+            } else {
+                r#"Basic realm="Simple Registry", charset="UTF-8""#.to_string()
+            };
+
+            Response::builder()
+                .status(status)
+                .header(CONTENT_TYPE, "application/json")
+                .header(WWW_AUTHENTICATE, www_auth)
+                .body(ResponseBody::Fixed(Full::new(body)))
+                .unwrap()
+        }
         _ => Response::builder()
             .status(status)
             .header(CONTENT_TYPE, "application/json")

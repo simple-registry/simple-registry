@@ -53,6 +53,10 @@ impl FSRegistryTestCase {
         &mut self.registry
     }
 
+    pub fn into_registry(self) -> Registry {
+        self.registry
+    }
+
     pub fn set_repository_config(
         &mut self,
         repositories_config: HashMap<String, RepositoryConfig>,

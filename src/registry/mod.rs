@@ -213,6 +213,24 @@ impl Registry {
         identity: &ClientIdentity,
         request: &Parts,
     ) -> Result<(), Error> {
+        if !identity.token_scopes.is_empty() {
+            use crate::registry::server::auth::token::route_requires_scope;
+
+            let has_required_scope = identity
+                .token_scopes
+                .iter()
+                .any(|scope| route_requires_scope(route, scope));
+
+            if !has_required_scope {
+                log_denial("token scope", identity);
+                return Err(Error::Denied(
+                    "Token does not grant access to this resource".to_string(),
+                ));
+            }
+
+            return Ok(());
+        }
+
         if let Some(global_policy) = &self.global_access_policy {
             debug!("Evaluating global access policy");
             let allowed = global_policy.evaluate(route, identity)?;

@@ -1,4 +1,4 @@
-use crate::configuration::{IdentityConfig, ServerConfig};
+use crate::configuration::{IdentityConfig, ServerConfig, TokenConfig};
 use crate::registry::server::auth::oidc::OidcValidator;
 use crate::registry::server::listeners::insecure::InsecureListener;
 use crate::registry::server::listeners::tls::{ServerTlsConfig, TlsListener};
@@ -32,8 +32,9 @@ impl Command {
         identities: &HashMap<String, IdentityConfig>,
         registry: Registry,
         oidc_validators: Arc<Vec<OidcValidator>>,
+        token_config: Option<TokenConfig>,
     ) -> Result<Command, configuration::Error> {
-        let context = ServerContext::new(identities, registry, oidc_validators);
+        let context = ServerContext::new(identities, registry, oidc_validators, token_config)?;
 
         let listener = match server_config {
             ServerConfig::Insecure(config) => {
@@ -53,8 +54,9 @@ impl Command {
         identities: &HashMap<String, IdentityConfig>,
         registry: Registry,
         oidc_validators: Arc<Vec<OidcValidator>>,
+        token_config: Option<TokenConfig>,
     ) -> Result<(), configuration::Error> {
-        let context = ServerContext::new(identities, registry, oidc_validators);
+        let context = ServerContext::new(identities, registry, oidc_validators, token_config)?;
 
         match (&self.listener, server_config) {
             (ServiceListener::Insecure(listener), _) => listener.notify_config_change(context),

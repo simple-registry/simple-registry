@@ -134,6 +134,8 @@ pub struct AuthConfig {
     pub oidc: HashMap<String, OidcProviderConfig>,
     #[serde(default)]
     pub webhook: HashMap<String, WebhookConfig>,
+    #[serde(default)]
+    pub token: Option<TokenConfig>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -162,6 +164,34 @@ pub struct RepositoryConfig {
     #[serde(default)]
     pub immutable_tags_exclusions: Vec<String>,
     pub authorization_webhook: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct TokenConfig {
+    #[serde(default = "TokenConfig::default_algorithm")]
+    pub algorithm: String,
+    pub secret: Option<String>,
+    pub private_key_path: Option<std::path::PathBuf>,
+    pub public_key_path: Option<std::path::PathBuf>,
+    #[serde(default = "TokenConfig::default_ttl")]
+    pub default_ttl: String,
+    #[serde(default = "TokenConfig::default_max_ttl")]
+    pub max_ttl: String,
+    pub issuer: String,
+}
+
+impl TokenConfig {
+    fn default_algorithm() -> String {
+        "HS256".to_string()
+    }
+
+    fn default_ttl() -> String {
+        "1h".to_string()
+    }
+
+    fn default_max_ttl() -> String {
+        "24h".to_string()
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -238,12 +268,8 @@ impl Configuration {
             })?;
         }
 
-        let webhook_names: std::collections::HashSet<&str> = self
-            .auth
-            .webhook
-            .keys()
-            .map(std::string::String::as_str)
-            .collect();
+        let webhook_names: std::collections::HashSet<&str> =
+            self.auth.webhook.keys().map(String::as_str).collect();
 
         if let Some(ref webhook_name) = self.global.authorization_webhook {
             if !webhook_names.contains(webhook_name.as_str()) {

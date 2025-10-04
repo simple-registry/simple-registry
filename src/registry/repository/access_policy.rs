@@ -12,15 +12,26 @@
 //! # Available Variables
 //!
 //! CEL expressions have access to:
-//! - `identity`: Client identity information (id, username, certificate details)
-//! - `request`: Request details (action, namespace, digest, reference)
+//! - `identity`: Client identity information (id, username, certificate details, `token_scopes`)
+//! - `request`: Request details (action, namespace, digest, reference, `category`)
+//!
+//! The `request.category` field groups fine-grained actions into categories:
+//! - `"pull"` for all read operations (get-manifest, get-blob, list-tags, etc.)
+//! - `"push"` for all write operations (put-manifest, uploads, etc.)
+//! - `"delete"` for all delete operations
+//! - `null` for non-repository operations
+//!
+//! This allows simpler CEL policies like:
+//! ```cel
+//! request.category == "pull" || identity.username == "admin"
+//! ```
 
 use crate::configuration::Error as ConfigError;
 use crate::registry::server::route::Route;
 pub use crate::registry::server::ClientIdentity;
 use crate::registry::Error;
 use cel_interpreter::{Context, Program, Value};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 /// Configuration for access control policies.
@@ -30,6 +41,14 @@ pub struct RepositoryAccessPolicyConfig {
     pub default_allow: bool,
     #[serde(default)]
     pub rules: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ClientRequest<'a> {
+    #[serde(flatten)]
+    route: &'a Route<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<&'static str>,
 }
 
 /// Access control policy engine.
@@ -132,8 +151,13 @@ impl AccessPolicy {
         request: &'a Route,
         identity: &'a ClientIdentity,
     ) -> Result<Context<'a>, Error> {
+        let client_request = ClientRequest {
+            route: request,
+            category: request.category(),
+        };
+
         let mut context = Context::default();
-        context.add_variable("request", request)?;
+        context.add_variable("request", client_request)?;
         context.add_variable("identity", identity)?;
         Ok(context)
     }
