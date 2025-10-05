@@ -1,9 +1,9 @@
 use crate::configuration::RepositoryConfig;
-use crate::registry::cache;
 use crate::registry::cache::Cache;
 use crate::registry::metadata_store;
 use crate::registry::test_utils::create_test_registry;
 use crate::registry::{blob_store, Registry, Repository};
+use crate::registry::{cache, data_store};
 use bytesize::ByteSize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,13 +22,13 @@ impl FSRegistryTestCase {
         let temp_dir = TempDir::new().expect("Failed to create temp dir for FSBackendConfig");
         let path = temp_dir.path().to_string_lossy().to_string();
 
-        let blob_store = blob_store::fs::Backend::new(blob_store::fs::BackendConfig {
+        let blob_store = blob_store::fs::Backend::new(&data_store::fs::BackendConfig {
             root_dir: path.clone(),
             sync_to_disk: false,
         });
         let blob_store = Arc::new(blob_store);
 
-        let metadata_store = metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
+        let metadata_store = metadata_store::fs::Backend::new(&metadata_store::fs::BackendConfig {
             root_dir: path,
             sync_to_disk: false,
             redis: None,
@@ -84,7 +84,7 @@ impl S3RegistryTestCase {
     pub fn new() -> Self {
         let key_prefix = format!("test-{}", Uuid::new_v4());
 
-        let blob_store = blob_store::s3::Backend::new(blob_store::s3::BackendConfig {
+        let blob_store = blob_store::s3::Backend::new(&data_store::s3::BackendConfig {
             access_key_id: "root".to_string(),
             secret_key: "roottoor".to_string(),
             endpoint: "http://127.0.0.1:9000".to_string(),
@@ -95,10 +95,11 @@ impl S3RegistryTestCase {
             multipart_copy_chunk_size: ByteSize::mb(5),
             multipart_copy_jobs: 4,
             multipart_part_size: ByteSize::mb(5),
-        });
+        })
+        .unwrap();
         let blob_store = Arc::new(blob_store);
 
-        let metadata_store = metadata_store::s3::Backend::new(metadata_store::s3::BackendConfig {
+        let metadata_store = metadata_store::s3::Backend::new(&metadata_store::s3::BackendConfig {
             access_key_id: "root".to_string(),
             secret_key: "roottoor".to_string(),
             endpoint: "http://127.0.0.1:9000".to_string(),

@@ -1,4 +1,4 @@
-use crate::registry::oci;
+use crate::registry::{data_store, oci};
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::GetObjectError;
@@ -13,6 +13,7 @@ use tracing::error;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
+    DataStore(data_store::Error),
     HashSerialization(String),
     JSONSerialization(String),
     StorageBackend(String),
@@ -25,6 +26,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Error::DataStore(err) => write!(f, "Data store error: {err}"),
             Error::HashSerialization(e) => write!(f, "Hash state management error: {e}"),
             Error::JSONSerialization(e) => write!(f, "JSON serialization error: {e}"),
             Error::StorageBackend(e) => write!(f, "Storage backend error: {e}"),
@@ -32,6 +34,15 @@ impl fmt::Display for Error {
             Error::UploadNotFound => write!(f, "Upload not found"),
             Error::BlobNotFound => write!(f, "Blob not found"),
             Error::ReferenceNotFound => write!(f, "Reference not found"),
+        }
+    }
+}
+
+impl From<data_store::Error> for Error {
+    fn from(err: data_store::Error) -> Self {
+        match err {
+            data_store::Error::NotFound(_) => Error::ReferenceNotFound,
+            _ => Error::DataStore(err),
         }
     }
 }

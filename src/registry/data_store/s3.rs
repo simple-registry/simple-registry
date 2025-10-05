@@ -1,3 +1,4 @@
+use crate::registry::data_store::Error;
 use aws_sdk_s3::config::{timeout::TimeoutConfig, BehaviorVersion, Credentials, Region};
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
@@ -42,7 +43,7 @@ impl BackendConfig {
     }
 
     pub fn default_multipart_part_size() -> ByteSize {
-        ByteSize::mib(10)
+        ByteSize::mib(50)
     }
 }
 
@@ -54,10 +55,22 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(config: BackendConfig) -> Self {
+    pub fn new(config: &BackendConfig) -> Result<Self, Error> {
+        if config.multipart_part_size < ByteSize::mib(5) {
+            return Err(Error::Configuration(
+                "Multipart part size must be at least 5MiB".to_string(),
+            ));
+        }
+
+        if config.multipart_copy_chunk_size > ByteSize::gib(5) {
+            return Err(Error::Configuration(
+                "Multipart copy chunk size must be at most 5GiB".to_string(),
+            ));
+        }
+
         let credentials = Credentials::new(
-            config.access_key_id,
-            config.secret_key,
+            &config.access_key_id,
+            &config.secret_key,
             None,
             None,
             "custom",
@@ -70,8 +83,8 @@ impl Backend {
 
         let client_config = S3Config::builder()
             .behavior_version(BehaviorVersion::latest())
-            .region(Region::new(config.region))
-            .endpoint_url(config.endpoint)
+            .region(Region::new(config.region.clone()))
+            .endpoint_url(&config.endpoint)
             .credentials_provider(credentials)
             .timeout_config(timeout)
             .force_path_style(true)
@@ -79,11 +92,11 @@ impl Backend {
 
         let s3_client = S3Client::from_conf(client_config);
 
-        Self {
+        Ok(Self {
             s3_client,
-            bucket: config.bucket,
-            key_prefix: config.key_prefix,
-        }
+            bucket: config.bucket.clone(),
+            key_prefix: config.key_prefix.clone(),
+        })
     }
 
     fn full_key(&self, path: &str) -> String {

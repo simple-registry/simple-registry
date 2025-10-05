@@ -27,7 +27,7 @@ pub mod upload;
 mod version;
 
 use crate::configuration;
-use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
+use crate::configuration::{GlobalConfig, RepositoryConfig};
 use crate::registry::cache::Cache;
 use crate::registry::server::auth::webhook::WebhookAuthorizer;
 pub use repository::Repository;
@@ -85,11 +85,11 @@ impl Registry {
         metadata_store: Arc<dyn MetadataStore + Send + Sync>,
         repositories_config: HashMap<String, RepositoryConfig>,
         global_config: &GlobalConfig,
-        auth_token_cache: &CacheStoreConfig,
+        auth_token_cache: &cache::CacheStoreConfig,
         auth_config: &configuration::AuthConfig,
     ) -> Result<Self, configuration::Error> {
         let auth_token_cache_arc: Arc<dyn Cache> =
-            if let CacheStoreConfig::Redis(ref redis_config) = auth_token_cache {
+            if let cache::CacheStoreConfig::Redis(ref redis_config) = auth_token_cache {
                 Arc::new(cache::redis::Backend::new(redis_config.clone())?)
             } else {
                 Arc::new(cache::memory::Backend::new())
@@ -341,7 +341,7 @@ pub mod test_utils {
     ) -> Registry {
         let repositories_config = create_test_repository_config();
         let global = GlobalConfig::default();
-        let token_cache = CacheStoreConfig::default();
+        let token_cache = cache::CacheStoreConfig::default();
 
         Registry::new(
             blob_store,
@@ -428,8 +428,9 @@ pub mod test_utils {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
-    use crate::registry::blob_store::fs::{Backend as FSBlobStore, BackendConfig as FSBlobConfig};
+    use crate::configuration::{GlobalConfig, RepositoryConfig};
+    use crate::registry::blob_store::fs::Backend as FSBlobStore;
+    use crate::registry::data_store::fs::BackendConfig as FSBlobConfig;
     use crate::registry::metadata_store::fs::{
         Backend as FSMetadataStore, BackendConfig as FSMetadataConfig,
     };
@@ -663,19 +664,19 @@ mod test {
             root_dir: temp_dir.clone(),
             sync_to_disk: false,
         };
-        let blob_store = Arc::new(FSBlobStore::new(blob_config));
+        let blob_store = Arc::new(FSBlobStore::new(&blob_config));
         let metadata_config = FSMetadataConfig {
             root_dir: temp_dir,
             redis: None,
             sync_to_disk: false,
         };
-        let metadata_store = Arc::new(FSMetadataStore::new(metadata_config).unwrap());
+        let metadata_store = Arc::new(FSMetadataStore::new(&metadata_config).unwrap());
         let registry = Registry::new(
             blob_store,
             metadata_store,
             HashMap::new(),
             &global_config,
-            &CacheStoreConfig::Memory,
+            &cache::CacheStoreConfig::Memory,
             &configuration::AuthConfig::default(),
         )
         .unwrap();
@@ -722,19 +723,19 @@ mod test {
             root_dir: temp_dir.clone(),
             sync_to_disk: false,
         };
-        let blob_store = Arc::new(FSBlobStore::new(blob_config));
+        let blob_store = Arc::new(FSBlobStore::new(&blob_config));
         let metadata_config = FSMetadataConfig {
             root_dir: temp_dir,
             redis: None,
             sync_to_disk: false,
         };
-        let metadata_store = Arc::new(FSMetadataStore::new(metadata_config).unwrap());
+        let metadata_store = Arc::new(FSMetadataStore::new(&metadata_config).unwrap());
         let mut registry = Registry::new(
             blob_store,
             metadata_store,
             HashMap::new(),
             &global_config,
-            &CacheStoreConfig::Memory,
+            &cache::CacheStoreConfig::Memory,
             &configuration::AuthConfig::default(),
         )
         .unwrap();
@@ -784,19 +785,17 @@ mod test {
 
     #[test]
     fn test_namespace_to_repository_matching() {
-        use crate::configuration::{CacheStoreConfig, GlobalConfig, RepositoryConfig};
+        use crate::configuration::{GlobalConfig, RepositoryConfig};
         use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
         use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
 
-        let blob_store = Arc::new(blob_store::fs::Backend::new(
-            blob_store::fs::BackendConfig {
-                root_dir: "/tmp/test".into(),
-                sync_to_disk: false,
-            },
-        ));
+        let blob_store = Arc::new(blob_store::fs::Backend::new(&FSBlobConfig {
+            root_dir: "/tmp/test".into(),
+            sync_to_disk: false,
+        }));
 
         let metadata_store = Arc::new(
-            metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
+            metadata_store::fs::Backend::new(&metadata_store::fs::BackendConfig {
                 root_dir: "/tmp/test".into(),
                 sync_to_disk: false,
                 redis: None,
@@ -835,7 +834,7 @@ mod test {
             metadata_store,
             repositories_config,
             &global_config,
-            &CacheStoreConfig::Memory,
+            &cache::CacheStoreConfig::Memory,
             &configuration::AuthConfig::default(),
         )
         .unwrap();

@@ -6,6 +6,7 @@ pub use error::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+mod config;
 pub mod fs;
 pub mod link_kind;
 mod link_metadata;
@@ -13,6 +14,7 @@ mod lock;
 pub mod s3;
 
 use crate::registry::metadata_store::link_kind::LinkKind;
+pub use config::MetadataStoreConfig;
 pub use link_metadata::LinkMetadata;
 pub use lock::redis::LockConfig;
 

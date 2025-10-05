@@ -140,7 +140,14 @@ fn reload_full_config(server: &Arc<server::Command>, _config_path: &Path, config
         return;
     };
 
-    let Ok(registry) = create_registry(config) else {
+    let Ok(registry) = create_registry(
+        &config.global,
+        &config.blob_store,
+        config.metadata_store.clone(),
+        config.repository.clone(),
+        &config.cache,
+        &config.auth,
+    ) else {
         error!("Failed to create registry with new configuration");
         return;
     };

@@ -17,9 +17,9 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(config: BackendConfig) -> Self {
+    pub fn new(config: &BackendConfig) -> Self {
         Self {
-            root: config.root_dir.into(),
+            root: PathBuf::from(&config.root_dir),
             sync_to_disk: config.sync_to_disk,
         }
     }

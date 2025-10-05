@@ -1,4 +1,3 @@
-use bytesize::ByteSize;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -22,11 +21,11 @@ pub struct Configuration {
     #[serde(default)]
     pub global: GlobalConfig,
     #[serde(default, alias = "cache_store")]
-    pub cache: CacheStoreConfig,
+    pub cache: cache::CacheStoreConfig,
     #[serde(default, alias = "storage")]
-    pub blob_store: BlobStorageConfig,
+    pub blob_store: blob_store::BlobStorageConfig,
     #[serde(default)]
-    pub metadata_store: MetadataStoreConfig,
+    pub metadata_store: Option<metadata_store::MetadataStoreConfig>,
     #[serde(default)]
     pub auth: AuthConfig,
     #[serde(default)]
@@ -90,42 +89,6 @@ impl GlobalConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub enum CacheStoreConfig {
-    #[default]
-    #[serde(rename = "memory")]
-    Memory,
-    #[serde(rename = "redis")]
-    Redis(cache::redis::BackendConfig),
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[allow(clippy::large_enum_variant)]
-pub enum BlobStorageConfig {
-    #[serde(rename = "fs")]
-    FS(blob_store::fs::BackendConfig),
-    #[serde(rename = "s3")]
-    S3(blob_store::s3::BackendConfig),
-}
-
-impl Default for BlobStorageConfig {
-    fn default() -> Self {
-        BlobStorageConfig::FS(blob_store::fs::BackendConfig::default())
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[allow(clippy::large_enum_variant)]
-pub enum MetadataStoreConfig {
-    #[serde(rename = "fs")]
-    FS(metadata_store::fs::BackendConfig),
-    #[serde(rename = "s3")]
-    S3(metadata_store::s3::BackendConfig),
-    #[serde(skip_deserializing)]
-    #[default]
-    Unspecified,
-}
-
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct AuthConfig {
     #[serde(default)]
@@ -183,49 +146,11 @@ impl Configuration {
     }
 
     pub fn load_from_str(slice: &str) -> Result<Self, Error> {
-        let mut config: Configuration = toml::from_str(slice).map_err(|e| {
+        let config: Configuration = toml::from_str(slice).map_err(|e| {
             println!("Configuration file format error:");
             println!("{e}");
             Error::ConfigurationFileFormat(e.to_string())
         })?;
-
-        // Resolve Unspecified metadata_store based on blob_store configuration
-        if matches!(config.metadata_store, MetadataStoreConfig::Unspecified) {
-            config.metadata_store = match &config.blob_store {
-                BlobStorageConfig::FS(cfg) => {
-                    MetadataStoreConfig::FS(metadata_store::fs::BackendConfig {
-                        root_dir: cfg.root_dir.clone(),
-                        redis: None,
-                        sync_to_disk: cfg.sync_to_disk,
-                    })
-                }
-                BlobStorageConfig::S3(cfg) => {
-                    tracing::info!("Auto-configuring S3 metadata-store from blob-store");
-                    MetadataStoreConfig::S3(metadata_store::s3::BackendConfig {
-                        bucket: cfg.bucket.clone(),
-                        region: cfg.region.clone(),
-                        endpoint: cfg.endpoint.clone(),
-                        access_key_id: cfg.access_key_id.clone(),
-                        secret_key: cfg.secret_key.clone(),
-                        key_prefix: cfg.key_prefix.clone(),
-                        redis: None,
-                    })
-                }
-            };
-        }
-
-        if let BlobStorageConfig::S3(s3_storage) = &config.blob_store {
-            if s3_storage.multipart_part_size < ByteSize::mib(5) {
-                return Err(Error::StreamingChunkSize(
-                    "Multipart part size must be at least 5MiB".to_string(),
-                ));
-            }
-            if s3_storage.multipart_copy_chunk_size > ByteSize::gib(5) {
-                return Err(Error::StreamingChunkSize(
-                    "Multipart copy chunk size must be at most 5GiB".to_string(),
-                ));
-            }
-        }
 
         config.validate()?;
         Ok(config)
@@ -238,12 +163,8 @@ impl Configuration {
             })?;
         }
 
-        let webhook_names: std::collections::HashSet<&str> = self
-            .auth
-            .webhook
-            .keys()
-            .map(std::string::String::as_str)
-            .collect();
+        let webhook_names: std::collections::HashSet<&str> =
+            self.auth.webhook.keys().map(String::as_str).collect();
 
         if let Some(ref webhook_name) = self.global.authorization_webhook {
             if !webhook_names.contains(webhook_name.as_str()) {
@@ -270,6 +191,7 @@ impl Configuration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::data_store;
 
     #[tokio::test]
     async fn test_load_minimal_config() {
@@ -294,8 +216,8 @@ mod tests {
         assert_eq!(server_config.query_timeout, 3600);
         assert_eq!(server_config.query_timeout_grace_period, 60);
 
-        assert_eq!(config.cache, CacheStoreConfig::Memory);
-        assert_eq!(config.blob_store, BlobStorageConfig::default());
+        assert_eq!(config.cache, cache::CacheStoreConfig::Memory);
+        assert_eq!(config.blob_store, blob_store::BlobStorageConfig::default());
 
         assert!(config.auth.identity.is_empty());
         assert!(config.repository.is_empty());
@@ -322,12 +244,12 @@ mod tests {
 
         // Should autoconfigure S3 metadata store with same settings
         match config.metadata_store {
-            MetadataStoreConfig::S3(ref meta_cfg) => {
-                assert_eq!(meta_cfg.bucket, "test-bucket");
-                assert_eq!(meta_cfg.region, "us-east-1");
-                assert_eq!(meta_cfg.endpoint, "http://localhost:9000");
-                assert_eq!(meta_cfg.access_key_id, "test-key");
-                assert_eq!(meta_cfg.secret_key, "test-secret");
+            Some(metadata_store::MetadataStoreConfig::S3(config)) => {
+                assert_eq!(config.bucket, "test-bucket");
+                assert_eq!(config.region, "us-east-1");
+                assert_eq!(config.endpoint, "http://localhost:9000");
+                assert_eq!(config.access_key_id, "test-key");
+                assert_eq!(config.secret_key, "test-secret");
             }
             _ => panic!("Expected S3 metadata store to be auto-configured"),
         }
@@ -350,9 +272,9 @@ mod tests {
 
         // Should use FS metadata store with same root_dir
         match config.metadata_store {
-            MetadataStoreConfig::FS(ref meta_cfg) => {
-                assert_eq!(meta_cfg.root_dir, "/data/registry");
-                assert!(meta_cfg.sync_to_disk);
+            Some(metadata_store::MetadataStoreConfig::FS(config)) => {
+                assert_eq!(config.root_dir, "/data/registry");
+                assert!(config.sync_to_disk);
             }
             _ => panic!("Expected FS metadata store"),
         }
@@ -372,20 +294,14 @@ mod tests {
         let config = Configuration::load_from_str(config).unwrap();
 
         // Should parse 'storage' as 'blob_store'
-        match config.blob_store {
-            BlobStorageConfig::FS(ref cfg) => {
-                assert_eq!(cfg.root_dir, "/data/registry");
-            }
-            BlobStorageConfig::S3(_) => panic!("Expected FS blob store from 'storage' field"),
-        }
+        let expected = blob_store::BlobStorageConfig::FS(data_store::fs::BackendConfig {
+            root_dir: "/data/registry".to_string(),
+            sync_to_disk: false,
+        });
+        assert_eq!(config.blob_store, expected);
 
         // Should autoconfigure metadata store based on blob store
-        match config.metadata_store {
-            MetadataStoreConfig::FS(ref cfg) => {
-                assert_eq!(cfg.root_dir, "/data/registry");
-            }
-            _ => panic!("Expected FS metadata store to be auto-configured"),
-        }
+        assert_eq!(config.metadata_store, None);
     }
 
     #[tokio::test]
@@ -435,8 +351,8 @@ mod tests {
 
         // Should keep the explicitly configured FS metadata store
         match config.metadata_store {
-            MetadataStoreConfig::FS(ref meta_cfg) => {
-                assert_eq!(meta_cfg.root_dir, "/custom/metadata/path");
+            Some(metadata_store::MetadataStoreConfig::FS(config)) => {
+                assert_eq!(config.root_dir, "/custom/metadata/path");
             }
             _ => panic!("Expected explicitly configured FS metadata store to be preserved"),
         }

@@ -9,10 +9,8 @@ use tracing::debug;
 #[derive(Debug)]
 pub enum Error {
     Cache(cache::Error),
-    MetadataStore(String),
     Io(io::Error),
     ConfigurationFileFormat(String),
-    StreamingChunkSize(String),
     Http(String),
     TaskQueue(task_queue::Error),
     Tls(String),
@@ -26,14 +24,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Cache(err) => write!(f, "Cache error: {err}"),
-            Error::MetadataStore(err) => write!(f, "Metadata store error: {err}"),
             Error::Io(err) => write!(f, "IO error: {err}"),
             Error::ConfigurationFileFormat(error) => {
                 write!(f, "Configuration file format error.")?;
                 write!(f, "{error}")
-            }
-            Error::StreamingChunkSize(error) => {
-                write!(f, "Streaming chunk size error: {error}")
             }
             Error::Http(error) => {
                 write!(f, "HTTP error: {error}")

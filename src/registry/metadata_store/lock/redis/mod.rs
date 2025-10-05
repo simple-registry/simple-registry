@@ -57,12 +57,12 @@ pub struct RedisBackend {
 }
 
 impl RedisBackend {
-    pub fn new(config: LockConfig) -> redis::RedisResult<Self> {
-        let client = Arc::new(Client::open(config.url)?);
+    pub fn new(config: &LockConfig) -> redis::RedisResult<Self> {
+        let client = Arc::new(Client::open(config.url.clone())?);
         Ok(RedisBackend {
             client,
             ttl: config.ttl,
-            key_prefix: config.key_prefix,
+            key_prefix: config.key_prefix.clone(),
             max_retries: config.max_retries,
             retry_delay_ms: config.retry_delay_ms,
         })

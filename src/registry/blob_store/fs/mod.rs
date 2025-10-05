@@ -8,7 +8,6 @@ use crate::registry::oci::Digest;
 use crate::registry::{data_store, path_builder};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
 use sha2::{Digest as Sha256Digest, Sha256};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -17,22 +16,6 @@ use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncSeekExt};
 use tracing::{error, info, instrument};
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub struct BackendConfig {
-    pub root_dir: String,
-    #[serde(default)]
-    pub sync_to_disk: bool,
-}
-
-impl From<BackendConfig> for data_store::fs::BackendConfig {
-    fn from(config: BackendConfig) -> Self {
-        Self {
-            root_dir: config.root_dir,
-            sync_to_disk: config.sync_to_disk,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Backend {
     store: data_store::fs::Backend,
@@ -40,15 +23,15 @@ pub struct Backend {
 
 impl Debug for Backend {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FSBackend").finish()
+        f.debug_struct("Backend").finish()
     }
 }
 
 impl Backend {
-    pub fn new(config: BackendConfig) -> Self {
+    pub fn new(config: &data_store::fs::BackendConfig) -> Self {
         info!("Using filesystem blob-store backend");
         Self {
-            store: data_store::fs::Backend::new(config.into()),
+            store: data_store::fs::Backend::new(config),
         }
     }
 
@@ -96,6 +79,14 @@ impl Backend {
         let hash_state_path = path_builder::upload_hash_context_path(name, uuid, "sha256", offset);
         let state = self.store.read(&hash_state_path).await?;
         Sha256::from_state(&state)
+    }
+
+    async fn file_size_or_err(&self, path: &str, not_found: Error) -> Result<u64, Error> {
+        match self.store.file_size(path).await {
+            Ok(size) => Ok(size),
+            Err(e) if e.kind() == ErrorKind::NotFound => Err(not_found),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -172,11 +163,7 @@ impl BlobStore for Backend {
     ) -> Result<(), Error> {
         let upload_size = if append {
             let path = path_builder::upload_path(name, uuid);
-            match self.store.file_size(&path).await {
-                Ok(size) => size,
-                Err(e) if e.kind() == ErrorKind::NotFound => return Err(Error::UploadNotFound),
-                Err(e) => return Err(e.into()),
-            }
+            self.file_size_or_err(&path, Error::UploadNotFound).await?
         } else {
             0
         };
@@ -219,12 +206,7 @@ impl BlobStore for Backend {
         uuid: &str,
     ) -> Result<(Digest, u64, DateTime<Utc>), Error> {
         let path = path_builder::upload_path(name, uuid);
-        let size = match self.store.file_size(&path).await {
-            Ok(size) => size,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Err(Error::UploadNotFound),
-            Err(e) => return Err(e.into()),
-        };
-
+        let size = self.file_size_or_err(&path, Error::UploadNotFound).await?;
         let digest = self.load_hasher(name, uuid, size).await?.digest();
 
         let date = path_builder::upload_start_date_path(name, uuid);
@@ -245,11 +227,7 @@ impl BlobStore for Backend {
         digest: Option<&Digest>,
     ) -> Result<Digest, Error> {
         let path = path_builder::upload_path(name, uuid);
-        let size = match self.store.file_size(&path).await {
-            Ok(size) => size,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Err(Error::UploadNotFound),
-            Err(e) => return Err(e.into()),
-        };
+        let size = self.file_size_or_err(&path, Error::UploadNotFound).await?;
 
         let digest = if let Some(digest) = digest {
             digest.clone()
@@ -297,11 +275,7 @@ impl BlobStore for Backend {
     #[instrument(skip(self))]
     async fn get_blob_size(&self, digest: &Digest) -> Result<u64, Error> {
         let path = path_builder::blob_path(digest);
-        match self.store.file_size(&path).await {
-            Ok(size) => Ok(size),
-            Err(e) if e.kind() == ErrorKind::NotFound => Err(Error::BlobNotFound),
-            Err(e) => Err(e.into()),
-        }
+        Ok(self.file_size_or_err(&path, Error::BlobNotFound).await?)
     }
 
     #[instrument(skip(self))]

@@ -1,5 +1,5 @@
-use crate::configuration::{CacheStoreConfig, IdentityConfig, OidcProviderConfig};
-use crate::registry::cache::{self, Cache};
+use crate::configuration::{IdentityConfig, OidcProviderConfig};
+use crate::registry::cache;
 use crate::registry::server::auth::oidc::OidcValidator;
 use crate::registry::server::auth::{
     AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator,
@@ -21,16 +21,11 @@ pub struct ServerContext {
 impl ServerContext {
     pub fn build_oidc_validators(
         oidc_config: &HashMap<String, OidcProviderConfig>,
-        auth_token_cache: &CacheStoreConfig,
+        auth_token_cache: &cache::CacheStoreConfig,
     ) -> Result<Arc<Vec<OidcValidator>>, crate::configuration::Error> {
         let mut validators = Vec::new();
         for (name, provider_config) in oidc_config {
-            let cache: Box<dyn Cache> = match auth_token_cache {
-                CacheStoreConfig::Redis(redis_config) => {
-                    Box::new(cache::redis::Backend::new(redis_config.clone())?)
-                }
-                CacheStoreConfig::Memory => Box::new(cache::memory::Backend::new()),
-            };
+            let cache = auth_token_cache.to_backend()?;
 
             let validator =
                 OidcValidator::new(name.clone(), provider_config, cache).map_err(|e| {

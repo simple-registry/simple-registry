@@ -22,14 +22,14 @@ pub struct OidcValidator {
     provider_name: String,
     provider: Box<dyn OidcProvider>,
     http_client: Arc<Client>,
-    cache: Box<dyn Cache>,
+    cache: Arc<dyn Cache>,
 }
 
 impl OidcValidator {
     pub fn new(
         provider_name: String,
         provider_config: &OidcProviderConfig,
-        cache: Box<dyn Cache>,
+        cache: Arc<dyn Cache>,
     ) -> Result<Self, Error> {
         let http_client = Arc::new(
             Client::builder()

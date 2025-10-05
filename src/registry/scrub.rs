@@ -390,13 +390,13 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::{AuthConfig, CacheStoreConfig, GlobalConfig, RepositoryConfig};
-    use crate::registry::blob_store;
-    use crate::registry::metadata_store;
+    use crate::configuration::{AuthConfig, GlobalConfig, RepositoryConfig};
     use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
     use crate::registry::repository::RetentionPolicy;
     use crate::registry::test_utils::{create_test_manifest, create_test_repository_config};
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
+    use crate::registry::{blob_store, data_store};
+    use crate::registry::{cache, metadata_store};
     use std::slice;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -608,13 +608,13 @@ mod tests {
 
         let temp_dir = std::env::temp_dir().to_string_lossy().to_string();
         let blob_store = Arc::new(blob_store::fs::Backend::new(
-            blob_store::fs::BackendConfig {
+            &data_store::fs::BackendConfig {
                 root_dir: temp_dir.clone(),
                 sync_to_disk: false,
             },
         ));
         let metadata_store = Arc::new(
-            metadata_store::fs::Backend::new(metadata_store::fs::BackendConfig {
+            metadata_store::fs::Backend::new(&metadata_store::fs::BackendConfig {
                 root_dir: temp_dir,
                 redis: None,
                 sync_to_disk: false,
@@ -634,7 +634,7 @@ mod tests {
             metadata_store,
             repositories_config,
             &global_config,
-            &CacheStoreConfig::Memory,
+            &cache::CacheStoreConfig::Memory,
             &AuthConfig::default(),
         )
         .unwrap();
@@ -963,7 +963,7 @@ mod tests {
             registry.metadata_store.clone(),
             create_test_repository_config(),
             &GlobalConfig::default(),
-            &CacheStoreConfig::default(),
+            &cache::CacheStoreConfig::default(),
             &AuthConfig::default(),
         )
         .unwrap()
@@ -1149,7 +1149,7 @@ mod tests {
             registry.metadata_store.clone(),
             create_test_repository_config(),
             &GlobalConfig::default(),
-            &CacheStoreConfig::default(),
+            &cache::CacheStoreConfig::default(),
             &AuthConfig::default(),
         )
         .unwrap()

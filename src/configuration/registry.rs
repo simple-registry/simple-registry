@@ -1,51 +1,51 @@
-use crate::configuration::{BlobStorageConfig, Configuration, Error, MetadataStoreConfig};
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
-use crate::registry::{blob_store, metadata_store, Registry};
-use std::sync::Arc;
+use crate::configuration::{AuthConfig, GlobalConfig, RepositoryConfig};
+use crate::registry::{blob_store, cache, metadata_store, Registry};
+use std::collections::HashMap;
+use tracing::info;
 
-pub fn create_blob_store(config: &BlobStorageConfig) -> Arc<dyn BlobStore + Send + Sync> {
-    match config {
-        BlobStorageConfig::FS(fs_config) => {
-            Arc::new(blob_store::fs::Backend::new(fs_config.clone()))
-        }
-        BlobStorageConfig::S3(s3_config) => {
-            Arc::new(blob_store::s3::Backend::new(s3_config.clone()))
-        }
-    }
-}
+pub fn create_registry(
+    registry_config: &GlobalConfig,
+    blob_store_config: &blob_store::BlobStorageConfig,
+    metadata_store_config: Option<metadata_store::MetadataStoreConfig>,
+    repository_config: HashMap<String, RepositoryConfig>,
+    cache_config: &cache::CacheStoreConfig,
+    auth_config: &AuthConfig,
+) -> Result<Registry, crate::command::Error> {
+    let metadata_store_config = match metadata_store_config {
+        Some(config) => config,
+        None => match &blob_store_config {
+            blob_store::BlobStorageConfig::FS(config) => {
+                metadata_store::MetadataStoreConfig::FS(metadata_store::fs::BackendConfig {
+                    root_dir: config.root_dir.clone(),
+                    redis: None,
+                    sync_to_disk: config.sync_to_disk,
+                })
+            }
+            blob_store::BlobStorageConfig::S3(config) => {
+                info!("Auto-configuring S3 metadata-store from blob-store");
+                metadata_store::MetadataStoreConfig::S3(metadata_store::s3::BackendConfig {
+                    bucket: config.bucket.clone(),
+                    region: config.region.clone(),
+                    endpoint: config.endpoint.clone(),
+                    access_key_id: config.access_key_id.clone(),
+                    secret_key: config.secret_key.clone(),
+                    key_prefix: config.key_prefix.clone(),
+                    redis: None,
+                })
+            }
+        },
+    };
 
-pub fn create_metadata_store(
-    config: &MetadataStoreConfig,
-) -> Result<Arc<dyn MetadataStore + Send + Sync>, crate::command::Error> {
-    match config {
-        MetadataStoreConfig::FS(fs_config) => Ok(Arc::new(
-            metadata_store::fs::Backend::new(fs_config.clone())
-                .map_err(crate::command::Error::Configuration)?,
-        )),
-        MetadataStoreConfig::S3(s3_config) => Ok(Arc::new(
-            metadata_store::s3::Backend::new(s3_config.clone())
-                .map_err(crate::command::Error::Configuration)?,
-        )),
-        MetadataStoreConfig::Unspecified => Err(crate::command::Error::Configuration(
-            Error::ConfigurationFileFormat(
-                "Metadata store configuration is unspecified".to_string(),
-            ),
-        )),
-    }
-}
-
-pub fn create_registry(config: &Configuration) -> Result<Registry, crate::command::Error> {
-    let blob_store = create_blob_store(&config.blob_store);
-    let metadata_store = create_metadata_store(&config.metadata_store)?;
+    let blob_store = blob_store_config.to_backend()?;
+    let metadata_store = metadata_store_config.to_backend()?;
 
     Registry::new(
         blob_store,
         metadata_store,
-        config.repository.clone(),
-        &config.global,
-        &config.cache,
-        &config.auth,
+        repository_config,
+        registry_config,
+        cache_config,
+        auth_config,
     )
     .map_err(crate::command::Error::Configuration)
 }

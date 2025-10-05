@@ -104,7 +104,14 @@ async fn run_command(
     set_tracing(config.observability.clone())?;
 
     let oidc_validators = ServerContext::build_oidc_validators(&config.auth.oidc, &config.cache)?;
-    let registry = create_registry(&config)?;
+    let registry = create_registry(
+        &config.global,
+        &config.blob_store,
+        config.metadata_store.clone(),
+        config.repository.clone(),
+        &config.cache,
+        &config.auth,
+    )?;
 
     match cli_args.subcommand {
         SubCommand::Argon(_) => argon::Command::run(),

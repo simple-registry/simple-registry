@@ -2,6 +2,7 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
+    Configuration(String),
     Io(String),
     Serialization(String),
     NotFound(String),
@@ -10,6 +11,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Error::Configuration(msg) => write!(f, "Configuration error: {msg}"),
             Error::Io(e) => write!(f, "IO error: {e}"),
             Error::Serialization(e) => write!(f, "Serialization error: {e}"),
             Error::NotFound(e) => write!(f, "Not found: {e}"),

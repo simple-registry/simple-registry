@@ -11,8 +11,8 @@ async fn test_acquire_lock() {
         retry_delay_ms: 5,
     };
 
-    let redis_backend = RedisBackend::new(config.clone()).expect("Failed to create RedisBackend");
-    let redis_backend2 = RedisBackend::new(config).expect("Failed to create RedisBackend");
+    let redis_backend = RedisBackend::new(&config).expect("Failed to create RedisBackend");
+    let redis_backend2 = RedisBackend::new(&config).expect("Failed to create RedisBackend");
 
     // Step 1: Acquire the lock
     let lock = redis_backend

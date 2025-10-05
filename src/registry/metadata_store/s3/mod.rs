@@ -49,25 +49,23 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(config: BackendConfig) -> Result<Self, crate::configuration::Error> {
+    pub fn new(config: &BackendConfig) -> Result<Self, Error> {
         info!("Using S3 metadata-store backend");
-        let store = data_store::s3::Backend::new(data_store::s3::BackendConfig {
-            access_key_id: config.access_key_id,
-            secret_key: config.secret_key,
-            endpoint: config.endpoint,
-            bucket: config.bucket,
-            region: config.region,
-            key_prefix: config.key_prefix,
+        let store = data_store::s3::Backend::new(&data_store::s3::BackendConfig {
+            access_key_id: config.access_key_id.clone(),
+            secret_key: config.secret_key.clone(),
+            endpoint: config.endpoint.clone(),
+            bucket: config.bucket.clone(),
+            region: config.region.clone(),
+            key_prefix: config.key_prefix.clone(),
             ..Default::default()
-        });
+        })?;
 
         let lock: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync> =
-            if let Some(redis_config) = config.redis {
+            if let Some(redis_config) = &config.redis {
                 info!("Using Redis lock store for S3 metadata-store");
                 let backend = lock::RedisBackend::new(redis_config).map_err(|e| {
-                    crate::configuration::Error::MetadataStore(format!(
-                        "Failed to initialize Redis lock store: {e}"
-                    ))
+                    Error::Lock(format!("Failed to initialize Redis lock store: {e}"))
                 })?;
                 Arc::new(backend)
             } else {

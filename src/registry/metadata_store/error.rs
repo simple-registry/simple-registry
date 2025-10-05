@@ -1,8 +1,9 @@
+use crate::registry::data_store;
 use std::fmt;
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
-    DataStore(crate::registry::data_store::Error),
+    DataStore(data_store::Error),
     Lock(String),
     InvalidData(String),
     StorageBackend(String),
@@ -23,10 +24,10 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<crate::registry::data_store::Error> for Error {
-    fn from(err: crate::registry::data_store::Error) -> Self {
+impl From<data_store::Error> for Error {
+    fn from(err: data_store::Error) -> Self {
         match err {
-            crate::registry::data_store::Error::NotFound(_) => Error::ReferenceNotFound,
+            data_store::Error::NotFound(_) => Error::ReferenceNotFound,
             _ => Error::DataStore(err),
         }
     }

@@ -1,4 +1,4 @@
-use crate::registry::blob_store;
+use crate::registry::{blob_store, metadata_store};
 use crate::{configuration, registry};
 use std::{fmt, io};
 
@@ -9,6 +9,7 @@ pub enum Error {
     Watcher(String),
     Configuration(configuration::Error),
     Registry(registry::Error),
+    MetadataStore(metadata_store::Error),
     BlobStore(blob_store::Error),
     Std(Box<dyn std::error::Error>),
 }
@@ -27,8 +28,12 @@ impl fmt::Display for Error {
                 write!(f, "Registry error")?;
                 write!(f, "{err}")
             }
+            Error::MetadataStore(err) => {
+                write!(f, "Metadata store error")?;
+                write!(f, "{err}")
+            }
             Error::BlobStore(err) => {
-                write!(f, "Data store error")?;
+                write!(f, "Blob store error")?;
                 write!(f, "{err}")
             }
             Error::Std(err) => {
@@ -60,6 +65,12 @@ impl From<configuration::Error> for Error {
 impl From<registry::Error> for Error {
     fn from(err: registry::Error) -> Self {
         Error::Registry(err)
+    }
+}
+
+impl From<metadata_store::Error> for Error {
+    fn from(err: metadata_store::Error) -> Self {
+        Error::MetadataStore(err)
     }
 }
 
