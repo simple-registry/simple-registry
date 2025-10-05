@@ -2,11 +2,12 @@ use crate::command::server;
 use crate::configuration::registry::create_registry;
 use crate::configuration::{Configuration, ServerConfig};
 use crate::registry::server::listeners::tls::ServerTlsConfig;
-use crate::registry::server::ServerContext;
+use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::{error, info};
 
 pub struct ConfigWatcher {
@@ -57,9 +58,6 @@ async fn watch_config_loop(
     config_path: PathBuf,
     server: Arc<server::Command>,
 ) -> Result<(), crate::command::Error> {
-    use notify::event::ModifyKind;
-    use tokio::sync::mpsc;
-
     let (tx, mut rx) = mpsc::channel::<Event>(100);
 
     loop {
@@ -133,13 +131,6 @@ async fn watch_config_loop(
 }
 
 fn reload_full_config(server: &Arc<server::Command>, _config_path: &Path, config: &Configuration) {
-    let Ok(oidc_validators) =
-        ServerContext::build_oidc_validators(&config.auth.oidc, &config.cache)
-    else {
-        error!("Failed to build OIDC validators");
-        return;
-    };
-
     let Ok(registry) = create_registry(
         &config.global,
         &config.blob_store,
@@ -152,12 +143,7 @@ fn reload_full_config(server: &Arc<server::Command>, _config_path: &Path, config
         return;
     };
 
-    if let Err(e) = server.notify_config_change(
-        &config.server,
-        &config.auth.identity,
-        registry,
-        oidc_validators,
-    ) {
+    if let Err(e) = server.notify_config_change(config, registry) {
         error!("Failed to notify server of configuration change: {e}");
     } else {
         info!("Configuration reloaded");

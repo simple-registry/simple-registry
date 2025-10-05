@@ -5,7 +5,6 @@ use crate::command::{argon, scrub, server};
 use crate::configuration::registry::create_registry;
 use crate::configuration::watcher::ConfigWatcher;
 use crate::configuration::{Configuration, ObservabilityConfig};
-use crate::registry::server::ServerContext;
 use argh::FromArgs;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, KeyValue};
@@ -103,7 +102,6 @@ async fn run_command(
 ) -> Result<(), command::Error> {
     set_tracing(config.observability.clone())?;
 
-    let oidc_validators = ServerContext::build_oidc_validators(&config.auth.oidc, &config.cache)?;
     let registry = create_registry(
         &config.global,
         &config.blob_store,
@@ -120,12 +118,7 @@ async fn run_command(
             scrub.run().await
         }
         SubCommand::Serve(_) => {
-            let server = Arc::new(server::Command::new(
-                &config.server,
-                &config.auth.identity,
-                registry,
-                oidc_validators,
-            )?);
+            let server = Arc::new(server::Command::new(&config, registry)?);
 
             let _watcher = ConfigWatcher::new(&cli_args.config, server.clone())?;
             server.run().await

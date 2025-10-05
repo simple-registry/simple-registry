@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde_json;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 /// Client identity information used in access control decisions.
 ///
@@ -12,6 +13,25 @@ pub struct ClientIdentity {
     pub certificate: ClientCertificate,
     pub oidc: Option<OidcClaims>,
     pub client_ip: Option<String>,
+}
+
+impl ClientIdentity {
+    /// Create a new `ClientIdentity` with the client's IP address if available
+    pub fn new(remote_address: Option<SocketAddr>) -> Self {
+        Self {
+            client_ip: remote_address.map(|addr| addr.ip().to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Check if the client has been authenticated by any method
+    pub fn is_authenticated(&self) -> bool {
+        self.id.is_some()
+            || self.username.is_some()
+            || self.oidc.is_some()
+            || !self.certificate.common_names.is_empty()
+            || !self.certificate.organizations.is_empty()
+    }
 }
 
 /// Certificate information extracted from client mTLS certificates.

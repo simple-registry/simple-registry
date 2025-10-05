@@ -1,13 +1,10 @@
-use crate::configuration::{IdentityConfig, ServerConfig};
-use crate::registry::server::auth::oidc::OidcValidator;
+use crate::configuration::{Configuration, ServerConfig};
 use crate::registry::server::listeners::insecure::InsecureListener;
 use crate::registry::server::listeners::tls::{ServerTlsConfig, TlsListener};
 use crate::registry::server::ServerContext;
 use crate::registry::Registry;
 use crate::{command, configuration};
 use argh::FromArgs;
-use std::collections::HashMap;
-use std::sync::Arc;
 
 pub enum ServiceListener {
     Insecure(InsecureListener),
@@ -28,19 +25,19 @@ pub struct Command {
 
 impl Command {
     pub fn new(
-        server_config: &ServerConfig,
-        identities: &HashMap<String, IdentityConfig>,
+        config: &Configuration,
         registry: Registry,
-        oidc_validators: Arc<Vec<OidcValidator>>,
     ) -> Result<Command, configuration::Error> {
-        let context = ServerContext::new(identities, registry, oidc_validators);
+        let context = ServerContext::new(config, registry).map_err(|e| {
+            configuration::Error::Http(format!("Failed to create server context: {e}"))
+        })?;
 
-        let listener = match server_config {
-            ServerConfig::Insecure(config) => {
-                ServiceListener::Insecure(InsecureListener::new(config, context))
+        let listener = match &config.server {
+            ServerConfig::Insecure(server_config) => {
+                ServiceListener::Insecure(InsecureListener::new(server_config, context))
             }
-            ServerConfig::Tls(config) => {
-                ServiceListener::Secure(TlsListener::new(config, context)?)
+            ServerConfig::Tls(server_config) => {
+                ServiceListener::Secure(TlsListener::new(server_config, context)?)
             }
         };
 
@@ -49,17 +46,17 @@ impl Command {
 
     pub fn notify_config_change(
         &self,
-        server_config: &ServerConfig,
-        identities: &HashMap<String, IdentityConfig>,
+        config: &Configuration,
         registry: Registry,
-        oidc_validators: Arc<Vec<OidcValidator>>,
     ) -> Result<(), configuration::Error> {
-        let context = ServerContext::new(identities, registry, oidc_validators);
+        let context = ServerContext::new(config, registry).map_err(|e| {
+            configuration::Error::Http(format!("Failed to create server context: {e}"))
+        })?;
 
-        match (&self.listener, server_config) {
+        match (&self.listener, &config.server) {
             (ServiceListener::Insecure(listener), _) => listener.notify_config_change(context),
-            (ServiceListener::Secure(listener), ServerConfig::Tls(config)) => {
-                listener.notify_config_change(config, context)?;
+            (ServiceListener::Secure(listener), ServerConfig::Tls(server_config)) => {
+                listener.notify_config_change(server_config, context)?;
             }
             _ => {}
         }

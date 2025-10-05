@@ -1,17 +1,29 @@
 use crate::configuration;
 use crate::registry::Error;
 use prometheus::{
-    register_histogram_with_registry, register_int_counter_with_registry,
-    register_int_gauge_with_registry,
+    register_histogram_with_registry, register_int_counter_vec_with_registry,
+    register_int_counter_with_registry, register_int_gauge_with_registry,
 };
 use prometheus::{
-    Encoder, Histogram, IntCounter, IntGauge, Registry as PrometheusRegistry, TextEncoder,
+    Encoder, Histogram, IntCounter, IntCounterVec, IntGauge, Registry as PrometheusRegistry,
+    TextEncoder,
 };
 use std::sync::atomic::AtomicU64;
 use std::sync::LazyLock;
 use tracing::error;
 
 pub static IN_FLIGHT_REQUESTS: AtomicU64 = AtomicU64::new(0);
+
+pub static AUTH_ATTEMPTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec_with_registry!(
+        "auth_attempts_total",
+        "Total number of authentication attempts",
+        &["method", "result"],
+        &METRICS_PROVIDER.registry
+    )
+    .expect("Failed to register auth_attempts metric")
+});
+
 pub static METRICS_PROVIDER: LazyLock<MetricsProvider> = LazyLock::new(|| {
     MetricsProvider::new().unwrap_or_else(|error| {
         error!("Unable to create metrics provider: {error}");
