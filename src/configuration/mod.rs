@@ -225,62 +225,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metadata_store_defaults_with_s3_blob_store() {
-        // When using S3 blob store and no metadata store is specified,
-        // it should autoconfigure S3 metadata store
-        let config = r#"
-        [server]
-        bind_address = "0.0.0.0"
-        
-        [blob_store.s3]
-        bucket = "test-bucket"
-        region = "us-east-1"
-        endpoint = "http://localhost:9000"
-        access_key_id = "test-key"
-        secret_key = "test-secret"
-        "#;
-
-        let config = Configuration::load_from_str(config).unwrap();
-
-        // Should autoconfigure S3 metadata store with same settings
-        match config.metadata_store {
-            Some(metadata_store::MetadataStoreConfig::S3(config)) => {
-                assert_eq!(config.bucket, "test-bucket");
-                assert_eq!(config.region, "us-east-1");
-                assert_eq!(config.endpoint, "http://localhost:9000");
-                assert_eq!(config.access_key_id, "test-key");
-                assert_eq!(config.secret_key, "test-secret");
-            }
-            _ => panic!("Expected S3 metadata store to be auto-configured"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_metadata_store_defaults_with_fs_blob_store() {
-        // When using FS blob store and no metadata store is specified,
-        // it should use FS metadata store with same root_dir
-        let config = r#"
-        [server]
-        bind_address = "0.0.0.0"
-        
-        [blob_store.fs]
-        root_dir = "/data/registry"
-        sync_to_disk = true
-        "#;
-
-        let config = Configuration::load_from_str(config).unwrap();
-
-        // Should use FS metadata store with same root_dir
-        match config.metadata_store {
-            Some(metadata_store::MetadataStoreConfig::FS(config)) => {
-                assert_eq!(config.root_dir, "/data/registry");
-                assert!(config.sync_to_disk);
-            }
-            _ => panic!("Expected FS metadata store"),
-        }
-    }
-
-    #[tokio::test]
     async fn test_storage_field_backward_compatibility() {
         // Test that old 'storage' field is supported for backward compatibility
         let config = r#"

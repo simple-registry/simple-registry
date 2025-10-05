@@ -2,9 +2,8 @@ use crate::configuration::{Error, RepositoryConfig};
 use crate::registry;
 use crate::registry::cache::Cache;
 use crate::registry::oci::{Digest, Reference};
-use regex::Regex;
 use std::sync::Arc;
-use tracing::{error, instrument};
+use tracing::instrument;
 
 pub mod access_policy;
 pub mod retention_policy;
@@ -17,11 +16,7 @@ pub use retention_policy::RetentionPolicy;
 pub struct Repository {
     pub name: String,
     pub upstreams: Vec<RegistryClient>,
-    pub access_policy: AccessPolicy,
     pub retention_policy: RetentionPolicy,
-    pub immutable_tags: bool,
-    pub immutable_tags_exclusions: Vec<Regex>,
-    pub authorization_webhook: Option<String>,
 }
 
 impl Repository {
@@ -35,29 +30,12 @@ impl Repository {
             upstreams.push(RegistryClient::new(config, cache.clone())?);
         }
 
-        let access_policy = AccessPolicy::new(&config.access_policy)?;
         let retention_policy = RetentionPolicy::new(&config.retention_policy)?;
-
-        let immutable_tags_exclusions = config
-            .immutable_tags_exclusions
-            .into_iter()
-            .filter_map(|p| match Regex::new(&p) {
-                Ok(regex) => Some(regex),
-                Err(e) => {
-                    error!("Invalid regex pattern '{}': {}", p, e);
-                    None
-                }
-            })
-            .collect();
 
         Ok(Self {
             name,
             upstreams,
-            access_policy,
             retention_policy,
-            immutable_tags: config.immutable_tags,
-            immutable_tags_exclusions,
-            authorization_webhook: config.authorization_webhook,
         })
     }
 

@@ -108,7 +108,6 @@ async fn run_command(
         config.metadata_store.clone(),
         config.repository.clone(),
         &config.cache,
-        &config.auth,
     )?;
 
     match cli_args.subcommand {

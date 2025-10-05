@@ -1,4 +1,5 @@
 pub mod authenticator;
+pub mod authorizer;
 pub mod basic_auth;
 pub mod mtls;
 pub mod oidc;
@@ -8,6 +9,7 @@ use crate::registry::server::ClientIdentity;
 use crate::registry::Error;
 use async_trait::async_trait;
 pub use authenticator::Authenticator;
+pub use authorizer::Authorizer;
 pub use basic_auth::BasicAuthValidator;
 use hyper::http::request::Parts;
 pub use mtls::{MtlsValidator, PeerCertificate};

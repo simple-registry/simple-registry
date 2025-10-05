@@ -1,5 +1,6 @@
 use crate::configuration::Configuration;
-use crate::registry::server::auth::Authenticator;
+use crate::registry::server::auth::{Authenticator, Authorizer};
+use crate::registry::server::route::Route;
 use crate::registry::server::ClientIdentity;
 use crate::registry::{Error, Registry};
 use hyper::http::request::Parts;
@@ -8,15 +9,18 @@ use tracing::instrument;
 
 pub struct ServerContext {
     authenticator: Arc<Authenticator>,
+    authorizer: Arc<Authorizer>,
     pub registry: Registry,
 }
 
 impl ServerContext {
     pub fn new(config: &Configuration, registry: Registry) -> Result<Self, Error> {
         let authenticator = Arc::new(Authenticator::new(config)?);
+        let authorizer = Arc::new(Authorizer::new(config, &registry)?);
 
         Ok(Self {
             authenticator,
+            authorizer,
             registry,
         })
     }
@@ -44,5 +48,21 @@ impl ServerContext {
         }
 
         Ok(identity)
+    }
+
+    #[instrument(skip(self, request))]
+    pub async fn authorize_request(
+        &self,
+        route: &Route<'_>,
+        identity: &ClientIdentity,
+        request: &Parts,
+    ) -> Result<(), Error> {
+        self.authorizer
+            .authorize_request(route, identity, request, &self.registry)
+            .await
+    }
+
+    pub fn is_tag_immutable(&self, namespace: &str, tag: &str) -> bool {
+        self.authorizer.is_tag_immutable(namespace, tag)
     }
 }

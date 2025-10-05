@@ -1,4 +1,5 @@
 use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
+use crate::registry::oci::Reference;
 use crate::registry::server::auth::PeerCertificate;
 use crate::registry::server::request_ext::{HeaderExt, IntoAsyncRead};
 use crate::registry::server::route::Route;
@@ -146,10 +147,7 @@ async fn router(
     let route = router::parse(&parts.method, &parts.uri);
     let remote_address = parts.extensions.get::<std::net::SocketAddr>().copied();
     let identity = context.authenticate_request(&parts, remote_address).await?;
-    context
-        .registry
-        .validate_request(&route, &identity, &parts)
-        .await?;
+    context.authorize_request(&route, &identity, &parts).await?;
 
     match route {
         Route::Unknown => {
@@ -221,10 +219,14 @@ async fn router(
             reference,
         } => {
             let mime_types = parts.accepted_content_types();
+            let is_tag_immutable = match &reference {
+                Reference::Tag(tag) => context.is_tag_immutable(namespace, tag.as_str()),
+                Reference::Digest(_) => false,
+            };
 
             context
                 .registry
-                .handle_get_manifest(namespace, reference, &mime_types)
+                .handle_get_manifest(namespace, reference, &mime_types, is_tag_immutable)
                 .await
         }
         Route::HeadManifest {
@@ -232,10 +234,14 @@ async fn router(
             reference,
         } => {
             let mime_types = parts.accepted_content_types();
+            let is_tag_immutable = match &reference {
+                Reference::Tag(tag) => context.is_tag_immutable(namespace, tag.as_str()),
+                Reference::Digest(_) => false,
+            };
 
             context
                 .registry
-                .handle_head_manifest(namespace, reference, &mime_types)
+                .handle_head_manifest(namespace, reference, &mime_types, is_tag_immutable)
                 .await
         }
         Route::PutManifest {

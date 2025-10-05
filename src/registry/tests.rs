@@ -49,10 +49,6 @@ impl FSRegistryTestCase {
         &self.registry
     }
 
-    pub fn registry_mut(&mut self) -> &mut Registry {
-        &mut self.registry
-    }
-
     pub fn set_repository_config(
         &mut self,
         repositories_config: HashMap<String, RepositoryConfig>,
@@ -91,10 +87,10 @@ impl S3RegistryTestCase {
             region: "region".to_string(),
             bucket: "registry".to_string(),
             key_prefix: key_prefix.to_string(),
-            multipart_copy_threshold: ByteSize::mb(5),
-            multipart_copy_chunk_size: ByteSize::mb(5),
+            multipart_copy_threshold: ByteSize::mib(5),
+            multipart_copy_chunk_size: ByteSize::mib(5),
             multipart_copy_jobs: 4,
-            multipart_part_size: ByteSize::mb(5),
+            multipart_part_size: ByteSize::mib(5),
         })
         .unwrap();
         let blob_store = Arc::new(blob_store);

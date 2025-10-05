@@ -390,7 +390,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::{AuthConfig, GlobalConfig, RepositoryConfig};
+    use crate::configuration::{GlobalConfig, RepositoryConfig};
     use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
     use crate::registry::repository::RetentionPolicy;
     use crate::registry::test_utils::{create_test_manifest, create_test_repository_config};
@@ -556,6 +556,7 @@ mod tests {
                     slice::from_ref(&media_type),
                     namespace,
                     Reference::Tag(tag.clone()),
+                    false,
                 )
                 .await;
 
@@ -635,7 +636,6 @@ mod tests {
             repositories_config,
             &global_config,
             &cache::CacheStoreConfig::Memory,
-            &AuthConfig::default(),
         )
         .unwrap();
         registry.scrub_dry_run = false;
@@ -696,7 +696,8 @@ mod tests {
                 repository,
                 &accepted_types,
                 namespace,
-                Reference::Tag("latest".to_string())
+                Reference::Tag("latest".to_string()),
+                false,
             )
             .await
             .is_ok());
@@ -707,7 +708,8 @@ mod tests {
                 repository,
                 &accepted_types,
                 namespace,
-                Reference::Tag("v1.0".to_string())
+                Reference::Tag("v1.0".to_string()),
+                false,
             )
             .await
             .is_ok());
@@ -719,6 +721,7 @@ mod tests {
                 &accepted_types,
                 namespace,
                 Reference::Tag("old".to_string()),
+                false,
             )
             .await;
         println!("Old tag result: {:?}", old_result.is_ok());
@@ -784,6 +787,7 @@ mod tests {
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
+                false,
             )
             .await
             .unwrap();
@@ -964,7 +968,6 @@ mod tests {
             create_test_repository_config(),
             &GlobalConfig::default(),
             &cache::CacheStoreConfig::default(),
-            &AuthConfig::default(),
         )
         .unwrap()
         .with_scrub_dry_run(false);
@@ -1150,7 +1153,6 @@ mod tests {
             create_test_repository_config(),
             &GlobalConfig::default(),
             &cache::CacheStoreConfig::default(),
-            &AuthConfig::default(),
         )
         .unwrap()
         .with_scrub_dry_run(false);

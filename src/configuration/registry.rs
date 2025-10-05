@@ -1,4 +1,4 @@
-use crate::configuration::{AuthConfig, GlobalConfig, RepositoryConfig};
+use crate::configuration::{GlobalConfig, RepositoryConfig};
 use crate::registry::{blob_store, cache, metadata_store, Registry};
 use std::collections::HashMap;
 use tracing::info;
@@ -9,7 +9,6 @@ pub fn create_registry(
     metadata_store_config: Option<metadata_store::MetadataStoreConfig>,
     repository_config: HashMap<String, RepositoryConfig>,
     cache_config: &cache::CacheStoreConfig,
-    auth_config: &AuthConfig,
 ) -> Result<Registry, crate::command::Error> {
     let metadata_store_config = match metadata_store_config {
         Some(config) => config,
@@ -45,7 +44,6 @@ pub fn create_registry(
         repository_config,
         registry_config,
         cache_config,
-        auth_config,
     )
     .map_err(crate::command::Error::Configuration)
 }

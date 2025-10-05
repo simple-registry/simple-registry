@@ -33,7 +33,7 @@ impl Backend {
     pub fn new(config: &data_store::s3::BackendConfig) -> Result<Self, Error> {
         info!("Using S3 blob-store backend");
         #[allow(clippy::cast_possible_truncation)]
-        let multipart_part_size = config.multipart_part_size.as_u64() as usize;
+        let multipart_part_size = config.multipart_part_size.as_u64() as usize; // XXX: abstraction leaks
         let store = data_store::s3::Backend::new(config)?;
 
         Ok(Self {

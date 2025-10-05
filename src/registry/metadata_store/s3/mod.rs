@@ -58,7 +58,12 @@ impl Backend {
             bucket: config.bucket.clone(),
             region: config.region.clone(),
             key_prefix: config.key_prefix.clone(),
-            ..Default::default()
+            multipart_copy_threshold:
+                data_store::s3::BackendConfig::default_multipart_copy_threshold(),
+            multipart_copy_chunk_size:
+                data_store::s3::BackendConfig::default_multipart_copy_chunk_size(),
+            multipart_copy_jobs: data_store::s3::BackendConfig::default_multipart_copy_jobs(),
+            multipart_part_size: data_store::s3::BackendConfig::default_multipart_part_size(),
         })?;
 
         let lock: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync> =

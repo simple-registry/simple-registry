@@ -83,6 +83,7 @@ impl Registry {
         accepted_types: &[String],
         namespace: &str,
         reference: Reference,
+        is_tag_immutable: bool,
     ) -> Result<HeadManifestResponse, Error> {
         let manifest = self.head_local_manifest(namespace, &reference).await;
         if !repository.is_pull_through() {
@@ -93,15 +94,14 @@ impl Registry {
         }
 
         if let Ok(manifest) = manifest {
-            if let Reference::Tag(tag) = &reference {
-                if self.is_tag_mutable(repository, tag) {
-                    let (_, digest, _) = repository
-                        .head_manifest(accepted_types, namespace, &reference)
-                        .await?;
-                    if digest == manifest.digest {
-                        return Ok(manifest);
-                    }
-                } else {
+            if let Reference::Tag(_tag) = &reference {
+                if is_tag_immutable {
+                    return Ok(manifest);
+                }
+                let (_, digest, _) = repository
+                    .head_manifest(accepted_types, namespace, &reference)
+                    .await?;
+                if digest == manifest.digest {
                     return Ok(manifest);
                 }
             } else {
@@ -112,7 +112,13 @@ impl Registry {
         // pull from upstream
 
         let res = self
-            .get_manifest(repository, accepted_types, namespace, reference)
+            .get_manifest(
+                repository,
+                accepted_types,
+                namespace,
+                reference,
+                is_tag_immutable,
+            )
             .await?;
 
         Ok(HeadManifestResponse {
@@ -162,6 +168,7 @@ impl Registry {
         accepted_types: &[String],
         namespace: &str,
         reference: Reference,
+        is_tag_immutable: bool,
     ) -> Result<GetManifestResponse, Error> {
         let manifest = self.get_local_manifest(namespace, &reference).await;
         if !repository.is_pull_through() {
@@ -172,15 +179,14 @@ impl Registry {
         }
 
         if let Ok(manifest) = manifest {
-            if let Reference::Tag(tag) = &reference {
-                if self.is_tag_mutable(repository, tag) {
-                    let (_, digest, _) = repository
-                        .head_manifest(accepted_types, namespace, &reference)
-                        .await?;
-                    if digest == manifest.digest {
-                        return Ok(manifest);
-                    }
-                } else {
+            if let Reference::Tag(_tag) = &reference {
+                if is_tag_immutable {
+                    return Ok(manifest);
+                }
+                let (_, digest, _) = repository
+                    .head_manifest(accepted_types, namespace, &reference)
+                    .await?;
+                if digest == manifest.digest {
                     return Ok(manifest);
                 }
             }
@@ -242,21 +248,6 @@ impl Registry {
 
         match reference {
             Reference::Tag(tag) => {
-                let repository = self.get_repository_for_namespace(namespace)?;
-
-                let tag_link = LinkKind::Tag(tag.clone());
-                if let Ok(existing_link) = self
-                    .metadata_store
-                    .read_link(namespace, &tag_link, false)
-                    .await
-                {
-                    if existing_link.target != digest && !self.is_tag_mutable(repository, tag) {
-                        return Err(Error::TagImmutable(format!(
-                            "Tag '{tag}' is immutable and cannot be overwritten"
-                        )));
-                    }
-                }
-
                 links.push((LinkKind::Tag(tag.clone()), digest.clone()));
                 links.push((LinkKind::Digest(digest.clone()), digest.clone()));
             }
@@ -387,17 +378,24 @@ impl Registry {
     }
 
     // API Handlers
-    #[instrument(skip(self))]
+    #[instrument(skip(self, is_tag_immutable))]
     pub async fn handle_head_manifest(
         &self,
         namespace: &str,
         reference: Reference,
         mime_types: &[String],
+        is_tag_immutable: bool,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.get_repository_for_namespace(namespace)?;
 
         let manifest = self
-            .head_manifest(repository, mime_types, namespace, reference)
+            .head_manifest(
+                repository,
+                mime_types,
+                namespace,
+                reference,
+                is_tag_immutable,
+            )
             .await?;
 
         let res = if let Some(media_type) = manifest.media_type {
@@ -418,17 +416,24 @@ impl Registry {
         Ok(res)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, is_tag_immutable))]
     pub async fn handle_get_manifest(
         &self,
         namespace: &str,
         reference: Reference,
         mime_types: &[String],
+        is_tag_immutable: bool,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.get_repository_for_namespace(namespace)?;
 
         let manifest = self
-            .get_manifest(repository, mime_types, namespace, reference)
+            .get_manifest(
+                repository,
+                mime_types,
+                namespace,
+                reference,
+                is_tag_immutable,
+            )
             .await?;
 
         let res = if let Some(content_type) = manifest.media_type {
@@ -593,6 +598,7 @@ mod tests {
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
+                false,
             )
             .await
             .unwrap();
@@ -651,6 +657,7 @@ mod tests {
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
+                false,
             )
             .await
             .unwrap();
@@ -666,6 +673,7 @@ mod tests {
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Digest(response.digest.clone()),
+                false,
             )
             .await
             .unwrap();
@@ -710,6 +718,7 @@ mod tests {
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
+                false,
             )
             .await
             .unwrap();
@@ -725,6 +734,7 @@ mod tests {
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Digest(response.digest.clone()),
+                false,
             )
             .await
             .unwrap();
@@ -775,6 +785,7 @@ mod tests {
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
+                false,
             )
             .await
             .is_err());
@@ -792,6 +803,7 @@ mod tests {
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Digest(response.digest),
+                false,
             )
             .await
             .is_err());
@@ -869,7 +881,7 @@ mod tests {
         let reference = Reference::Tag(tag.to_string());
 
         let response = registry
-            .handle_head_manifest(namespace, reference, &mime_types)
+            .handle_head_manifest(namespace, reference, &mime_types, false)
             .await
             .unwrap();
 
@@ -932,7 +944,7 @@ mod tests {
         let accepted_types = Vec::new();
 
         let response = registry
-            .handle_get_manifest(namespace, reference, &accepted_types)
+            .handle_get_manifest(namespace, reference, &accepted_types, false)
             .await
             .unwrap();
 
@@ -1015,6 +1027,7 @@ mod tests {
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
+                false,
             )
             .await
             .expect("get manifest failed");
@@ -1070,6 +1083,7 @@ mod tests {
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(tag.to_string()),
+                false,
             )
             .await
             .is_err());
@@ -1085,95 +1099,6 @@ mod tests {
     async fn test_handle_delete_manifest_s3() {
         let t = S3RegistryTestCase::new();
         test_handle_delete_manifest_impl(t.registry()).await;
-    }
-
-    async fn test_immutable_tags_impl(test_case: &mut FSRegistryTestCase) {
-        let namespace = "test-repo";
-        let (content, media_type) = create_test_manifest();
-
-        let mut repositories_config = crate::registry::test_utils::create_test_repository_config();
-        repositories_config
-            .get_mut("test-repo")
-            .unwrap()
-            .immutable_tags = true;
-        repositories_config
-            .get_mut("test-repo")
-            .unwrap()
-            .immutable_tags_exclusions = vec!["^latest$".to_string(), "^dev-.*".to_string()];
-
-        test_case.set_repository_config(repositories_config);
-        let registry = test_case.registry();
-
-        let immutable_tag = "v1.0.0";
-        let _ = registry
-            .put_manifest(
-                namespace,
-                &Reference::Tag(immutable_tag.to_string()),
-                Some(&media_type),
-                &content,
-            )
-            .await
-            .unwrap();
-
-        let new_content = b"different content";
-        let result = registry
-            .put_manifest(
-                namespace,
-                &Reference::Tag(immutable_tag.to_string()),
-                Some(&media_type),
-                new_content,
-            )
-            .await;
-
-        assert!(matches!(result, Err(Error::TagImmutable(_))));
-
-        let mutable_tag = "latest";
-        let _ = registry
-            .put_manifest(
-                namespace,
-                &Reference::Tag(mutable_tag.to_string()),
-                Some(&media_type),
-                &content,
-            )
-            .await
-            .unwrap();
-
-        let result = registry
-            .put_manifest(
-                namespace,
-                &Reference::Tag(mutable_tag.to_string()),
-                Some(&media_type),
-                new_content,
-            )
-            .await;
-        assert!(result.is_ok());
-
-        let dev_tag = "dev-feature-123";
-        let _ = registry
-            .put_manifest(
-                namespace,
-                &Reference::Tag(dev_tag.to_string()),
-                Some(&media_type),
-                &content,
-            )
-            .await
-            .unwrap();
-
-        let result = registry
-            .put_manifest(
-                namespace,
-                &Reference::Tag(dev_tag.to_string()),
-                Some(&media_type),
-                new_content,
-            )
-            .await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_immutable_tags_fs() {
-        let mut t = FSRegistryTestCase::new();
-        test_immutable_tags_impl(&mut t).await;
     }
 
     async fn test_pull_through_cache_optimization_impl(test_case: &mut FSRegistryTestCase) {
@@ -1207,6 +1132,7 @@ mod tests {
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(immutable_tag.to_string()),
+                false,
             )
             .await;
         assert!(get_result.is_ok());
@@ -1228,6 +1154,7 @@ mod tests {
                 slice::from_ref(&media_type),
                 namespace,
                 Reference::Tag(mutable_tag.to_string()),
+                false,
             )
             .await;
         assert!(get_mutable.is_ok());
