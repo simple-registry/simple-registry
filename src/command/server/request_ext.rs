@@ -99,7 +99,7 @@ impl IntoAsyncRead for Incoming {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::ResponseBody;
+    use crate::command::server::response_body::ResponseBody;
     use hyper::header::{HeaderValue, RANGE};
     use hyper::Request;
 

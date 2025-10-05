@@ -1,7 +1,7 @@
+use crate::command::server::serve_request;
+use crate::command::server::ServerContext;
 use crate::configuration::Error;
 use crate::registry;
-use crate::registry::server::serve_request;
-use crate::registry::server::ServerContext;
 use arc_swap::ArcSwap;
 use hyper_util::rt::TokioIo;
 use rustls::server::WebPkiClientVerifier;

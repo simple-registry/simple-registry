@@ -1,7 +1,8 @@
+use crate::command::server::response_body::ResponseBody;
 use crate::registry::blob_store::{BlobStore, Reader};
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::oci::Digest;
-use crate::registry::{blob_store, task_queue, Error, Registry, Repository, ResponseBody};
+use crate::registry::{blob_store, task_queue, Error, Registry, Repository};
 use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
 use hyper::{Response, StatusCode};
 use std::sync::Arc;

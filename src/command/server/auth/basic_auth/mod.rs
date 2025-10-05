@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests;
 
+use crate::command::server::auth::{AuthMiddleware, AuthResult};
+use crate::command::server::request_ext::HeaderExt;
+use crate::command::server::ClientIdentity;
 use crate::configuration::IdentityConfig;
-use crate::registry::server::auth::{AuthMiddleware, AuthResult};
-use crate::registry::server::request_ext::HeaderExt;
-use crate::registry::server::ClientIdentity;
 use crate::registry::Error;
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use async_trait::async_trait;

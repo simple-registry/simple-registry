@@ -43,7 +43,7 @@ fn test_webhook_config_validation() {
 
 #[test]
 fn test_webhook_action_header() {
-    use crate::registry::server::route::Route;
+    use crate::command::server::route::Route;
 
     let route = Route::GetManifest {
         namespace: "test",

@@ -16,7 +16,6 @@ pub mod metadata_store;
 pub mod oci;
 mod path_builder;
 pub mod repository;
-pub mod server;
 pub mod task_queue;
 #[cfg(test)]
 mod tests;
@@ -33,7 +32,6 @@ use crate::registry::metadata_store::MetadataStore;
 pub use crate::registry::task_queue::TaskQueue;
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
-pub use server::response_body::ResponseBody;
 
 static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap()

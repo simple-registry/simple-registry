@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests;
 
+use crate::command::server::client_identity::ClientIdentity;
+use crate::command::server::route::Route;
 use crate::registry::cache::Cache;
-use crate::registry::error::Error;
-use crate::registry::server::client_identity::ClientIdentity;
-use crate::registry::server::route::Route;
+use crate::registry::Error;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::http::request::Parts;
 use hyper::http::HeaderMap;

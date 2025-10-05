@@ -1,10 +1,11 @@
+use crate::command;
 use crate::configuration::registry::create_registry;
 use crate::configuration::{Configuration, ServerConfig};
-use crate::registry::server::listeners::insecure::InsecureListener;
-use crate::registry::server::listeners::tls::{ServerTlsConfig, TlsListener};
-use crate::registry::server::ServerContext;
-use crate::{command, configuration};
 use argh::FromArgs;
+
+use super::listeners::insecure::InsecureListener;
+use super::listeners::tls::{ServerTlsConfig, TlsListener};
+use super::ServerContext;
 
 pub enum ServiceListener {
     Insecure(InsecureListener),
@@ -24,7 +25,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn new(config: &Configuration) -> Result<Command, configuration::Error> {
+    pub fn new(config: &Configuration) -> Result<Command, crate::configuration::Error> {
         let registry = create_registry(
             &config.global,
             &config.blob_store,
@@ -32,10 +33,12 @@ impl Command {
             config.repository.clone(),
             &config.cache,
         )
-        .map_err(|e| configuration::Error::Http(format!("Failed to create registry: {e}")))?;
+        .map_err(|e| {
+            crate::configuration::Error::Http(format!("Failed to create registry: {e}"))
+        })?;
 
         let context = ServerContext::new(config, registry).map_err(|e| {
-            configuration::Error::Http(format!("Failed to create server context: {e}"))
+            crate::configuration::Error::Http(format!("Failed to create server context: {e}"))
         })?;
 
         let listener = match &config.server {
@@ -50,7 +53,10 @@ impl Command {
         Ok(Command { listener })
     }
 
-    pub fn notify_config_change(&self, config: &Configuration) -> Result<(), configuration::Error> {
+    pub fn notify_config_change(
+        &self,
+        config: &Configuration,
+    ) -> Result<(), crate::configuration::Error> {
         let registry = create_registry(
             &config.global,
             &config.blob_store,
@@ -58,10 +64,12 @@ impl Command {
             config.repository.clone(),
             &config.cache,
         )
-        .map_err(|e| configuration::Error::Http(format!("Failed to create registry: {e}")))?;
+        .map_err(|e| {
+            crate::configuration::Error::Http(format!("Failed to create registry: {e}"))
+        })?;
 
         let context = ServerContext::new(config, registry).map_err(|e| {
-            configuration::Error::Http(format!("Failed to create server context: {e}"))
+            crate::configuration::Error::Http(format!("Failed to create server context: {e}"))
         })?;
 
         match (&self.listener, &config.server) {
@@ -78,7 +86,7 @@ impl Command {
     pub fn notify_tls_config_change(
         &self,
         server_config: &ServerTlsConfig,
-    ) -> Result<(), configuration::Error> {
+    ) -> Result<(), crate::configuration::Error> {
         if let ServiceListener::Secure(listener) = &self.listener {
             listener.notify_tls_config_change(server_config)?;
         }

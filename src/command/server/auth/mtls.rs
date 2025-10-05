@@ -1,5 +1,5 @@
-use crate::registry::server::auth::{AuthMiddleware, AuthResult};
-use crate::registry::server::{ClientCertificate, ClientIdentity};
+use crate::command::server::auth::{AuthMiddleware, AuthResult};
+use crate::command::server::{ClientCertificate, ClientIdentity};
 use crate::registry::Error;
 use async_trait::async_trait;
 use hyper::http::request::Parts;

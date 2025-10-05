@@ -1,5 +1,5 @@
-use crate::registry::server::serve_request;
-use crate::registry::server::ServerContext;
+use crate::command::server::serve_request;
+use crate::command::server::ServerContext;
 use crate::registry::Error;
 use arc_swap::ArcSwap;
 use hyper_util::rt::TokioIo;

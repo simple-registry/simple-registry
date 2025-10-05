@@ -1,4 +1,5 @@
-use crate::registry::{Error, Registry, ResponseBody};
+use crate::command::server::response_body::ResponseBody;
+use crate::registry::{Error, Registry};
 use hyper::{Response, StatusCode};
 use tracing::instrument;
 

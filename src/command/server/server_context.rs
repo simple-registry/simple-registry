@@ -1,7 +1,7 @@
+use crate::command::server::auth::{Authenticator, Authorizer};
+use crate::command::server::route::Route;
+use crate::command::server::ClientIdentity;
 use crate::configuration::Configuration;
-use crate::registry::server::auth::{Authenticator, Authorizer};
-use crate::registry::server::route::Route;
-use crate::registry::server::ClientIdentity;
 use crate::registry::{Error, Registry};
 use hyper::http::request::Parts;
 use std::sync::Arc;

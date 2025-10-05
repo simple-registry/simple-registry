@@ -1,9 +1,9 @@
 use super::oidc::OidcValidator;
 use super::{AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator};
+use crate::command::server::ClientIdentity;
 use crate::configuration::{AuthConfig, Configuration};
 use crate::metrics_provider::AUTH_ATTEMPTS;
 use crate::registry::cache::CacheStoreConfig;
-use crate::registry::server::ClientIdentity;
 use crate::registry::Error;
 use hyper::http::request::Parts;
 use std::net::SocketAddr;

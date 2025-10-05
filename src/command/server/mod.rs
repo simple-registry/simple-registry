@@ -1,3 +1,5 @@
+mod command;
+
 pub mod auth;
 pub mod client_identity;
 pub mod http_server;
@@ -9,5 +11,6 @@ pub mod router;
 pub mod server_context;
 
 pub use client_identity::{ClientCertificate, ClientIdentity, OidcClaims};
+pub use command::{Command, Options};
 pub use http_server::serve_request;
 pub use server_context::ServerContext;

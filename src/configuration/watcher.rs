@@ -1,6 +1,6 @@
 use crate::command::server;
+use crate::command::server::listeners::tls::ServerTlsConfig;
 use crate::configuration::{Configuration, ServerConfig};
-use crate::registry::server::listeners::tls::ServerTlsConfig;
 use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::collections::HashSet;

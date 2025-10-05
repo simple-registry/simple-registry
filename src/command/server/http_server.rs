@@ -1,10 +1,11 @@
+use crate::command::server::auth::PeerCertificate;
+use crate::command::server::request_ext::{HeaderExt, IntoAsyncRead};
+use crate::command::server::response_body::ResponseBody;
+use crate::command::server::route::Route;
+use crate::command::server::{router, ServerContext};
 use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
 use crate::registry::oci::Reference;
-use crate::registry::server::auth::PeerCertificate;
-use crate::registry::server::request_ext::{HeaderExt, IntoAsyncRead};
-use crate::registry::server::route::Route;
-use crate::registry::server::{router, ServerContext};
-use crate::registry::{Error, ResponseBody};
+use crate::registry::Error;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONTENT_RANGE, CONTENT_TYPE, RANGE, WWW_AUTHENTICATE};

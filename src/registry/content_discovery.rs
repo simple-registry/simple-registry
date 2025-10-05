@@ -1,5 +1,6 @@
+use crate::command::server::response_body::ResponseBody;
 use crate::registry::oci::{Descriptor, Digest, ReferrerList};
-use crate::registry::{Error, Registry, ResponseBody};
+use crate::registry::{Error, Registry};
 use hyper::header::{CONTENT_TYPE, LINK};
 use hyper::{Response, StatusCode};
 use serde::Serialize;

@@ -15,9 +15,9 @@
 //! - `identity`: Client identity information (id, username, certificate details)
 //! - `request`: Request details (action, namespace, digest, reference)
 
+use crate::command::server::route::Route;
+pub use crate::command::server::ClientIdentity;
 use crate::configuration::Error as ConfigError;
-use crate::registry::server::route::Route;
-pub use crate::registry::server::ClientIdentity;
 use crate::registry::Error;
 use cel_interpreter::{Context, Program, Value};
 use serde::Deserialize;
@@ -142,7 +142,7 @@ impl AccessPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::server::route::Route;
+    use crate::command::server::route::Route;
 
     #[test]
     fn test_access_policy_default_allow_no_rules() {

@@ -1,8 +1,8 @@
+use crate::command::server::auth::webhook::WebhookAuthorizer;
+use crate::command::server::route::Route;
+use crate::command::server::ClientIdentity;
 use crate::configuration::Configuration;
 use crate::registry::repository::AccessPolicy;
-use crate::registry::server::auth::webhook::WebhookAuthorizer;
-use crate::registry::server::route::Route;
-use crate::registry::server::ClientIdentity;
 use crate::registry::{Error, Registry};
 use hyper::http::request::Parts;
 use regex::Regex;

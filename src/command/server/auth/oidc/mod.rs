@@ -1,13 +1,13 @@
 pub mod jwk;
 pub mod provider;
 
+use crate::command::server::auth::basic_auth::extract_basic_auth;
+use crate::command::server::auth::oidc::provider::{generic, github};
+use crate::command::server::auth::{AuthMiddleware, AuthResult};
+use crate::command::server::request_ext::HeaderExt;
+use crate::command::server::{ClientIdentity, OidcClaims};
 use crate::configuration::OidcProviderConfig;
 use crate::registry::cache::Cache;
-use crate::registry::server::auth::basic_auth::extract_basic_auth;
-use crate::registry::server::auth::oidc::provider::{generic, github};
-use crate::registry::server::auth::{AuthMiddleware, AuthResult};
-use crate::registry::server::request_ext::HeaderExt;
-use crate::registry::server::{ClientIdentity, OidcClaims};
 use crate::registry::Error;
 use async_trait::async_trait;
 use hyper::http::request::Parts;
@@ -113,7 +113,7 @@ impl AuthMiddleware for OidcValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::ResponseBody;
+    use crate::command::server::response_body::ResponseBody;
     use base64::prelude::BASE64_STANDARD;
     use base64::Engine;
     use hyper::header::{HeaderValue, AUTHORIZATION};
