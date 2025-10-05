@@ -1,4 +1,3 @@
-use chrono::Duration;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -17,7 +16,6 @@ pub mod metadata_store;
 pub mod oci;
 mod path_builder;
 pub mod repository;
-mod scrub;
 pub mod server;
 pub mod task_queue;
 #[cfg(test)]
@@ -29,7 +27,6 @@ use crate::configuration;
 use crate::configuration::{GlobalConfig, RepositoryConfig};
 use crate::registry::cache::Cache;
 pub use repository::Repository;
-use repository::RetentionPolicy;
 
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
@@ -45,11 +42,8 @@ static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub struct Registry {
     blob_store: Arc<dyn BlobStore + Send + Sync>,
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
-    repositories: HashMap<String, Repository>,
-    global_retention_policy: Option<RetentionPolicy>,
+    repositories: Arc<HashMap<String, Repository>>,
     update_pull_time: bool,
-    scrub_dry_run: bool,
-    upload_timeout: Duration,
     task_queue: TaskQueue,
 }
 
@@ -85,34 +79,15 @@ impl Registry {
             repositories.insert(repository_name, res);
         }
 
-        let global_retention_policy = if global_config.retention_policy.rules.is_empty() {
-            None
-        } else {
-            Some(RetentionPolicy::new(&global_config.retention_policy)?)
-        };
-
         let res = Self {
             update_pull_time: global_config.update_pull_time,
             blob_store,
             metadata_store,
-            repositories,
-            global_retention_policy,
-            scrub_dry_run: true,
-            upload_timeout: Duration::days(1),
+            repositories: Arc::new(repositories),
             task_queue: TaskQueue::new(global_config.max_concurrent_cache_jobs)?,
         };
 
         Ok(res)
-    }
-
-    pub fn with_scrub_dry_run(mut self, scrub_dry_run: bool) -> Self {
-        self.scrub_dry_run = scrub_dry_run;
-        self
-    }
-
-    pub fn with_upload_timeout(mut self, scrub_upload_timeout: Duration) -> Self {
-        self.upload_timeout = scrub_upload_timeout;
-        self
     }
 
     pub fn get_repository(&self, name: &str) -> Result<&Repository, Error> {
@@ -145,7 +120,6 @@ pub mod test_utils {
     use crate::registry::oci::Digest;
     use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
     use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
-    use serde_json::json;
 
     pub fn create_test_repository_config() -> HashMap<String, RepositoryConfig> {
         let mut repositories = HashMap::new();
@@ -179,8 +153,6 @@ pub mod test_utils {
             &token_cache,
         )
         .unwrap()
-        .with_upload_timeout(Duration::seconds(0))
-        .with_scrub_dry_run(false)
     }
 
     pub async fn create_test_blob(
@@ -226,28 +198,5 @@ pub mod test_utils {
         .unwrap();
 
         (digest, repository)
-    }
-
-    pub fn create_test_manifest() -> (Vec<u8>, String) {
-        let manifest = json!({
-            "schemaVersion": 2,
-            "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
-            "config": {
-                "mediaType": "application/vnd.docker.container.image.v1+json",
-                "digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-                "size": 1234
-            },
-            "layers": [
-                {
-                    "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
-                    "digest": "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-                    "size": 5678
-                }
-            ]
-        });
-
-        let content = serde_json::to_vec(&manifest).unwrap();
-        let media_type = "application/vnd.docker.distribution.manifest.v2+json".to_string();
-        (content, media_type)
     }
 }

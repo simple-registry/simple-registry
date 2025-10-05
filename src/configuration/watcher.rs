@@ -1,5 +1,4 @@
 use crate::command::server;
-use crate::configuration::registry::create_registry;
 use crate::configuration::{Configuration, ServerConfig};
 use crate::registry::server::listeners::tls::ServerTlsConfig;
 use notify::event::ModifyKind;
@@ -131,18 +130,7 @@ async fn watch_config_loop(
 }
 
 fn reload_full_config(server: &Arc<server::Command>, _config_path: &Path, config: &Configuration) {
-    let Ok(registry) = create_registry(
-        &config.global,
-        &config.blob_store,
-        config.metadata_store.clone(),
-        config.repository.clone(),
-        &config.cache,
-    ) else {
-        error!("Failed to create registry with new configuration");
-        return;
-    };
-
-    if let Err(e) = server.notify_config_change(config, registry) {
+    if let Err(e) = server.notify_config_change(config) {
         error!("Failed to notify server of configuration change: {e}");
     } else {
         info!("Configuration reloaded");

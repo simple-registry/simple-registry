@@ -117,13 +117,6 @@ impl S3RegistryTestCase {
         }
     }
 
-    pub fn set_repository_config(
-        &mut self,
-        repositories_config: HashMap<String, RepositoryConfig>,
-    ) {
-        prepare_with_repository_config(&mut self.s3_registry, repositories_config);
-    }
-
     pub fn registry(&self) -> &Registry {
         &self.s3_registry
     }
@@ -162,5 +155,5 @@ fn prepare_with_repository_config(
         repositories.insert(repository_name, res);
     }
 
-    registry.repositories = repositories;
+    registry.repositories = Arc::new(repositories);
 }

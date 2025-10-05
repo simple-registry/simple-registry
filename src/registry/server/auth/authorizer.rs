@@ -195,19 +195,18 @@ impl Authorizer {
             } else if self.global_access_policy.is_none() {
                 return Err(Error::NotFound);
             }
-        } else {
-            if let Some(webhook_name) = &self.global_authorization_webhook {
-                debug!("Evaluating global webhook authorization: {}", webhook_name);
+        } else if let Some(webhook_name) = &self.global_authorization_webhook {
+            debug!("Evaluating global webhook authorization: {}", webhook_name);
 
-                let webhook = self.webhooks.get(webhook_name).ok_or_else(|| {
-                    Error::Internal(format!("Webhook '{webhook_name}' not found"))
-                })?;
+            let webhook = self
+                .webhooks
+                .get(webhook_name)
+                .ok_or_else(|| Error::Internal(format!("Webhook '{webhook_name}' not found")))?;
 
-                let allowed = webhook.authorize(route, identity, request).await?;
-                if !allowed {
-                    log_denial(&format!("global webhook '{webhook_name}'"), identity);
-                    return Err(Error::Unauthorized("Access denied by webhook".to_string()));
-                }
+            let allowed = webhook.authorize(route, identity, request).await?;
+            if !allowed {
+                log_denial(&format!("global webhook '{webhook_name}'"), identity);
+                return Err(Error::Unauthorized("Access denied by webhook".to_string()));
             }
         }
 

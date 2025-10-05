@@ -3,16 +3,13 @@ use crate::registry::{blob_store, cache, metadata_store, Registry};
 use std::collections::HashMap;
 use tracing::info;
 
-pub fn create_registry(
-    registry_config: &GlobalConfig,
+pub fn resolve_metadata_store_config(
     blob_store_config: &blob_store::BlobStorageConfig,
     metadata_store_config: Option<metadata_store::MetadataStoreConfig>,
-    repository_config: HashMap<String, RepositoryConfig>,
-    cache_config: &cache::CacheStoreConfig,
-) -> Result<Registry, crate::command::Error> {
-    let metadata_store_config = match metadata_store_config {
+) -> metadata_store::MetadataStoreConfig {
+    match metadata_store_config {
         Some(config) => config,
-        None => match &blob_store_config {
+        None => match blob_store_config {
             blob_store::BlobStorageConfig::FS(config) => {
                 metadata_store::MetadataStoreConfig::FS(metadata_store::fs::BackendConfig {
                     root_dir: config.root_dir.clone(),
@@ -33,7 +30,18 @@ pub fn create_registry(
                 })
             }
         },
-    };
+    }
+}
+
+pub fn create_registry(
+    registry_config: &GlobalConfig,
+    blob_store_config: &blob_store::BlobStorageConfig,
+    metadata_store_config: Option<metadata_store::MetadataStoreConfig>,
+    repository_config: HashMap<String, RepositoryConfig>,
+    cache_config: &cache::CacheStoreConfig,
+) -> Result<Registry, crate::command::Error> {
+    let metadata_store_config =
+        resolve_metadata_store_config(blob_store_config, metadata_store_config);
 
     let blob_store = blob_store_config.to_backend()?;
     let metadata_store = metadata_store_config.to_backend()?;

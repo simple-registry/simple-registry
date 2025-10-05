@@ -84,7 +84,6 @@ impl RetentionPolicy {
     pub fn has_rules(&self) -> bool {
         !self.rules.is_empty()
     }
-
     /// Evaluates whether a manifest should be retained.
     ///
     /// # Arguments

@@ -1,8 +1,8 @@
+use crate::configuration::registry::create_registry;
 use crate::configuration::{Configuration, ServerConfig};
 use crate::registry::server::listeners::insecure::InsecureListener;
 use crate::registry::server::listeners::tls::{ServerTlsConfig, TlsListener};
 use crate::registry::server::ServerContext;
-use crate::registry::Registry;
 use crate::{command, configuration};
 use argh::FromArgs;
 
@@ -24,10 +24,16 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn new(
-        config: &Configuration,
-        registry: Registry,
-    ) -> Result<Command, configuration::Error> {
+    pub fn new(config: &Configuration) -> Result<Command, configuration::Error> {
+        let registry = create_registry(
+            &config.global,
+            &config.blob_store,
+            config.metadata_store.clone(),
+            config.repository.clone(),
+            &config.cache,
+        )
+        .map_err(|e| configuration::Error::Http(format!("Failed to create registry: {e}")))?;
+
         let context = ServerContext::new(config, registry).map_err(|e| {
             configuration::Error::Http(format!("Failed to create server context: {e}"))
         })?;
@@ -44,11 +50,16 @@ impl Command {
         Ok(Command { listener })
     }
 
-    pub fn notify_config_change(
-        &self,
-        config: &Configuration,
-        registry: Registry,
-    ) -> Result<(), configuration::Error> {
+    pub fn notify_config_change(&self, config: &Configuration) -> Result<(), configuration::Error> {
+        let registry = create_registry(
+            &config.global,
+            &config.blob_store,
+            config.metadata_store.clone(),
+            config.repository.clone(),
+            &config.cache,
+        )
+        .map_err(|e| configuration::Error::Http(format!("Failed to create registry: {e}")))?;
+
         let context = ServerContext::new(config, registry).map_err(|e| {
             configuration::Error::Http(format!("Failed to create server context: {e}"))
         })?;

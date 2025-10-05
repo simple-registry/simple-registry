@@ -2,7 +2,6 @@
 #![warn(clippy::pedantic)]
 
 use crate::command::{argon, scrub, server};
-use crate::configuration::registry::create_registry;
 use crate::configuration::watcher::ConfigWatcher;
 use crate::configuration::{Configuration, ObservabilityConfig};
 use argh::FromArgs;
@@ -102,22 +101,14 @@ async fn run_command(
 ) -> Result<(), command::Error> {
     set_tracing(config.observability.clone())?;
 
-    let registry = create_registry(
-        &config.global,
-        &config.blob_store,
-        config.metadata_store.clone(),
-        config.repository.clone(),
-        &config.cache,
-    )?;
-
     match cli_args.subcommand {
         SubCommand::Argon(_) => argon::Command::run(),
         SubCommand::Scrub(scrub_options) => {
-            let scrub = scrub::Command::new(&scrub_options, registry);
+            let scrub = scrub::Command::new(&scrub_options, &config)?;
             scrub.run().await
         }
         SubCommand::Serve(_) => {
-            let server = Arc::new(server::Command::new(&config, registry)?);
+            let server = Arc::new(server::Command::new(&config)?);
 
             let _watcher = ConfigWatcher::new(&cli_args.config, server.clone())?;
             server.run().await

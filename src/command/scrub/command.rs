@@ -1,11 +1,17 @@
+use super::Scrubber;
 use crate::command;
-use crate::registry::Registry;
+use crate::configuration::registry::resolve_metadata_store_config;
+use crate::configuration::Configuration;
+use crate::registry::blob_store::BlobStore;
+use crate::registry::metadata_store::MetadataStore;
+use crate::registry::repository::RetentionPolicy;
+use crate::registry::{cache, Repository};
 use argh::FromArgs;
-use humantime::Duration;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::process::exit;
 use std::sync::Arc;
-use std::time::Duration as StdDuration;
+use std::time::Duration;
 use tracing::{error, info};
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -21,7 +27,7 @@ pub struct Options {
     pub dry_mode: bool,
     #[argh(option, short = 't')]
     /// the maximum duration an upload can be in progress before it is considered obsolete in seconds
-    pub upload_timeout: Option<Duration>,
+    pub upload_timeout: Option<humantime::Duration>,
     #[argh(switch, short = 'u')]
     /// check for obsolete uploads
     pub check_uploads: bool,
@@ -49,15 +55,47 @@ enum ScrubCheck {
 }
 
 pub struct Command {
-    registry: Arc<Registry>,
+    blob_store: Arc<dyn BlobStore + Send + Sync>,
+    metadata_store: Arc<dyn MetadataStore + Send + Sync>,
+    repositories: Arc<HashMap<String, Repository>>,
+    global_retention_policy: Option<Arc<RetentionPolicy>>,
+    dry_run: bool,
+    upload_timeout: chrono::Duration,
     enabled_checks: HashSet<ScrubCheck>,
 }
 
 impl Command {
-    pub fn new(options: &Options, registry: Registry) -> Self {
+    pub fn new(options: &Options, config: &Configuration) -> Result<Self, command::Error> {
+        let metadata_store_config =
+            resolve_metadata_store_config(&config.blob_store, config.metadata_store.clone());
+
+        let blob_store = config.blob_store.to_backend()?;
+        let metadata_store = metadata_store_config.to_backend()?;
+
+        let mut repositories_map = HashMap::new();
+        let auth_token_cache: Arc<dyn cache::Cache> = Arc::new(cache::memory::Backend::new());
+
+        for (repository_name, repository_config) in &config.repository {
+            let res = Repository::new(
+                repository_name.clone(),
+                repository_config.clone(),
+                &auth_token_cache,
+            )?;
+            repositories_map.insert(repository_name.clone(), res);
+        }
+        let repositories = Arc::new(repositories_map);
+
+        let global_retention_policy = if config.global.retention_policy.rules.is_empty() {
+            None
+        } else {
+            Some(Arc::new(RetentionPolicy::new(
+                &config.global.retention_policy,
+            )?))
+        };
+
         let upload_timeout = options
             .upload_timeout
-            .map_or(StdDuration::from_secs(86400), Into::into);
+            .map_or(Duration::from_secs(86400), Into::into);
 
         let upload_timeout =
             chrono::Duration::from_std(upload_timeout).expect("Upload timeout must be valid");
@@ -66,12 +104,6 @@ impl Command {
             "Upload timeout set to {} second(s)",
             upload_timeout.num_seconds()
         );
-
-        let registry = registry
-            .with_scrub_dry_run(options.dry_mode)
-            .with_upload_timeout(upload_timeout);
-
-        let registry = Arc::new(registry);
 
         let mut enabled_checks = HashSet::new();
 
@@ -99,16 +131,31 @@ impl Command {
             info!("Dry-run mode: no changes will be made to the storage");
         }
 
-        Self {
-            registry,
+        Ok(Self {
+            blob_store,
+            metadata_store,
+            repositories,
+            global_retention_policy,
+            dry_run: options.dry_mode,
+            upload_timeout,
             enabled_checks,
-        }
+        })
     }
 
     pub async fn run(&self) -> Result<(), command::Error> {
+        let scrubber = Scrubber::new(
+            self.blob_store.clone(),
+            self.metadata_store.clone(),
+            self.repositories.clone(),
+            self.global_retention_policy.clone(),
+            self.dry_run,
+            self.upload_timeout,
+        );
+
         let mut marker = None;
         loop {
-            let Ok((namespaces, next_marker)) = self.registry.list_catalog(Some(100), marker).await
+            let Ok((namespaces, next_marker)) =
+                self.metadata_store.list_namespaces(100, marker).await
             else {
                 error!("Failed to read catalog");
                 exit(1);
@@ -116,26 +163,19 @@ impl Command {
 
             for namespace in namespaces {
                 if self.enabled_checks.contains(&ScrubCheck::Retention) {
-                    let _ = self.registry.enforce_retention(&namespace).await;
+                    let _ = scrubber.enforce_retention(&namespace).await;
                 }
 
                 if self.enabled_checks.contains(&ScrubCheck::Uploads) {
-                    // Step 1: check upload directories
-                    // - for incomplete uploads (threshold from config file)
-                    // - delete corrupted upload directories (here we are incompatible with docker "distribution")
-                    let _ = self.registry.scrub_uploads(&namespace).await;
+                    let _ = scrubber.scrub_uploads(&namespace).await;
                 }
 
                 if self.enabled_checks.contains(&ScrubCheck::Tags) {
-                    // Step 2: for each manifest tags "_manifests/tags/<tag-name>/current/link", ensure the
-                    // revision exists: "_manifests/revisions/sha256/<hash>/link"
-                    let _ = self.registry.scrub_tags(&namespace).await;
+                    let _ = scrubber.scrub_tags(&namespace).await;
                 }
 
                 if self.enabled_checks.contains(&ScrubCheck::Revisions) {
-                    // Step 3: for each revision "_manifests/revisions/sha256/<hash>/link", read the manifest,
-                    // and ensure related links exists
-                    let _ = self.registry.scrub_revisions(&namespace).await;
+                    let _ = scrubber.scrub_revisions(&namespace).await;
                 }
             }
 
@@ -147,8 +187,7 @@ impl Command {
         }
 
         if self.enabled_checks.contains(&ScrubCheck::Blobs) {
-            // Step 4: blob garbage collection
-            let _ = self.registry.cleanup_orphan_blobs().await;
+            let _ = scrubber.cleanup_orphan_blobs().await;
         }
 
         Ok(())
