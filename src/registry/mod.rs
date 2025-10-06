@@ -13,7 +13,6 @@ pub mod data_store;
 mod error;
 pub mod manifest;
 pub mod metadata_store;
-pub mod oci;
 mod path_builder;
 pub mod repository;
 pub mod task_queue;
@@ -115,7 +114,7 @@ impl Registry {
 pub mod test_utils {
     use super::*;
     use crate::registry::metadata_store::link_kind::LinkKind;
-    use crate::registry::oci::Digest;
+    use crate::oci::Digest;
     use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
     use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
 

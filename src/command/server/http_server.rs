@@ -4,7 +4,7 @@ use crate::command::server::response_body::ResponseBody;
 use crate::command::server::route::Route;
 use crate::command::server::{router, ServerContext};
 use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
-use crate::registry::oci::Reference;
+use crate::oci::Reference;
 use crate::registry::Error;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};

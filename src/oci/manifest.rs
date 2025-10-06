@@ -1,4 +1,4 @@
-use crate::registry::oci::{Descriptor, Error};
+use crate::oci::{Descriptor, Error};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

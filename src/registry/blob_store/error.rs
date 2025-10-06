@@ -1,4 +1,4 @@
-use crate::registry::{data_store, oci};
+use crate::registry::data_store;
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::GetObjectError;
@@ -10,6 +10,7 @@ use std::num::TryFromIntError;
 use std::string::FromUtf8Error;
 use std::{fmt, io};
 use tracing::error;
+use crate::oci;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {

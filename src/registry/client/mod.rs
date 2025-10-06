@@ -7,7 +7,7 @@ use crate::configuration;
 use crate::registry::blob::DOCKER_CONTENT_DIGEST;
 use crate::registry::blob_store::Reader;
 use crate::registry::cache::Cache;
-use crate::registry::oci::{Digest, Reference};
+use crate::oci::{Digest, Reference};
 use crate::registry::Error;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;

@@ -1,6 +1,6 @@
 mod error;
 
-use crate::registry::oci::{Descriptor, Digest};
+use crate::oci::{Descriptor, Digest};
 use async_trait::async_trait;
 pub use error::Error;
 use serde::{Deserialize, Serialize};
@@ -89,7 +89,7 @@ mod tests {
     use crate::registry::blob_store::BlobStore;
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::metadata_store::MetadataStore;
-    use crate::registry::oci::Descriptor;
+    use crate::oci::Descriptor;
     use chrono::{Duration, Utc};
     use std::collections::HashMap;
 

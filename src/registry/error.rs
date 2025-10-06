@@ -1,6 +1,6 @@
-use crate::configuration;
+use crate::{configuration, oci};
 use crate::registry::{blob_store, cache, metadata_store};
-use crate::registry::{oci, task_queue};
+use crate::registry::task_queue;
 use cel_interpreter::SerializationError;
 use hyper::header::InvalidHeaderValue;
 use hyper::http::uri::InvalidUri;

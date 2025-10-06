@@ -1,5 +1,5 @@
 use crate::command::server::response_body::ResponseBody;
-use crate::registry::oci::{Descriptor, Digest, ReferrerList};
+use crate::oci::{Descriptor, Digest, ReferrerList};
 use crate::registry::{Error, Registry};
 use hyper::header::{CONTENT_TYPE, LINK};
 use hyper::{Response, StatusCode};
@@ -157,7 +157,7 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::registry::metadata_store::link_kind::LinkKind;
-    use crate::registry::oci::Reference;
+    use crate::oci::Reference;
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use futures_util::TryStreamExt;

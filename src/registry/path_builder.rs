@@ -1,5 +1,5 @@
 use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::oci::Digest;
+use crate::oci::Digest;
 
 pub fn blobs_root_dir() -> String {
     "v2/blobs".to_string()
@@ -212,7 +212,7 @@ pub fn get_link_container_path(reference: &LinkKind, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::oci::Digest;
+    use crate::oci::Digest;
 
     #[test]
     fn test_no_prefix() {

@@ -1,5 +1,5 @@
 use crate::command::server::response_body::ResponseBody;
-use crate::registry::oci::Digest;
+use crate::oci::Digest;
 use crate::registry::{Error, Registry};
 use hyper::header::{CONTENT_LENGTH, LOCATION, RANGE};
 use hyper::{Response, StatusCode};

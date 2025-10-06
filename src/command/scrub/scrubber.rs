@@ -1,7 +1,7 @@
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::{LinkMetadata, MetadataStore};
-use crate::registry::oci::Digest;
+use crate::oci::Digest;
 use crate::registry::repository::retention_policy::ManifestImage;
 use crate::registry::repository::{Repository, RetentionPolicy};
 use crate::registry::{parse_manifest_digests, Error};

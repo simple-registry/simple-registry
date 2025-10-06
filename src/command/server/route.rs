@@ -1,4 +1,4 @@
-use crate::registry::oci::{Digest, Reference};
+use crate::oci::{Digest, Reference};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -169,7 +169,7 @@ impl<'a> Route<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::oci::Digest;
+    use crate::oci::Digest;
     use std::str::FromStr;
 
     #[test]

@@ -1,6 +1,6 @@
 use super::*;
 use crate::registry::cache;
-use crate::registry::oci::{Digest, Reference};
+use crate::oci::{Digest, Reference};
 
 #[test]
 fn test_get_upstream_namespace() {

@@ -1,7 +1,7 @@
 use crate::configuration::{Error, RepositoryConfig};
 use crate::registry;
 use crate::registry::cache::Cache;
-use crate::registry::oci::{Digest, Reference};
+use crate::oci::{Digest, Reference};
 use std::sync::Arc;
 use tracing::instrument;
 

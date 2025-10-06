@@ -9,6 +9,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument};
+use crate::oci::Reference;
 
 /// Centralized authorization component that handles all access control decisions
 pub struct Authorizer {
@@ -155,7 +156,7 @@ impl Authorizer {
                 }
 
                 if let Route::PutManifest {
-                    reference: crate::registry::oci::Reference::Tag(tag),
+                    reference: Reference::Tag(tag),
                     ..
                 } = route
                 {

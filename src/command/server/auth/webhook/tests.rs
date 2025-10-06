@@ -1,5 +1,5 @@
 use super::*;
-use crate::registry::oci::Reference;
+use crate::oci::Reference;
 use std::path::PathBuf;
 
 #[test]

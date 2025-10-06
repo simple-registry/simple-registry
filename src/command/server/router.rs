@@ -1,5 +1,5 @@
 use super::route::Route;
-use crate::registry::oci::{Digest, Reference};
+use crate::oci::{Digest, Reference};
 use hyper::{Method, Uri};
 use serde::Deserialize;
 use std::str::FromStr;

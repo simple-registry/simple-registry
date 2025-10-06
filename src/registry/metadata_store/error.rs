@@ -1,5 +1,6 @@
 use crate::registry::data_store;
 use std::fmt;
+use crate::oci;
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -55,8 +56,8 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<crate::registry::oci::Error> for Error {
-    fn from(err: crate::registry::oci::Error) -> Self {
+impl From<oci::Error> for Error {
+    fn from(err: oci::Error) -> Self {
         Error::InvalidData(err.to_string())
     }
 }
