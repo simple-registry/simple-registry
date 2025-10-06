@@ -1,7 +1,7 @@
+use crate::cache::Cache;
 use crate::configuration::Error;
 use crate::oci::{Digest, Reference};
 use crate::registry;
-use crate::registry::cache::Cache;
 use serde::Deserialize;
 use std::sync::Arc;
 use tracing::instrument;

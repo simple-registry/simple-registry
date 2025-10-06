@@ -1,6 +1,6 @@
+use crate::cache::Cache;
 use crate::command::server::auth::oidc::{Jwk, OidcProvider};
 use crate::command::server::OidcClaims;
-use crate::registry::cache::Cache;
 use crate::registry::Error;
 use async_trait::async_trait;
 use jsonwebtoken::{decode, decode_header, Validation};

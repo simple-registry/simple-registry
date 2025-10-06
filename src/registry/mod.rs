@@ -7,7 +7,6 @@ use tracing::instrument;
 mod access_policy;
 pub mod blob;
 pub mod blob_store;
-pub mod cache;
 pub mod content_discovery;
 pub mod data_store;
 mod error;
@@ -22,9 +21,9 @@ mod tests;
 pub mod upload;
 mod version;
 
-use crate::configuration;
 use crate::configuration::GlobalConfig;
 use crate::registry::cache::Cache;
+use crate::{cache, configuration};
 pub use repository::Repository;
 
 use crate::registry::blob_store::BlobStore;

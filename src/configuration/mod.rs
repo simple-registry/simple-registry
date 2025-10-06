@@ -7,13 +7,13 @@ mod error;
 pub mod registry;
 pub mod watcher;
 
+use crate::cache;
 use crate::command::server::auth::oidc;
 use crate::command::server::auth::webhook::WebhookConfig;
 use crate::command::server::listeners::{insecure, tls};
 use crate::registry::repository::RepositoryConfig;
 use crate::registry::{
-    blob_store, cache, metadata_store, RepositoryAccessPolicyConfig,
-    RepositoryRetentionPolicyConfig,
+    blob_store, metadata_store, RepositoryAccessPolicyConfig, RepositoryRetentionPolicyConfig,
 };
 pub use error::Error;
 

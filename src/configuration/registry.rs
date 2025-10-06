@@ -1,5 +1,6 @@
+use crate::cache;
 use crate::configuration::{GlobalConfig, RepositoryConfig};
-use crate::registry::{blob_store, cache, metadata_store, Registry};
+use crate::registry::{blob_store, metadata_store, Registry};
 use std::collections::HashMap;
 use tracing::info;
 

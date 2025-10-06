@@ -3,8 +3,8 @@ use std::fmt::Debug;
 
 mod config;
 mod error;
-pub(crate) mod memory;
-pub(crate) mod redis;
+pub mod memory;
+pub mod redis;
 
 pub use config::CacheStoreConfig;
 pub use error::Error;

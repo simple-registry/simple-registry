@@ -1,5 +1,5 @@
-use crate::registry::cache;
-use crate::registry::cache::{Cache, Error};
+use crate::cache;
+use crate::cache::{Cache, Error};
 use serde::Deserialize;
 use std::sync::Arc;
 

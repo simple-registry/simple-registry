@@ -1,4 +1,4 @@
-use crate::registry::cache::{Cache, Error};
+use crate::cache::{Cache, Error};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};

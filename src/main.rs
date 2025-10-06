@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 
+mod cache;
 mod command;
 mod configuration;
 mod metrics_provider;

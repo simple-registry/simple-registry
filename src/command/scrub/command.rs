@@ -1,10 +1,10 @@
 use super::Scrubber;
-use crate::command;
 use crate::configuration::registry::resolve_metadata_store_config;
 use crate::configuration::Configuration;
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
-use crate::registry::{cache, Repository, RetentionPolicy};
+use crate::registry::{Repository, RetentionPolicy};
+use crate::{cache, command};
 use argh::FromArgs;
 use std::collections::HashMap;
 use std::collections::HashSet;

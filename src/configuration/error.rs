@@ -1,4 +1,5 @@
-use crate::registry::{cache, task_queue};
+use crate::cache;
+use crate::registry::task_queue;
 use hyper::header::InvalidHeaderValue;
 use opentelemetry_otlp::ExporterBuildError;
 use opentelemetry_sdk::trace::TraceError;
