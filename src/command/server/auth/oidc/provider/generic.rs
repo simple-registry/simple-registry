@@ -164,7 +164,7 @@ async fn fetch_jwks(
     jwks_cache_key: &str,
     oidc_config_cache_key: &str,
 ) -> Result<Jwks, Error> {
-    if let Ok(cached) = cache.retrieve(jwks_cache_key).await {
+    if let Ok(Some(cached)) = cache.retrieve(jwks_cache_key).await {
         if let Ok(jwks) = serde_json::from_str::<Jwks>(&cached) {
             debug!("Using cached JWKS");
             return Ok(jwks);
@@ -216,7 +216,7 @@ async fn fetch_oidc_configuration(
     cache: &dyn Cache,
     oidc_config_cache_key: &str,
 ) -> Result<OpenIdConfiguration, Error> {
-    if let Ok(cached) = cache.retrieve(oidc_config_cache_key).await {
+    if let Ok(Some(cached)) = cache.retrieve(oidc_config_cache_key).await {
         if let Ok(config) = serde_json::from_str::<OpenIdConfiguration>(&cached) {
             debug!("Using cached OIDC configuration");
             return Ok(config);

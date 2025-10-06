@@ -39,7 +39,7 @@ pub fn create_registry(
     blob_store_config: &blob_store::BlobStorageConfig,
     metadata_store_config: Option<metadata_store::MetadataStoreConfig>,
     repository_config: HashMap<String, RepositoryConfig>,
-    cache_config: &cache::CacheStoreConfig,
+    cache_config: &cache::Config,
 ) -> Result<Registry, crate::command::Error> {
     let metadata_store_config =
         resolve_metadata_store_config(blob_store_config, metadata_store_config);

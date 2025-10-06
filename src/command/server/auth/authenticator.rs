@@ -1,6 +1,6 @@
 use super::oidc::OidcValidator;
 use super::{AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator};
-use crate::cache::CacheStoreConfig;
+use crate::cache::Config;
 use crate::command::server::ClientIdentity;
 use crate::configuration::{AuthConfig, Configuration};
 use crate::metrics_provider::AUTH_ATTEMPTS;
@@ -47,7 +47,7 @@ impl Authenticator {
 
     fn build_oidc_validators(
         auth_config: &AuthConfig,
-        cache_config: &CacheStoreConfig,
+        cache_config: &Config,
     ) -> Result<OidcValidators, Error> {
         let mut validators = Vec::new();
 

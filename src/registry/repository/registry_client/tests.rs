@@ -28,7 +28,7 @@ async fn test_get_manifest_path() {
         password: Some("password".to_string()),
     };
 
-    let cache = Arc::new(cache::memory::Backend::new());
+    let cache = cache::Config::Memory.to_backend().unwrap();
     let upstream = RegistryClient::new(config, cache).unwrap();
 
     let repo_name = "local";
@@ -51,7 +51,7 @@ async fn test_get_blob_path() {
         password: None,
     };
 
-    let cache = Arc::new(cache::memory::Backend::new());
+    let cache = cache::Config::Memory.to_backend().unwrap();
     let upstream = RegistryClient::new(config, cache).unwrap();
 
     let repo_name = "local";

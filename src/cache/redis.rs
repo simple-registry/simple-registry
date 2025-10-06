@@ -4,7 +4,6 @@ use redis::AsyncCommands;
 use serde::Deserialize;
 use tracing::info;
 
-/// Configuration for Redis backend
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct BackendConfig {
     pub url: String,
@@ -18,12 +17,12 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(config: BackendConfig) -> Result<Self, Error> {
+    pub fn new(config: &BackendConfig) -> Result<Self, Error> {
         info!("Using Redis cache store");
         let client = redis::Client::open(config.url.as_str())?;
         Ok(Backend {
             client,
-            key_prefix: config.key_prefix,
+            key_prefix: config.key_prefix.clone(),
         })
     }
 
@@ -40,11 +39,11 @@ impl Cache for Backend {
         Ok(conn.set_ex(key, value, expires_in).await?)
     }
 
-    async fn retrieve(&self, key: &str) -> Result<String, Error> {
+    async fn retrieve(&self, key: &str) -> Result<Option<String>, Error> {
         let mut conn = self.get_connection().await?;
         let key = format!("{}{key}", self.key_prefix);
         let value: Option<String> = conn.get(key).await?;
-        value.ok_or(Error::NotFound)
+        Ok(value)
     }
 }
 
@@ -59,14 +58,12 @@ mod tests {
             url: "redis://localhost:6379/0".to_string(),
             key_prefix: "test_acquire_write_lock".to_owned(),
         };
-        let cache = Backend::new(config).unwrap();
+        let cache = Backend::new(&config).unwrap();
 
-        // Store and retrieve token
         cache.store("key", "token", 1).await.unwrap();
-        assert_eq!(cache.retrieve("key").await, Ok("token".to_string()));
+        assert_eq!(cache.retrieve("key").await, Ok(Some("token".to_string())));
 
-        // Expired token
         tokio::time::sleep(Duration::from_millis(1050)).await;
-        assert_eq!(cache.retrieve("key").await, Err(Error::NotFound));
+        assert_eq!(cache.retrieve("key").await, Ok(None));
     }
 }

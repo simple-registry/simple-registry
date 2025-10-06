@@ -137,7 +137,7 @@ impl WebhookAuthorizer {
     ) -> Result<bool, Error> {
         let cache_key = self.make_cache_key(route, identity);
 
-        if let Ok(cached) = self.cache.retrieve(&cache_key).await {
+        if let Ok(Some(cached)) = self.cache.retrieve(&cache_key).await {
             let cached_bool = cached.as_str() == "true";
             let result_label = if cached_bool {
                 "cached_allow".to_string()

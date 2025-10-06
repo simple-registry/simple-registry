@@ -1,17 +1,18 @@
 use async_trait::async_trait;
+use std::any::Any;
 use std::fmt::Debug;
 
 mod config;
 mod error;
-pub mod memory;
-pub mod redis;
+mod memory;
+mod redis;
 
-pub use config::CacheStoreConfig;
+pub use config::Config;
 pub use error::Error;
 
 /// Trait for cache implementations that can store and retrieve values with a given TTL
 #[async_trait]
-pub trait Cache: Debug + Send + Sync {
+pub trait Cache: Any + Debug + Send + Sync {
     /// Store a value with a given TTL in the cache
     ///
     /// # Arguments
@@ -34,7 +35,8 @@ pub trait Cache: Debug + Send + Sync {
     ///
     /// # Returns
     ///
-    /// * `Ok(String)` if the value was found in the cache
-    /// * `Err(Error)` if the value was not found in the cache or could not be retrieved
-    async fn retrieve(&self, key: &str) -> Result<String, Error>;
+    /// * `Ok(Some(String))` if the value was found in the cache
+    /// * `Ok(None)` if the value was not found in the cache
+    /// * `Err(Error)` if the value could not be retrieved
+    async fn retrieve(&self, key: &str) -> Result<Option<String>, Error>;
 }

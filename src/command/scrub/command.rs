@@ -1,10 +1,10 @@
 use super::Scrubber;
+use crate::command;
 use crate::configuration::registry::resolve_metadata_store_config;
 use crate::configuration::Configuration;
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::{Repository, RetentionPolicy};
-use crate::{cache, command};
 use argh::FromArgs;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -72,7 +72,10 @@ impl Command {
         let metadata_store = metadata_store_config.to_backend()?;
 
         let mut repositories_map = HashMap::new();
-        let auth_token_cache: Arc<dyn cache::Cache> = Arc::new(cache::memory::Backend::new());
+        let Ok(auth_token_cache) = config.cache.to_backend() else {
+            error!("Failed to initialize auth token cache");
+            exit(1);
+        };
 
         for (repository_name, repository_config) in &config.repository {
             let res = Repository::new(

@@ -22,6 +22,12 @@ impl Backend {
             counter: Arc::new(AtomicUsize::new(0)),
         }
     }
+
+    async fn cleanup_expired(&self) {
+        let mut store = self.store.write().await;
+        let now = Instant::now();
+        store.retain(|_, &mut (_, expiry)| expiry > now);
+    }
 }
 
 #[async_trait]
@@ -29,13 +35,11 @@ impl Cache for Backend {
     async fn store(&self, key: &str, value: &str, expires_in: u64) -> Result<(), Error> {
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
 
-        let mut store = self.store.write().await;
-
         if count % 1000 == 0 {
-            let now = Instant::now();
-            store.retain(|_, &mut (_, expiry)| expiry > now);
+            self.cleanup_expired().await;
         }
 
+        let mut store = self.store.write().await;
         store.insert(
             key.to_string(),
             (
@@ -46,29 +50,21 @@ impl Cache for Backend {
         Ok(())
     }
 
-    async fn retrieve(&self, key: &str) -> Result<String, Error> {
+    async fn retrieve(&self, key: &str) -> Result<Option<String>, Error> {
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
 
         if count % 1000 == 0 {
-            let mut store = self.store.write().await;
-            let now = Instant::now();
-            store.retain(|_, &mut (_, expiry)| expiry > now);
+            self.cleanup_expired().await;
+        }
 
-            if let Some((value, expiry)) = store.get(key) {
-                if *expiry > Instant::now() {
-                    return Ok(value.clone());
-                }
-            }
-        } else {
-            let store = self.store.read().await;
-            if let Some((value, expiry)) = store.get(key) {
-                if *expiry > Instant::now() {
-                    return Ok(value.clone());
-                }
+        let store = self.store.read().await;
+        if let Some((value, expiry)) = store.get(key) {
+            if *expiry > Instant::now() {
+                return Ok(Some(value.clone()));
             }
         }
 
-        Err(Error::NotFound)
+        Ok(None)
     }
 }
 
@@ -83,10 +79,10 @@ mod tests {
 
         let res = cache.store("key", "value", 1).await;
         assert!(res.is_ok());
-        assert_eq!(cache.retrieve("key").await, Ok("value".to_string()));
+        assert_eq!(cache.retrieve("key").await, Ok(Some("value".to_string())));
 
         tokio::time::sleep(Duration::from_millis(1050)).await;
-        assert_eq!(cache.retrieve("key").await, Err(Error::NotFound));
+        assert_eq!(cache.retrieve("key").await, Ok(None));
     }
 
     #[tokio::test]
@@ -113,7 +109,10 @@ mod tests {
             let _ = cache.retrieve(&format!("nonexistent_{i}")).await;
         }
 
-        assert_eq!(cache.retrieve("long_0").await, Ok("value".to_string()));
-        assert_eq!(cache.retrieve("short_0").await, Err(Error::NotFound));
+        assert_eq!(
+            cache.retrieve("long_0").await,
+            Ok(Some("value".to_string()))
+        );
+        assert_eq!(cache.retrieve("short_0").await, Ok(None));
     }
 }

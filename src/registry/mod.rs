@@ -22,7 +22,6 @@ pub mod upload;
 mod version;
 
 use crate::configuration::GlobalConfig;
-use crate::registry::cache::Cache;
 use crate::{cache, configuration};
 pub use repository::Repository;
 
@@ -60,21 +59,16 @@ impl Registry {
         metadata_store: Arc<dyn MetadataStore + Send + Sync>,
         repositories_config: HashMap<String, RepositoryConfig>,
         global_config: &GlobalConfig,
-        auth_token_cache: &cache::CacheStoreConfig,
+        auth_token_cache: &cache::Config,
     ) -> Result<Self, configuration::Error> {
-        let auth_token_cache_arc: Arc<dyn Cache> =
-            if let cache::CacheStoreConfig::Redis(ref redis_config) = auth_token_cache {
-                Arc::new(cache::redis::Backend::new(redis_config.clone())?)
-            } else {
-                Arc::new(cache::memory::Backend::new())
-            };
+        let auth_token_cache = auth_token_cache.to_backend()?;
 
         let mut repositories = HashMap::new();
         for (repository_name, repository_config) in repositories_config {
             let res = Repository::new(
                 repository_name.clone(),
                 repository_config,
-                &auth_token_cache_arc,
+                &auth_token_cache,
             )?;
             repositories.insert(repository_name, res);
         }
@@ -143,7 +137,7 @@ pub mod test_utils {
     ) -> Registry {
         let repositories_config = create_test_repository_config();
         let global = GlobalConfig::default();
-        let token_cache = cache::CacheStoreConfig::default();
+        let token_cache = cache::Config::default();
 
         Registry::new(
             blob_store,
@@ -182,7 +176,7 @@ pub mod test_utils {
         assert!(namespace_links.contains(&tag_link));
 
         // Create a non-pull-through repository
-        let cache: Arc<dyn Cache> = Arc::new(cache::memory::Backend::new());
+        let cache = cache::Config::Memory.to_backend().unwrap();
         let repository = Repository::new(
             "test-repo".to_string(),
             RepositoryConfig {

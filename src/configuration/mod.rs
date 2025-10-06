@@ -23,7 +23,7 @@ pub struct Configuration {
     #[serde(default)]
     pub global: GlobalConfig,
     #[serde(default, alias = "cache_store")]
-    pub cache: cache::CacheStoreConfig,
+    pub cache: cache::Config,
     #[serde(default, alias = "storage")]
     pub blob_store: blob_store::BlobStorageConfig,
     #[serde(default)]
@@ -203,7 +203,7 @@ mod tests {
         assert_eq!(server_config.query_timeout, 3600);
         assert_eq!(server_config.query_timeout_grace_period, 60);
 
-        assert_eq!(config.cache, cache::CacheStoreConfig::Memory);
+        assert_eq!(config.cache, cache::Config::Memory);
         assert_eq!(config.blob_store, blob_store::BlobStorageConfig::default());
 
         assert!(config.auth.identity.is_empty());
