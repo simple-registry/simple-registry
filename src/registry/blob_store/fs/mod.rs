@@ -1,10 +1,10 @@
 #[cfg(test)]
 pub mod tests;
 
+use crate::oci::Digest;
 use crate::registry::blob_store::hashing_reader::HashingReader;
 use crate::registry::blob_store::sha256_ext::Sha256Ext;
 use crate::registry::blob_store::{BlobStore, Error, Reader};
-use crate::oci::Digest;
 use crate::registry::{data_store, path_builder};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

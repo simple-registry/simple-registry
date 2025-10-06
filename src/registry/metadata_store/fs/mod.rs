@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod tests;
 
+use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::lock::{self, LockBackend, MemoryBackend};
 use crate::registry::metadata_store::{
     BlobIndex, BlobIndexOperation, Error, LinkMetadata, LockConfig, MetadataStore,
 };
-use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::{data_store, path_builder};
 use async_trait::async_trait;
 use serde::Deserialize;

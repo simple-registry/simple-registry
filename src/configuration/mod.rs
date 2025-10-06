@@ -10,9 +10,11 @@ pub mod watcher;
 use crate::command::server::auth::oidc;
 use crate::command::server::auth::webhook::WebhookConfig;
 use crate::command::server::listeners::{insecure, tls};
-use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
-use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
-use crate::registry::{blob_store, cache, client, metadata_store};
+use crate::registry::repository::RepositoryConfig;
+use crate::registry::{
+    blob_store, cache, metadata_store, RepositoryAccessPolicyConfig,
+    RepositoryRetentionPolicyConfig,
+};
 pub use error::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -110,21 +112,6 @@ pub struct IdentityConfig {
 pub enum OidcProviderConfig {
     Generic(oidc::provider::generic::ProviderConfig),
     GitHub(oidc::provider::github::ProviderConfig),
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct RepositoryConfig {
-    #[serde(default)]
-    pub upstream: Vec<client::ClientConfig>,
-    #[serde(default)]
-    pub access_policy: RepositoryAccessPolicyConfig,
-    #[serde(default)]
-    pub retention_policy: RepositoryRetentionPolicyConfig,
-    #[serde(default)]
-    pub immutable_tags: bool,
-    #[serde(default)]
-    pub immutable_tags_exclusions: Vec<String>,
-    pub authorization_webhook: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

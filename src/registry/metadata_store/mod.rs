@@ -86,10 +86,10 @@ pub trait MetadataStore: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use crate::oci::Descriptor;
     use crate::registry::blob_store::BlobStore;
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::metadata_store::MetadataStore;
-    use crate::oci::Descriptor;
     use chrono::{Duration, Utc};
     use std::collections::HashMap;
 

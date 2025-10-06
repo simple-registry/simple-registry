@@ -1,6 +1,6 @@
-use crate::configuration::RepositoryConfig;
 use crate::registry::cache::Cache;
 use crate::registry::metadata_store;
+use crate::registry::repository::RepositoryConfig;
 use crate::registry::test_utils::create_test_registry;
 use crate::registry::{blob_store, Registry, Repository};
 use crate::registry::{cache, data_store};

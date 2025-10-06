@@ -1,6 +1,6 @@
 use super::*;
-use crate::registry::cache;
 use crate::oci::{Digest, Reference};
+use crate::registry::cache;
 
 #[test]
 fn test_get_upstream_namespace() {
@@ -18,7 +18,7 @@ fn test_get_upstream_namespace() {
 
 #[tokio::test]
 async fn test_get_manifest_path() {
-    let config = ClientConfig {
+    let config = RegistryClientConfig {
         url: "https://example.com".to_string(),
         max_redirect: 5,
         server_ca_bundle: None,
@@ -41,7 +41,7 @@ async fn test_get_manifest_path() {
 
 #[tokio::test]
 async fn test_get_blob_path() {
-    let config = ClientConfig {
+    let config = RegistryClientConfig {
         url: "https://example.com".to_string(),
         max_redirect: 5,
         server_ca_bundle: None,

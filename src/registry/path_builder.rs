@@ -1,5 +1,5 @@
-use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::oci::Digest;
+use crate::registry::metadata_store::link_kind::LinkKind;
 
 pub fn blobs_root_dir() -> String {
     "v2/blobs".to_string()

@@ -1,6 +1,6 @@
 use crate::command::server::response_body::ResponseBody;
-use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::oci::{Digest, Manifest, Reference};
+use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::{Error, Registry, Repository};
 use futures_util::future;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};

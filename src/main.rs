@@ -17,8 +17,8 @@ use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
 mod command;
 mod configuration;
 mod metrics_provider;
-mod registry;
 mod oci;
+mod registry;
 
 fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), configuration::Error> {
     if let Some(ObservabilityConfig {

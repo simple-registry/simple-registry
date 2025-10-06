@@ -2,14 +2,13 @@ use crate::command::server::auth::webhook::WebhookAuthorizer;
 use crate::command::server::route::Route;
 use crate::command::server::ClientIdentity;
 use crate::configuration::Configuration;
-use crate::registry::repository::AccessPolicy;
-use crate::registry::{Error, Registry};
+use crate::oci::Reference;
+use crate::registry::{AccessPolicy, Error, Registry};
 use hyper::http::request::Parts;
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument};
-use crate::oci::Reference;
 
 /// Centralized authorization component that handles all access control decisions
 pub struct Authorizer {

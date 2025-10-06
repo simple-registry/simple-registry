@@ -1,17 +1,33 @@
-use crate::configuration::{Error, RepositoryConfig};
+use crate::configuration::Error;
+use crate::oci::{Digest, Reference};
 use crate::registry;
 use crate::registry::cache::Cache;
-use crate::oci::{Digest, Reference};
+use serde::Deserialize;
 use std::sync::Arc;
 use tracing::instrument;
-
-pub mod access_policy;
-pub mod retention_policy;
+mod registry_client;
 
 use crate::registry::blob_store::Reader;
-use crate::registry::client::RegistryClient;
-pub use access_policy::AccessPolicy;
-pub use retention_policy::RetentionPolicy;
+use registry_client::RegistryClient;
+
+use crate::registry::access_policy::RepositoryAccessPolicyConfig;
+use crate::registry::retention_policy::{RepositoryRetentionPolicyConfig, RetentionPolicy};
+pub use registry_client::RegistryClientConfig;
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct RepositoryConfig {
+    #[serde(default)]
+    pub upstream: Vec<RegistryClientConfig>,
+    #[serde(default)]
+    pub access_policy: RepositoryAccessPolicyConfig,
+    #[serde(default)]
+    pub retention_policy: RepositoryRetentionPolicyConfig,
+    #[serde(default)]
+    pub immutable_tags: bool,
+    #[serde(default)]
+    pub immutable_tags_exclusions: Vec<String>,
+    pub authorization_webhook: Option<String>,
+}
 
 pub struct Repository {
     pub name: String,

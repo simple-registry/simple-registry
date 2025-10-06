@@ -156,8 +156,8 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::oci::Reference;
+    use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
     use futures_util::TryStreamExt;

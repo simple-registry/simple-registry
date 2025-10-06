@@ -4,10 +4,10 @@ use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
 use tracing::instrument;
 
+mod access_policy;
 pub mod blob;
 pub mod blob_store;
 pub mod cache;
-pub mod client;
 pub mod content_discovery;
 pub mod data_store;
 mod error;
@@ -15,6 +15,7 @@ pub mod manifest;
 pub mod metadata_store;
 mod path_builder;
 pub mod repository;
+mod retention_policy;
 pub mod task_queue;
 #[cfg(test)]
 mod tests;
@@ -22,15 +23,18 @@ pub mod upload;
 mod version;
 
 use crate::configuration;
-use crate::configuration::{GlobalConfig, RepositoryConfig};
+use crate::configuration::GlobalConfig;
 use crate::registry::cache::Cache;
 pub use repository::Repository;
 
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
+use crate::registry::repository::RepositoryConfig;
 pub use crate::registry::task_queue::TaskQueue;
+pub use access_policy::{AccessPolicy, RepositoryAccessPolicyConfig};
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
+pub use retention_policy::{ManifestImage, RepositoryRetentionPolicyConfig, RetentionPolicy};
 
 static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap()
@@ -113,10 +117,10 @@ impl Registry {
 #[cfg(test)]
 pub mod test_utils {
     use super::*;
-    use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::oci::Digest;
-    use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
-    use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
+    use crate::registry::access_policy::RepositoryAccessPolicyConfig;
+    use crate::registry::metadata_store::link_kind::LinkKind;
+    use crate::registry::retention_policy::RepositoryRetentionPolicyConfig;
 
     pub fn create_test_repository_config() -> HashMap<String, RepositoryConfig> {
         let mut repositories = HashMap::new();

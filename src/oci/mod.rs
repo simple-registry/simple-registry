@@ -8,9 +8,9 @@ mod reference;
 
 pub use descriptor::Descriptor;
 pub use digest::Digest;
+pub use error::Error;
 pub use manifest::Manifest;
 pub use reference::Reference;
-pub use error::Error;
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]

@@ -4,17 +4,15 @@ mod tests;
 mod bearer_token;
 
 use crate::configuration;
-use crate::registry::blob::DOCKER_CONTENT_DIGEST;
+use crate::oci::{Digest, Reference};
 use crate::registry::blob_store::Reader;
 use crate::registry::cache::Cache;
-use crate::oci::{Digest, Reference};
 use crate::registry::Error;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use bearer_token::BearerToken;
 use futures_util::TryStreamExt;
-use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use reqwest::header::{ACCEPT, AUTHORIZATION, WWW_AUTHENTICATE};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, WWW_AUTHENTICATE};
 use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client, Identity, Method, Response, StatusCode};
 use serde::Deserialize;
@@ -26,6 +24,8 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 use tokio_util::io::StreamReader;
 use tracing::{info, warn};
+
+pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
 
 fn parse_header<T: std::str::FromStr>(
     response: &Response,
@@ -40,9 +40,9 @@ fn parse_header<T: std::str::FromStr>(
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct ClientConfig {
+pub struct RegistryClientConfig {
     pub url: String,
-    #[serde(default = "ClientConfig::default_max_redirect")]
+    #[serde(default = "RegistryClientConfig::default_max_redirect")]
     pub max_redirect: u8,
     pub server_ca_bundle: Option<String>,
     pub client_certificate: Option<String>,
@@ -51,7 +51,7 @@ pub struct ClientConfig {
     pub password: Option<String>,
 }
 
-impl ClientConfig {
+impl RegistryClientConfig {
     fn default_max_redirect() -> u8 {
         5
     }
@@ -67,7 +67,10 @@ pub struct RegistryClient {
 }
 
 impl RegistryClient {
-    pub fn new(config: ClientConfig, cache: Arc<dyn Cache>) -> Result<Self, configuration::Error> {
+    pub fn new(
+        config: RegistryClientConfig,
+        cache: Arc<dyn Cache>,
+    ) -> Result<Self, configuration::Error> {
         let mut client_builder = Client::builder()
             .redirect(Policy::limited(config.max_redirect as usize))
             .timeout(Duration::from_secs(300));
