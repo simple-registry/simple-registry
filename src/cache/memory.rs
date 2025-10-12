@@ -35,7 +35,7 @@ impl Cache for Backend {
     async fn store_value(&self, key: &str, value: &str, expires_in: u64) -> Result<(), Error> {
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
 
-        if count % 1000 == 0 {
+        if count.is_multiple_of(1000) {
             self.cleanup_expired().await;
         }
 
@@ -53,7 +53,7 @@ impl Cache for Backend {
     async fn retrieve_value(&self, key: &str) -> Result<Option<String>, Error> {
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
 
-        if count % 1000 == 0 {
+        if count.is_multiple_of(1000) {
             self.cleanup_expired().await;
         }
 

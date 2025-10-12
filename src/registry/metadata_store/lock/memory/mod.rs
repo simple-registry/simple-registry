@@ -39,7 +39,7 @@ impl LockBackend for MemoryBackend {
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
 
         let mut locks = self.locks.lock().await;
-        if count % 10000 == 0 {
+        if count.is_multiple_of(10000) {
             locks.retain(|_, weak| weak.upgrade().is_some());
         }
 
