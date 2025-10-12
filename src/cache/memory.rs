@@ -32,7 +32,7 @@ impl Backend {
 
 #[async_trait]
 impl Cache for Backend {
-    async fn store(&self, key: &str, value: &str, expires_in: u64) -> Result<(), Error> {
+    async fn store_value(&self, key: &str, value: &str, expires_in: u64) -> Result<(), Error> {
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
 
         if count % 1000 == 0 {
@@ -50,7 +50,7 @@ impl Cache for Backend {
         Ok(())
     }
 
-    async fn retrieve(&self, key: &str) -> Result<Option<String>, Error> {
+    async fn retrieve_value(&self, key: &str) -> Result<Option<String>, Error> {
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
 
         if count % 1000 == 0 {
@@ -77,12 +77,15 @@ mod tests {
     async fn test_store_and_retrieve() {
         let cache = Backend::new();
 
-        let res = cache.store("key", "value", 1).await;
+        let res = cache.store_value("key", "value", 1).await;
         assert!(res.is_ok());
-        assert_eq!(cache.retrieve("key").await, Ok(Some("value".to_string())));
+        assert_eq!(
+            cache.retrieve_value("key").await,
+            Ok(Some("value".to_string()))
+        );
 
         tokio::time::sleep(Duration::from_millis(1050)).await;
-        assert_eq!(cache.retrieve("key").await, Ok(None));
+        assert_eq!(cache.retrieve_value("key").await, Ok(None));
     }
 
     #[tokio::test]
@@ -91,14 +94,14 @@ mod tests {
 
         for i in 0..500 {
             cache
-                .store(&format!("short_{i}"), "value", 1)
+                .store_value(&format!("short_{i}"), "value", 1)
                 .await
                 .unwrap();
         }
 
         for i in 0..5 {
             cache
-                .store(&format!("long_{i}"), "value", 100)
+                .store_value(&format!("long_{i}"), "value", 100)
                 .await
                 .unwrap();
         }
@@ -106,13 +109,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1100)).await;
 
         for i in 0..495 {
-            let _ = cache.retrieve(&format!("nonexistent_{i}")).await;
+            let _ = cache.retrieve_value(&format!("nonexistent_{i}")).await;
         }
 
         assert_eq!(
-            cache.retrieve("long_0").await,
+            cache.retrieve_value("long_0").await,
             Ok(Some("value".to_string()))
         );
-        assert_eq!(cache.retrieve("short_0").await, Ok(None));
+        assert_eq!(cache.retrieve_value("short_0").await, Ok(None));
     }
 }

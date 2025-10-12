@@ -5,12 +5,13 @@ use tracing::warn;
 #[derive(Debug, PartialEq)]
 pub enum Error {
     Backend(String),
+    Execution(String),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Error::Backend(err) => write!(f, "{err}"),
+            Error::Backend(err) | Error::Execution(err) => write!(f, "{err}"),
         }
     }
 }
@@ -29,14 +30,17 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let backend_error = Error::Backend("Some backend error".to_string());
-        assert_eq!(format!("{backend_error}"), "Some backend error");
+        let error = Error::Backend("Some error".to_string());
+        assert_eq!(format!("{error}"), "Some error");
+
+        let error = Error::Execution("Some error".to_string());
+        assert_eq!(format!("{error}"), "Some error");
     }
 
     #[test]
     fn test_from_redis_error() {
-        let redis_error = RedisError::from((redis::ErrorKind::IoError, "IO error occurred"));
-        let error: Error = redis_error.into();
+        let error = RedisError::from((redis::ErrorKind::IoError, "IO error occurred"));
+        let error: Error = error.into();
         assert_eq!(error, Error::Backend("Backend error".to_string()));
     }
 }

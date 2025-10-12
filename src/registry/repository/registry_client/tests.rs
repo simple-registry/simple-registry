@@ -29,7 +29,7 @@ async fn test_get_manifest_path() {
     };
 
     let cache = cache::Config::Memory.to_backend().unwrap();
-    let upstream = RegistryClient::new(config, cache).unwrap();
+    let upstream = RegistryClient::new(&config, cache).unwrap();
 
     let repo_name = "local";
     let namespace = "local/repo";
@@ -52,7 +52,7 @@ async fn test_get_blob_path() {
     };
 
     let cache = cache::Config::Memory.to_backend().unwrap();
-    let upstream = RegistryClient::new(config, cache).unwrap();
+    let upstream = RegistryClient::new(&config, cache).unwrap();
 
     let repo_name = "local";
     let namespace = "local/repo";

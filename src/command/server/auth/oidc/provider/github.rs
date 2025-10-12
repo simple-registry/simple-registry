@@ -1,6 +1,6 @@
 use crate::command::server::auth::oidc::provider::generic;
 use crate::command::server::auth::oidc::OidcProvider;
-use crate::registry::Error;
+use crate::command::server::error::Error;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -86,14 +86,12 @@ impl OidcProvider for Provider {
         claims: &HashMap<String, serde_json::Value>,
     ) -> Result<(), Error> {
         if !claims.contains_key("repository") {
-            return Err(Error::Unauthorized(
-                "Missing repository claim in GitHub token".to_string(),
-            ));
+            let msg = "Missing repository claim in GitHub token".to_string();
+            return Err(Error::Execution(msg));
         }
         if !claims.contains_key("actor") {
-            return Err(Error::Unauthorized(
-                "Missing actor claim in GitHub token".to_string(),
-            ));
+            let msg = "Missing actor claim in GitHub token".to_string();
+            return Err(Error::Execution(msg));
         }
         Ok(())
     }
@@ -102,6 +100,71 @@ impl OidcProvider for Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::server::error::Error;
+
+    #[test]
+    fn test_config_deserialize_minimal() {
+        let toml = r#"
+            issuer = "https://token.actions.githubusercontent.com"
+            jwks_uri = "https://token.actions.githubusercontent.com/.well-known/jwks"
+        "#;
+
+        let config: ProviderConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.issuer, "https://token.actions.githubusercontent.com");
+        assert_eq!(
+            config.jwks_uri,
+            "https://token.actions.githubusercontent.com/.well-known/jwks"
+        );
+        assert_eq!(config.jwks_refresh_interval, 3600);
+        assert!(config.required_audience.is_none());
+        assert_eq!(config.clock_skew_tolerance, 60);
+    }
+
+    #[test]
+    fn test_config_deserialize_with_defaults() {
+        let toml = r"";
+
+        let config: ProviderConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.issuer, "https://token.actions.githubusercontent.com");
+        assert_eq!(
+            config.jwks_uri,
+            "https://token.actions.githubusercontent.com/.well-known/jwks"
+        );
+        assert_eq!(config.jwks_refresh_interval, 3600);
+        assert_eq!(config.clock_skew_tolerance, 60);
+    }
+
+    #[test]
+    fn test_config_deserialize_full() {
+        let toml = r#"
+            issuer = "https://custom.github.com"
+            jwks_uri = "https://custom.github.com/jwks"
+            jwks_refresh_interval = 7200
+            required_audience = "my-app"
+            clock_skew_tolerance = 120
+        "#;
+
+        let config: ProviderConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.issuer, "https://custom.github.com");
+        assert_eq!(config.jwks_uri, "https://custom.github.com/jwks");
+        assert_eq!(config.jwks_refresh_interval, 7200);
+        assert_eq!(config.required_audience, Some("my-app".to_string()));
+        assert_eq!(config.clock_skew_tolerance, 120);
+    }
+
+    #[test]
+    fn test_default_functions() {
+        assert_eq!(
+            default_github_issuer(),
+            "https://token.actions.githubusercontent.com"
+        );
+        assert_eq!(
+            default_github_jwks_uri(),
+            "https://token.actions.githubusercontent.com/.well-known/jwks"
+        );
+        assert_eq!(default_jwks_refresh_interval(), 3600);
+        assert_eq!(default_clock_skew_tolerance(), 60);
+    }
 
     #[test]
     fn test_create_provider() {
@@ -148,10 +211,40 @@ mod tests {
             Some("https://token.actions.githubusercontent.com/.well-known/jwks")
         );
         assert_eq!(provider.required_audience(), Some("my-audience"));
+        assert_eq!(provider.jwks_refresh_interval(), 3600);
+        assert_eq!(provider.clock_skew_tolerance(), 60);
     }
 
     #[test]
-    fn test_validate_provider_claims() {
+    fn test_provider_with_custom_refresh_interval() {
+        let config = ProviderConfig {
+            issuer: default_github_issuer(),
+            jwks_uri: default_github_jwks_uri(),
+            jwks_refresh_interval: 7200,
+            required_audience: None,
+            clock_skew_tolerance: default_clock_skew_tolerance(),
+        };
+
+        let provider = Provider::new(config);
+        assert_eq!(provider.jwks_refresh_interval(), 7200);
+    }
+
+    #[test]
+    fn test_provider_with_custom_clock_skew() {
+        let config = ProviderConfig {
+            issuer: default_github_issuer(),
+            jwks_uri: default_github_jwks_uri(),
+            jwks_refresh_interval: default_jwks_refresh_interval(),
+            required_audience: None,
+            clock_skew_tolerance: 120,
+        };
+
+        let provider = Provider::new(config);
+        assert_eq!(provider.clock_skew_tolerance(), 120);
+    }
+
+    #[test]
+    fn test_validate_provider_claims_success() {
         let config = ProviderConfig {
             issuer: default_github_issuer(),
             jwks_uri: default_github_jwks_uri(),
@@ -165,17 +258,87 @@ mod tests {
         let mut claims = HashMap::new();
         claims.insert("repository".to_string(), serde_json::json!("org/repo"));
         claims.insert("actor".to_string(), serde_json::json!("user"));
+        claims.insert("extra".to_string(), serde_json::json!("data"));
+
         assert!(provider.validate_provider_claims(&claims).is_ok());
+    }
+
+    #[test]
+    fn test_validate_provider_claims_missing_repository() {
+        let config = ProviderConfig {
+            issuer: default_github_issuer(),
+            jwks_uri: default_github_jwks_uri(),
+            jwks_refresh_interval: default_jwks_refresh_interval(),
+            required_audience: None,
+            clock_skew_tolerance: default_clock_skew_tolerance(),
+        };
+
+        let provider = Provider::new(config);
 
         let mut claims = HashMap::new();
         claims.insert("actor".to_string(), serde_json::json!("user"));
-        assert!(provider.validate_provider_claims(&claims).is_err());
+
+        let result = provider.validate_provider_claims(&claims);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::Execution(msg) => {
+                assert!(msg.contains("repository"));
+            }
+            _ => panic!("Expected Execution error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_provider_claims_missing_actor() {
+        let config = ProviderConfig {
+            issuer: default_github_issuer(),
+            jwks_uri: default_github_jwks_uri(),
+            jwks_refresh_interval: default_jwks_refresh_interval(),
+            required_audience: None,
+            clock_skew_tolerance: default_clock_skew_tolerance(),
+        };
+
+        let provider = Provider::new(config);
 
         let mut claims = HashMap::new();
         claims.insert("repository".to_string(), serde_json::json!("org/repo"));
-        assert!(provider.validate_provider_claims(&claims).is_err());
 
+        let result = provider.validate_provider_claims(&claims);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::Execution(msg) => {
+                assert!(msg.contains("actor"));
+            }
+            _ => panic!("Expected Execution error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_provider_claims_empty() {
+        let config = ProviderConfig {
+            issuer: default_github_issuer(),
+            jwks_uri: default_github_jwks_uri(),
+            jwks_refresh_interval: default_jwks_refresh_interval(),
+            required_audience: None,
+            clock_skew_tolerance: default_clock_skew_tolerance(),
+        };
+
+        let provider = Provider::new(config);
         let claims = HashMap::new();
         assert!(provider.validate_provider_claims(&claims).is_err());
+    }
+
+    #[test]
+    fn test_provider_name() {
+        let config = ProviderConfig {
+            issuer: default_github_issuer(),
+            jwks_uri: default_github_jwks_uri(),
+            jwks_refresh_interval: default_jwks_refresh_interval(),
+            required_audience: None,
+            clock_skew_tolerance: default_clock_skew_tolerance(),
+        };
+
+        let provider = Provider::new(config);
+        assert_eq!(provider.name(), "GitHub Actions");
     }
 }

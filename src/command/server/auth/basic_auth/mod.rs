@@ -2,47 +2,61 @@
 mod tests;
 
 use crate::command::server::auth::{AuthMiddleware, AuthResult};
+use crate::command::server::error::Error;
 use crate::command::server::request_ext::HeaderExt;
 use crate::command::server::ClientIdentity;
-use crate::configuration::IdentityConfig;
-use crate::registry::Error;
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use argon2::password_hash::PasswordHashString;
+use argon2::{Argon2, PasswordVerifier};
 use async_trait::async_trait;
-use base64::prelude::BASE64_STANDARD;
-use base64::Engine;
-use hyper::header::AUTHORIZATION;
 use hyper::http::request::Parts;
+use serde::Deserialize;
 use std::collections::HashMap;
-use tracing::{debug, error, instrument};
+use tracing::{debug, instrument, warn};
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Config {
+    pub username: String,
+    pub password: String,
+}
 
 pub struct BasicAuthValidator {
-    credentials: HashMap<String, (String, String)>, // username -> (identity_id, password_hash)
+    users: HashMap<String, (String, PasswordHashString)>,
+}
+
+fn build_users(
+    identities: &HashMap<String, Config>,
+) -> HashMap<String, (String, PasswordHashString)> {
+    let mut credentials = HashMap::new();
+    for (id, config) in identities {
+        let password_hash = match PasswordHashString::new(&config.password) {
+            Ok(hash) => hash,
+            Err(err) => {
+                warn!("Invalid password hash for user {}: {err}", config.username);
+                continue;
+            }
+        };
+
+        credentials.insert(config.username.clone(), (id.clone(), password_hash));
+    }
+
+    credentials
 }
 
 impl BasicAuthValidator {
-    pub fn new(identities: &HashMap<String, IdentityConfig>) -> Self {
-        let mut credentials = HashMap::new();
-        for (identity_id, identity_config) in identities {
-            credentials.insert(
-                identity_config.username.clone(),
-                (identity_id.clone(), identity_config.password.clone()),
-            );
+    pub fn new(identities: &HashMap<String, Config>) -> Self {
+        Self {
+            users: build_users(identities),
         }
-
-        Self { credentials }
     }
 
     #[instrument(skip(self, password))]
     pub fn validate_credentials(&self, username: &str, password: &str) -> Option<String> {
-        let Some((identity_id, identity_password)) = self.credentials.get(username) else {
+        let Some((identity_id, identity_password)) = self.users.get(username) else {
             debug!("Username not found in credentials");
             return None;
         };
 
-        let Ok(identity_password) = PasswordHash::new(identity_password) else {
-            error!("Unable to parse password hash");
-            return None;
-        };
+        let identity_password = identity_password.password_hash();
 
         match Argon2::default().verify_password(password.as_bytes(), &identity_password) {
             Ok(()) => Some(identity_id.clone()),
@@ -61,7 +75,7 @@ impl AuthMiddleware for BasicAuthValidator {
         parts: &Parts,
         identity: &mut ClientIdentity,
     ) -> Result<AuthResult, Error> {
-        let Some((username, password)) = extract_basic_auth(parts) else {
+        let Some((username, password)) = parts.basic_auth() else {
             return Ok(AuthResult::NoCredentials);
         };
 
@@ -74,19 +88,4 @@ impl AuthMiddleware for BasicAuthValidator {
             None => Ok(AuthResult::NoCredentials),
         }
     }
-}
-
-/// Extracts Basic authentication credentials from the Authorization header.
-pub fn extract_basic_auth(parts: &Parts) -> Option<(String, String)> {
-    let Some(authorization) = parts.get_header(AUTHORIZATION) else {
-        debug!("No authorization header found");
-        return None;
-    };
-
-    let value = authorization.strip_prefix("Basic ")?;
-    let value = BASE64_STANDARD.decode(value).ok()?;
-    let value = String::from_utf8(value).ok()?;
-
-    let (username, password) = value.split_once(':')?;
-    Some((username.to_string(), password.to_string()))
 }

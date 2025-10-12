@@ -1,8 +1,7 @@
+use crate::registry::data_store;
 use crate::registry::metadata_store;
-use crate::registry::repository::RepositoryConfig;
 use crate::registry::test_utils::create_test_registry;
 use crate::registry::{blob_store, Registry, Repository};
-use crate::registry::{cache, data_store};
 use bytesize::ByteSize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,11 +47,8 @@ impl FSRegistryTestCase {
         &self.registry
     }
 
-    pub fn set_repository_config(
-        &mut self,
-        repositories_config: HashMap<String, RepositoryConfig>,
-    ) {
-        prepare_with_repository_config(&mut self.registry, repositories_config);
+    pub fn set_repositories(&mut self, repositories: Arc<HashMap<String, Repository>>) {
+        self.registry.repositories = repositories;
     }
 
     pub fn blob_store(&self) -> &blob_store::fs::Backend {
@@ -141,18 +137,4 @@ impl Drop for S3RegistryTestCase {
             });
         }
     }
-}
-
-fn prepare_with_repository_config(
-    registry: &mut Registry,
-    repositories_config: HashMap<String, RepositoryConfig>,
-) {
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let mut repositories = HashMap::new();
-    for (repository_name, repository_config) in repositories_config {
-        let res = Repository::new(repository_name.clone(), repository_config, &cache).unwrap();
-        repositories.insert(repository_name, res);
-    }
-
-    registry.repositories = Arc::new(repositories);
 }

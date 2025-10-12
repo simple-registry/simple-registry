@@ -10,6 +10,7 @@ use tracing::{debug, warn};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
+    Initialization(String),
     BlobUnknown,
     BlobUploadUnknown,
     DigestInvalid,
@@ -18,12 +19,10 @@ pub enum Error {
     ManifestUnknown,
     NameInvalid,
     NameUnknown,
-    TagImmutable(String),
     Unauthorized(String),
     Denied(String),
     Unsupported,
     RangeNotSatisfiable,
-    NotFound,
     Internal(String),
 }
 
@@ -40,10 +39,11 @@ impl Display for Error {
             Error::ManifestUnknown => write!(f, "manifest unknown to registry"),
             Error::NameInvalid => write!(f, "invalid repository name"),
             Error::NameUnknown => write!(f, "repository name not known to registry"),
-            Error::TagImmutable(s) | Error::Unauthorized(s) | Error::Denied(s) => write!(f, "{s}"),
+            Error::Initialization(s) | Error::Unauthorized(s) | Error::Denied(s) => {
+                write!(f, "{s}")
+            }
             Error::Unsupported => write!(f, "the operation is unsupported"),
             Error::RangeNotSatisfiable => write!(f, "range not satisfiable"),
-            Error::NotFound => write!(f, "resource not found"),
             Error::Internal(s) => write!(f, "internal server error: {s}"),
         }
     }
@@ -113,6 +113,7 @@ impl From<hyper::http::Error> for Error {
 }
 
 // XXX: at least repository_upstream is using this error type
+// usage should be reviewed and replaced by more specific errors
 impl From<serde_json::Error> for Error {
     fn from(error: serde_json::Error) -> Self {
         debug!("Serde JSON error: {error}");

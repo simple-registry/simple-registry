@@ -4,7 +4,6 @@ mod tests;
 mod bearer_token;
 
 use crate::cache::Cache;
-use crate::configuration;
 use crate::oci::{Digest, Reference};
 use crate::registry::blob_store::Reader;
 use crate::registry::Error;
@@ -67,25 +66,16 @@ pub struct RegistryClient {
 }
 
 impl RegistryClient {
-    pub fn new(
-        config: RegistryClientConfig,
-        cache: Arc<dyn Cache>,
-    ) -> Result<Self, configuration::Error> {
+    pub fn new(config: &RegistryClientConfig, cache: Arc<dyn Cache>) -> Result<Self, Error> {
         let mut client_builder = Client::builder()
             .redirect(Policy::limited(config.max_redirect as usize))
             .timeout(Duration::from_secs(300));
 
         if let Some(ca_bundle) = &config.server_ca_bundle {
-            let cert_pem = fs::read(ca_bundle).map_err(|e| {
-                configuration::Error::ConfigurationFileFormat(format!(
-                    "Failed to read CA bundle: {e}"
-                ))
-            })?;
-            let cert = Certificate::from_pem(&cert_pem).map_err(|e| {
-                configuration::Error::ConfigurationFileFormat(format!(
-                    "Failed to parse CA bundle: {e}"
-                ))
-            })?;
+            let cert_pem = fs::read(ca_bundle)
+                .map_err(|e| Error::Initialization(format!("Failed to read CA bundle: {e}")))?;
+            let cert = Certificate::from_pem(&cert_pem)
+                .map_err(|e| Error::Initialization(format!("Failed to parse CA bundle: {e}")))?;
             client_builder = client_builder.add_root_certificate(cert);
         } else {
             client_builder = client_builder.use_rustls_tls();
@@ -95,30 +85,21 @@ impl RegistryClient {
             (&config.client_certificate, &config.client_private_key)
         {
             let cert_pem = fs::read(cert_path).map_err(|e| {
-                configuration::Error::ConfigurationFileFormat(format!(
-                    "Failed to read client certificate: {e}"
-                ))
+                Error::Initialization(format!("Failed to read client certificate: {e}"))
             })?;
-            let key_pem = fs::read(key_path).map_err(|e| {
-                configuration::Error::ConfigurationFileFormat(format!(
-                    "Failed to read client key: {e}"
-                ))
-            })?;
+            let key_pem = fs::read(key_path)
+                .map_err(|e| Error::Initialization(format!("Failed to read client key: {e}")))?;
             let identity = Identity::from_pem(&[cert_pem, key_pem].concat()).map_err(|e| {
-                configuration::Error::ConfigurationFileFormat(format!(
-                    "Failed to create client identity: {e}"
-                ))
+                Error::Initialization(format!("Failed to create client identity: {e}"))
             })?;
             client_builder = client_builder.identity(identity);
         }
 
-        let client = client_builder.build().map_err(|e| {
-            configuration::Error::ConfigurationFileFormat(format!(
-                "Failed to build HTTP client: {e}"
-            ))
-        })?;
+        let client = client_builder
+            .build()
+            .map_err(|e| Error::Initialization(format!("Failed to build HTTP client: {e}")))?;
 
-        let basic_auth = match (config.username, config.password) {
+        let basic_auth = match (config.username.clone(), config.password.clone()) {
             (Some(username), Some(password)) => Some((username, password)),
             (Some(_), None) | (None, Some(_)) => {
                 warn!("Username and password must be both provided");
@@ -128,7 +109,7 @@ impl RegistryClient {
         };
 
         Ok(Self {
-            url: config.url,
+            url: config.url.clone(),
             client,
             basic_auth,
             cache,
@@ -311,7 +292,10 @@ impl RegistryClient {
 
             let authority = response.url().host_str().unwrap_or("unknown");
             let cache_key = format!("auth:{authority}");
-            let _ = self.cache.store(&cache_key, &token, bearer.ttl()).await;
+            let _ = self
+                .cache
+                .store_value(&cache_key, &token, bearer.ttl())
+                .await;
 
             Ok(token)
         } else if auth_header.starts_with("Basic ") {

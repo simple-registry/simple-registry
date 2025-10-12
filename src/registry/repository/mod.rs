@@ -1,7 +1,5 @@
 use crate::cache::Cache;
-use crate::configuration::Error;
 use crate::oci::{Digest, Reference};
-use crate::registry;
 use serde::Deserialize;
 use std::sync::Arc;
 use tracing::instrument;
@@ -10,18 +8,19 @@ mod registry_client;
 use crate::registry::blob_store::Reader;
 use registry_client::RegistryClient;
 
-use crate::registry::access_policy::RepositoryAccessPolicyConfig;
-use crate::registry::retention_policy::{RepositoryRetentionPolicyConfig, RetentionPolicy};
+use crate::registry::access_policy::AccessPolicyConfig;
+use crate::registry::retention_policy::{RetentionPolicy, RetentionPolicyConfig};
+use crate::registry::Error;
 pub use registry_client::RegistryClientConfig;
 
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct RepositoryConfig {
+pub struct Config {
     #[serde(default)]
     pub upstream: Vec<RegistryClientConfig>,
     #[serde(default)]
-    pub access_policy: RepositoryAccessPolicyConfig,
+    pub access_policy: AccessPolicyConfig,
     #[serde(default)]
-    pub retention_policy: RepositoryRetentionPolicyConfig,
+    pub retention_policy: RetentionPolicyConfig,
     #[serde(default)]
     pub immutable_tags: bool,
     #[serde(default)]
@@ -36,20 +35,16 @@ pub struct Repository {
 }
 
 impl Repository {
-    pub fn new(
-        name: String,
-        config: RepositoryConfig,
-        cache: &Arc<dyn Cache>,
-    ) -> Result<Self, Error> {
+    pub fn new(name: &str, config: &Config, cache: &Arc<dyn Cache>) -> Result<Self, Error> {
         let mut upstreams = Vec::new();
-        for config in config.upstream {
+        for config in &config.upstream {
             upstreams.push(RegistryClient::new(config, cache.clone())?);
         }
 
         let retention_policy = RetentionPolicy::new(&config.retention_policy)?;
 
         Ok(Self {
-            name,
+            name: name.to_string(),
             upstreams,
             retention_policy,
         })
@@ -65,7 +60,7 @@ impl Repository {
         accepted_types: &[String],
         namespace: &str,
         digest: &Digest,
-    ) -> Result<(Digest, u64), registry::Error> {
+    ) -> Result<(Digest, u64), Error> {
         for upstream in &self.upstreams {
             let location = upstream.get_blob_path(&self.name, namespace, digest);
             let response = upstream.head_blob(accepted_types, &location).await;
@@ -75,7 +70,7 @@ impl Repository {
             }
         }
 
-        Err(registry::Error::ManifestUnknown)
+        Err(Error::ManifestUnknown)
     }
 
     #[instrument(skip(self))]
@@ -84,7 +79,7 @@ impl Repository {
         accepted_types: &[String],
         namespace: &str,
         digest: &Digest,
-    ) -> Result<(u64, Box<dyn Reader>), registry::Error> {
+    ) -> Result<(u64, Box<dyn Reader>), Error> {
         for upstream in &self.upstreams {
             let location = upstream.get_blob_path(&self.name, namespace, digest);
             if let Ok(response) = upstream.get_blob(accepted_types, &location).await {
@@ -92,7 +87,7 @@ impl Repository {
             }
         }
 
-        Err(registry::Error::ManifestUnknown)
+        Err(Error::ManifestUnknown)
     }
 
     #[instrument(skip(self))]
@@ -101,7 +96,7 @@ impl Repository {
         accepted_types: &[String],
         namespace: &str,
         reference: &Reference,
-    ) -> Result<(Option<String>, Digest, u64), registry::Error> {
+    ) -> Result<(Option<String>, Digest, u64), Error> {
         for upstream in &self.upstreams {
             let location = upstream.get_manifest_path(&self.name, namespace, reference);
             if let Ok(response) = upstream.head_manifest(accepted_types, &location).await {
@@ -109,7 +104,7 @@ impl Repository {
             }
         }
 
-        Err(registry::Error::ManifestUnknown)
+        Err(Error::ManifestUnknown)
     }
 
     #[instrument(skip(self))]
@@ -118,7 +113,7 @@ impl Repository {
         accepted_types: &[String],
         namespace: &str,
         reference: &Reference,
-    ) -> Result<(Option<String>, Digest, Vec<u8>), registry::Error> {
+    ) -> Result<(Option<String>, Digest, Vec<u8>), Error> {
         for upstream in &self.upstreams {
             let location = upstream.get_manifest_path(&self.name, namespace, reference);
             if let Ok(response) = upstream.get_manifest(accepted_types, &location).await {
@@ -126,6 +121,6 @@ impl Repository {
             }
         }
 
-        Err(registry::Error::ManifestUnknown)
+        Err(Error::ManifestUnknown)
     }
 }

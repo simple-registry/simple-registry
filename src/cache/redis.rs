@@ -33,13 +33,13 @@ impl Backend {
 
 #[async_trait]
 impl Cache for Backend {
-    async fn store(&self, key: &str, value: &str, expires_in: u64) -> Result<(), Error> {
+    async fn store_value(&self, key: &str, value: &str, expires_in: u64) -> Result<(), Error> {
         let mut conn = self.get_connection().await?;
         let key = format!("{}{key}", self.key_prefix);
         Ok(conn.set_ex(key, value, expires_in).await?)
     }
 
-    async fn retrieve(&self, key: &str) -> Result<Option<String>, Error> {
+    async fn retrieve_value(&self, key: &str) -> Result<Option<String>, Error> {
         let mut conn = self.get_connection().await?;
         let key = format!("{}{key}", self.key_prefix);
         let value: Option<String> = conn.get(key).await?;
@@ -60,10 +60,13 @@ mod tests {
         };
         let cache = Backend::new(&config).unwrap();
 
-        cache.store("key", "token", 1).await.unwrap();
-        assert_eq!(cache.retrieve("key").await, Ok(Some("token".to_string())));
+        cache.store_value("key", "token", 1).await.unwrap();
+        assert_eq!(
+            cache.retrieve_value("key").await,
+            Ok(Some("token".to_string()))
+        );
 
         tokio::time::sleep(Duration::from_millis(1050)).await;
-        assert_eq!(cache.retrieve("key").await, Ok(None));
+        assert_eq!(cache.retrieve_value("key").await, Ok(None));
     }
 }

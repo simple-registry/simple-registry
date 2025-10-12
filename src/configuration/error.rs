@@ -1,126 +1,54 @@
-use crate::cache;
-use crate::registry::task_queue;
-use hyper::header::InvalidHeaderValue;
-use opentelemetry_otlp::ExporterBuildError;
-use opentelemetry_sdk::trace::TraceError;
-use rustls_pki_types::pem;
-use std::{fmt, io};
-use tracing::debug;
+use std::fmt;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
-    Cache(cache::Error),
-    Io(io::Error),
-    ConfigurationFileFormat(String),
-    Http(String),
-    TaskQueue(task_queue::Error),
-    Tls(String),
-    TracingInit(TraceError),
-    ExporterInit(ExporterBuildError),
-    CELPolicy(cel_interpreter::ParseErrors),
-    PolicyCompilation(String),
+    Initialization(String),
+    InvalidFormat(String),
+    NotReadable(String),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Error::Cache(err) => write!(f, "Cache error: {err}"),
-            Error::Io(err) => write!(f, "IO error: {err}"),
-            Error::ConfigurationFileFormat(error) => {
-                write!(f, "Configuration file format error.")?;
-                write!(f, "{error}")
-            }
-            Error::Http(error) => {
-                write!(f, "HTTP error: {error}")
-            }
-            Error::TaskQueue(error) => {
-                write!(f, "Task queue error: {error}")
-            }
-            Error::Tls(error) => {
-                write!(f, "TLS error: {error}")
-            }
-            Error::TracingInit(error) => {
-                write!(f, "Tracing initialization error: {error}")
-            }
-            Error::ExporterInit(error) => {
-                write!(f, "Exporter initialization error: {error}")
-            }
-            Error::CELPolicy(error) => {
-                write!(f, "CEL policy error")?;
-                write!(f, "{error}")
-            }
-            Error::PolicyCompilation(msg) => {
-                write!(f, "Policy compilation error: {msg}")
+            Error::Initialization(err) | Error::InvalidFormat(err) | Error::NotReadable(err) => {
+                write!(f, "{err}")
             }
         }
     }
 }
 
-impl From<cache::Error> for Error {
-    fn from(error: cache::Error) -> Self {
-        debug!("Cache error: {error}");
-        Error::Cache(error)
+impl From<notify::Error> for Error {
+    fn from(err: notify::Error) -> Self {
+        let msg = format!("Watcher error: {err}");
+        Error::NotReadable(msg)
     }
 }
 
-impl From<task_queue::Error> for Error {
-    fn from(error: task_queue::Error) -> Self {
-        debug!("Task queue error: {error}");
-        Error::TaskQueue(error)
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Self {
-        Error::Io(err)
-    }
-}
+    #[test]
+    fn test_error_display() {
+        let error = Error::Initialization("Some error".to_string());
+        assert_eq!(format!("{error}"), "Some error");
 
-impl From<toml::de::Error> for Error {
-    fn from(error: toml::de::Error) -> Self {
-        debug!("TOML error: {error}");
-        Error::ConfigurationFileFormat(error.to_string())
-    }
-}
+        let error = Error::InvalidFormat("Some error".to_string());
+        assert_eq!(format!("{error}"), "Some error");
 
-impl From<InvalidHeaderValue> for Error {
-    fn from(error: InvalidHeaderValue) -> Self {
-        Error::Http(format!("{error}"))
+        let error = Error::NotReadable("Some error".to_string());
+        assert_eq!(format!("{error}"), "Some error");
     }
-}
 
-impl From<rustls::Error> for Error {
-    fn from(err: rustls::Error) -> Self {
-        Error::Tls(err.to_string())
-    }
-}
+    #[test]
+    fn test_from_notify_error() {
+        let notify_error = notify::Error::generic("Generic error");
+        let error: Error = notify_error.into();
 
-impl From<rustls::server::VerifierBuilderError> for Error {
-    fn from(err: rustls::server::VerifierBuilderError) -> Self {
-        Error::Tls(err.to_string())
-    }
-}
-
-impl From<pem::Error> for Error {
-    fn from(err: pem::Error) -> Self {
-        Error::Tls(err.to_string())
-    }
-}
-
-impl From<TraceError> for Error {
-    fn from(error: TraceError) -> Self {
-        Error::TracingInit(error)
-    }
-}
-
-impl From<ExporterBuildError> for Error {
-    fn from(error: ExporterBuildError) -> Self {
-        Error::ExporterInit(error)
-    }
-}
-
-impl From<cel_interpreter::ParseErrors> for Error {
-    fn from(error: cel_interpreter::ParseErrors) -> Self {
-        Error::CELPolicy(error)
+        assert_eq!(format!("{error}"), "Watcher error: Generic error");
+        assert_eq!(
+            error,
+            Error::NotReadable("Watcher error: Generic error".to_string())
+        );
     }
 }

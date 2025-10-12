@@ -1,6 +1,6 @@
 use crate::command::server;
 use crate::command::server::listeners::tls::ServerTlsConfig;
-use crate::configuration::{Configuration, ServerConfig};
+use crate::configuration::{Configuration, Error, ServerConfig};
 use notify::event::ModifyKind;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::collections::HashSet;
@@ -14,13 +14,13 @@ pub struct ConfigWatcher {
 }
 
 impl ConfigWatcher {
-    pub fn new(
-        config_path: &str,
-        server: Arc<server::Command>,
-    ) -> Result<Self, crate::command::Error> {
+    pub fn new(config_path: &str, server: Arc<server::Command>) -> Result<Self, Error> {
         info!("Setting up config watcher for: {}", config_path);
 
-        let config_file_path = std::fs::canonicalize(PathBuf::from(config_path))?;
+        let Ok(config_file_path) = std::fs::canonicalize(PathBuf::from(config_path)) else {
+            let msg = format!("Failed to canonicalize config path: {config_path}");
+            return Err(Error::NotReadable(msg));
+        };
         let config_path_clone = config_file_path.clone();
 
         let handle = tokio::spawn(async move {
@@ -56,7 +56,7 @@ fn get_tls_paths(tls_config: &ServerTlsConfig, config_dir: &Path) -> Vec<PathBuf
 async fn watch_config_loop(
     config_path: PathBuf,
     server: Arc<server::Command>,
-) -> Result<(), crate::command::Error> {
+) -> Result<(), Error> {
     let (tx, mut rx) = mpsc::channel::<Event>(100);
 
     loop {

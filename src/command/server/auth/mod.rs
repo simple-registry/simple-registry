@@ -5,8 +5,8 @@ pub mod mtls;
 pub mod oidc;
 pub mod webhook;
 
+use crate::command::server::error::Error;
 use crate::command::server::ClientIdentity;
-use crate::registry::Error;
 use async_trait::async_trait;
 pub use authenticator::Authenticator;
 pub use authorizer::Authorizer;

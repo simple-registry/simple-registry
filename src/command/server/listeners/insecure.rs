@@ -1,13 +1,13 @@
+use crate::command::server::error::Error;
+use crate::command::server::listeners::{accept, build_listener};
 use crate::command::server::serve_request;
 use crate::command::server::ServerContext;
-use crate::registry::Error;
 use arc_swap::ArcSwap;
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpListener;
 use tracing::{debug, info};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -74,11 +74,11 @@ impl InsecureListener {
 
     pub async fn serve(&self) -> Result<(), Error> {
         info!("Listening on {} (non-TLS)", self.binding_address);
-        let listener = TcpListener::bind(self.binding_address).await?;
+        let listener = build_listener(self.binding_address).await?;
 
         loop {
             debug!("Waiting for incoming connection");
-            let (tcp, remote_address) = listener.accept().await?;
+            let (tcp, remote_address) = accept(&listener).await?;
 
             debug!("Accepted connection from {remote_address}");
             let stream = TokioIo::new(tcp);
@@ -92,6 +92,224 @@ impl InsecureListener {
                 timeouts,
                 remote_address,
             )));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::configuration::Configuration;
+    use crate::registry::Registry;
+    use std::net::Ipv6Addr;
+
+    fn create_test_config() -> Configuration {
+        let toml = r#"
+            [blob_store.fs]
+            root_dir = "/tmp/test-blobs"
+
+            [metadata_store.fs]
+            root_dir = "/tmp/test-metadata"
+
+            [cache.memory]
+
+            [server]
+            bind_address = "127.0.0.1"
+            port = 8080
+
+            [global]
+            update_pull_time = false
+            max_concurrent_cache_jobs = 10
+        "#;
+
+        toml::from_str(toml).unwrap()
+    }
+
+    fn create_test_server_context() -> ServerContext {
+        let config = create_test_config();
+        let blob_store = config.blob_store.to_backend().unwrap();
+        let metadata_store = config.resolve_metadata_config().to_backend().unwrap();
+        let repositories = std::sync::Arc::new(std::collections::HashMap::new());
+
+        let registry = Registry::new(blob_store, metadata_store, repositories, false, 10).unwrap();
+
+        ServerContext::new(&config, registry).unwrap()
+    }
+
+    #[test]
+    fn test_config_default_values() {
+        let config = Config::default();
+
+        assert_eq!(config.port, 8000);
+        assert_eq!(config.query_timeout, 3600);
+        assert_eq!(config.query_timeout_grace_period, 60);
+        assert_eq!(config.bind_address, IpAddr::from(Ipv4Addr::from([0; 4])));
+    }
+
+    #[test]
+    fn test_config_custom_values() {
+        let toml = r#"
+            bind_address = "192.168.1.100"
+            port = 9000
+            query_timeout = 7200
+            query_timeout_grace_period = 120
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert_eq!(config.port, 9000);
+        assert_eq!(config.query_timeout, 7200);
+        assert_eq!(config.query_timeout_grace_period, 120);
+        assert_eq!(
+            config.bind_address,
+            "192.168.1.100".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_config_partial_defaults() {
+        let toml = r#"
+            bind_address = "10.0.0.1"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert_eq!(config.port, 8000);
+        assert_eq!(config.query_timeout, 3600);
+        assert_eq!(config.query_timeout_grace_period, 60);
+    }
+
+    #[test]
+    fn test_config_ipv6_address() {
+        let toml = r#"
+            bind_address = "::1"
+            port = 8443
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert_eq!(config.bind_address, IpAddr::from(Ipv6Addr::LOCALHOST));
+        assert_eq!(config.port, 8443);
+    }
+
+    #[test]
+    fn test_insecure_listener_new() {
+        let config = Config {
+            bind_address: "127.0.0.1".parse().unwrap(),
+            port: 8080,
+            query_timeout: 1800,
+            query_timeout_grace_period: 30,
+        };
+
+        let context = create_test_server_context();
+        let listener = InsecureListener::new(&config, context);
+
+        assert_eq!(
+            listener.binding_address,
+            SocketAddr::from(([127, 0, 0, 1], 8080))
+        );
+    }
+
+    #[test]
+    fn test_insecure_listener_new_with_ipv6() {
+        let config = Config {
+            bind_address: "::1".parse().unwrap(),
+            port: 9000,
+            query_timeout: 3600,
+            query_timeout_grace_period: 60,
+        };
+
+        let context = create_test_server_context();
+        let listener = InsecureListener::new(&config, context);
+
+        assert_eq!(
+            listener.binding_address.ip(),
+            "::1".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(listener.binding_address.port(), 9000);
+    }
+
+    #[test]
+    fn test_insecure_listener_notify_config_change() {
+        let config = Config::default();
+        let context1 = create_test_server_context();
+        let listener = InsecureListener::new(&config, context1);
+
+        let context2 = create_test_server_context();
+        listener.notify_config_change(context2);
+    }
+
+    #[test]
+    fn test_insecure_listener_timeouts_initialization() {
+        let config = Config {
+            bind_address: "127.0.0.1".parse().unwrap(),
+            port: 8080,
+            query_timeout: 5000,
+            query_timeout_grace_period: 100,
+        };
+
+        let context = create_test_server_context();
+        let listener = InsecureListener::new(&config, context);
+
+        let timeouts = listener.timeouts.load();
+        assert_eq!(timeouts[0], Duration::from_secs(5000));
+        assert_eq!(timeouts[1], Duration::from_secs(100));
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config1 = Config {
+            bind_address: "127.0.0.1".parse().unwrap(),
+            port: 8080,
+            query_timeout: 3600,
+            query_timeout_grace_period: 60,
+        };
+
+        let config2 = config1.clone();
+
+        assert_eq!(config1.bind_address, config2.bind_address);
+        assert_eq!(config1.port, config2.port);
+        assert_eq!(config1.query_timeout, config2.query_timeout);
+        assert_eq!(
+            config1.query_timeout_grace_period,
+            config2.query_timeout_grace_period
+        );
+    }
+
+    #[test]
+    fn test_config_debug_format() {
+        let config = Config::default();
+        let debug_str = format!("{config:?}");
+
+        assert!(debug_str.contains("Config"));
+        assert!(debug_str.contains("bind_address"));
+        assert!(debug_str.contains("port"));
+    }
+
+    #[test]
+    fn test_insecure_listener_with_zero_port() {
+        let config = Config {
+            bind_address: "127.0.0.1".parse().unwrap(),
+            port: 0,
+            query_timeout: 3600,
+            query_timeout_grace_period: 60,
+        };
+
+        let context = create_test_server_context();
+        let listener = InsecureListener::new(&config, context);
+
+        assert_eq!(listener.binding_address.port(), 0);
+    }
+
+    #[test]
+    fn test_insecure_listener_multiple_config_changes() {
+        let config = Config::default();
+        let context1 = create_test_server_context();
+        let listener = InsecureListener::new(&config, context1);
+
+        for _ in 0..5 {
+            let context = create_test_server_context();
+            listener.notify_config_change(context);
         }
     }
 }

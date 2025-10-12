@@ -30,6 +30,13 @@ impl Reference {
             Err(Error::InvalidFormat(format!("Invalid reference: '{s}'",)))
         }
     }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Reference::Tag(s) => s,
+            Reference::Digest(d) => d.as_str(),
+        }
+    }
 }
 
 impl Display for Reference {

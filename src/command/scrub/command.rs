@@ -1,14 +1,14 @@
-use super::Scrubber;
-use crate::command;
-use crate::configuration::registry::resolve_metadata_store_config;
+use crate::cache;
+use crate::cache::Cache;
+use crate::command::scrub::error::Error;
+use crate::command::scrub::Scrubber;
 use crate::configuration::Configuration;
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
-use crate::registry::{Repository, RetentionPolicy};
+use crate::registry::{blob_store, repository, Repository, RetentionPolicy, RetentionPolicyConfig};
 use argh::FromArgs;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::process::exit;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info};
@@ -63,37 +63,112 @@ pub struct Command {
     enabled_checks: HashSet<ScrubCheck>,
 }
 
-impl Command {
-    pub fn new(options: &Options, config: &Configuration) -> Result<Self, command::Error> {
-        let metadata_store_config =
-            resolve_metadata_store_config(&config.blob_store, config.metadata_store.clone());
+fn build_blob_store(config: &blob_store::BlobStorageConfig) -> Result<Arc<dyn BlobStore>, Error> {
+    let Ok(blob_store) = config.to_backend() else {
+        let msg = "Failed to initialize blob store".to_string();
+        return Err(Error::Initialization(msg));
+    };
 
-        let blob_store = config.blob_store.to_backend()?;
-        let metadata_store = metadata_store_config.to_backend()?;
+    Ok(blob_store)
+}
 
-        let mut repositories_map = HashMap::new();
-        let Ok(auth_token_cache) = config.cache.to_backend() else {
-            error!("Failed to initialize auth token cache");
-            exit(1);
-        };
-
-        for (repository_name, repository_config) in &config.repository {
-            let res = Repository::new(
-                repository_name.clone(),
-                repository_config.clone(),
-                &auth_token_cache,
-            )?;
-            repositories_map.insert(repository_name.clone(), res);
+fn build_metadata_store(config: &Configuration) -> Result<Arc<dyn MetadataStore>, Error> {
+    match config.resolve_metadata_config().to_backend() {
+        Ok(store) => Ok(store),
+        Err(err) => {
+            let msg = format!("Failed to initialize metadata store: {err}");
+            Err(Error::Initialization(msg))
         }
-        let repositories = Arc::new(repositories_map);
+    }
+}
 
-        let global_retention_policy = if config.global.retention_policy.rules.is_empty() {
-            None
-        } else {
-            Some(Arc::new(RetentionPolicy::new(
-                &config.global.retention_policy,
-            )?))
-        };
+fn build_auth_cache(config: &cache::Config) -> Result<Arc<dyn Cache>, Error> {
+    match config.to_backend() {
+        Ok(cache) => Ok(cache),
+        Err(err) => {
+            let msg = format!("Failed to initialize auth token cache: {err}");
+            Err(Error::Initialization(msg))
+        }
+    }
+}
+
+fn build_repository(
+    name: &str,
+    config: &repository::Config,
+    auth_cache: &Arc<dyn Cache>,
+) -> Result<Repository, Error> {
+    match Repository::new(name, config, auth_cache) {
+        Ok(repo) => Ok(repo),
+        Err(err) => {
+            let msg = format!("Failed to initialize repository '{name}': {err}");
+            Err(Error::Initialization(msg))
+        }
+    }
+}
+
+fn build_repositories(
+    configs: &HashMap<String, repository::Config>,
+    auth_cache: &Arc<dyn Cache>,
+) -> Result<Arc<HashMap<String, Repository>>, Error> {
+    let mut repositories = HashMap::new();
+    for (name, config) in configs {
+        let repo = build_repository(name, config, auth_cache)?;
+        repositories.insert(name.clone(), repo);
+    }
+
+    Ok(Arc::new(repositories))
+}
+
+fn build_global_retention_policy(
+    config: &RetentionPolicyConfig,
+) -> Result<Option<Arc<RetentionPolicy>>, Error> {
+    if config.rules.is_empty() {
+        return Ok(None);
+    }
+
+    match RetentionPolicy::new(config) {
+        Ok(policy) => Ok(Some(Arc::new(policy))),
+        Err(err) => {
+            let msg = format!("Failed to initialize global retention policy: {err}");
+            Err(Error::Initialization(msg))
+        }
+    }
+}
+
+fn build_enabled_checks(options: &Options) -> HashSet<ScrubCheck> {
+    let mut enabled_checks = HashSet::new();
+
+    if options.check_uploads {
+        enabled_checks.insert(ScrubCheck::Uploads);
+    }
+
+    if options.check_tags {
+        enabled_checks.insert(ScrubCheck::Tags);
+    }
+
+    if options.check_revisions {
+        enabled_checks.insert(ScrubCheck::Revisions);
+    }
+
+    if options.check_blobs {
+        enabled_checks.insert(ScrubCheck::Blobs);
+    }
+
+    if options.enforce_retention_policies {
+        enabled_checks.insert(ScrubCheck::Retention);
+    }
+
+    enabled_checks
+}
+
+impl Command {
+    pub fn new(options: &Options, config: &Configuration) -> Result<Self, Error> {
+        let blob_store = build_blob_store(&config.blob_store)?;
+        let metadata_store = build_metadata_store(config)?;
+        let auth_cache = build_auth_cache(&config.cache)?;
+        let repositories = build_repositories(&config.repository, &auth_cache)?;
+        let global_retention_policy =
+            build_global_retention_policy(&config.global.retention_policy)?;
 
         let upload_timeout = options
             .upload_timeout
@@ -107,27 +182,7 @@ impl Command {
             upload_timeout.num_seconds()
         );
 
-        let mut enabled_checks = HashSet::new();
-
-        if options.check_uploads {
-            enabled_checks.insert(ScrubCheck::Uploads);
-        }
-
-        if options.check_tags {
-            enabled_checks.insert(ScrubCheck::Tags);
-        }
-
-        if options.check_revisions {
-            enabled_checks.insert(ScrubCheck::Revisions);
-        }
-
-        if options.check_blobs {
-            enabled_checks.insert(ScrubCheck::Blobs);
-        }
-
-        if options.enforce_retention_policies {
-            enabled_checks.insert(ScrubCheck::Retention);
-        }
+        let enabled_checks = build_enabled_checks(options);
 
         if options.dry_mode {
             info!("Dry-run mode: no changes will be made to the storage");
@@ -144,7 +199,7 @@ impl Command {
         })
     }
 
-    pub async fn run(&self) -> Result<(), command::Error> {
+    pub async fn run(&self) -> Result<(), Error> {
         let scrubber = Scrubber::new(
             self.blob_store.clone(),
             self.metadata_store.clone(),
@@ -154,31 +209,27 @@ impl Command {
             self.upload_timeout,
         );
 
+        self.process_all_namespaces(&scrubber).await?;
+
+        if self.enabled_checks.contains(&ScrubCheck::Blobs) {
+            let _ = scrubber.cleanup_orphan_blobs().await;
+        }
+
+        Ok(())
+    }
+
+    async fn process_all_namespaces(&self, scrubber: &Scrubber) -> Result<(), Error> {
         let mut marker = None;
         loop {
             let Ok((namespaces, next_marker)) =
                 self.metadata_store.list_namespaces(100, marker).await
             else {
                 error!("Failed to read catalog");
-                exit(1);
+                return Err(Error::Execution("Failed to read catalog".to_string()));
             };
 
             for namespace in namespaces {
-                if self.enabled_checks.contains(&ScrubCheck::Retention) {
-                    let _ = scrubber.enforce_retention(&namespace).await;
-                }
-
-                if self.enabled_checks.contains(&ScrubCheck::Uploads) {
-                    let _ = scrubber.scrub_uploads(&namespace).await;
-                }
-
-                if self.enabled_checks.contains(&ScrubCheck::Tags) {
-                    let _ = scrubber.scrub_tags(&namespace).await;
-                }
-
-                if self.enabled_checks.contains(&ScrubCheck::Revisions) {
-                    let _ = scrubber.scrub_revisions(&namespace).await;
-                }
+                self.process_namespace(scrubber, &namespace).await;
             }
 
             if next_marker.is_none() {
@@ -188,10 +239,455 @@ impl Command {
             marker = next_marker;
         }
 
-        if self.enabled_checks.contains(&ScrubCheck::Blobs) {
-            let _ = scrubber.cleanup_orphan_blobs().await;
+        Ok(())
+    }
+
+    async fn process_namespace(&self, scrubber: &Scrubber, namespace: &str) {
+        if self.enabled_checks.contains(&ScrubCheck::Retention) {
+            let _ = scrubber.enforce_retention(namespace).await;
         }
 
-        Ok(())
+        if self.enabled_checks.contains(&ScrubCheck::Uploads) {
+            let _ = scrubber.scrub_uploads(namespace).await;
+        }
+
+        if self.enabled_checks.contains(&ScrubCheck::Tags) {
+            let _ = scrubber.scrub_tags(namespace).await;
+        }
+
+        if self.enabled_checks.contains(&ScrubCheck::Revisions) {
+            let _ = scrubber.scrub_revisions(namespace).await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_enabled_checks_all() {
+        let options = Options {
+            dry_mode: false,
+            upload_timeout: None,
+            check_uploads: true,
+            check_tags: true,
+            check_revisions: true,
+            check_blobs: true,
+            enforce_retention_policies: true,
+        };
+
+        let checks = build_enabled_checks(&options);
+
+        assert_eq!(checks.len(), 5);
+        assert!(checks.contains(&ScrubCheck::Uploads));
+        assert!(checks.contains(&ScrubCheck::Tags));
+        assert!(checks.contains(&ScrubCheck::Revisions));
+        assert!(checks.contains(&ScrubCheck::Blobs));
+        assert!(checks.contains(&ScrubCheck::Retention));
+    }
+
+    #[test]
+    fn test_build_enabled_checks_none() {
+        let options = Options {
+            dry_mode: false,
+            upload_timeout: None,
+            check_uploads: false,
+            check_tags: false,
+            check_revisions: false,
+            check_blobs: false,
+            enforce_retention_policies: false,
+        };
+
+        let checks = build_enabled_checks(&options);
+
+        assert_eq!(checks.len(), 0);
+    }
+
+    #[test]
+    fn test_build_enabled_checks_selective() {
+        let options = Options {
+            dry_mode: false,
+            upload_timeout: None,
+            check_uploads: true,
+            check_tags: false,
+            check_revisions: true,
+            check_blobs: false,
+            enforce_retention_policies: false,
+        };
+
+        let checks = build_enabled_checks(&options);
+
+        assert_eq!(checks.len(), 2);
+        assert!(checks.contains(&ScrubCheck::Uploads));
+        assert!(checks.contains(&ScrubCheck::Revisions));
+        assert!(!checks.contains(&ScrubCheck::Tags));
+        assert!(!checks.contains(&ScrubCheck::Blobs));
+        assert!(!checks.contains(&ScrubCheck::Retention));
+    }
+
+    #[test]
+    fn test_build_global_retention_policy_empty() {
+        let config = RetentionPolicyConfig { rules: vec![] };
+        let result = build_global_retention_policy(&config);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_build_global_retention_policy_with_rules() {
+        let config = RetentionPolicyConfig {
+            rules: vec!["image.pushed_at > now() - days(30)".to_string()],
+        };
+        let result = build_global_retention_policy(&config);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_build_global_retention_policy_invalid_rule() {
+        let config = RetentionPolicyConfig {
+            rules: vec!["invalid cel expression!!!".to_string()],
+        };
+        let result = build_global_retention_policy(&config);
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_command_new_with_valid_config() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().to_string_lossy().to_string();
+
+        let config_content = format!(
+            r#"
+            [blob_store.fs]
+            root_dir = "{path}"
+
+            [metadata_store.fs]
+            root_dir = "{path}"
+
+            [cache.memory]
+
+            [server]
+            bind_address = "0.0.0.0"
+            port = 8000
+
+            [global]
+            update_pull_time = false
+            max_concurrent_cache_jobs = 10
+
+            [global.retention_policy]
+            rules = []
+            "#
+        );
+
+        let config: Configuration = toml::from_str(&config_content).unwrap();
+
+        let options = Options {
+            dry_mode: true,
+            upload_timeout: Some(humantime::Duration::from(std::time::Duration::from_secs(
+                3600,
+            ))),
+            check_uploads: true,
+            check_tags: true,
+            check_revisions: true,
+            check_blobs: true,
+            enforce_retention_policies: true,
+        };
+
+        let command = Command::new(&options, &config);
+
+        assert!(command.is_ok());
+        let cmd = command.unwrap();
+        assert!(cmd.dry_run);
+        assert_eq!(cmd.upload_timeout.num_seconds(), 3600);
+        assert_eq!(cmd.enabled_checks.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_command_run_executes_checks() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().to_string_lossy().to_string();
+
+        let config_content = format!(
+            r#"
+            [blob_store.fs]
+            root_dir = "{path}"
+
+            [metadata_store.fs]
+            root_dir = "{path}"
+
+            [cache.memory]
+
+            [server]
+            bind_address = "0.0.0.0"
+            port = 8000
+
+            [global]
+            update_pull_time = false
+            max_concurrent_cache_jobs = 10
+
+            [global.retention_policy]
+            rules = []
+            "#
+        );
+
+        let config: crate::configuration::Configuration = toml::from_str(&config_content).unwrap();
+
+        let options = Options {
+            dry_mode: true,
+            upload_timeout: None,
+            check_uploads: true,
+            check_tags: false,
+            check_revisions: false,
+            check_blobs: false,
+            enforce_retention_policies: false,
+        };
+
+        let command = Command::new(&options, &config).unwrap();
+        let result = command.run().await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_command_run_with_namespace() {
+        use crate::oci::Digest;
+        use crate::registry::metadata_store::link_kind::LinkKind;
+        use std::str::FromStr;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().to_string_lossy().to_string();
+
+        let config_content = format!(
+            r#"
+            [blob_store.fs]
+            root_dir = "{path}"
+
+            [metadata_store.fs]
+            root_dir = "{path}"
+
+            [cache.memory]
+
+            [server]
+            bind_address = "0.0.0.0"
+            port = 8000
+
+            [global]
+            update_pull_time = false
+            max_concurrent_cache_jobs = 10
+
+            [global.retention_policy]
+            rules = []
+            "#
+        );
+
+        let config: crate::configuration::Configuration = toml::from_str(&config_content).unwrap();
+
+        let _blob_store = build_blob_store(&config.blob_store).unwrap();
+        let metadata_store = build_metadata_store(&config).unwrap();
+
+        let namespace = "test-namespace";
+        let digest = Digest::from_str(
+            "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        )
+        .unwrap();
+
+        metadata_store
+            .create_link(namespace, &LinkKind::Tag("test".to_string()), &digest)
+            .await
+            .unwrap();
+
+        let options = Options {
+            dry_mode: false,
+            upload_timeout: None,
+            check_uploads: false,
+            check_tags: true,
+            check_revisions: false,
+            check_blobs: false,
+            enforce_retention_policies: false,
+        };
+
+        let command = Command::new(&options, &config).unwrap();
+        let result = command.run().await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_process_namespace_executes_selected_checks() {
+        use crate::oci::Digest;
+        use crate::registry::metadata_store::link_kind::LinkKind;
+        use std::str::FromStr;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().to_string_lossy().to_string();
+
+        let config_content = format!(
+            r#"
+            [blob_store.fs]
+            root_dir = "{path}"
+
+            [metadata_store.fs]
+            root_dir = "{path}"
+
+            [cache.memory]
+
+            [server]
+            bind_address = "0.0.0.0"
+            port = 8000
+
+            [global]
+            update_pull_time = false
+            max_concurrent_cache_jobs = 10
+
+            [global.retention_policy]
+            rules = []
+            "#
+        );
+
+        let config: crate::configuration::Configuration = toml::from_str(&config_content).unwrap();
+
+        let blob_store = build_blob_store(&config.blob_store).unwrap();
+        let metadata_store = build_metadata_store(&config).unwrap();
+
+        let namespace = "test-namespace";
+        let digest = Digest::from_str(
+            "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        )
+        .unwrap();
+
+        metadata_store
+            .create_link(namespace, &LinkKind::Tag("test".to_string()), &digest)
+            .await
+            .unwrap();
+
+        let options = Options {
+            dry_mode: false,
+            upload_timeout: None,
+            check_uploads: true,
+            check_tags: true,
+            check_revisions: false,
+            check_blobs: false,
+            enforce_retention_policies: false,
+        };
+
+        let command = Command::new(&options, &config).unwrap();
+
+        let scrubber = Scrubber::new(
+            blob_store,
+            metadata_store,
+            command.repositories.clone(),
+            command.global_retention_policy.clone(),
+            command.dry_run,
+            command.upload_timeout,
+        );
+
+        command.process_namespace(&scrubber, namespace).await;
+    }
+
+    #[tokio::test]
+    async fn test_command_with_blob_check() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().to_string_lossy().to_string();
+
+        let config_content = format!(
+            r#"
+            [blob_store.fs]
+            root_dir = "{path}"
+
+            [metadata_store.fs]
+            root_dir = "{path}"
+
+            [cache.memory]
+
+            [server]
+            bind_address = "0.0.0.0"
+            port = 8000
+
+            [global]
+            update_pull_time = false
+            max_concurrent_cache_jobs = 10
+
+            [global.retention_policy]
+            rules = []
+            "#
+        );
+
+        let config: crate::configuration::Configuration = toml::from_str(&config_content).unwrap();
+
+        let options = Options {
+            dry_mode: true,
+            upload_timeout: None,
+            check_uploads: false,
+            check_tags: false,
+            check_revisions: false,
+            check_blobs: true,
+            enforce_retention_policies: false,
+        };
+
+        let command = Command::new(&options, &config).unwrap();
+        assert!(command.enabled_checks.contains(&ScrubCheck::Blobs));
+
+        let result = command.run().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_command_default_upload_timeout() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().to_string_lossy().to_string();
+
+        let config_content = format!(
+            r#"
+            [blob_store.fs]
+            root_dir = "{path}"
+
+            [metadata_store.fs]
+            root_dir = "{path}"
+
+            [cache.memory]
+
+            [server]
+            bind_address = "0.0.0.0"
+            port = 8000
+
+            [global]
+            update_pull_time = false
+            max_concurrent_cache_jobs = 10
+
+            [global.retention_policy]
+            rules = []
+            "#
+        );
+
+        let config: crate::configuration::Configuration = toml::from_str(&config_content).unwrap();
+
+        let options = Options {
+            dry_mode: false,
+            upload_timeout: None,
+            check_uploads: false,
+            check_tags: false,
+            check_revisions: false,
+            check_blobs: false,
+            enforce_retention_policies: false,
+        };
+
+        let command = Command::new(&options, &config).unwrap();
+
+        assert_eq!(command.upload_timeout.num_seconds(), 86400);
     }
 }

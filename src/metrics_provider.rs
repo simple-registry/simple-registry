@@ -1,4 +1,3 @@
-use crate::configuration;
 use crate::registry::Error;
 use prometheus::{
     register_histogram_with_registry, register_int_counter_vec_with_registry,
@@ -24,12 +23,8 @@ pub static AUTH_ATTEMPTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("Failed to register auth_attempts metric")
 });
 
-pub static METRICS_PROVIDER: LazyLock<MetricsProvider> = LazyLock::new(|| {
-    MetricsProvider::new().unwrap_or_else(|error| {
-        error!("Unable to create metrics provider: {error}");
-        std::process::exit(1);
-    })
-});
+pub static METRICS_PROVIDER: LazyLock<MetricsProvider> =
+    LazyLock::new(|| MetricsProvider::new().expect("Unable to create metrics provider: {error}"));
 
 pub struct MetricsProvider {
     registry: PrometheusRegistry,
@@ -39,7 +34,7 @@ pub struct MetricsProvider {
 }
 
 impl MetricsProvider {
-    pub fn new() -> Result<Self, configuration::Error> {
+    pub fn new() -> Result<Self, Error> {
         let registry = PrometheusRegistry::new();
 
         let metric_http_request_total = register_int_counter_with_registry!(
@@ -49,7 +44,7 @@ impl MetricsProvider {
         )
         .map_err(|error| {
             error!("Unable to create http_requests_total metric: {error}");
-            configuration::Error::Http(String::from("Unable to create http_requests_total metric"))
+            Error::Initialization(String::from("Unable to create http_requests_total metric"))
         })?;
 
         let metric_http_request_duration = register_histogram_with_registry!(
@@ -59,7 +54,7 @@ impl MetricsProvider {
         )
         .map_err(|error| {
             error!("Unable to create http_request_duration metric: {error}");
-            configuration::Error::Http(String::from(
+            Error::Initialization(String::from(
                 "Unable to create http_request_duration metric",
             ))
         })?;
@@ -71,7 +66,7 @@ impl MetricsProvider {
         )
         .map_err(|error| {
             error!("Unable to create http_requests_in_flight metric: {error}");
-            configuration::Error::Http(String::from(
+            Error::Initialization(String::from(
                 "Unable to create http_requests_in_flight metric",
             ))
         })?;

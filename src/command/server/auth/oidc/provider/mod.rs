@@ -1,7 +1,7 @@
 pub mod generic;
 pub mod github;
 
-use crate::registry::Error;
+use crate::command::server::error::Error;
 use async_trait::async_trait;
 use std::collections::HashMap;
 

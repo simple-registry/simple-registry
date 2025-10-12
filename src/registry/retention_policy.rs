@@ -24,8 +24,7 @@
 //! - `top(tag, list, n)`: Check if tag is in top N of list
 //! - `size(list)`: Get size of a list
 
-use crate::configuration::Error as ConfigError;
-use crate::registry::Error;
+use crate::configuration::Error;
 use cel_interpreter::{Context, Program, Value};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -34,7 +33,7 @@ use tracing::debug;
 
 /// Configuration for retention policies.
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct RepositoryRetentionPolicyConfig {
+pub struct RetentionPolicyConfig {
     #[serde(default)]
     pub rules: Vec<String>,
 }
@@ -59,19 +58,18 @@ impl RetentionPolicy {
     /// Creates a new retention policy from configuration.
     ///
     /// Compiles CEL expressions from the configuration into programs.
-    pub fn new(config: &RepositoryRetentionPolicyConfig) -> Result<Self, ConfigError> {
+    pub fn new(config: &RetentionPolicyConfig) -> Result<Self, Error> {
         let mut compiled_rules = Vec::new();
 
         for (index, rule) in config.rules.iter().enumerate() {
             match Program::compile(rule) {
                 Ok(program) => compiled_rules.push(program),
                 Err(e) => {
-                    return Err(ConfigError::PolicyCompilation(format!(
-                        "Failed to compile retention policy rule #{} '{}': {}",
-                        index + 1,
-                        rule,
-                        e
-                    )));
+                    let msg = Error::Initialization(format!(
+                        "Failed to compile retention policy rule #{} '{rule}': {e}",
+                        index + 1
+                    ));
+                    return Err(msg);
                 }
             }
         }
@@ -108,13 +106,16 @@ impl RetentionPolicy {
         let context = Self::build_context(manifest, last_pushed, last_pulled)?;
 
         for rule in &self.rules {
-            match rule.execute(&context)? {
-                Value::Bool(true) => {
+            match rule.execute(&context) {
+                Ok(Value::Bool(true)) => {
                     debug!("Retention rule matched");
                     return Ok(true);
                 }
-                Value::Bool(false) => {}
-                _ => return Ok(true),
+                Ok(Value::Bool(false)) => {}
+                _ => {
+                    debug!("Retention rule did not evaluate to a boolean, retaining");
+                    return Ok(true);
+                }
             }
         }
 
@@ -128,9 +129,15 @@ impl RetentionPolicy {
     ) -> Result<Context<'a>, Error> {
         let mut context = Context::default();
 
-        context.add_variable("image", manifest)?;
-        context.add_variable("last_pushed", last_pushed)?;
-        context.add_variable("last_pulled", last_pulled)?;
+        context
+            .add_variable("image", manifest)
+            .map_err(|e| Error::Initialization(e.to_string()))?;
+        context
+            .add_variable("last_pushed", last_pushed)
+            .map_err(|e| Error::Initialization(e.to_string()))?;
+        context
+            .add_variable("last_pulled", last_pulled)
+            .map_err(|e| Error::Initialization(e.to_string()))?;
 
         context.add_function("now", || Utc::now().timestamp());
         context.add_function("days", |d: i64| d * 86400);

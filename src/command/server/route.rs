@@ -130,6 +130,28 @@ impl<'a> Route<'a> {
         }
     }
 
+    pub fn get_digest(&self) -> Option<&Digest> {
+        match self {
+            Route::GetBlob { digest, .. }
+            | Route::HeadBlob { digest, .. }
+            | Route::DeleteBlob { digest, .. }
+            | Route::GetReferrer { digest, .. }
+            | Route::PutUpload { digest, .. } => Some(digest),
+            Route::StartUpload { digest, .. } => digest.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn get_reference(&self) -> Option<&Reference> {
+        match self {
+            Route::GetManifest { reference, .. }
+            | Route::HeadManifest { reference, .. }
+            | Route::PutManifest { reference, .. }
+            | Route::DeleteManifest { reference, .. } => Some(reference),
+            _ => None,
+        }
+    }
+
     pub fn action_name(&self) -> &'static str {
         match self {
             Route::ApiVersion => "get-api-version",

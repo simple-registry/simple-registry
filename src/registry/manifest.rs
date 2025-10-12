@@ -1106,12 +1106,9 @@ mod tests {
         let namespace = "test-repo";
         let (content, media_type) = create_test_manifest();
 
-        let mut repositories_config = crate::registry::test_utils::create_test_repository_config();
-        let repo_config = repositories_config.get_mut("test-repo").unwrap();
-        repo_config.immutable_tags = true;
-        repo_config.immutable_tags_exclusions = vec!["^latest$".to_string()];
+        let repositories = crate::registry::test_utils::create_test_repositories();
 
-        test_case.set_repository_config(repositories_config);
+        test_case.set_repositories(repositories);
         let registry = test_case.registry();
 
         let immutable_tag = "v1.0.0";

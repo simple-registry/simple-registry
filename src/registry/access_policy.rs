@@ -17,7 +17,6 @@
 
 use crate::command::server::route::Route;
 pub use crate::command::server::ClientIdentity;
-use crate::configuration::Error as ConfigError;
 use crate::registry::Error;
 use cel_interpreter::{Context, Program, Value};
 use serde::Deserialize;
@@ -25,7 +24,7 @@ use tracing::{debug, warn};
 
 /// Configuration for access control policies.
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct RepositoryAccessPolicyConfig {
+pub struct AccessPolicyConfig {
     #[serde(default)]
     pub default_allow: bool,
     #[serde(default)]
@@ -45,19 +44,20 @@ impl AccessPolicy {
     /// Creates a new access policy from configuration.
     ///
     /// Compiles CEL expressions from the configuration into programs.
-    pub fn new(config: &RepositoryAccessPolicyConfig) -> Result<Self, ConfigError> {
+    pub fn new(config: &AccessPolicyConfig) -> Result<Self, Error> {
         let mut compiled_rules = Vec::new();
 
         for (index, rule) in config.rules.iter().enumerate() {
             match Program::compile(rule) {
                 Ok(program) => compiled_rules.push(program),
                 Err(e) => {
-                    return Err(ConfigError::PolicyCompilation(format!(
+                    let msg = format!(
                         "Failed to compile access policy rule #{} '{}': {}",
                         index + 1,
                         rule,
                         e
-                    )));
+                    );
+                    return Err(Error::Initialization(msg));
                 }
             }
         }
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_access_policy_default_allow_no_rules() {
-        let config = RepositoryAccessPolicyConfig {
+        let config = AccessPolicyConfig {
             default_allow: true,
             rules: vec![],
         };
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_access_policy_default_deny_no_rules() {
-        let config = RepositoryAccessPolicyConfig {
+        let config = AccessPolicyConfig {
             default_allow: false,
             rules: vec![],
         };
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn test_access_policy_default_allow_with_deny_rule() {
-        let config = RepositoryAccessPolicyConfig {
+        let config = AccessPolicyConfig {
             default_allow: true,
             rules: vec!["identity.username == 'forbidden'".to_string()],
         };
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_access_policy_default_deny_with_allow_rule() {
-        let config = RepositoryAccessPolicyConfig {
+        let config = AccessPolicyConfig {
             default_allow: false,
             rules: vec!["identity.username == 'admin'".to_string()],
         };

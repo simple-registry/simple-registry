@@ -1,6 +1,6 @@
 use crate::command::server::auth::{AuthMiddleware, AuthResult};
+use crate::command::server::error::Error;
 use crate::command::server::{ClientCertificate, ClientIdentity};
-use crate::registry::Error;
 use async_trait::async_trait;
 use hyper::http::request::Parts;
 use std::sync::Arc;
@@ -31,13 +31,13 @@ impl MtlsValidator {
 
         let organizations = subject
             .iter_organization()
-            .map(|o| o.as_str().map(String::from))
-            .collect::<Result<Vec<String>, _>>()?;
+            .filter_map(|o| o.as_str().ok().map(String::from))
+            .collect::<Vec<_>>();
 
         let common_names = subject
             .iter_common_name()
-            .map(|o| o.as_str().map(String::from))
-            .collect::<Result<Vec<String>, _>>()?;
+            .filter_map(|cn| cn.as_str().ok().map(String::from))
+            .collect::<Vec<_>>();
 
         Ok(ClientCertificate {
             organizations,
@@ -75,5 +75,197 @@ impl AuthMiddleware for MtlsValidator {
 
         identity.certificate = cert_info;
         Ok(AuthResult::Authenticated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::Request;
+
+    fn generate_test_certificate() -> Vec<u8> {
+        use std::process::Command;
+
+        let output = Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                "/dev/null",
+                "-out",
+                "/dev/stdout",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=test-user/O=TestOrg/O=SecondOrg",
+                "-outform",
+                "DER",
+            ])
+            .output()
+            .expect("Failed to generate test certificate");
+
+        assert!(
+            output.status.success(),
+            "OpenSSL failed to generate certificate"
+        );
+        output.stdout
+    }
+
+    fn generate_minimal_certificate() -> Vec<u8> {
+        use std::process::Command;
+
+        let output = Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                "/dev/null",
+                "-out",
+                "/dev/stdout",
+                "-days",
+                "1",
+                "-subj",
+                "/",
+                "-outform",
+                "DER",
+            ])
+            .output()
+            .expect("Failed to generate minimal certificate");
+
+        assert!(
+            output.status.success(),
+            "OpenSSL failed to generate certificate"
+        );
+        output.stdout
+    }
+
+    #[test]
+    fn test_mtls_validator_new() {
+        let validator = MtlsValidator::new();
+        assert_eq!(std::mem::size_of_val(&validator), 0);
+    }
+
+    #[test]
+    fn test_mtls_validator_default() {
+        let validator = MtlsValidator;
+        assert_eq!(std::mem::size_of_val(&validator), 0);
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_no_certificate() {
+        let validator = MtlsValidator::new();
+        let request = Request::builder().body(()).unwrap();
+        let (parts, ()) = request.into_parts();
+        let mut identity = ClientIdentity::new(None);
+
+        let result = validator.authenticate(&parts, &mut identity).await;
+
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), AuthResult::NoCredentials));
+        assert!(identity.certificate.common_names.is_empty());
+        assert!(identity.certificate.organizations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_with_valid_certificate() {
+        let validator = MtlsValidator::new();
+        let cert_der = generate_test_certificate();
+        let peer_cert = PeerCertificate(Arc::new(cert_der));
+
+        let mut request = Request::builder().body(()).unwrap();
+        request.extensions_mut().insert(peer_cert);
+        let (parts, ()) = request.into_parts();
+
+        let mut identity = ClientIdentity::new(None);
+
+        let result = validator.authenticate(&parts, &mut identity).await;
+
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), AuthResult::Authenticated));
+        assert_eq!(identity.certificate.common_names, vec!["test-user"]);
+        assert_eq!(
+            identity.certificate.organizations,
+            vec!["TestOrg", "SecondOrg"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_with_minimal_certificate() {
+        let validator = MtlsValidator::new();
+        let cert_der = generate_minimal_certificate();
+        let peer_cert = PeerCertificate(Arc::new(cert_der));
+
+        let mut request = Request::builder().body(()).unwrap();
+        request.extensions_mut().insert(peer_cert);
+        let (parts, ()) = request.into_parts();
+
+        let mut identity = ClientIdentity::new(None);
+
+        let result = validator.authenticate(&parts, &mut identity).await;
+
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), AuthResult::Authenticated));
+        assert!(identity.certificate.common_names.is_empty());
+        assert!(identity.certificate.organizations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_with_malformed_certificate() {
+        let validator = MtlsValidator::new();
+        let invalid_cert = vec![0u8; 100];
+        let peer_cert = PeerCertificate(Arc::new(invalid_cert));
+
+        let mut request = Request::builder().body(()).unwrap();
+        request.extensions_mut().insert(peer_cert);
+        let (parts, ()) = request.into_parts();
+
+        let mut identity = ClientIdentity::new(None);
+
+        let result = validator.authenticate(&parts, &mut identity).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Unauthorized(_)));
+    }
+
+    #[test]
+    fn test_extract_certificate_identity() {
+        let cert_der = generate_test_certificate();
+        let (_, cert) = X509Certificate::from_der(&cert_der).unwrap();
+
+        let result = MtlsValidator::extract_certificate_identity(&cert);
+
+        assert!(result.is_ok());
+        let cert_info = result.unwrap();
+        assert_eq!(cert_info.common_names, vec!["test-user"]);
+        assert_eq!(cert_info.organizations, vec!["TestOrg", "SecondOrg"]);
+    }
+
+    #[test]
+    fn test_extract_certificate_identity_minimal() {
+        let cert_der = generate_minimal_certificate();
+        let (_, cert) = X509Certificate::from_der(&cert_der).unwrap();
+
+        let result = MtlsValidator::extract_certificate_identity(&cert);
+
+        assert!(result.is_ok());
+        let cert_info = result.unwrap();
+        assert!(cert_info.common_names.is_empty());
+        assert!(cert_info.organizations.is_empty());
+    }
+
+    #[test]
+    fn test_peer_certificate_clone() {
+        let cert_der = generate_test_certificate();
+        let peer_cert = PeerCertificate(Arc::new(cert_der));
+        let cloned = peer_cert.clone();
+
+        assert_eq!(peer_cert.0.len(), cloned.0.len());
+        assert!(Arc::ptr_eq(&peer_cert.0, &cloned.0));
     }
 }

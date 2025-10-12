@@ -13,7 +13,7 @@ arc-swap = "1.7"
 argh = "0.1"
 argon2 = "0.5"
 async-trait = "0.1"
-aws-sdk-s3 = { version = "1.106" }
+aws-sdk-s3 = { version = "1.108" }
 base64 = "0.22"
 bytes = "1.10"
 bytesize = { version = "2.1", features = ["serde"] }
@@ -27,12 +27,12 @@ hyper = { version = "1.7" , features = ["full"]}
 hyper-util = { version = "0.1", features = ["tokio", "server-graceful"] }
 jsonwebtoken = "9.3"
 notify = "8.2"
-opentelemetry = "0.30"
-opentelemetry_sdk = { version = "0.30", features = ["rt-tokio", "metrics"] }
-opentelemetry-otlp = { version = "0.30" , features = ["grpc-tonic"]}
+opentelemetry = "0.31"
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
+opentelemetry-otlp = { version = "0.31" , features = ["grpc-tonic"]}
 prometheus = "0.14"
 redis = { version = "0.32", features = ["tokio-comp"] }
-regex = "1.11"
+regex = "1.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 rpassword = "7.4"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "logging", "std", "tls12"] }
@@ -41,13 +41,16 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_urlencoded = "0.7"
 sha2 = "0.11.0-rc.2"
-tempfile = "3.22"
+tempfile = "3.23"
 tokio = { version = "1.47", features = ["full", "tracing"] }
 tokio-rustls = "0.26"
 tokio-util = { version = "0.7", features = ["io-util"] }
 toml = "0.9"
 tracing = "0.1"
-tracing-opentelemetry = "0.31"
+tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
 x509-parser = "0.18"
+
+[dev-dependencies]
+wiremock = "0.6"

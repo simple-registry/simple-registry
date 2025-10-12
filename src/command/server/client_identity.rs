@@ -23,15 +23,6 @@ impl ClientIdentity {
             ..Default::default()
         }
     }
-
-    /// Check if the client has been authenticated by any method
-    pub fn is_authenticated(&self) -> bool {
-        self.id.is_some()
-            || self.username.is_some()
-            || self.oidc.is_some()
-            || !self.certificate.common_names.is_empty()
-            || !self.certificate.organizations.is_empty()
-    }
 }
 
 /// Certificate information extracted from client mTLS certificates.
