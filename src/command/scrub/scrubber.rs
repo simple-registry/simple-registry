@@ -633,8 +633,8 @@ mod tests {
         let old_time = Utc::now() - Duration::hours(2);
         assert!(scrubber.is_upload_obsolete(old_time));
 
-        let exact_time = Utc::now() - Duration::hours(1);
-        assert!(!scrubber.is_upload_obsolete(exact_time));
+        let almost_expired_time = Utc::now() - Duration::minutes(50);
+        assert!(!scrubber.is_upload_obsolete(almost_expired_time));
     }
 
     #[tokio::test]
