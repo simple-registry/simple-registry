@@ -75,16 +75,50 @@ impl ServerContext {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::configuration::Configuration;
     use crate::oci::Reference;
+    use crate::registry::Repository;
     use argon2::password_hash::rand_core::OsRng;
     use argon2::password_hash::SaltString;
     use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
     use base64::Engine;
     use hyper::Request;
     use std::collections::HashMap;
+
+    fn create_test_config() -> Configuration {
+        let toml = r#"
+            [blob_store.fs]
+            root_dir = "/tmp/test-blobs"
+
+            [metadata_store.fs]
+            root_dir = "/tmp/test-metadata"
+
+            [cache.memory]
+
+            [server]
+            bind_address = "127.0.0.1"
+            port = 8080
+
+            [global]
+            update_pull_time = false
+            max_concurrent_cache_jobs = 10
+        "#;
+
+        toml::from_str(toml).unwrap()
+    }
+
+    pub fn create_test_server_context() -> ServerContext {
+        let config = create_test_config();
+        let blob_store = config.blob_store.to_backend().unwrap();
+        let metadata_store = config.resolve_metadata_config().to_backend().unwrap();
+        let repositories = Arc::new(HashMap::new());
+
+        let registry = Registry::new(blob_store, metadata_store, repositories, false, 10).unwrap();
+
+        ServerContext::new(&config, registry).unwrap()
+    }
 
     fn create_minimal_config() -> Configuration {
         let toml = r#"
@@ -109,8 +143,6 @@ mod tests {
     }
 
     fn create_test_registry(config: &Configuration) -> Registry {
-        use crate::registry::repository::Repository;
-
         let blob_store = config.blob_store.to_backend().unwrap();
         let metadata_store = config.resolve_metadata_config().to_backend().unwrap();
         let auth_cache = config.cache.to_backend().unwrap();

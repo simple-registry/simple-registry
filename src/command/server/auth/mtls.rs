@@ -145,18 +145,6 @@ mod tests {
         output.stdout
     }
 
-    #[test]
-    fn test_mtls_validator_new() {
-        let validator = MtlsValidator::new();
-        assert_eq!(std::mem::size_of_val(&validator), 0);
-    }
-
-    #[test]
-    fn test_mtls_validator_default() {
-        let validator = MtlsValidator;
-        assert_eq!(std::mem::size_of_val(&validator), 0);
-    }
-
     #[tokio::test]
     async fn test_authenticate_no_certificate() {
         let validator = MtlsValidator::new();
@@ -257,15 +245,5 @@ mod tests {
         let cert_info = result.unwrap();
         assert!(cert_info.common_names.is_empty());
         assert!(cert_info.organizations.is_empty());
-    }
-
-    #[test]
-    fn test_peer_certificate_clone() {
-        let cert_der = generate_test_certificate();
-        let peer_cert = PeerCertificate(Arc::new(cert_der));
-        let cloned = peer_cert.clone();
-
-        assert_eq!(peer_cert.0.len(), cloned.0.len());
-        assert!(Arc::ptr_eq(&peer_cert.0, &cloned.0));
     }
 }

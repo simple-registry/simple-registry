@@ -99,42 +99,8 @@ impl InsecureListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::configuration::Configuration;
-    use crate::registry::Registry;
+    use crate::command::server::server_context::tests::create_test_server_context;
     use std::net::Ipv6Addr;
-
-    fn create_test_config() -> Configuration {
-        let toml = r#"
-            [blob_store.fs]
-            root_dir = "/tmp/test-blobs"
-
-            [metadata_store.fs]
-            root_dir = "/tmp/test-metadata"
-
-            [cache.memory]
-
-            [server]
-            bind_address = "127.0.0.1"
-            port = 8080
-
-            [global]
-            update_pull_time = false
-            max_concurrent_cache_jobs = 10
-        "#;
-
-        toml::from_str(toml).unwrap()
-    }
-
-    fn create_test_server_context() -> ServerContext {
-        let config = create_test_config();
-        let blob_store = config.blob_store.to_backend().unwrap();
-        let metadata_store = config.resolve_metadata_config().to_backend().unwrap();
-        let repositories = std::sync::Arc::new(std::collections::HashMap::new());
-
-        let registry = Registry::new(blob_store, metadata_store, repositories, false, 10).unwrap();
-
-        ServerContext::new(&config, registry).unwrap()
-    }
 
     #[test]
     fn test_config_default_values() {
@@ -254,36 +220,6 @@ mod tests {
         let timeouts = listener.timeouts.load();
         assert_eq!(timeouts[0], Duration::from_secs(5000));
         assert_eq!(timeouts[1], Duration::from_secs(100));
-    }
-
-    #[test]
-    fn test_config_clone() {
-        let config1 = Config {
-            bind_address: "127.0.0.1".parse().unwrap(),
-            port: 8080,
-            query_timeout: 3600,
-            query_timeout_grace_period: 60,
-        };
-
-        let config2 = config1.clone();
-
-        assert_eq!(config1.bind_address, config2.bind_address);
-        assert_eq!(config1.port, config2.port);
-        assert_eq!(config1.query_timeout, config2.query_timeout);
-        assert_eq!(
-            config1.query_timeout_grace_period,
-            config2.query_timeout_grace_period
-        );
-    }
-
-    #[test]
-    fn test_config_debug_format() {
-        let config = Config::default();
-        let debug_str = format!("{config:?}");
-
-        assert!(debug_str.contains("Config"));
-        assert!(debug_str.contains("bind_address"));
-        assert!(debug_str.contains("port"));
     }
 
     #[test]

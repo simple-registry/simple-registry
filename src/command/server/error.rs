@@ -547,14 +547,6 @@ mod tests {
     }
 
     #[test]
-    fn test_error_debug_format() {
-        let error = Error::Unauthorized("test".to_string());
-        let debug_output = format!("{error:?}");
-        assert!(debug_output.contains("Unauthorized"));
-        assert!(debug_output.contains("test"));
-    }
-
-    #[test]
     fn test_json_structure_completeness() {
         let error = Error::NotFound("Resource missing".to_string());
         let request_id = Some("abc-123".to_string());

@@ -25,6 +25,7 @@ impl Config {
 mod tests {
     use super::*;
     use crate::cache::redis::BackendConfig;
+    use std::any::TypeId;
 
     #[tokio::test]
     async fn test_memory_backend() {
@@ -34,10 +35,7 @@ mod tests {
         assert!(backend.is_ok());
 
         let backend = backend.unwrap();
-        assert_eq!(
-            (*backend).type_id(),
-            std::any::TypeId::of::<cache::memory::Backend>()
-        );
+        assert_eq!((*backend).type_id(), TypeId::of::<cache::memory::Backend>());
     }
 
     #[tokio::test]
@@ -51,9 +49,6 @@ mod tests {
         assert!(backend.is_ok());
 
         let backend = backend.unwrap();
-        assert_eq!(
-            (*backend).type_id(),
-            std::any::TypeId::of::<cache::redis::Backend>()
-        );
+        assert_eq!((*backend).type_id(), TypeId::of::<cache::redis::Backend>());
     }
 }

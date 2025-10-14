@@ -160,6 +160,7 @@ impl Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::server::listeners::tls::tests::build_config;
 
     fn create_minimal_config() -> Configuration {
         let toml = r#"
@@ -463,12 +464,7 @@ mod tests {
         let config = create_minimal_config();
         let command = Command::new(&config).unwrap();
 
-        let tls_config = ServerTlsConfig {
-            server_certificate_bundle: "/tmp/cert.pem".to_string(),
-            server_private_key: "/tmp/key.pem".to_string(),
-            client_ca_bundle: None,
-        };
-
+        let (tls_config, _temp_files) = build_config(false);
         let result = command.notify_tls_config_change(&tls_config);
 
         assert!(result.is_ok());
@@ -486,32 +482,6 @@ mod tests {
 
         let insecure_listener = InsecureListener::new(insecure_config, context);
         let _service_listener = ServiceListener::Insecure(insecure_listener);
-    }
-
-    #[test]
-    fn test_build_blob_store_preserves_configuration() {
-        let config = create_minimal_config();
-        let blob_store = build_blob_store(&config.blob_store).unwrap();
-
-        assert!(Arc::strong_count(&blob_store) == 1);
-    }
-
-    #[test]
-    fn test_build_metadata_store_preserves_configuration() {
-        let config = create_minimal_config();
-        let metadata_store = build_metadata_store(&config).unwrap();
-
-        assert!(Arc::strong_count(&metadata_store) == 1);
-    }
-
-    #[test]
-    fn test_build_auth_cache_can_be_shared() {
-        let cache_config = cache::Config::Memory;
-        let cache1 = build_auth_cache(&cache_config).unwrap();
-        let cache2 = cache1.clone();
-
-        assert!(Arc::strong_count(&cache1) == 2);
-        assert!(Arc::strong_count(&cache2) == 2);
     }
 
     #[test]

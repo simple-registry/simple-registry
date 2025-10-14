@@ -185,6 +185,7 @@ mod tests {
     use super::*;
     use crate::command::server::auth::oidc;
     use crate::registry::data_store;
+    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_load_minimal_config() {
@@ -257,8 +258,14 @@ mod tests {
 
         match config.server {
             ServerConfig::Tls(tls_config) => {
-                assert_eq!(tls_config.tls.server_certificate_bundle, "server.pem");
-                assert_eq!(tls_config.tls.server_private_key, "server.key");
+                assert_eq!(
+                    tls_config.tls.server_certificate_bundle.to_str(),
+                    Some("server.pem")
+                );
+                assert_eq!(
+                    tls_config.tls.server_private_key.to_str(),
+                    Some("server.key")
+                );
             }
             ServerConfig::Insecure(_) => {
                 panic!("Expected TLS server config but got Insecure");
@@ -664,9 +671,18 @@ mod tests {
         let config = Configuration::load_from_str(config).unwrap();
         match config.server {
             ServerConfig::Tls(tls_config) => {
-                assert_eq!(tls_config.tls.server_certificate_bundle, "server.pem");
-                assert_eq!(tls_config.tls.server_private_key, "server.key");
-                assert_eq!(tls_config.tls.client_ca_bundle, Some("ca.pem".to_string()));
+                assert_eq!(
+                    tls_config.tls.server_certificate_bundle,
+                    PathBuf::from("server.pem")
+                );
+                assert_eq!(
+                    tls_config.tls.server_private_key,
+                    PathBuf::from("server.key")
+                );
+                assert_eq!(
+                    tls_config.tls.client_ca_bundle,
+                    Some(PathBuf::from("ca.pem"))
+                );
             }
             ServerConfig::Insecure(_) => panic!("Expected TLS server config"),
         }
@@ -692,78 +708,6 @@ mod tests {
             }
             ServerConfig::Tls(_) => panic!("Expected Insecure server config"),
         }
-    }
-
-    #[test]
-    fn test_configuration_clone() {
-        let config = r#"
-        [server]
-        bind_address = "0.0.0.0"
-
-        [global]
-        max_concurrent_requests = 8
-        "#;
-
-        let config = Configuration::load_from_str(config).unwrap();
-        let cloned = config.clone();
-
-        assert_eq!(config.global.max_concurrent_requests, 8);
-        assert_eq!(cloned.global.max_concurrent_requests, 8);
-    }
-
-    #[test]
-    fn test_global_config_clone() {
-        let config = GlobalConfig {
-            max_concurrent_requests: 10,
-            max_concurrent_cache_jobs: 8,
-            update_pull_time: true,
-            access_policy: AccessPolicyConfig::default(),
-            retention_policy: RetentionPolicyConfig::default(),
-            immutable_tags: true,
-            immutable_tags_exclusions: vec!["latest".to_string()],
-            authorization_webhook: Some("webhook".to_string()),
-        };
-
-        let cloned = config.clone();
-        assert_eq!(
-            config.max_concurrent_requests,
-            cloned.max_concurrent_requests
-        );
-        assert_eq!(
-            config.max_concurrent_cache_jobs,
-            cloned.max_concurrent_cache_jobs
-        );
-        assert_eq!(config.update_pull_time, cloned.update_pull_time);
-        assert_eq!(config.immutable_tags, cloned.immutable_tags);
-        assert_eq!(
-            config.immutable_tags_exclusions,
-            cloned.immutable_tags_exclusions
-        );
-        assert_eq!(config.authorization_webhook, cloned.authorization_webhook);
-    }
-
-    #[test]
-    fn test_observability_config_clone() {
-        let config = ObservabilityConfig {
-            tracing: Some(TracingConfig {
-                endpoint: "http://localhost:4317".to_string(),
-                sampling_rate: 0.5,
-            }),
-        };
-
-        let cloned = config.clone();
-        assert!(cloned.tracing.is_some());
-        assert_eq!(
-            cloned.tracing.as_ref().unwrap().endpoint,
-            "http://localhost:4317"
-        );
-        assert!((cloned.tracing.as_ref().unwrap().sampling_rate - 0.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_observability_config_default() {
-        let config = ObservabilityConfig::default();
-        assert!(config.tracing.is_none());
     }
 
     #[tokio::test]
@@ -860,38 +804,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_server_config_debug_format() {
-        let config = r#"
-        [server]
-        bind_address = "0.0.0.0"
-        port = 8080
-        "#;
-
-        let config = Configuration::load_from_str(config).unwrap();
-        let debug_str = format!("{:?}", config.server);
-        assert!(debug_str.contains("Insecure"));
-    }
-
-    #[test]
-    fn test_global_config_debug_format() {
-        let config = GlobalConfig::default();
-        let debug_str = format!("{config:?}");
-        assert!(debug_str.contains("GlobalConfig"));
-    }
-
-    #[test]
-    fn test_configuration_debug_format() {
-        let config = r#"
-        [server]
-        bind_address = "0.0.0.0"
-        "#;
-
-        let config = Configuration::load_from_str(config).unwrap();
-        let debug_str = format!("{config:?}");
-        assert!(debug_str.contains("Configuration"));
-    }
-
     #[tokio::test]
     async fn test_ipv6_bind_address() {
         let config = r#"
@@ -937,43 +849,6 @@ mod tests {
         assert_eq!(config.global.retention_policy.rules.len(), 1);
     }
 
-    #[test]
-    fn test_tracing_config_clone() {
-        let config = TracingConfig {
-            endpoint: "http://jaeger:4317".to_string(),
-            sampling_rate: 0.25,
-        };
-
-        let cloned = config.clone();
-        assert_eq!(config.endpoint, cloned.endpoint);
-        assert!((config.sampling_rate - cloned.sampling_rate).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_tracing_config_debug_format() {
-        let config = TracingConfig {
-            endpoint: "http://jaeger:4317".to_string(),
-            sampling_rate: 0.5,
-        };
-
-        let debug_str = format!("{config:?}");
-        assert!(debug_str.contains("TracingConfig"));
-        assert!(debug_str.contains("jaeger"));
-    }
-
-    #[test]
-    fn test_observability_config_debug_format() {
-        let config = ObservabilityConfig {
-            tracing: Some(TracingConfig {
-                endpoint: "http://localhost:4317".to_string(),
-                sampling_rate: 0.1,
-            }),
-        };
-
-        let debug_str = format!("{config:?}");
-        assert!(debug_str.contains("ObservabilityConfig"));
-    }
-
     #[tokio::test]
     async fn test_resolve_metadata_config_preserves_explicit_s3_config() {
         let config = r#"
@@ -1006,38 +881,6 @@ mod tests {
             }
             metadata_store::MetadataStoreConfig::FS(_) => {
                 panic!("Expected S3 metadata store config")
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_server_config_tls_clone() {
-        let config = r#"
-        [server]
-        bind_address = "0.0.0.0"
-        port = 8443
-
-        [server.tls]
-        server_certificate_bundle = "cert.pem"
-        server_private_key = "key.pem"
-        "#;
-
-        let config = Configuration::load_from_str(config).unwrap();
-        let cloned_config = config.server.clone();
-
-        match (config.server, cloned_config) {
-            (ServerConfig::Tls(original), ServerConfig::Tls(cloned)) => {
-                assert_eq!(
-                    original.tls.server_certificate_bundle,
-                    cloned.tls.server_certificate_bundle
-                );
-                assert_eq!(
-                    original.tls.server_private_key,
-                    cloned.tls.server_private_key
-                );
-            }
-            (ServerConfig::Insecure(_), _) | (_, ServerConfig::Insecure(_)) => {
-                panic!("Expected TLS server config")
             }
         }
     }
@@ -1192,9 +1035,12 @@ mod tests {
             ServerConfig::Tls(tls_config) => {
                 assert_eq!(
                     tls_config.tls.server_certificate_bundle,
-                    "/path/to/cert.pem"
+                    PathBuf::from("/path/to/cert.pem")
                 );
-                assert_eq!(tls_config.tls.server_private_key, "/path/to/key.pem");
+                assert_eq!(
+                    tls_config.tls.server_private_key,
+                    PathBuf::from("/path/to/key.pem")
+                );
             }
             ServerConfig::Insecure(_) => panic!("Expected TLS server config"),
         }

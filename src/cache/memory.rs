@@ -72,6 +72,7 @@ impl Cache for Backend {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tokio::time;
 
     #[tokio::test]
     async fn test_store_and_retrieve() {
@@ -106,7 +107,7 @@ mod tests {
                 .unwrap();
         }
 
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        time::sleep(Duration::from_millis(1100)).await;
 
         for i in 0..495 {
             let _ = cache.retrieve_value(&format!("nonexistent_{i}")).await;

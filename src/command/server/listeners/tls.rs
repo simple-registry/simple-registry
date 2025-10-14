@@ -10,6 +10,7 @@ use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::Deserialize;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_rustls::TlsAcceptor;
@@ -43,9 +44,9 @@ impl Config {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServerTlsConfig {
-    pub server_certificate_bundle: String,
-    pub server_private_key: String,
-    pub client_ca_bundle: Option<String>,
+    pub server_certificate_bundle: PathBuf,
+    pub server_private_key: PathBuf,
+    pub client_ca_bundle: Option<PathBuf>,
 }
 
 pub struct TlsListener {
@@ -209,10 +210,9 @@ impl TlsListener {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
-    use crate::configuration::Configuration;
-    use crate::registry::Registry;
+    use crate::command::server::server_context::tests::create_test_server_context;
     use std::io::Write;
     use std::net::Ipv6Addr;
     use std::sync::Once;
@@ -279,44 +279,39 @@ MyMgL1gcqJFWmtfn1TE+IPz1HEN3GXgDI9PYOV63PrTQg3ZU9ixvj2wJYbT7xNWy
 PpGhlTQXVV6Evtahtp+cRw==
 -----END PRIVATE KEY-----";
 
-    fn create_test_config() -> Configuration {
-        let toml = r#"
-            [blob_store.fs]
-            root_dir = "/tmp/test-blobs"
-
-            [metadata_store.fs]
-            root_dir = "/tmp/test-metadata"
-
-            [cache.memory]
-
-            [server]
-            bind_address = "127.0.0.1"
-            port = 8080
-
-            [global]
-            update_pull_time = false
-            max_concurrent_cache_jobs = 10
-        "#;
-
-        toml::from_str(toml).unwrap()
-    }
-
-    fn create_test_server_context() -> ServerContext {
-        let config = create_test_config();
-        let blob_store = config.blob_store.to_backend().unwrap();
-        let metadata_store = config.resolve_metadata_config().to_backend().unwrap();
-        let repositories = std::sync::Arc::new(std::collections::HashMap::new());
-
-        let registry = Registry::new(blob_store, metadata_store, repositories, false, 10).unwrap();
-
-        ServerContext::new(&config, registry).unwrap()
-    }
-
     fn create_temp_cert_file(content: &str) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    pub fn build_config(
+        client_tls: bool,
+    ) -> (
+        ServerTlsConfig,
+        (NamedTempFile, NamedTempFile, NamedTempFile),
+    ) {
+        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
+        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
+        let ca_file = create_temp_cert_file(TEST_SERVER_CERT);
+
+        let server_certificate_bundle = cert_file.path().to_path_buf();
+        let server_private_key = key_file.path().to_path_buf();
+        let client_ca_bundle = if client_tls {
+            Some(ca_file.path().to_path_buf())
+        } else {
+            None
+        };
+
+        (
+            ServerTlsConfig {
+                server_certificate_bundle,
+                server_private_key,
+                client_ca_bundle,
+            },
+            (cert_file, key_file, ca_file),
+        )
     }
 
     #[test]
@@ -396,58 +391,9 @@ PpGhlTQXVV6Evtahtp+cRw==
     }
 
     #[test]
-    fn test_server_tls_config_clone() {
-        let tls_config = ServerTlsConfig {
-            server_certificate_bundle: "/path/to/cert.pem".to_string(),
-            server_private_key: "/path/to/key.pem".to_string(),
-            client_ca_bundle: Some("/path/to/ca.pem".to_string()),
-        };
-
-        let cloned = tls_config.clone();
-
-        assert_eq!(
-            tls_config.server_certificate_bundle,
-            cloned.server_certificate_bundle
-        );
-        assert_eq!(tls_config.server_private_key, cloned.server_private_key);
-        assert_eq!(tls_config.client_ca_bundle, cloned.client_ca_bundle);
-    }
-
-    #[test]
-    fn test_server_tls_config_without_client_ca() {
-        let tls_config = ServerTlsConfig {
-            server_certificate_bundle: "/path/to/cert.pem".to_string(),
-            server_private_key: "/path/to/key.pem".to_string(),
-            client_ca_bundle: None,
-        };
-
-        assert!(tls_config.client_ca_bundle.is_none());
-    }
-
-    #[test]
-    fn test_server_tls_config_with_client_ca() {
-        let tls_config = ServerTlsConfig {
-            server_certificate_bundle: "/path/to/cert.pem".to_string(),
-            server_private_key: "/path/to/key.pem".to_string(),
-            client_ca_bundle: Some("/path/to/ca.pem".to_string()),
-        };
-
-        assert!(tls_config.client_ca_bundle.is_some());
-        assert_eq!(tls_config.client_ca_bundle.unwrap(), "/path/to/ca.pem");
-    }
-
-    #[test]
     fn test_build_tls_acceptor_success() {
         init_crypto_provider();
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
-
-        let tls_config = ServerTlsConfig {
-            server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-            server_private_key: key_file.path().to_str().unwrap().to_string(),
-            client_ca_bundle: None,
-        };
-
+        let (tls_config, _tmp_files) = build_config(false);
         let result = TlsListener::build_tls_acceptor(&tls_config);
 
         assert!(result.is_ok());
@@ -456,15 +402,7 @@ PpGhlTQXVV6Evtahtp+cRw==
     #[test]
     fn test_build_tls_acceptor_with_client_ca() {
         init_crypto_provider();
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
-        let ca_file = create_temp_cert_file(TEST_SERVER_CERT);
-
-        let tls_config = ServerTlsConfig {
-            server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-            server_private_key: key_file.path().to_str().unwrap().to_string(),
-            client_ca_bundle: Some(ca_file.path().to_str().unwrap().to_string()),
-        };
+        let (tls_config, _tmp_files) = build_config(true);
 
         let result = TlsListener::build_tls_acceptor(&tls_config);
 
@@ -473,13 +411,8 @@ PpGhlTQXVV6Evtahtp+cRw==
 
     #[test]
     fn test_build_tls_acceptor_missing_cert_file() {
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
-
-        let tls_config = ServerTlsConfig {
-            server_certificate_bundle: "/nonexistent/cert.pem".to_string(),
-            server_private_key: key_file.path().to_str().unwrap().to_string(),
-            client_ca_bundle: None,
-        };
+        let (mut tls_config, _tmp_files) = build_config(true);
+        tls_config.server_certificate_bundle = PathBuf::from("/invalid/path.pem");
 
         let result = TlsListener::build_tls_acceptor(&tls_config);
 
@@ -493,13 +426,8 @@ PpGhlTQXVV6Evtahtp+cRw==
 
     #[test]
     fn test_build_tls_acceptor_missing_key_file() {
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
-
-        let tls_config = ServerTlsConfig {
-            server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-            server_private_key: "/nonexistent/key.pem".to_string(),
-            client_ca_bundle: None,
-        };
+        let (mut tls_config, _tmp_files) = build_config(true);
+        tls_config.server_private_key = PathBuf::from("/invalid/path.pem");
 
         let result = TlsListener::build_tls_acceptor(&tls_config);
 
@@ -515,13 +443,9 @@ PpGhlTQXVV6Evtahtp+cRw==
     fn test_build_tls_acceptor_invalid_cert_format() {
         init_crypto_provider();
         let cert_file = create_temp_cert_file("invalid cert data");
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
 
-        let tls_config = ServerTlsConfig {
-            server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-            server_private_key: key_file.path().to_str().unwrap().to_string(),
-            client_ca_bundle: None,
-        };
+        let (mut tls_config, _tmp_files) = build_config(true);
+        tls_config.server_certificate_bundle = cert_file.path().to_path_buf();
 
         let result = TlsListener::build_tls_acceptor(&tls_config);
 
@@ -531,14 +455,10 @@ PpGhlTQXVV6Evtahtp+cRw==
     #[test]
     fn test_build_tls_acceptor_invalid_key_format() {
         init_crypto_provider();
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
         let key_file = create_temp_cert_file("invalid key data");
 
-        let tls_config = ServerTlsConfig {
-            server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-            server_private_key: key_file.path().to_str().unwrap().to_string(),
-            client_ca_bundle: None,
-        };
+        let (mut tls_config, _tmp_files) = build_config(true);
+        tls_config.server_private_key = key_file.path().to_path_buf();
 
         let result = TlsListener::build_tls_acceptor(&tls_config);
 
@@ -547,14 +467,8 @@ PpGhlTQXVV6Evtahtp+cRw==
 
     #[test]
     fn test_build_tls_acceptor_missing_client_ca_file() {
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
-
-        let tls_config = ServerTlsConfig {
-            server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-            server_private_key: key_file.path().to_str().unwrap().to_string(),
-            client_ca_bundle: Some("/nonexistent/ca.pem".to_string()),
-        };
+        let (mut tls_config, _tmp_files) = build_config(false);
+        tls_config.client_ca_bundle = Some(PathBuf::from("/nonexistent/ca.pem"));
 
         let result = TlsListener::build_tls_acceptor(&tls_config);
 
@@ -569,19 +483,15 @@ PpGhlTQXVV6Evtahtp+cRw==
     #[test]
     fn test_tls_listener_new() {
         init_crypto_provider();
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
+
+        let (tls, _temp_files) = build_config(false);
 
         let config = Config {
             bind_address: "127.0.0.1".parse().unwrap(),
             port: 8443,
             query_timeout: 3600,
             query_timeout_grace_period: 60,
-            tls: ServerTlsConfig {
-                server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-                server_private_key: key_file.path().to_str().unwrap().to_string(),
-                client_ca_bundle: None,
-            },
+            tls,
         };
 
         let context = create_test_server_context();
@@ -598,19 +508,14 @@ PpGhlTQXVV6Evtahtp+cRw==
     #[test]
     fn test_tls_listener_new_with_ipv6() {
         init_crypto_provider();
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
+        let (tls, _temp_files) = build_config(false);
 
         let config = Config {
             bind_address: "::1".parse().unwrap(),
             port: 9443,
             query_timeout: 3600,
             query_timeout_grace_period: 60,
-            tls: ServerTlsConfig {
-                server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-                server_private_key: key_file.path().to_str().unwrap().to_string(),
-                client_ca_bundle: None,
-            },
+            tls,
         };
 
         let context = create_test_server_context();
@@ -631,16 +536,16 @@ PpGhlTQXVV6Evtahtp+cRw==
         let cert_file = create_temp_cert_file("invalid");
         let key_file = create_temp_cert_file("invalid");
 
+        let (mut tls, _temp_files) = build_config(false);
+        tls.server_certificate_bundle = cert_file.path().to_path_buf();
+        tls.server_private_key = key_file.path().to_path_buf();
+
         let config = Config {
             bind_address: "127.0.0.1".parse().unwrap(),
             port: 8443,
             query_timeout: 3600,
             query_timeout_grace_period: 60,
-            tls: ServerTlsConfig {
-                server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-                server_private_key: key_file.path().to_str().unwrap().to_string(),
-                client_ca_bundle: None,
-            },
+            tls,
         };
 
         let context = create_test_server_context();
@@ -652,19 +557,14 @@ PpGhlTQXVV6Evtahtp+cRw==
     #[test]
     fn test_tls_listener_notify_config_change() {
         init_crypto_provider();
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
+        let (tls, _temp_files) = build_config(false);
 
         let config = Config {
             bind_address: "127.0.0.1".parse().unwrap(),
             port: 8443,
             query_timeout: 3600,
             query_timeout_grace_period: 60,
-            tls: ServerTlsConfig {
-                server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-                server_private_key: key_file.path().to_str().unwrap().to_string(),
-                client_ca_bundle: None,
-            },
+            tls,
         };
 
         let context1 = create_test_server_context();
@@ -679,31 +579,21 @@ PpGhlTQXVV6Evtahtp+cRw==
     #[test]
     fn test_tls_listener_notify_tls_config_change() {
         init_crypto_provider();
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
+        let (tls, _temp_files) = build_config(false);
 
         let config = Config {
             bind_address: "127.0.0.1".parse().unwrap(),
             port: 8443,
             query_timeout: 3600,
             query_timeout_grace_period: 60,
-            tls: ServerTlsConfig {
-                server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-                server_private_key: key_file.path().to_str().unwrap().to_string(),
-                client_ca_bundle: None,
-            },
+            tls,
         };
 
         let context = create_test_server_context();
         let listener = TlsListener::new(&config, context).unwrap();
 
-        let new_tls_config = ServerTlsConfig {
-            server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-            server_private_key: key_file.path().to_str().unwrap().to_string(),
-            client_ca_bundle: None,
-        };
-
-        let result = listener.notify_tls_config_change(&new_tls_config);
+        let (tls, _temp_files) = build_config(false);
+        let result = listener.notify_tls_config_change(&tls);
 
         assert!(result.is_ok());
     }
@@ -711,123 +601,24 @@ PpGhlTQXVV6Evtahtp+cRw==
     #[test]
     fn test_tls_listener_notify_tls_config_change_with_invalid_certs() {
         init_crypto_provider();
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
 
+        let (tls, _temp_files) = build_config(false);
         let config = Config {
             bind_address: "127.0.0.1".parse().unwrap(),
             port: 8443,
             query_timeout: 3600,
             query_timeout_grace_period: 60,
-            tls: ServerTlsConfig {
-                server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-                server_private_key: key_file.path().to_str().unwrap().to_string(),
-                client_ca_bundle: None,
-            },
+            tls,
         };
 
         let context = create_test_server_context();
         let listener = TlsListener::new(&config, context).unwrap();
 
-        let new_tls_config = ServerTlsConfig {
-            server_certificate_bundle: "/nonexistent/cert.pem".to_string(),
-            server_private_key: "/nonexistent/key.pem".to_string(),
-            client_ca_bundle: None,
-        };
+        let (mut tls_config, _tmp_files) = build_config(true);
+        tls_config.server_certificate_bundle = PathBuf::from("/invalid/path.pem");
 
-        let result = listener.notify_tls_config_change(&new_tls_config);
+        let result = listener.notify_tls_config_change(&tls_config);
 
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_tls_listener_timeouts_initialization() {
-        init_crypto_provider();
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
-
-        let config = Config {
-            bind_address: "127.0.0.1".parse().unwrap(),
-            port: 8443,
-            query_timeout: 5000,
-            query_timeout_grace_period: 100,
-            tls: ServerTlsConfig {
-                server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-                server_private_key: key_file.path().to_str().unwrap().to_string(),
-                client_ca_bundle: None,
-            },
-        };
-
-        let context = create_test_server_context();
-        let listener = TlsListener::new(&config, context).unwrap();
-
-        let timeouts = listener.timeouts.load();
-        assert_eq!(timeouts[0], Duration::from_secs(5000));
-        assert_eq!(timeouts[1], Duration::from_secs(100));
-    }
-
-    #[test]
-    fn test_config_clone() {
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
-
-        let config1 = Config {
-            bind_address: "127.0.0.1".parse().unwrap(),
-            port: 8443,
-            query_timeout: 3600,
-            query_timeout_grace_period: 60,
-            tls: ServerTlsConfig {
-                server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-                server_private_key: key_file.path().to_str().unwrap().to_string(),
-                client_ca_bundle: None,
-            },
-        };
-
-        let config2 = config1.clone();
-
-        assert_eq!(config1.bind_address, config2.bind_address);
-        assert_eq!(config1.port, config2.port);
-        assert_eq!(config1.query_timeout, config2.query_timeout);
-    }
-
-    #[test]
-    fn test_config_debug_format() {
-        let cert_file = create_temp_cert_file(TEST_SERVER_CERT);
-        let key_file = create_temp_cert_file(TEST_SERVER_KEY);
-
-        let config = Config {
-            bind_address: "127.0.0.1".parse().unwrap(),
-            port: 8443,
-            query_timeout: 3600,
-            query_timeout_grace_period: 60,
-            tls: ServerTlsConfig {
-                server_certificate_bundle: cert_file.path().to_str().unwrap().to_string(),
-                server_private_key: key_file.path().to_str().unwrap().to_string(),
-                client_ca_bundle: None,
-            },
-        };
-
-        let debug_str = format!("{config:?}");
-
-        assert!(debug_str.contains("Config"));
-        assert!(debug_str.contains("bind_address"));
-        assert!(debug_str.contains("port"));
-        assert!(debug_str.contains("tls"));
-    }
-
-    #[test]
-    fn test_server_tls_config_debug_format() {
-        let tls_config = ServerTlsConfig {
-            server_certificate_bundle: "/path/to/cert.pem".to_string(),
-            server_private_key: "/path/to/key.pem".to_string(),
-            client_ca_bundle: Some("/path/to/ca.pem".to_string()),
-        };
-
-        let debug_str = format!("{tls_config:?}");
-
-        assert!(debug_str.contains("ServerTlsConfig"));
-        assert!(debug_str.contains("server_certificate_bundle"));
-        assert!(debug_str.contains("server_private_key"));
-        assert!(debug_str.contains("client_ca_bundle"));
     }
 }

@@ -141,6 +141,16 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn build_config(mock_server: &MockServer) -> Config {
+        Config::Generic(generic::ProviderConfig {
+            issuer: mock_server.uri(),
+            jwks_uri: Some(format!("{}/.well-known/jwks", mock_server.uri())),
+            jwks_refresh_interval: 3600,
+            required_audience: None,
+            clock_skew_tolerance: 60,
+        })
+    }
+
     #[test]
     fn test_config_deserialize_generic() {
         let toml = r#"
@@ -327,14 +337,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let config = Config::Generic(generic::ProviderConfig {
-            issuer: mock_server.uri(),
-            jwks_uri: Some(format!("{}/.well-known/jwks", mock_server.uri())),
-            jwks_refresh_interval: 3600,
-            required_audience: None,
-            clock_skew_tolerance: 60,
-        });
-
+        let config = build_config(&mock_server);
         let cache = cache::Config::Memory.to_backend().unwrap();
         let validator = OidcValidator::new("test-provider".to_string(), &config, cache).unwrap();
 
@@ -402,14 +405,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let config = Config::Generic(generic::ProviderConfig {
-            issuer: mock_server.uri(),
-            jwks_uri: Some(format!("{}/.well-known/jwks", mock_server.uri())),
-            jwks_refresh_interval: 3600,
-            required_audience: None,
-            clock_skew_tolerance: 60,
-        });
-
+        let config = build_config(&mock_server);
         let cache = cache::Config::Memory.to_backend().unwrap();
         let validator = OidcValidator::new("test-provider".to_string(), &config, cache).unwrap();
 
@@ -468,14 +464,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let config = Config::Generic(generic::ProviderConfig {
-            issuer: mock_server.uri(),
-            jwks_uri: Some(format!("{}/.well-known/jwks", mock_server.uri())),
-            jwks_refresh_interval: 3600,
-            required_audience: None,
-            clock_skew_tolerance: 60,
-        });
-
+        let config = build_config(&mock_server);
         let cache = cache::Config::Memory.to_backend().unwrap();
         let validator = OidcValidator::new("github".to_string(), &config, cache).unwrap();
 
@@ -613,14 +602,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let config = Config::Generic(generic::ProviderConfig {
-            issuer: mock_server.uri(),
-            jwks_uri: Some(format!("{}/.well-known/jwks", mock_server.uri())),
-            jwks_refresh_interval: 3600,
-            required_audience: None,
-            clock_skew_tolerance: 60,
-        });
-
+        let config = build_config(&mock_server);
         let cache = cache::Config::Memory.to_backend().unwrap();
         let validator = OidcValidator::new("my-provider".to_string(), &config, cache).unwrap();
 

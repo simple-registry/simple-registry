@@ -224,7 +224,7 @@ impl Scrubber {
         Ok(())
     }
 
-    fn is_upload_obsolete(&self, start_date: chrono::DateTime<chrono::Utc>) -> bool {
+    fn is_upload_obsolete(&self, start_date: chrono::DateTime<Utc>) -> bool {
         let now = Utc::now();
         let duration = now.signed_duration_since(start_date);
         duration > self.upload_timeout
@@ -697,9 +697,7 @@ mod tests {
             .update_blob_index(
                 namespace,
                 &blob_digest,
-                crate::registry::metadata_store::BlobIndexOperation::Insert(
-                    orphan_layer_link.clone(),
-                ),
+                metadata_store::BlobIndexOperation::Insert(orphan_layer_link.clone()),
             )
             .await
             .unwrap();
@@ -1211,8 +1209,7 @@ mod tests {
             rules: vec!["top(image.tag, last_pushed, 10)".to_string()],
         };
 
-        let retention_policy =
-            Arc::new(crate::registry::RetentionPolicy::new(&retention_config).unwrap());
+        let retention_policy = Arc::new(RetentionPolicy::new(&retention_config).unwrap());
 
         let scrubber = Scrubber::new(
             test_case.blob_store().clone(),
@@ -1284,8 +1281,7 @@ mod tests {
             rules: vec!["image.pushed_at > now() - days(30)".to_string()],
         };
 
-        let retention_policy =
-            Arc::new(crate::registry::RetentionPolicy::new(&retention_config).unwrap());
+        let retention_policy = Arc::new(RetentionPolicy::new(&retention_config).unwrap());
 
         let scrubber = Scrubber::new(
             test_case.blob_store().clone(),
@@ -1358,7 +1354,7 @@ mod tests {
         let token_cache = cache::Config::default().to_backend().unwrap();
         let repository = Repository::new("test-repo", &repo_config, &token_cache).unwrap();
 
-        let mut repositories = std::collections::HashMap::new();
+        let mut repositories = HashMap::new();
         repositories.insert("test-repo".to_string(), repository);
 
         let scrubber = Scrubber::new(

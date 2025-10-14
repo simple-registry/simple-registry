@@ -86,7 +86,7 @@ mod tests {
         let local_addr = listener.local_addr().unwrap();
 
         let connect_handle = tokio::spawn(async move {
-            let mut stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
+            let mut stream = TcpStream::connect(local_addr).await.unwrap();
             stream.write_all(b"test").await.unwrap();
         });
 

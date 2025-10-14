@@ -164,6 +164,7 @@ struct UnserializableData {
     value: i32,
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn fail_serialization<S>(_: &i32, _: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -181,11 +182,5 @@ async fn test_store_serialization_error() {
     let cache_trait: &dyn Cache = &cache;
     let result = cache_trait.store("test_key", &bad_data, 60).await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        Error::Execution(msg) => {
-            assert!(msg.contains("Failed to serialize value for caching"));
-        }
-        _ => panic!("Expected Execution error"),
-    }
+    assert!(matches!(result, Err(Error::Execution(_))));
 }

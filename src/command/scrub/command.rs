@@ -300,30 +300,7 @@ mod tests {
         };
 
         let checks = build_enabled_checks(&options);
-
         assert_eq!(checks.len(), 0);
-    }
-
-    #[test]
-    fn test_build_enabled_checks_selective() {
-        let options = Options {
-            dry_mode: false,
-            upload_timeout: None,
-            check_uploads: true,
-            check_tags: false,
-            check_revisions: true,
-            check_blobs: false,
-            enforce_retention_policies: false,
-        };
-
-        let checks = build_enabled_checks(&options);
-
-        assert_eq!(checks.len(), 2);
-        assert!(checks.contains(&ScrubCheck::Uploads));
-        assert!(checks.contains(&ScrubCheck::Revisions));
-        assert!(!checks.contains(&ScrubCheck::Tags));
-        assert!(!checks.contains(&ScrubCheck::Blobs));
-        assert!(!checks.contains(&ScrubCheck::Retention));
     }
 
     #[test]

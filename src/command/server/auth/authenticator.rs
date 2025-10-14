@@ -462,7 +462,7 @@ mod tests {
 
         let request = Request::builder().body(()).unwrap();
         let (parts, ()) = request.into_parts();
-        let socket_addr: std::net::SocketAddr = "192.168.1.100:8080".parse().unwrap();
+        let socket_addr: SocketAddr = "192.168.1.100:8080".parse().unwrap();
 
         let result = authenticator
             .authenticate_request(&parts, Some(socket_addr))

@@ -51,6 +51,7 @@ impl Cache for Backend {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tokio::time;
 
     #[tokio::test]
     async fn test_store_and_retrieve() {
@@ -66,7 +67,7 @@ mod tests {
             Ok(Some("token".to_string()))
         );
 
-        tokio::time::sleep(Duration::from_millis(1050)).await;
+        time::sleep(Duration::from_millis(1050)).await;
         assert_eq!(cache.retrieve_value("key").await, Ok(None));
     }
 }
