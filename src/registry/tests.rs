@@ -1,5 +1,7 @@
+use crate::registry::blob_store::BlobStore;
 use crate::registry::data_store;
 use crate::registry::metadata_store;
+use crate::registry::metadata_store::MetadataStore;
 use crate::registry::test_utils::create_test_registry;
 use crate::registry::{blob_store, Registry, Repository};
 use bytesize::ByteSize;
@@ -7,6 +9,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
+
+pub trait RegistryTestCase {
+    fn registry(&self) -> &Registry;
+    fn blob_store(&self) -> &dyn BlobStore;
+    fn metadata_store(&self) -> &dyn MetadataStore;
+}
+
+pub fn backends() -> Vec<Box<dyn RegistryTestCase>> {
+    vec![
+        Box::new(FSRegistryTestCase::new()),
+        Box::new(S3RegistryTestCase::new()),
+    ]
+}
 
 pub struct FSRegistryTestCase {
     blob_store: Arc<blob_store::fs::Backend>,
@@ -55,12 +70,22 @@ impl FSRegistryTestCase {
         &self.blob_store
     }
 
-    pub fn metadata_store(&self) -> &metadata_store::fs::Backend {
-        &self.metadata_store
-    }
-
     pub fn temp_dir(&self) -> &TempDir {
         &self.temp_dir
+    }
+}
+
+impl RegistryTestCase for FSRegistryTestCase {
+    fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
+    fn blob_store(&self) -> &dyn BlobStore {
+        &*self.blob_store
+    }
+
+    fn metadata_store(&self) -> &dyn MetadataStore {
+        &*self.metadata_store
     }
 }
 
@@ -112,16 +137,22 @@ impl S3RegistryTestCase {
         }
     }
 
-    pub fn registry(&self) -> &Registry {
-        &self.s3_registry
-    }
-
     pub fn blob_store(&self) -> &blob_store::s3::Backend {
         &self.s3_blob_store
     }
+}
 
-    pub fn metadata_store(&self) -> &metadata_store::s3::Backend {
-        &self.s3_metadata_store
+impl RegistryTestCase for S3RegistryTestCase {
+    fn registry(&self) -> &Registry {
+        &self.s3_registry
+    }
+
+    fn blob_store(&self) -> &dyn BlobStore {
+        &*self.s3_blob_store
+    }
+
+    fn metadata_store(&self) -> &dyn MetadataStore {
+        &*self.s3_metadata_store
     }
 }
 

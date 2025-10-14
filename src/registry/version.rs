@@ -22,40 +22,30 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
-    use crate::registry::Registry;
-
-    async fn test_handle_get_api_version_impl(registry: &Registry) {
-        let response = registry.handle_get_api_version().await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get(DOCKER_DISTRIBUTION_API_VERSION)
-                .and_then(|h| h.to_str().ok())
-                .map(std::string::ToString::to_string),
-            Some("registry/2.0".to_string())
-        );
-        assert_eq!(
-            response
-                .headers()
-                .get(X_POWERED_BY)
-                .and_then(|h| h.to_str().ok())
-                .map(std::string::ToString::to_string),
-            Some("Simple-Registry".to_string())
-        );
-    }
+    use crate::registry::tests::backends;
 
     #[tokio::test]
-    async fn test_handle_get_api_version_fs() {
-        let t = FSRegistryTestCase::new();
-        test_handle_get_api_version_impl(t.registry()).await;
-    }
+    async fn test_handle_get_api_version() {
+        for test_case in backends() {
+            let response = test_case.registry().handle_get_api_version().await.unwrap();
 
-    #[tokio::test]
-    async fn test_handle_get_api_version_s3() {
-        let t = S3RegistryTestCase::new();
-        test_handle_get_api_version_impl(t.registry()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(DOCKER_DISTRIBUTION_API_VERSION)
+                    .and_then(|h| h.to_str().ok())
+                    .map(std::string::ToString::to_string),
+                Some("registry/2.0".to_string())
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(X_POWERED_BY)
+                    .and_then(|h| h.to_str().ok())
+                    .map(std::string::ToString::to_string),
+                Some("Simple-Registry".to_string())
+            );
+        }
     }
 }

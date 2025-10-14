@@ -278,454 +278,363 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::registry::test_utils::create_test_blob;
-    use crate::registry::tests::{FSRegistryTestCase, S3RegistryTestCase};
+    use crate::registry::tests::backends;
     use futures_util::TryStreamExt;
     use http_body_util::BodyExt;
     use std::io::Cursor;
     use tokio::io::AsyncReadExt;
     use tokio_util::io::StreamReader;
 
-    async fn test_head_blob_impl(registry: &Registry) {
-        let namespace = "test-repo";
-        let content = b"test blob content";
-
-        let (digest, repository) = create_test_blob(registry, namespace, content).await;
-        let response = registry
-            .head_blob(&repository, &[], namespace, &digest)
-            .await
-            .unwrap();
-
-        assert_eq!(response.digest, digest);
-        assert_eq!(response.size, content.len() as u64);
-    }
-
     #[tokio::test]
-    async fn test_head_blob_fs() {
-        let t = FSRegistryTestCase::new();
-        test_head_blob_impl(t.registry()).await;
-    }
+    async fn test_head_blob() {
+        for test_case in backends() {
+            let registry = test_case.registry();
+            let namespace = "test-repo";
+            let content = b"test blob content";
 
-    #[tokio::test]
-    async fn test_head_blob_s3() {
-        let t = S3RegistryTestCase::new();
-        test_head_blob_impl(t.registry()).await;
-    }
+            let (digest, repository) = create_test_blob(registry, namespace, content).await;
+            let response = registry
+                .head_blob(&repository, &[], namespace, &digest)
+                .await
+                .unwrap();
 
-    async fn test_get_blob_impl(registry: &Registry) {
-        let namespace = "test-repo";
-        let content = b"test blob content";
-
-        let (digest, repository) = create_test_blob(registry, namespace, content).await;
-        let response = registry
-            .get_blob(&repository, &[], namespace, &digest, None)
-            .await
-            .unwrap();
-
-        match response {
-            GetBlobResponse::Reader(mut reader, size) => {
-                assert_eq!(size, content.len() as u64);
-                let mut buf = Vec::new();
-                reader.read_to_end(&mut buf).await.unwrap();
-                assert_eq!(buf, content);
-            }
-            _ => panic!("Expected Reader response"),
+            assert_eq!(response.digest, digest);
+            assert_eq!(response.size, content.len() as u64);
         }
     }
 
     #[tokio::test]
-    async fn test_get_blob_fs() {
-        let t = FSRegistryTestCase::new();
-        test_get_blob_impl(t.registry()).await;
-    }
+    async fn test_get_blob() {
+        for test_case in backends() {
+            let registry = test_case.registry();
+            let namespace = "test-repo";
+            let content = b"test blob content";
 
-    #[tokio::test]
-    async fn test_get_blob_s3() {
-        let t = S3RegistryTestCase::new();
-        test_get_blob_impl(t.registry()).await;
-    }
+            let (digest, repository) = create_test_blob(registry, namespace, content).await;
+            let response = registry
+                .get_blob(&repository, &[], namespace, &digest, None)
+                .await
+                .unwrap();
 
-    async fn test_get_blob_with_range_impl(registry: &Registry) {
-        let namespace = "test-repo";
-        let content = b"test blob content";
-
-        let (digest, repository) = create_test_blob(registry, namespace, content).await;
-        let range = Some((5, Some(10))); // Get bytes 5-10 (inclusive)
-        let response = registry
-            .get_blob(&repository, &[], namespace, &digest, range)
-            .await
-            .unwrap();
-
-        match response {
-            GetBlobResponse::RangedReader(mut reader, (start, end), total_size) => {
-                assert_eq!(start, 5);
-                assert_eq!(end, 10);
-                assert_eq!(total_size, content.len() as u64);
-
-                let mut buf = Vec::new();
-                reader.read_to_end(&mut buf).await.unwrap();
-                assert_eq!(buf, &content[5..=10]); // Note: using inclusive range
+            match response {
+                GetBlobResponse::Reader(mut reader, size) => {
+                    assert_eq!(size, content.len() as u64);
+                    let mut buf = Vec::new();
+                    reader.read_to_end(&mut buf).await.unwrap();
+                    assert_eq!(buf, content);
+                }
+                _ => panic!("Expected Reader response"),
             }
-            _ => panic!("Expected RangedReader response"),
         }
     }
 
     #[tokio::test]
-    async fn test_get_blob_with_range_fs() {
-        let t = FSRegistryTestCase::new();
-        test_get_blob_with_range_impl(t.registry()).await;
+    async fn test_get_blob_with_range() {
+        for test_case in backends() {
+            let registry = test_case.registry();
+            let namespace = "test-repo";
+            let content = b"test blob content";
+
+            let (digest, repository) = create_test_blob(registry, namespace, content).await;
+            let range = Some((5, Some(10)));
+            let response = registry
+                .get_blob(&repository, &[], namespace, &digest, range)
+                .await
+                .unwrap();
+
+            match response {
+                GetBlobResponse::RangedReader(mut reader, (start, end), total_size) => {
+                    assert_eq!(start, 5);
+                    assert_eq!(end, 10);
+                    assert_eq!(total_size, content.len() as u64);
+
+                    let mut buf = Vec::new();
+                    reader.read_to_end(&mut buf).await.unwrap();
+                    assert_eq!(buf, &content[5..=10]);
+                }
+                _ => panic!("Expected RangedReader response"),
+            }
+        }
     }
 
     #[tokio::test]
-    async fn test_get_blob_with_range_s3() {
-        let t = S3RegistryTestCase::new();
-        test_get_blob_with_range_impl(t.registry()).await;
-    }
+    async fn test_delete_blob() {
+        for test_case in backends() {
+            let registry = test_case.registry();
+            let namespace = "test-repo";
+            let content = b"test blob content";
 
-    async fn test_delete_blob_impl(registry: &Registry) {
-        let namespace = "test-repo";
-        let content = b"test blob content";
+            let (digest, _) = create_test_blob(registry, namespace, content).await;
 
-        // Create the blob and ensure the namespace exists
-        let (digest, _) = create_test_blob(registry, namespace, content).await;
+            let layer_link = LinkKind::Layer(digest.clone());
+            let config_link = LinkKind::Config(digest.clone());
+            registry
+                .metadata_store
+                .create_link(namespace, &layer_link, &digest)
+                .await
+                .unwrap();
+            registry
+                .metadata_store
+                .create_link(namespace, &config_link, &digest)
+                .await
+                .unwrap();
 
-        // Create test links
-        let layer_link = LinkKind::Layer(digest.clone());
-        let config_link = LinkKind::Config(digest.clone());
-        registry
-            .metadata_store
-            .create_link(namespace, &layer_link, &digest)
-            .await
-            .unwrap();
-        registry
-            .metadata_store
-            .create_link(namespace, &config_link, &digest)
-            .await
-            .unwrap();
+            assert!(registry
+                .metadata_store
+                .read_link(namespace, &layer_link, false)
+                .await
+                .is_ok());
+            assert!(registry
+                .metadata_store
+                .read_link(namespace, &config_link, false)
+                .await
+                .is_ok());
 
-        // Verify links exist
-        assert!(registry
-            .metadata_store
-            .read_link(namespace, &layer_link, false)
-            .await
-            .is_ok());
-        assert!(registry
-            .metadata_store
-            .read_link(namespace, &config_link, false)
-            .await
-            .is_ok());
+            let blob_index = registry
+                .metadata_store
+                .read_blob_index(&digest)
+                .await
+                .unwrap();
+            assert!(blob_index.namespace.contains_key(namespace));
+            let namespace_links = blob_index.namespace.get(namespace).unwrap();
+            assert!(namespace_links.contains(&layer_link));
+            assert!(namespace_links.contains(&config_link));
 
-        // Verify blob index is updated
-        let blob_index = registry
-            .metadata_store
-            .read_blob_index(&digest)
-            .await
-            .unwrap();
-        assert!(blob_index.namespace.contains_key(namespace));
-        let namespace_links = blob_index.namespace.get(namespace).unwrap();
-        assert!(namespace_links.contains(&layer_link));
-        assert!(namespace_links.contains(&config_link));
+            registry.delete_blob(namespace, &digest).await.unwrap();
 
-        // Delete the blob
-        registry.delete_blob(namespace, &digest).await.unwrap();
-
-        // Verify links are deleted
-        assert!(registry
-            .metadata_store
-            .read_link(namespace, &layer_link, false)
-            .await
-            .is_err());
-        assert!(registry
-            .metadata_store
-            .read_link(namespace, &config_link, false)
-            .await
-            .is_err());
+            assert!(registry
+                .metadata_store
+                .read_link(namespace, &layer_link, false)
+                .await
+                .is_err());
+            assert!(registry
+                .metadata_store
+                .read_link(namespace, &config_link, false)
+                .await
+                .is_err());
+        }
     }
 
     #[tokio::test]
-    async fn test_delete_blob_fs() {
-        let t = FSRegistryTestCase::new();
-        test_delete_blob_impl(t.registry()).await;
+    async fn test_copy_blob() {
+        for test_case in backends() {
+            let registry = test_case.registry();
+            let namespace = "test-repo";
+            let content = b"test blob content";
+
+            let (digest, _) = create_test_blob(registry, namespace, content).await;
+
+            let stream = Cursor::new(content.to_vec());
+            let storage_engine = registry.blob_store.clone();
+
+            Registry::copy_blob(storage_engine, stream, namespace.to_string(), &digest)
+                .await
+                .unwrap();
+
+            let stored_content = registry.blob_store.read_blob(&digest).await.unwrap();
+            assert_eq!(stored_content, content);
+        }
     }
 
     #[tokio::test]
-    async fn test_delete_blob_s3() {
-        let t = S3RegistryTestCase::new();
-        test_delete_blob_impl(t.registry()).await;
-    }
+    async fn test_handle_head_blob() {
+        for test_case in backends() {
+            let registry = test_case.registry();
+            let namespace = "test-repo";
+            let content = b"test blob content";
+            let (digest, _) = create_test_blob(registry, namespace, content).await;
 
-    async fn test_copy_blob_impl(registry: &Registry) {
-        let namespace = "test-repo";
-        let content = b"test blob content";
+            let accepted_content_types = Vec::new();
 
-        let (digest, _) = create_test_blob(registry, namespace, content).await;
+            let response = registry
+                .handle_head_blob(namespace, &digest, &accepted_content_types)
+                .await
+                .unwrap();
 
-        // Create a test stream
-        let stream = Cursor::new(content.to_vec());
-        let storage_engine = registry.blob_store.clone();
-
-        // Test copy_blob
-        Registry::copy_blob(storage_engine, stream, namespace.to_string(), &digest)
-            .await
-            .unwrap();
-
-        // Verify the blob was copied correctly
-        let stored_content = registry.blob_store.read_blob(&digest).await.unwrap();
-        assert_eq!(stored_content, content);
-    }
-
-    #[tokio::test]
-    async fn test_copy_blob_fs() {
-        let t = FSRegistryTestCase::new();
-        test_copy_blob_impl(t.registry()).await;
-    }
-
-    #[tokio::test]
-    async fn test_copy_blob_s3() {
-        let t = S3RegistryTestCase::new();
-        test_copy_blob_impl(t.registry()).await;
-    }
-
-    // Handler tests
-    async fn test_handle_head_blob_impl(registry: &Registry) {
-        let namespace = "test-repo";
-        let content = b"test blob content";
-        let (digest, _) = create_test_blob(registry, namespace, content).await;
-
-        let accepted_content_types = Vec::new();
-
-        let response = registry
-            .handle_head_blob(namespace, &digest, &accepted_content_types)
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get(DOCKER_CONTENT_DIGEST)
-                .and_then(|h| h.to_str().ok())
-                .map(std::string::ToString::to_string),
-            Some(digest.to_string())
-        );
-        assert_eq!(
-            response
-                .headers()
-                .get(CONTENT_LENGTH)
-                .and_then(|h| h.to_str().ok())
-                .map(std::string::ToString::to_string),
-            Some(content.len().to_string())
-        );
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(DOCKER_CONTENT_DIGEST)
+                    .and_then(|h| h.to_str().ok())
+                    .map(std::string::ToString::to_string),
+                Some(digest.to_string())
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(CONTENT_LENGTH)
+                    .and_then(|h| h.to_str().ok())
+                    .map(std::string::ToString::to_string),
+                Some(content.len().to_string())
+            );
+        }
     }
 
     #[tokio::test]
-    async fn test_handle_head_blob_fs() {
-        let t = FSRegistryTestCase::new();
-        test_handle_head_blob_impl(t.registry()).await;
+    async fn test_handle_delete_blob() {
+        for test_case in backends() {
+            let registry = test_case.registry();
+            let namespace = "test-repo";
+            let content = b"test blob content";
+            let (digest, _) = create_test_blob(registry, namespace, content).await;
+
+            let layer_link = LinkKind::Layer(digest.clone());
+            let config_link = LinkKind::Config(digest.clone());
+            let latest_link = LinkKind::Tag("latest".to_string());
+            registry
+                .metadata_store
+                .create_link(namespace, &layer_link, &digest)
+                .await
+                .unwrap();
+            registry
+                .metadata_store
+                .create_link(namespace, &config_link, &digest)
+                .await
+                .unwrap();
+
+            assert!(registry
+                .metadata_store
+                .read_link(namespace, &layer_link, false)
+                .await
+                .is_ok());
+            assert!(registry
+                .metadata_store
+                .read_link(namespace, &config_link, false)
+                .await
+                .is_ok());
+            assert!(registry
+                .metadata_store
+                .read_link(namespace, &latest_link, false)
+                .await
+                .is_ok());
+
+            assert!(registry.blob_store.read_blob(&digest).await.is_ok());
+
+            let response = registry
+                .handle_delete_blob(namespace, &digest)
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+            registry
+                .metadata_store
+                .delete_link(namespace, &latest_link)
+                .await
+                .unwrap();
+
+            assert!(registry
+                .metadata_store
+                .read_link(namespace, &layer_link, false)
+                .await
+                .is_err());
+            assert!(registry
+                .metadata_store
+                .read_link(namespace, &config_link, false)
+                .await
+                .is_err());
+            assert!(registry
+                .metadata_store
+                .read_link(namespace, &latest_link, false)
+                .await
+                .is_err());
+
+            let blob_index = registry.metadata_store.read_blob_index(&digest).await;
+            assert!(blob_index.is_err());
+
+            assert!(registry.blob_store.read_blob(&digest).await.is_err());
+        }
     }
 
     #[tokio::test]
-    async fn test_handle_head_blob_s3() {
-        let t = S3RegistryTestCase::new();
-        test_handle_head_blob_impl(t.registry()).await;
-    }
+    async fn test_handle_get_blob() {
+        for test_case in backends() {
+            let registry = test_case.registry();
+            let namespace = "test-repo";
+            let content = b"test blob content";
+            let (digest, _) = create_test_blob(registry, namespace, content).await;
 
-    async fn test_handle_delete_blob_impl(registry: &Registry) {
-        let namespace = "test-repo";
-        let content = b"test blob content";
-        let (digest, _) = create_test_blob(registry, namespace, content).await;
+            let accepted_content_types = Vec::new();
 
-        // Create test links
-        let layer_link = LinkKind::Layer(digest.clone());
-        let config_link = LinkKind::Config(digest.clone());
-        let latest_link = LinkKind::Tag("latest".to_string());
-        registry
-            .metadata_store
-            .create_link(namespace, &layer_link, &digest)
-            .await
-            .unwrap();
-        registry
-            .metadata_store
-            .create_link(namespace, &config_link, &digest)
-            .await
-            .unwrap();
+            let response = registry
+                .handle_get_blob(namespace, &digest, &accepted_content_types, None)
+                .await
+                .unwrap();
 
-        // Verify links exist
-        assert!(registry
-            .metadata_store
-            .read_link(namespace, &layer_link, false)
-            .await
-            .is_ok());
-        assert!(registry
-            .metadata_store
-            .read_link(namespace, &config_link, false)
-            .await
-            .is_ok());
-        assert!(registry
-            .metadata_store
-            .read_link(namespace, &latest_link, false)
-            .await
-            .is_ok());
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(DOCKER_CONTENT_DIGEST)
+                    .and_then(|h| h.to_str().ok())
+                    .map(std::string::ToString::to_string),
+                Some(digest.to_string())
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(CONTENT_LENGTH)
+                    .and_then(|h| h.to_str().ok())
+                    .map(std::string::ToString::to_string),
+                Some(content.len().to_string())
+            );
 
-        // Verify blob exists
-        assert!(registry.blob_store.read_blob(&digest).await.is_ok());
-
-        let response = registry
-            .handle_delete_blob(namespace, &digest)
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-
-        // Delete the latest tag link
-        registry
-            .metadata_store
-            .delete_link(namespace, &latest_link)
-            .await
-            .unwrap();
-
-        // Verify links are deleted
-        assert!(registry
-            .metadata_store
-            .read_link(namespace, &layer_link, false)
-            .await
-            .is_err());
-        assert!(registry
-            .metadata_store
-            .read_link(namespace, &config_link, false)
-            .await
-            .is_err());
-        assert!(registry
-            .metadata_store
-            .read_link(namespace, &latest_link, false)
-            .await
-            .is_err());
-
-        // Verify blob index is empty
-        let blob_index = registry.metadata_store.read_blob_index(&digest).await;
-        assert!(blob_index.is_err());
-
-        // Verify blob is deleted (since all links are removed)
-        assert!(registry.blob_store.read_blob(&digest).await.is_err());
+            let stream = response.into_data_stream().map_err(std::io::Error::other);
+            let mut reader = StreamReader::new(stream);
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, content);
+        }
     }
 
     #[tokio::test]
-    async fn test_handle_delete_blob_fs() {
-        let t = FSRegistryTestCase::new();
-        test_handle_delete_blob_impl(t.registry()).await;
-    }
+    async fn test_handle_get_blob_with_range() {
+        for test_case in backends() {
+            let registry = test_case.registry();
+            let namespace = "test-repo";
+            let content = b"test blob content";
+            let (digest, _) = create_test_blob(registry, namespace, content).await;
 
-    #[tokio::test]
-    async fn test_handle_delete_blob_s3() {
-        let t = S3RegistryTestCase::new();
-        test_handle_delete_blob_impl(t.registry()).await;
-    }
+            let accepted_content_types = Vec::new();
+            let range = Some((5, Some(10)));
 
-    async fn test_handle_get_blob_impl(registry: &Registry) {
-        let namespace = "test-repo";
-        let content = b"test blob content";
-        let (digest, _) = create_test_blob(registry, namespace, content).await;
+            let response = registry
+                .handle_get_blob(namespace, &digest, &accepted_content_types, range)
+                .await
+                .unwrap();
 
-        let accepted_content_types = Vec::new();
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(DOCKER_CONTENT_DIGEST)
+                    .and_then(|h| h.to_str().ok())
+                    .map(std::string::ToString::to_string),
+                Some(digest.to_string())
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(CONTENT_LENGTH)
+                    .and_then(|h| h.to_str().ok())
+                    .map(std::string::ToString::to_string),
+                Some("6".to_string())
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(CONTENT_RANGE)
+                    .and_then(|h| h.to_str().ok())
+                    .map(std::string::ToString::to_string),
+                Some(format!("bytes 5-10/{}", content.len()))
+            );
 
-        let response = registry
-            .handle_get_blob(namespace, &digest, &accepted_content_types, None)
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get(DOCKER_CONTENT_DIGEST)
-                .and_then(|h| h.to_str().ok())
-                .map(std::string::ToString::to_string),
-            Some(digest.to_string())
-        );
-        assert_eq!(
-            response
-                .headers()
-                .get(CONTENT_LENGTH)
-                .and_then(|h| h.to_str().ok())
-                .map(std::string::ToString::to_string),
-            Some(content.len().to_string())
-        );
-
-        // Read response body
-        let stream = response.into_data_stream().map_err(std::io::Error::other);
-        let mut reader = StreamReader::new(stream);
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).await.unwrap();
-        assert_eq!(buf, content);
-    }
-
-    #[tokio::test]
-    async fn test_handle_get_blob_fs() {
-        let t = FSRegistryTestCase::new();
-        test_handle_get_blob_impl(t.registry()).await;
-    }
-
-    #[tokio::test]
-    async fn test_handle_get_blob_s3() {
-        let t = S3RegistryTestCase::new();
-        test_handle_get_blob_impl(t.registry()).await;
-    }
-
-    async fn test_handle_get_blob_with_range_impl(registry: &Registry) {
-        let namespace = "test-repo";
-        let content = b"test blob content";
-        let (digest, _) = create_test_blob(registry, namespace, content).await;
-
-        let accepted_content_types = Vec::new();
-        let range = Some((5, Some(10)));
-
-        let response = registry
-            .handle_get_blob(namespace, &digest, &accepted_content_types, range)
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(
-            response
-                .headers()
-                .get(DOCKER_CONTENT_DIGEST)
-                .and_then(|h| h.to_str().ok())
-                .map(std::string::ToString::to_string),
-            Some(digest.to_string())
-        );
-        assert_eq!(
-            response
-                .headers()
-                .get(CONTENT_LENGTH)
-                .and_then(|h| h.to_str().ok())
-                .map(std::string::ToString::to_string),
-            Some("6".to_string()) // 10 - 5 + 1
-        );
-        assert_eq!(
-            response
-                .headers()
-                .get(CONTENT_RANGE)
-                .and_then(|h| h.to_str().ok())
-                .map(std::string::ToString::to_string),
-            Some(format!("bytes 5-10/{}", content.len()))
-        );
-
-        // Read response body
-        let stream = response.into_data_stream().map_err(std::io::Error::other);
-        let mut reader = StreamReader::new(stream);
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).await.unwrap();
-        assert_eq!(buf, &content[5..=10]);
-    }
-
-    #[tokio::test]
-    async fn test_handle_get_blob_with_range_fs() {
-        let t = FSRegistryTestCase::new();
-        test_handle_get_blob_with_range_impl(t.registry()).await;
-    }
-
-    #[tokio::test]
-    async fn test_handle_get_blob_with_range_s3() {
-        let t = S3RegistryTestCase::new();
-        test_handle_get_blob_with_range_impl(t.registry()).await;
+            let stream = response.into_data_stream().map_err(std::io::Error::other);
+            let mut reader = StreamReader::new(stream);
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(buf, &content[5..=10]);
+        }
     }
 }
