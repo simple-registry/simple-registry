@@ -25,3 +25,65 @@ impl BearerToken {
         self.expires_in
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_token_from_token_field() {
+        let bearer = BearerToken {
+            token: Some("token123".to_string()),
+            access_token: None,
+            expires_in: 3600,
+        };
+
+        assert_eq!(bearer.token().unwrap(), "token123");
+    }
+
+    #[test]
+    fn test_token_from_access_token_field() {
+        let bearer = BearerToken {
+            token: None,
+            access_token: Some("access456".to_string()),
+            expires_in: 3600,
+        };
+
+        assert_eq!(bearer.token().unwrap(), "access456");
+    }
+
+    #[test]
+    fn test_token_prefers_token_over_access_token() {
+        let bearer = BearerToken {
+            token: Some("token123".to_string()),
+            access_token: Some("access456".to_string()),
+            expires_in: 3600,
+        };
+
+        assert_eq!(bearer.token().unwrap(), "token123");
+    }
+
+    #[test]
+    fn test_token_missing_both_fields() {
+        let bearer = BearerToken {
+            token: None,
+            access_token: None,
+            expires_in: 3600,
+        };
+
+        let result = bearer.token();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::Internal(_)));
+    }
+
+    #[test]
+    fn test_ttl_returns_expires_in() {
+        let bearer = BearerToken {
+            token: Some("token".to_string()),
+            access_token: None,
+            expires_in: 7200,
+        };
+
+        assert_eq!(bearer.ttl(), 7200);
+    }
+}
