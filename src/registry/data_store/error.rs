@@ -36,3 +36,50 @@ impl From<serde_json::Error> for Error {
         Error::Serialization(err.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn test_display() {
+        assert_eq!(
+            format!("{}", Error::Configuration("invalid config".to_string())),
+            "Configuration error: invalid config"
+        );
+        assert_eq!(
+            format!("{}", Error::Io("disk full".to_string())),
+            "IO error: disk full"
+        );
+        assert_eq!(
+            format!("{}", Error::Serialization("invalid JSON".to_string())),
+            "Serialization error: invalid JSON"
+        );
+        assert_eq!(
+            format!("{}", Error::NotFound("file.txt".to_string())),
+            "Not found: file.txt"
+        );
+    }
+
+    #[test]
+    fn test_from_io_error_not_found() {
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "missing file");
+        let err: Error = io_err.into();
+        assert!(matches!(err, Error::NotFound(_)));
+    }
+
+    #[test]
+    fn test_from_io_error_other() {
+        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+        let err: Error = io_err.into();
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    #[test]
+    fn test_from_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{invalid}").unwrap_err();
+        let err: Error = json_err.into();
+        assert!(matches!(err, Error::Serialization(_)));
+    }
+}
