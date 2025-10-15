@@ -134,8 +134,10 @@ impl From<oci::Error> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aws_sdk_s3::error::SdkError;
     use aws_sdk_s3::operation::get_object::GetObjectError;
     use aws_sdk_s3::operation::head_object::HeadObjectError;
+    use aws_sdk_s3::operation::put_object::PutObjectError;
     use aws_sdk_s3::primitives::ByteStreamError;
     use sha2::digest::crypto_common::hazmat::DeserializeStateError;
 
@@ -280,8 +282,6 @@ mod tests {
 
     #[test]
     fn test_from_sdk_error() {
-        use aws_sdk_s3::error::SdkError;
-        use aws_sdk_s3::operation::put_object::PutObjectError;
         let sdk_error: SdkError<PutObjectError, _> =
             SdkError::construction_failure(io::Error::new(io::ErrorKind::TimedOut, "timeout"));
         assert!(matches!(Error::from(sdk_error), Error::StorageBackend(_)));
