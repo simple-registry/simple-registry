@@ -1,11 +1,12 @@
 mod error;
 
-use crate::registry::oci::{Descriptor, Digest};
+use crate::oci::{Descriptor, Digest};
 use async_trait::async_trait;
 pub use error::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+mod config;
 pub mod fs;
 pub mod link_kind;
 mod link_metadata;
@@ -13,6 +14,7 @@ mod lock;
 pub mod s3;
 
 use crate::registry::metadata_store::link_kind::LinkKind;
+pub use config::MetadataStoreConfig;
 pub use link_metadata::LinkMetadata;
 pub use lock::redis::LockConfig;
 
@@ -84,14 +86,15 @@ pub trait MetadataStore: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use crate::oci::Descriptor;
     use crate::registry::blob_store::BlobStore;
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::metadata_store::MetadataStore;
-    use crate::registry::oci::Descriptor;
+    use crate::registry::tests::backends;
     use chrono::{Duration, Utc};
     use std::collections::HashMap;
 
-    pub async fn test_datastore_list_namespaces(b: &impl BlobStore, m: &impl MetadataStore) {
+    pub async fn test_datastore_list_namespaces(b: &dyn BlobStore, m: &dyn MetadataStore) {
         let namespaces = ["repo1", "repo2", "repo3/nested"];
         let digest = b.create_blob(b"test blob content").await.unwrap();
 
@@ -133,7 +136,7 @@ mod tests {
         assert_eq!(all_namespaces, namespaces);
     }
 
-    pub async fn test_datastore_list_tags(b: &impl BlobStore, m: &impl MetadataStore) {
+    pub async fn test_datastore_list_tags(b: &dyn BlobStore, m: &dyn MetadataStore) {
         let namespace = "test-repo";
         let digest = b.create_blob(b"test blob content").await.unwrap();
 
@@ -183,7 +186,7 @@ mod tests {
         assert!(!tags_after_delete.contains(&delete_tag.to_string()));
     }
 
-    pub async fn test_datastore_list_referrers(b: &impl BlobStore, m: &impl MetadataStore) {
+    pub async fn test_datastore_list_referrers(b: &dyn BlobStore, m: &dyn MetadataStore) {
         let namespace = "test-repo";
         let base_digest = b.create_blob(b"base manifest content").await.unwrap();
         let base_link = LinkKind::Digest(base_digest.clone());
@@ -264,7 +267,7 @@ mod tests {
         assert!(non_matching_referrers.is_empty());
     }
 
-    pub async fn test_datastore_list_revisions(b: &impl BlobStore, m: &impl MetadataStore) {
+    pub async fn test_datastore_list_revisions(b: &dyn BlobStore, m: &dyn MetadataStore) {
         let namespace = "test-repo";
 
         let manifest_contents = [
@@ -315,7 +318,7 @@ mod tests {
         assert!(token3.is_none());
     }
 
-    pub async fn test_datastore_link_operations(b: &impl BlobStore, m: &impl MetadataStore) {
+    pub async fn test_datastore_link_operations(b: &dyn BlobStore, m: &dyn MetadataStore) {
         let namespace = "test-namespace";
         let digest = b.create_blob(b"test blob content").await.unwrap();
 
@@ -332,5 +335,42 @@ mod tests {
         let ref_info = m.read_link(namespace, &tag_link, false).await.unwrap();
         let created_at = ref_info.created_at.unwrap();
         assert!(Utc::now().signed_duration_since(created_at) < Duration::seconds(1));
+    }
+
+    #[tokio::test]
+    async fn test_list_namespaces() {
+        for test_case in backends() {
+            test_datastore_list_namespaces(test_case.blob_store(), test_case.metadata_store())
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_tags() {
+        for test_case in backends() {
+            test_datastore_list_tags(test_case.blob_store(), test_case.metadata_store()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_referrers() {
+        for test_case in backends() {
+            test_datastore_list_referrers(test_case.blob_store(), test_case.metadata_store()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_revisions() {
+        for test_case in backends() {
+            test_datastore_list_revisions(test_case.blob_store(), test_case.metadata_store()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_link_operations() {
+        for test_case in backends() {
+            test_datastore_link_operations(test_case.blob_store(), test_case.metadata_store())
+                .await;
+        }
     }
 }

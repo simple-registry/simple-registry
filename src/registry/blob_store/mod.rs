@@ -1,12 +1,14 @@
+mod config;
 mod error;
 pub mod fs;
 mod hashing_reader;
 pub mod s3;
 mod sha256_ext;
 
-use crate::registry::oci::Digest;
+use crate::oci::Digest;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+pub use config::BlobStorageConfig;
 use tokio::io::AsyncRead;
 
 pub use error::Error;

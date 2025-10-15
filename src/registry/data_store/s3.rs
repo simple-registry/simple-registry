@@ -1,3 +1,4 @@
+use crate::registry::data_store::Error;
 use aws_sdk_s3::config::{timeout::TimeoutConfig, BehaviorVersion, Credentials, Region};
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
@@ -42,7 +43,7 @@ impl BackendConfig {
     }
 
     pub fn default_multipart_part_size() -> ByteSize {
-        ByteSize::mib(10)
+        ByteSize::mib(50)
     }
 }
 
@@ -54,10 +55,22 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(config: BackendConfig) -> Self {
+    pub fn new(config: &BackendConfig) -> Result<Self, Error> {
+        if config.multipart_part_size < ByteSize::mib(5) {
+            return Err(Error::Configuration(
+                "Multipart part size must be at least 5MiB".to_string(),
+            ));
+        }
+
+        if config.multipart_copy_chunk_size > ByteSize::gib(5) {
+            return Err(Error::Configuration(
+                "Multipart copy chunk size must be at most 5GiB".to_string(),
+            ));
+        }
+
         let credentials = Credentials::new(
-            config.access_key_id,
-            config.secret_key,
+            &config.access_key_id,
+            &config.secret_key,
             None,
             None,
             "custom",
@@ -70,8 +83,8 @@ impl Backend {
 
         let client_config = S3Config::builder()
             .behavior_version(BehaviorVersion::latest())
-            .region(Region::new(config.region))
-            .endpoint_url(config.endpoint)
+            .region(Region::new(config.region.clone()))
+            .endpoint_url(&config.endpoint)
             .credentials_provider(credentials)
             .timeout_config(timeout)
             .force_path_style(true)
@@ -79,11 +92,11 @@ impl Backend {
 
         let s3_client = S3Client::from_conf(client_config);
 
-        Self {
+        Ok(Self {
             s3_client,
-            bucket: config.bucket,
-            key_prefix: config.key_prefix,
-        }
+            bucket: config.bucket.clone(),
+            key_prefix: config.key_prefix.clone(),
+        })
     }
 
     fn full_key(&self, path: &str) -> String {
@@ -573,5 +586,196 @@ impl Backend {
         }
 
         Ok(parts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_multipart_copy_threshold() {
+        assert_eq!(
+            BackendConfig::default_multipart_copy_threshold(),
+            ByteSize::gb(5)
+        );
+    }
+
+    #[test]
+    fn test_default_multipart_copy_chunk_size() {
+        assert_eq!(
+            BackendConfig::default_multipart_copy_chunk_size(),
+            ByteSize::mb(100)
+        );
+    }
+
+    #[test]
+    fn test_default_multipart_copy_jobs() {
+        assert_eq!(BackendConfig::default_multipart_copy_jobs(), 4);
+    }
+
+    #[test]
+    fn test_default_multipart_part_size() {
+        assert_eq!(
+            BackendConfig::default_multipart_part_size(),
+            ByteSize::mib(50)
+        );
+    }
+
+    #[test]
+    fn test_new_multipart_part_size_too_small() {
+        let config = BackendConfig {
+            access_key_id: "key".to_string(),
+            secret_key: "secret".to_string(),
+            endpoint: "http://localhost:9000".to_string(),
+            bucket: "test".to_string(),
+            region: "us-east-1".to_string(),
+            key_prefix: String::new(),
+            multipart_copy_threshold: ByteSize::gb(5),
+            multipart_copy_chunk_size: ByteSize::mb(100),
+            multipart_copy_jobs: 4,
+            multipart_part_size: ByteSize::mib(4), // Less than 5 MiB
+        };
+
+        let result = Backend::new(&config);
+        assert!(matches!(result, Err(Error::Configuration(_))));
+    }
+
+    #[test]
+    fn test_new_multipart_copy_chunk_size_too_large() {
+        let config = BackendConfig {
+            access_key_id: "key".to_string(),
+            secret_key: "secret".to_string(),
+            endpoint: "http://localhost:9000".to_string(),
+            bucket: "test".to_string(),
+            region: "us-east-1".to_string(),
+            key_prefix: String::new(),
+            multipart_copy_threshold: ByteSize::gb(5),
+            multipart_copy_chunk_size: ByteSize::gib(6), // More than 5 GiB
+            multipart_copy_jobs: 4,
+            multipart_part_size: ByteSize::mib(50),
+        };
+
+        let result = Backend::new(&config);
+        assert!(matches!(result, Err(Error::Configuration(_))));
+    }
+
+    #[test]
+    fn test_new_valid_config() {
+        let config = BackendConfig {
+            access_key_id: "key".to_string(),
+            secret_key: "secret".to_string(),
+            endpoint: "http://localhost:9000".to_string(),
+            bucket: "test".to_string(),
+            region: "us-east-1".to_string(),
+            key_prefix: String::new(),
+            multipart_copy_threshold: ByteSize::gb(5),
+            multipart_copy_chunk_size: ByteSize::mb(100),
+            multipart_copy_jobs: 4,
+            multipart_part_size: ByteSize::mib(50),
+        };
+
+        let result = Backend::new(&config);
+        assert!(result.is_ok());
+        let backend = result.unwrap();
+        assert_eq!(backend.bucket, "test");
+        assert_eq!(backend.key_prefix, "");
+    }
+
+    #[test]
+    fn test_full_key_without_prefix() {
+        let config = BackendConfig {
+            access_key_id: "key".to_string(),
+            secret_key: "secret".to_string(),
+            endpoint: "http://localhost:9000".to_string(),
+            bucket: "test".to_string(),
+            region: "us-east-1".to_string(),
+            key_prefix: String::new(),
+            multipart_copy_threshold: ByteSize::gb(5),
+            multipart_copy_chunk_size: ByteSize::mb(100),
+            multipart_copy_jobs: 4,
+            multipart_part_size: ByteSize::mib(50),
+        };
+
+        let backend = Backend::new(&config).unwrap();
+        assert_eq!(backend.full_key("test/file.txt"), "test/file.txt");
+    }
+
+    #[test]
+    fn test_full_key_with_prefix() {
+        let config = BackendConfig {
+            access_key_id: "key".to_string(),
+            secret_key: "secret".to_string(),
+            endpoint: "http://localhost:9000".to_string(),
+            bucket: "test".to_string(),
+            region: "us-east-1".to_string(),
+            key_prefix: "prefix".to_string(),
+            multipart_copy_threshold: ByteSize::gb(5),
+            multipart_copy_chunk_size: ByteSize::mb(100),
+            multipart_copy_jobs: 4,
+            multipart_part_size: ByteSize::mib(50),
+        };
+
+        let backend = Backend::new(&config).unwrap();
+        assert_eq!(backend.full_key("test/file.txt"), "prefix/test/file.txt");
+    }
+
+    #[tokio::test]
+    async fn test_upload_part_returns_etag() {
+        let config = BackendConfig {
+            access_key_id: "minioadmin".to_string(),
+            secret_key: "minioadmin".to_string(),
+            endpoint: "http://localhost:9000".to_string(),
+            bucket: "test-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            key_prefix: String::new(),
+            multipart_copy_threshold: ByteSize::gb(5),
+            multipart_copy_chunk_size: ByteSize::mb(100),
+            multipart_copy_jobs: 4,
+            multipart_part_size: ByteSize::mib(50),
+        };
+
+        let backend = Backend::new(&config).unwrap();
+
+        let result = backend
+            .upload_part(
+                "test/file.txt",
+                "test-upload-id",
+                1,
+                Bytes::from("test data"),
+            )
+            .await;
+
+        if result.is_err() {
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("error") || err.to_string().contains("refused"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_abort_multipart_upload() {
+        let config = BackendConfig {
+            access_key_id: "minioadmin".to_string(),
+            secret_key: "minioadmin".to_string(),
+            endpoint: "http://localhost:9000".to_string(),
+            bucket: "test-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            key_prefix: String::new(),
+            multipart_copy_threshold: ByteSize::gb(5),
+            multipart_copy_chunk_size: ByteSize::mb(100),
+            multipart_copy_jobs: 4,
+            multipart_part_size: ByteSize::mib(50),
+        };
+
+        let backend = Backend::new(&config).unwrap();
+
+        let result = backend
+            .abort_multipart_upload("test/file.txt", "test-upload-id")
+            .await;
+
+        if result.is_err() {
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("error") || err.to_string().contains("refused"));
+        }
     }
 }

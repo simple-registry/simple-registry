@@ -17,9 +17,9 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(config: BackendConfig) -> Self {
+    pub fn new(config: &BackendConfig) -> Self {
         Self {
-            root: config.root_dir.into(),
+            root: PathBuf::from(&config.root_dir),
             sync_to_disk: config.sync_to_disk,
         }
     }
@@ -154,9 +154,224 @@ impl Backend {
         }
         fs::OpenOptions::new()
             .create(true)
-            .truncate(false)
-            .write(true)
+            .append(true)
             .open(full_path)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn test_new() {
+        let config = BackendConfig {
+            root_dir: "/test/path".to_string(),
+            sync_to_disk: true,
+        };
+        let backend = Backend::new(&config);
+        assert_eq!(backend.root, PathBuf::from("/test/path"));
+        assert!(backend.sync_to_disk);
+    }
+
+    #[tokio::test]
+    async fn test_write_and_read() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = BackendConfig {
+            root_dir: tmp_dir.path().to_string_lossy().into_owned(),
+            sync_to_disk: false,
+        };
+        let backend = Backend::new(&config);
+
+        backend.write("test.txt", b"hello world").await.unwrap();
+        let content = backend.read("test.txt").await.unwrap();
+        assert_eq!(content, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_write_with_sync_to_disk() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = BackendConfig {
+            root_dir: tmp_dir.path().to_string_lossy().into_owned(),
+            sync_to_disk: true,
+        };
+        let backend = Backend::new(&config);
+
+        backend.write("test.txt", b"synced").await.unwrap();
+        let content = backend.read("test.txt").await.unwrap();
+        assert_eq!(content, b"synced");
+    }
+
+    #[tokio::test]
+    async fn test_read_to_string() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = BackendConfig {
+            root_dir: tmp_dir.path().to_string_lossy().into_owned(),
+            sync_to_disk: false,
+        };
+        let backend = Backend::new(&config);
+
+        backend.write("test.txt", b"hello string").await.unwrap();
+        let content = backend.read_to_string("test.txt").await.unwrap();
+        assert_eq!(content, "hello string");
+    }
+
+    #[tokio::test]
+    async fn test_delete() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = BackendConfig {
+            root_dir: tmp_dir.path().to_string_lossy().into_owned(),
+            sync_to_disk: false,
+        };
+        let backend = Backend::new(&config);
+
+        backend.write("test.txt", b"delete me").await.unwrap();
+        backend.delete("test.txt").await.unwrap();
+        assert!(backend.read("test.txt").await.is_err());
+
+        backend.delete("non_existent.txt").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_dir() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = BackendConfig {
+            root_dir: tmp_dir.path().to_string_lossy().into_owned(),
+            sync_to_disk: false,
+        };
+        let backend = Backend::new(&config);
+
+        backend.write("dir/file1.txt", b"content1").await.unwrap();
+        backend.write("dir/file2.txt", b"content2").await.unwrap();
+
+        backend.delete_dir("dir").await.unwrap();
+        assert!(backend.read("dir/file1.txt").await.is_err());
+
+        backend.delete_dir("non_existent_dir").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_file_size() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = BackendConfig {
+            root_dir: tmp_dir.path().to_string_lossy().into_owned(),
+            sync_to_disk: false,
+        };
+        let backend = Backend::new(&config);
+
+        let data = b"test data";
+        backend.write("test.txt", data).await.unwrap();
+        let size = backend.file_size("test.txt").await.unwrap();
+        assert_eq!(size, data.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn test_list_dir() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = BackendConfig {
+            root_dir: tmp_dir.path().to_string_lossy().into_owned(),
+            sync_to_disk: false,
+        };
+        let backend = Backend::new(&config);
+
+        backend.write("dir/file1.txt", b"content1").await.unwrap();
+        backend.write("dir/file2.txt", b"content2").await.unwrap();
+
+        let mut entries = backend.list_dir("dir").await.unwrap();
+        entries.sort();
+        assert_eq!(entries, vec!["file1.txt", "file2.txt"]);
+
+        let empty = backend.list_dir("non_existent").await.unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_delete_empty_parent_dirs() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = BackendConfig {
+            root_dir: tmp_dir.path().to_string_lossy().into_owned(),
+            sync_to_disk: false,
+        };
+        let backend = Backend::new(&config);
+
+        backend.write("a/b/c/file.txt", b"content").await.unwrap();
+        backend.delete("a/b/c/file.txt").await.unwrap();
+
+        backend
+            .delete_empty_parent_dirs("a/b/c/file.txt")
+            .await
+            .unwrap();
+
+        assert!(backend.list_dir("a/b/c").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_rename() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = BackendConfig {
+            root_dir: tmp_dir.path().to_string_lossy().into_owned(),
+            sync_to_disk: false,
+        };
+        let backend = Backend::new(&config);
+
+        backend.write("old.txt", b"content").await.unwrap();
+        backend.rename("old.txt", "new.txt").await.unwrap();
+
+        assert!(backend.read("old.txt").await.is_err());
+        let content = backend.read("new.txt").await.unwrap();
+        assert_eq!(content, b"content");
+    }
+
+    #[tokio::test]
+    async fn test_open_file() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = BackendConfig {
+            root_dir: tmp_dir.path().to_string_lossy().into_owned(),
+            sync_to_disk: false,
+        };
+        let backend = Backend::new(&config);
+
+        backend.write("test.txt", b"content").await.unwrap();
+        let file = backend.open_file("test.txt").await.unwrap();
+        assert!(file.metadata().await.unwrap().is_file());
+    }
+
+    #[tokio::test]
+    async fn test_create_file() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = BackendConfig {
+            root_dir: tmp_dir.path().to_string_lossy().into_owned(),
+            sync_to_disk: false,
+        };
+        let backend = Backend::new(&config);
+
+        let mut file = backend.create_file("new.txt").await.unwrap();
+        file.write_all(b"new content").await.unwrap();
+        drop(file);
+
+        let content = backend.read("new.txt").await.unwrap();
+        assert_eq!(content, b"new content");
+    }
+
+    #[tokio::test]
+    async fn test_open_file_append() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config = BackendConfig {
+            root_dir: tmp_dir.path().to_string_lossy().into_owned(),
+            sync_to_disk: false,
+        };
+        let backend = Backend::new(&config);
+
+        backend.write("test.txt", b"initial").await.unwrap();
+
+        let mut file = backend.open_file_append("test.txt").await.unwrap();
+        file.write_all(b" appended").await.unwrap();
+        drop(file);
+
+        let content = backend.read("test.txt").await.unwrap();
+        assert_eq!(content, b"initial appended");
     }
 }

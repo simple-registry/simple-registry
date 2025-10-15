@@ -2,8 +2,8 @@
 
 set -euxo pipefail
 
-SERVER_CA_SUBJECT="/C=US/ST=CA/L=San Francisco/O=My Company/CN=Server CA"
-SERVER_SUBJECT="/C=US/ST=CA/L=San Francisco/O=My Company/CN=example.com"
+SERVER_CA_SUBJECT="/C=LU/ST=LU/L=Luxembourg/O=My Company/CN=Server CA"
+SERVER_SUBJECT="/C=LU/ST=LU/L=Luxembourg/O=My Company/CN=example.com"
 
 SERVER_CA_CERTIFICATE_FILE=ca-certificate.pem
 SERVER_CA_PRIVATE_KEY_FILE=ca-private-key.pem
@@ -12,8 +12,8 @@ SERVER_CERTIFICATE_BUNDLE=server-ca-bundle.pem
 SERVER_CERTIFICATE_FILE=server-certificate.pem
 SERVER_PRIVATE_KEY_FILE=server-private-key.pem
 
-CLIENT_CA_SUBJECT="/C=US/ST=CA/L=San Franciscos/O=My Company/CN=Client CA"
-CLIENT_SUBJECT="/C=US/ST=CA/L=San Francisco/O=admins/CN=philippe"
+CLIENT_CA_SUBJECT="/C=LU/ST=LU/L=Luxembourg/O=My Company/CN=Client CA"
+CLIENT_SUBJECT="/C=LU/ST=LU/L=Luxembourg/O=admins/CN=philippe"
 
 CLIENT_CA_CERTIFICATE_FILE=client-ca-certificate.pem
 CLIENT_CA_PRIVATE_KEY_FILE=client-ca-private-key.pem

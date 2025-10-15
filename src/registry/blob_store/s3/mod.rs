@@ -2,76 +2,20 @@ mod chunked_reader;
 #[cfg(test)]
 pub mod tests;
 
+use crate::oci::Digest;
 use crate::registry::blob_store::hashing_reader::HashingReader;
 use crate::registry::blob_store::sha256_ext::Sha256Ext;
 use crate::registry::blob_store::{BlobStore, Error, Reader};
-use crate::registry::oci::Digest;
 use crate::registry::{data_store, path_builder};
 use async_trait::async_trait;
 use bytes::Bytes;
-use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
 use chunked_reader::ChunkedReader;
-use serde::Deserialize;
 use sha2::{Digest as ShaDigestTrait, Sha256};
 use std::fmt::{Debug, Formatter};
 use std::io::Cursor;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{debug, info, instrument};
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub struct BackendConfig {
-    pub access_key_id: String,
-    pub secret_key: String,
-    pub endpoint: String,
-    pub bucket: String,
-    pub region: String,
-    #[serde(default)]
-    pub key_prefix: String,
-    #[serde(default = "BackendConfig::default_multipart_copy_threshold")]
-    pub multipart_copy_threshold: ByteSize,
-    #[serde(default = "BackendConfig::default_multipart_copy_chunk_size")]
-    pub multipart_copy_chunk_size: ByteSize,
-    #[serde(default = "BackendConfig::default_multipart_copy_jobs")]
-    pub multipart_copy_jobs: usize,
-    #[serde(default = "BackendConfig::default_multipart_part_size")]
-    pub multipart_part_size: ByteSize,
-}
-
-impl BackendConfig {
-    fn default_multipart_copy_threshold() -> ByteSize {
-        ByteSize::gb(5)
-    }
-
-    fn default_multipart_copy_chunk_size() -> ByteSize {
-        ByteSize::mb(100)
-    }
-
-    fn default_multipart_copy_jobs() -> usize {
-        4
-    }
-
-    fn default_multipart_part_size() -> ByteSize {
-        ByteSize::mib(10)
-    }
-}
-
-impl From<BackendConfig> for data_store::s3::BackendConfig {
-    fn from(config: BackendConfig) -> Self {
-        Self {
-            access_key_id: config.access_key_id,
-            secret_key: config.secret_key,
-            endpoint: config.endpoint,
-            bucket: config.bucket,
-            region: config.region,
-            key_prefix: config.key_prefix,
-            multipart_copy_threshold: config.multipart_copy_threshold,
-            multipart_copy_chunk_size: config.multipart_copy_chunk_size,
-            multipart_copy_jobs: config.multipart_copy_jobs,
-            multipart_part_size: config.multipart_part_size,
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct Backend {
@@ -81,21 +25,21 @@ pub struct Backend {
 
 impl Debug for Backend {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("S3StorageEngine").finish()
+        f.debug_struct("Backend").finish()
     }
 }
 
 impl Backend {
-    pub fn new(config: BackendConfig) -> Self {
+    pub fn new(config: &data_store::s3::BackendConfig) -> Result<Self, Error> {
         info!("Using S3 blob-store backend");
         #[allow(clippy::cast_possible_truncation)]
-        let multipart_part_size = config.multipart_part_size.as_u64() as usize;
-        let store = data_store::s3::Backend::new(config.into());
+        let multipart_part_size = config.multipart_part_size.as_u64() as usize; // XXX: abstraction leaks
+        let store = data_store::s3::Backend::new(config)?;
 
-        Self {
+        Ok(Self {
             store,
             multipart_part_size,
-        }
+        })
     }
 
     #[instrument(skip(self, chunk))]

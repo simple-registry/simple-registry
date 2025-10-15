@@ -1,12 +1,9 @@
-#[cfg(test)]
-mod tests;
-
+use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::lock::{self, LockBackend, MemoryBackend};
 use crate::registry::metadata_store::{
     BlobIndex, BlobIndexOperation, Error, LinkMetadata, LockConfig, MetadataStore,
 };
-use crate::registry::oci::{Descriptor, Digest, Manifest};
 use crate::registry::{data_store, path_builder};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -39,20 +36,18 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(config: BackendConfig) -> Result<Self, crate::configuration::Error> {
+    pub fn new(config: &BackendConfig) -> Result<Self, Error> {
         info!("Using filesystem metadata-store backend");
-        let store = data_store::fs::Backend::new(data_store::fs::BackendConfig {
-            root_dir: config.root_dir,
+        let store = data_store::fs::Backend::new(&data_store::fs::BackendConfig {
+            root_dir: config.root_dir.clone(),
             sync_to_disk: config.sync_to_disk,
         });
 
         let lock: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync> =
-            if let Some(redis_config) = config.redis {
+            if let Some(redis_config) = &config.redis {
                 info!("Using Redis lock store for filesystem metadata-store");
                 let backend = lock::RedisBackend::new(redis_config).map_err(|e| {
-                    crate::configuration::Error::MetadataStore(format!(
-                        "Failed to initialize Redis lock store: {e}"
-                    ))
+                    Error::Lock(format!("Failed to initialize Redis lock store: {e}"))
                 })?;
                 Arc::new(backend)
             } else {

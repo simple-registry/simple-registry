@@ -1,19 +1,17 @@
-use bytesize::ByteSize;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use tracing::info;
 
 mod error;
-pub mod registry;
-pub mod watcher;
 
-use crate::registry::repository::access_policy::RepositoryAccessPolicyConfig;
-use crate::registry::repository::retention_policy::RepositoryRetentionPolicyConfig;
-use crate::registry::server::auth::oidc;
-use crate::registry::server::auth::webhook::WebhookConfig;
-use crate::registry::server::listeners::{insecure, tls};
-use crate::registry::{blob_store, cache, client, metadata_store};
+use crate::cache;
+use crate::command::server::auth::authenticator;
+use crate::command::server::listeners::{insecure, tls};
+use crate::registry::{
+    blob_store, metadata_store, repository, AccessPolicyConfig, RetentionPolicyConfig,
+};
 pub use error::Error;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -22,15 +20,15 @@ pub struct Configuration {
     #[serde(default)]
     pub global: GlobalConfig,
     #[serde(default, alias = "cache_store")]
-    pub cache: CacheStoreConfig,
+    pub cache: cache::Config,
     #[serde(default, alias = "storage")]
-    pub blob_store: BlobStorageConfig,
+    pub blob_store: blob_store::BlobStorageConfig,
     #[serde(default)]
-    pub metadata_store: MetadataStoreConfig,
+    pub metadata_store: Option<metadata_store::MetadataStoreConfig>,
     #[serde(default)]
-    pub auth: AuthConfig,
+    pub auth: authenticator::AuthConfig,
     #[serde(default)]
-    pub repository: HashMap<String, RepositoryConfig>, // hashmap of namespace <-> repository_config
+    pub repository: HashMap<String, repository::Config>, // hashmap of namespace <-> repository_config
     #[serde(default)]
     pub observability: Option<ObservabilityConfig>,
 }
@@ -51,9 +49,9 @@ pub struct GlobalConfig {
     #[serde(default = "GlobalConfig::default_update_pull_time")]
     pub update_pull_time: bool,
     #[serde(default)]
-    pub access_policy: RepositoryAccessPolicyConfig,
+    pub access_policy: AccessPolicyConfig,
     #[serde(default)]
-    pub retention_policy: RepositoryRetentionPolicyConfig,
+    pub retention_policy: RetentionPolicyConfig,
     #[serde(default)]
     pub immutable_tags: bool,
     #[serde(default)]
@@ -67,8 +65,8 @@ impl Default for GlobalConfig {
             max_concurrent_requests: GlobalConfig::default_max_concurrent_requests(),
             max_concurrent_cache_jobs: GlobalConfig::default_max_concurrent_cache_jobs(),
             update_pull_time: GlobalConfig::default_update_pull_time(),
-            access_policy: RepositoryAccessPolicyConfig::default(),
-            retention_policy: RepositoryRetentionPolicyConfig::default(),
+            access_policy: AccessPolicyConfig::default(),
+            retention_policy: RetentionPolicyConfig::default(),
             immutable_tags: false,
             immutable_tags_exclusions: Vec::new(),
             authorization_webhook: None,
@@ -90,80 +88,6 @@ impl GlobalConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub enum CacheStoreConfig {
-    #[default]
-    #[serde(rename = "memory")]
-    Memory,
-    #[serde(rename = "redis")]
-    Redis(cache::redis::BackendConfig),
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[allow(clippy::large_enum_variant)]
-pub enum BlobStorageConfig {
-    #[serde(rename = "fs")]
-    FS(blob_store::fs::BackendConfig),
-    #[serde(rename = "s3")]
-    S3(blob_store::s3::BackendConfig),
-}
-
-impl Default for BlobStorageConfig {
-    fn default() -> Self {
-        BlobStorageConfig::FS(blob_store::fs::BackendConfig::default())
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[allow(clippy::large_enum_variant)]
-pub enum MetadataStoreConfig {
-    #[serde(rename = "fs")]
-    FS(metadata_store::fs::BackendConfig),
-    #[serde(rename = "s3")]
-    S3(metadata_store::s3::BackendConfig),
-    #[serde(skip_deserializing)]
-    #[default]
-    Unspecified,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct AuthConfig {
-    #[serde(default)]
-    pub identity: HashMap<String, IdentityConfig>,
-    #[serde(default)]
-    pub oidc: HashMap<String, OidcProviderConfig>,
-    #[serde(default)]
-    pub webhook: HashMap<String, WebhookConfig>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct IdentityConfig {
-    pub username: String,
-    pub password: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "provider", rename_all = "lowercase")]
-pub enum OidcProviderConfig {
-    Generic(oidc::provider::generic::ProviderConfig),
-    GitHub(oidc::provider::github::ProviderConfig),
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct RepositoryConfig {
-    #[serde(default)]
-    pub upstream: Vec<client::ClientConfig>,
-    #[serde(default)]
-    pub access_policy: RepositoryAccessPolicyConfig,
-    #[serde(default)]
-    pub retention_policy: RepositoryRetentionPolicyConfig,
-    #[serde(default)]
-    pub immutable_tags: bool,
-    #[serde(default)]
-    pub immutable_tags_exclusions: Vec<String>,
-    pub authorization_webhook: Option<String>,
-}
-
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ObservabilityConfig {
     #[serde(default)]
@@ -178,54 +102,22 @@ pub struct TracingConfig {
 
 impl Configuration {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
-        let config_str = fs::read_to_string(path)?;
-        Self::load_from_str(&config_str)
+        let config = match fs::read_to_string(path) {
+            Ok(config) => Ok(config),
+            Err(err) => Err(Error::NotReadable(format!(
+                "Unable to read configuration file: {err}"
+            ))),
+        }?;
+
+        Self::load_from_str(&config)
     }
 
     pub fn load_from_str(slice: &str) -> Result<Self, Error> {
-        let mut config: Configuration = toml::from_str(slice).map_err(|e| {
+        let config: Configuration = toml::from_str(slice).map_err(|e| {
             println!("Configuration file format error:");
             println!("{e}");
-            Error::ConfigurationFileFormat(e.to_string())
+            Error::NotReadable(e.to_string())
         })?;
-
-        // Resolve Unspecified metadata_store based on blob_store configuration
-        if matches!(config.metadata_store, MetadataStoreConfig::Unspecified) {
-            config.metadata_store = match &config.blob_store {
-                BlobStorageConfig::FS(cfg) => {
-                    MetadataStoreConfig::FS(metadata_store::fs::BackendConfig {
-                        root_dir: cfg.root_dir.clone(),
-                        redis: None,
-                        sync_to_disk: cfg.sync_to_disk,
-                    })
-                }
-                BlobStorageConfig::S3(cfg) => {
-                    tracing::info!("Auto-configuring S3 metadata-store from blob-store");
-                    MetadataStoreConfig::S3(metadata_store::s3::BackendConfig {
-                        bucket: cfg.bucket.clone(),
-                        region: cfg.region.clone(),
-                        endpoint: cfg.endpoint.clone(),
-                        access_key_id: cfg.access_key_id.clone(),
-                        secret_key: cfg.secret_key.clone(),
-                        key_prefix: cfg.key_prefix.clone(),
-                        redis: None,
-                    })
-                }
-            };
-        }
-
-        if let BlobStorageConfig::S3(s3_storage) = &config.blob_store {
-            if s3_storage.multipart_part_size < ByteSize::mib(5) {
-                return Err(Error::StreamingChunkSize(
-                    "Multipart part size must be at least 5MiB".to_string(),
-                ));
-            }
-            if s3_storage.multipart_copy_chunk_size > ByteSize::gib(5) {
-                return Err(Error::StreamingChunkSize(
-                    "Multipart copy chunk size must be at most 5GiB".to_string(),
-                ));
-            }
-        }
 
         config.validate()?;
         Ok(config)
@@ -234,42 +126,66 @@ impl Configuration {
     pub fn validate(&self) -> Result<(), Error> {
         for (name, webhook) in &self.auth.webhook {
             webhook.validate().map_err(|e| {
-                Error::ConfigurationFileFormat(format!("Invalid webhook '{name}': {e}"))
+                let msg = format!("Invalid webhook '{name}': {e}");
+                Error::InvalidFormat(msg)
             })?;
         }
 
-        let webhook_names: std::collections::HashSet<&str> = self
-            .auth
-            .webhook
-            .keys()
-            .map(std::string::String::as_str)
-            .collect();
+        let webhook_names = self.auth.webhook.keys().collect::<HashSet<_>>();
 
-        if let Some(ref webhook_name) = self.global.authorization_webhook {
-            if !webhook_names.contains(webhook_name.as_str()) {
-                return Err(Error::ConfigurationFileFormat(format!(
-                    "Global authorization_webhook '{webhook_name}' not found in auth.webhook definitions"
-                )));
+        if let Some(webhook_name) = &self.global.authorization_webhook {
+            if !webhook_names.contains(&webhook_name) {
+                let msg = format!("Webhook '{webhook_name}' not found (referenced globally)");
+                return Err(Error::InvalidFormat(msg));
             }
         }
 
-        for (repo_name, repo_config) in &self.repository {
-            if let Some(ref webhook_name) = repo_config.authorization_webhook {
-                if !webhook_name.is_empty() && !webhook_names.contains(webhook_name.as_str()) {
-                    return Err(Error::ConfigurationFileFormat(format!(
-                        "Repository '{repo_name}' references undefined webhook '{webhook_name}'"
-                    )));
+        for (repository, config) in &self.repository {
+            if let Some(webhook_name) = &config.authorization_webhook {
+                if !webhook_name.is_empty() && !webhook_names.contains(&webhook_name) {
+                    let msg = format!("Webhook '{webhook_name}' not found (referenced in '{repository}' repository)");
+                    return Err(Error::InvalidFormat(msg));
                 }
             }
         }
 
         Ok(())
     }
+
+    pub fn resolve_metadata_config(&self) -> metadata_store::MetadataStoreConfig {
+        match &self.metadata_store {
+            Some(config) => config.clone(),
+            None => match &self.blob_store {
+                blob_store::BlobStorageConfig::FS(config) => {
+                    metadata_store::MetadataStoreConfig::FS(metadata_store::fs::BackendConfig {
+                        root_dir: config.root_dir.clone(),
+                        redis: None,
+                        sync_to_disk: config.sync_to_disk,
+                    })
+                }
+                blob_store::BlobStorageConfig::S3(config) => {
+                    info!("Auto-configuring S3 metadata-store from blob-store");
+                    metadata_store::MetadataStoreConfig::S3(metadata_store::s3::BackendConfig {
+                        bucket: config.bucket.clone(),
+                        region: config.region.clone(),
+                        endpoint: config.endpoint.clone(),
+                        access_key_id: config.access_key_id.clone(),
+                        secret_key: config.secret_key.clone(),
+                        key_prefix: config.key_prefix.clone(),
+                        redis: None,
+                    })
+                }
+            },
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::server::auth::oidc;
+    use crate::registry::data_store;
+    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_load_minimal_config() {
@@ -294,68 +210,12 @@ mod tests {
         assert_eq!(server_config.query_timeout, 3600);
         assert_eq!(server_config.query_timeout_grace_period, 60);
 
-        assert_eq!(config.cache, CacheStoreConfig::Memory);
-        assert_eq!(config.blob_store, BlobStorageConfig::default());
+        assert_eq!(config.cache, cache::Config::Memory);
+        assert_eq!(config.blob_store, blob_store::BlobStorageConfig::default());
 
         assert!(config.auth.identity.is_empty());
         assert!(config.repository.is_empty());
         assert!(config.observability.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_metadata_store_defaults_with_s3_blob_store() {
-        // When using S3 blob store and no metadata store is specified,
-        // it should autoconfigure S3 metadata store
-        let config = r#"
-        [server]
-        bind_address = "0.0.0.0"
-        
-        [blob_store.s3]
-        bucket = "test-bucket"
-        region = "us-east-1"
-        endpoint = "http://localhost:9000"
-        access_key_id = "test-key"
-        secret_key = "test-secret"
-        "#;
-
-        let config = Configuration::load_from_str(config).unwrap();
-
-        // Should autoconfigure S3 metadata store with same settings
-        match config.metadata_store {
-            MetadataStoreConfig::S3(ref meta_cfg) => {
-                assert_eq!(meta_cfg.bucket, "test-bucket");
-                assert_eq!(meta_cfg.region, "us-east-1");
-                assert_eq!(meta_cfg.endpoint, "http://localhost:9000");
-                assert_eq!(meta_cfg.access_key_id, "test-key");
-                assert_eq!(meta_cfg.secret_key, "test-secret");
-            }
-            _ => panic!("Expected S3 metadata store to be auto-configured"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_metadata_store_defaults_with_fs_blob_store() {
-        // When using FS blob store and no metadata store is specified,
-        // it should use FS metadata store with same root_dir
-        let config = r#"
-        [server]
-        bind_address = "0.0.0.0"
-        
-        [blob_store.fs]
-        root_dir = "/data/registry"
-        sync_to_disk = true
-        "#;
-
-        let config = Configuration::load_from_str(config).unwrap();
-
-        // Should use FS metadata store with same root_dir
-        match config.metadata_store {
-            MetadataStoreConfig::FS(ref meta_cfg) => {
-                assert_eq!(meta_cfg.root_dir, "/data/registry");
-                assert!(meta_cfg.sync_to_disk);
-            }
-            _ => panic!("Expected FS metadata store"),
-        }
     }
 
     #[tokio::test]
@@ -372,20 +232,14 @@ mod tests {
         let config = Configuration::load_from_str(config).unwrap();
 
         // Should parse 'storage' as 'blob_store'
-        match config.blob_store {
-            BlobStorageConfig::FS(ref cfg) => {
-                assert_eq!(cfg.root_dir, "/data/registry");
-            }
-            BlobStorageConfig::S3(_) => panic!("Expected FS blob store from 'storage' field"),
-        }
+        let expected = blob_store::BlobStorageConfig::FS(data_store::fs::BackendConfig {
+            root_dir: "/data/registry".to_string(),
+            sync_to_disk: false,
+        });
+        assert_eq!(config.blob_store, expected);
 
         // Should autoconfigure metadata store based on blob store
-        match config.metadata_store {
-            MetadataStoreConfig::FS(ref cfg) => {
-                assert_eq!(cfg.root_dir, "/data/registry");
-            }
-            _ => panic!("Expected FS metadata store to be auto-configured"),
-        }
+        assert_eq!(config.metadata_store, None);
     }
 
     #[tokio::test]
@@ -404,8 +258,14 @@ mod tests {
 
         match config.server {
             ServerConfig::Tls(tls_config) => {
-                assert_eq!(tls_config.tls.server_certificate_bundle, "server.pem");
-                assert_eq!(tls_config.tls.server_private_key, "server.key");
+                assert_eq!(
+                    tls_config.tls.server_certificate_bundle.to_str(),
+                    Some("server.pem")
+                );
+                assert_eq!(
+                    tls_config.tls.server_private_key.to_str(),
+                    Some("server.key")
+                );
             }
             ServerConfig::Insecure(_) => {
                 panic!("Expected TLS server config but got Insecure");
@@ -435,8 +295,8 @@ mod tests {
 
         // Should keep the explicitly configured FS metadata store
         match config.metadata_store {
-            MetadataStoreConfig::FS(ref meta_cfg) => {
-                assert_eq!(meta_cfg.root_dir, "/custom/metadata/path");
+            Some(metadata_store::MetadataStoreConfig::FS(config)) => {
+                assert_eq!(config.root_dir, "/custom/metadata/path");
             }
             _ => panic!("Expected explicitly configured FS metadata store to be preserved"),
         }
@@ -444,7 +304,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_section() {
-        // Test auth section configuration
         let config = r#"
         [server]
         bind_address = "0.0.0.0"
@@ -465,7 +324,753 @@ mod tests {
         assert_eq!(config.auth.oidc.len(), 1);
         assert!(matches!(
             config.auth.oidc.get("generic"),
-            Some(OidcProviderConfig::Generic(_))
+            Some(oidc::Config::Generic(_))
         ));
+    }
+
+    #[test]
+    fn test_global_config_default() {
+        let config = GlobalConfig::default();
+        assert_eq!(config.max_concurrent_requests, 4);
+        assert_eq!(config.max_concurrent_cache_jobs, 4);
+        assert!(!config.update_pull_time);
+        assert!(!config.immutable_tags);
+        assert!(config.immutable_tags_exclusions.is_empty());
+        assert!(config.authorization_webhook.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_global_config_custom_values() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [global]
+        max_concurrent_requests = 10
+        max_concurrent_cache_jobs = 8
+        update_pull_time = true
+        immutable_tags = true
+        immutable_tags_exclusions = ["latest", "dev"]
+        authorization_webhook = "my-webhook"
+
+        [auth.webhook.my-webhook]
+        url = "https://example.com/webhook"
+        timeout_ms = 5000
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert_eq!(config.global.max_concurrent_requests, 10);
+        assert_eq!(config.global.max_concurrent_cache_jobs, 8);
+        assert!(config.global.update_pull_time);
+        assert!(config.global.immutable_tags);
+        assert_eq!(config.global.immutable_tags_exclusions.len(), 2);
+        assert_eq!(config.global.immutable_tags_exclusions[0], "latest");
+        assert_eq!(config.global.immutable_tags_exclusions[1], "dev");
+        assert_eq!(
+            config.global.authorization_webhook,
+            Some("my-webhook".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_metadata_config_from_fs_blob_store() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [blob_store.fs]
+        root_dir = "/data/blobs"
+        sync_to_disk = true
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        let metadata_config = config.resolve_metadata_config();
+
+        match metadata_config {
+            metadata_store::MetadataStoreConfig::FS(fs_config) => {
+                assert_eq!(fs_config.root_dir, "/data/blobs");
+                assert!(fs_config.sync_to_disk);
+                assert!(fs_config.redis.is_none());
+            }
+            metadata_store::MetadataStoreConfig::S3(_) => {
+                panic!("Expected FS metadata store config")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_metadata_config_from_s3_blob_store() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [blob_store.s3]
+        bucket = "my-bucket"
+        region = "us-east-1"
+        endpoint = "https://s3.example.com"
+        access_key_id = "key123"
+        secret_key = "secret456"
+        key_prefix = "prefix/"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        let metadata_config = config.resolve_metadata_config();
+
+        match metadata_config {
+            metadata_store::MetadataStoreConfig::S3(s3_config) => {
+                assert_eq!(s3_config.bucket, "my-bucket");
+                assert_eq!(s3_config.region, "us-east-1");
+                assert_eq!(s3_config.endpoint, "https://s3.example.com");
+                assert_eq!(s3_config.access_key_id, "key123");
+                assert_eq!(s3_config.secret_key, "secret456");
+                assert_eq!(s3_config.key_prefix, "prefix/");
+                assert!(s3_config.redis.is_none());
+            }
+            metadata_store::MetadataStoreConfig::FS(_) => {
+                panic!("Expected S3 metadata store config")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_repository_config() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [repository.myapp]
+        immutable_tags = true
+        immutable_tags_exclusions = ["dev"]
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert_eq!(config.repository.len(), 1);
+        assert!(config.repository.contains_key("myapp"));
+        assert!(config.repository["myapp"].immutable_tags);
+        assert_eq!(
+            config.repository["myapp"].immutable_tags_exclusions.len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_observability_config() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [observability.tracing]
+        endpoint = "http://jaeger:4317"
+        sampling_rate = 0.1
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert!(config.observability.is_some());
+        let observability = config.observability.unwrap();
+        assert!(observability.tracing.is_some());
+        let tracing = observability.tracing.unwrap();
+        assert_eq!(tracing.endpoint, "http://jaeger:4317");
+        assert!((tracing.sampling_rate - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_cache_config_memory() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [cache]
+        memory = {}
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert!(matches!(config.cache, cache::Config::Memory));
+    }
+
+    #[tokio::test]
+    async fn test_cache_config_redis() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [cache.redis]
+        url = "redis://localhost:6379"
+        key_prefix = "simple-registry:"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        match config.cache {
+            cache::Config::Redis(redis_config) => {
+                assert_eq!(redis_config.url, "redis://localhost:6379");
+            }
+            cache::Config::Memory => panic!("Expected Redis cache config"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cache_store_backward_compatibility() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [cache_store.redis]
+        url = "redis://localhost:6379"
+        key_prefix = "simple-registry:"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        match config.cache {
+            cache::Config::Redis(redis_config) => {
+                assert_eq!(redis_config.url, "redis://localhost:6379");
+            }
+            cache::Config::Memory => panic!("Expected Redis cache config"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_toml_format() {
+        let config = r#"
+        [server
+        bind_address = "0.0.0.0"
+        "#;
+
+        let result = Configuration::load_from_str(config);
+        assert!(result.is_err());
+        match result {
+            Err(Error::NotReadable(_)) => {}
+            _ => panic!("Expected NotReadable error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_referenced_globally() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [global]
+        authorization_webhook = "my-webhook"
+
+        [auth.webhook.my-webhook]
+        url = "https://example.com/webhook"
+        timeout_ms = 5000
+        "#;
+
+        let result = Configuration::load_from_str(config);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_missing_global_reference() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [global]
+        authorization_webhook = "nonexistent-webhook"
+        "#;
+
+        let result = Configuration::load_from_str(config);
+        assert!(result.is_err());
+        match result {
+            Err(Error::InvalidFormat(msg)) => {
+                assert!(msg.contains("Webhook 'nonexistent-webhook' not found"));
+                assert!(msg.contains("referenced globally"));
+            }
+            _ => panic!("Expected InvalidFormat error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_referenced_in_repository() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [repository.myapp]
+        authorization_webhook = "repo-webhook"
+
+        [auth.webhook.repo-webhook]
+        url = "https://example.com/webhook"
+        timeout_ms = 5000
+        "#;
+
+        let result = Configuration::load_from_str(config);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_missing_repository_reference() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [repository.myapp]
+        authorization_webhook = "missing-webhook"
+        "#;
+
+        let result = Configuration::load_from_str(config);
+        assert!(result.is_err());
+        match result {
+            Err(Error::InvalidFormat(msg)) => {
+                assert!(msg.contains("Webhook 'missing-webhook' not found"));
+                assert!(msg.contains("referenced in 'myapp' repository"));
+            }
+            _ => panic!("Expected InvalidFormat error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_empty_string_in_repository() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [repository.myapp]
+        authorization_webhook = ""
+        "#;
+
+        let result = Configuration::load_from_str(config);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_invalid_webhook_config() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [auth.webhook.bad-webhook]
+        url = "ht!tp://::invalid"
+        timeout_ms = 5000
+        "#;
+
+        let result = Configuration::load_from_str(config);
+        assert!(result.is_err());
+        match result {
+            Err(Error::InvalidFormat(msg)) => {
+                assert!(msg.contains("Invalid webhook 'bad-webhook'"));
+            }
+            _ => panic!("Expected InvalidFormat error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tls_config_with_client_ca() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+        port = 8443
+
+        [server.tls]
+        server_certificate_bundle = "server.pem"
+        server_private_key = "server.key"
+        client_ca_bundle = "ca.pem"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        match config.server {
+            ServerConfig::Tls(tls_config) => {
+                assert_eq!(
+                    tls_config.tls.server_certificate_bundle,
+                    PathBuf::from("server.pem")
+                );
+                assert_eq!(
+                    tls_config.tls.server_private_key,
+                    PathBuf::from("server.key")
+                );
+                assert_eq!(
+                    tls_config.tls.client_ca_bundle,
+                    Some(PathBuf::from("ca.pem"))
+                );
+            }
+            ServerConfig::Insecure(_) => panic!("Expected TLS server config"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insecure_config_with_custom_port() {
+        let config = r#"
+        [server]
+        bind_address = "127.0.0.1"
+        port = 9000
+        query_timeout = 7200
+        query_timeout_grace_period = 120
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        match config.server {
+            ServerConfig::Insecure(insecure_config) => {
+                assert_eq!(insecure_config.bind_address.to_string(), "127.0.0.1");
+                assert_eq!(insecure_config.port, 9000);
+                assert_eq!(insecure_config.query_timeout, 7200);
+                assert_eq!(insecure_config.query_timeout_grace_period, 120);
+            }
+            ServerConfig::Tls(_) => panic!("Expected Insecure server config"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_repositories() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [repository.app1]
+        immutable_tags = true
+
+        [repository.app2]
+        immutable_tags = false
+
+        [repository.app3]
+        immutable_tags = true
+        immutable_tags_exclusions = ["dev", "test"]
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert_eq!(config.repository.len(), 3);
+        assert!(config.repository["app1"].immutable_tags);
+        assert!(!config.repository["app2"].immutable_tags);
+        assert!(config.repository["app3"].immutable_tags);
+        assert_eq!(config.repository["app3"].immutable_tags_exclusions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_store_s3_with_redis() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [blob_store.s3]
+        bucket = "my-bucket"
+        region = "us-east-1"
+        endpoint = "https://s3.amazonaws.com"
+        access_key_id = "blob-key"
+        secret_key = "blob-secret"
+
+        [metadata_store.s3]
+        bucket = "metadata-bucket"
+        region = "us-east-1"
+        endpoint = "https://s3.amazonaws.com"
+        access_key_id = "key"
+        secret_key = "secret"
+
+        [metadata_store.s3.redis]
+        url = "redis://localhost:6379"
+        ttl = 30
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        let metadata_config = config.resolve_metadata_config();
+
+        match metadata_config {
+            metadata_store::MetadataStoreConfig::S3(s3_config) => {
+                assert_eq!(s3_config.bucket, "metadata-bucket");
+                assert!(s3_config.redis.is_some());
+                assert_eq!(s3_config.redis.unwrap().url, "redis://localhost:6379");
+            }
+            metadata_store::MetadataStoreConfig::FS(_) => {
+                panic!("Expected S3 metadata store config")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metadata_store_fs_with_redis() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [metadata_store.fs]
+        root_dir = "/data/metadata"
+
+        [metadata_store.fs.redis]
+        url = "redis://localhost:6379"
+        ttl = 30
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        let metadata_config = config.resolve_metadata_config();
+
+        match metadata_config {
+            metadata_store::MetadataStoreConfig::FS(fs_config) => {
+                assert_eq!(fs_config.root_dir, "/data/metadata");
+                assert!(fs_config.redis.is_some());
+                assert_eq!(fs_config.redis.unwrap().url, "redis://localhost:6379");
+            }
+            metadata_store::MetadataStoreConfig::S3(_) => {
+                panic!("Expected FS metadata store config")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_bind_address() {
+        let config = r#"
+        [server]
+        bind_address = "::1"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        match config.server {
+            ServerConfig::Insecure(insecure_config) => {
+                assert_eq!(insecure_config.bind_address.to_string(), "::1");
+            }
+            ServerConfig::Tls(_) => panic!("Expected Insecure server config"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_access_policy_in_global_config() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [global.access_policy]
+        mode = "deny"
+        rules = ["allow(true)"]
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert_eq!(config.global.access_policy.rules.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_retention_policy_in_global_config() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [global.retention_policy]
+        rules = ["age(image) > days(30)"]
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert_eq!(config.global.retention_policy.rules.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_metadata_config_preserves_explicit_s3_config() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [blob_store.s3]
+        bucket = "blob-bucket"
+        region = "us-east-1"
+        endpoint = "https://s3.amazonaws.com"
+        access_key_id = "blob-key"
+        secret_key = "blob-secret"
+
+        [metadata_store.s3]
+        bucket = "metadata-bucket"
+        region = "eu-west-1"
+        endpoint = "https://metadata.example.com"
+        access_key_id = "meta-key"
+        secret_key = "meta-secret"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        let metadata_config = config.resolve_metadata_config();
+
+        match metadata_config {
+            metadata_store::MetadataStoreConfig::S3(s3_config) => {
+                assert_eq!(s3_config.bucket, "metadata-bucket");
+                assert_eq!(s3_config.region, "eu-west-1");
+                assert_eq!(s3_config.endpoint, "https://metadata.example.com");
+            }
+            metadata_store::MetadataStoreConfig::FS(_) => {
+                panic!("Expected S3 metadata store config")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_webhooks() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [auth.webhook.webhook1]
+        url = "https://webhook1.example.com"
+        timeout_ms = 5000
+
+        [auth.webhook.webhook2]
+        url = "https://webhook2.example.com"
+        timeout_ms = 5000
+
+        [auth.webhook.webhook3]
+        url = "https://webhook3.example.com"
+        timeout_ms = 5000
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert_eq!(config.auth.webhook.len(), 3);
+        assert!(config.auth.webhook.contains_key("webhook1"));
+        assert!(config.auth.webhook.contains_key("webhook2"));
+        assert!(config.auth.webhook.contains_key("webhook3"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_multiple_repositories_with_webhooks() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [repository.app1]
+        authorization_webhook = "webhook1"
+
+        [repository.app2]
+        authorization_webhook = "webhook2"
+
+        [auth.webhook.webhook1]
+        url = "https://webhook1.example.com"
+        timeout_ms = 5000
+
+        [auth.webhook.webhook2]
+        url = "https://webhook2.example.com"
+        timeout_ms = 5000
+        "#;
+
+        let result = Configuration::load_from_str(config);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_load_from_file() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let config_content = r#"
+        [server]
+        bind_address = "127.0.0.1"
+        port = 8080
+
+        [global]
+        max_concurrent_requests = 8
+
+        [blob_store.fs]
+        root_dir = "/data/registry"
+        "#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = Configuration::load(temp_file.path());
+        assert!(result.is_ok());
+
+        let config = result.unwrap();
+        assert_eq!(config.global.max_concurrent_requests, 8);
+
+        match config.server {
+            ServerConfig::Insecure(server_config) => {
+                assert_eq!(server_config.bind_address.to_string(), "127.0.0.1");
+                assert_eq!(server_config.port, 8080);
+            }
+            ServerConfig::Tls(_) => panic!("Expected Insecure server config"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_from_nonexistent_file() {
+        let result = Configuration::load("/nonexistent/path/to/config.toml");
+        assert!(result.is_err());
+
+        match result {
+            Err(Error::NotReadable(msg)) => {
+                assert!(msg.contains("Unable to read configuration file"));
+            }
+            _ => panic!("Expected NotReadable error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_from_file_with_invalid_content() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let invalid_config = r#"
+        [server
+        bind_address = "0.0.0.0"
+        "#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(invalid_config.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = Configuration::load(temp_file.path());
+        assert!(result.is_err());
+
+        match result {
+            Err(Error::NotReadable(_)) => {}
+            _ => panic!("Expected NotReadable error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_from_file_with_tls_config() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let config_content = r#"
+        [server]
+        bind_address = "0.0.0.0"
+        port = 8443
+
+        [server.tls]
+        server_certificate_bundle = "/path/to/cert.pem"
+        server_private_key = "/path/to/key.pem"
+        "#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = Configuration::load(temp_file.path());
+        assert!(result.is_ok());
+
+        let config = result.unwrap();
+        match config.server {
+            ServerConfig::Tls(tls_config) => {
+                assert_eq!(
+                    tls_config.tls.server_certificate_bundle,
+                    PathBuf::from("/path/to/cert.pem")
+                );
+                assert_eq!(
+                    tls_config.tls.server_private_key,
+                    PathBuf::from("/path/to/key.pem")
+                );
+            }
+            ServerConfig::Insecure(_) => panic!("Expected TLS server config"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_from_file_with_validation_error() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let config_content = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [global]
+        authorization_webhook = "missing-webhook"
+        "#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = Configuration::load(temp_file.path());
+        assert!(result.is_err());
+
+        match result {
+            Err(Error::InvalidFormat(msg)) => {
+                assert!(msg.contains("Webhook 'missing-webhook' not found"));
+            }
+            _ => panic!("Expected InvalidFormat error"),
+        }
     }
 }
