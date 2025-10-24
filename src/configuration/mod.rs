@@ -172,6 +172,7 @@ impl Configuration {
                         access_key_id: config.access_key_id.clone(),
                         secret_key: config.secret_key.clone(),
                         key_prefix: config.key_prefix.clone(),
+                        use_conditional_writes: false, // Default to false for auto-configured metadata stores
                         redis: None,
                     })
                 }

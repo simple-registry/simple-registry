@@ -122,6 +122,7 @@ impl S3RegistryTestCase {
             region: "region".to_string(),
             bucket: "registry".to_string(),
             key_prefix: key_prefix.to_string(),
+            use_conditional_writes: false,
             redis: None,
         })
         .unwrap();

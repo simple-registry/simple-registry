@@ -1,6 +1,9 @@
 use crate::registry::data_store::Error;
 use aws_sdk_s3::config::{timeout::TimeoutConfig, BehaviorVersion, Credentials, Region};
+use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+use aws_sdk_s3::operation::delete_object::DeleteObjectOutput;
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
+use aws_sdk_s3::operation::put_object::PutObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::{Client as S3Client, Config as S3Config};
@@ -102,6 +105,8 @@ impl Backend {
     fn full_key(&self, path: &str) -> String {
         if self.key_prefix.is_empty() {
             path.to_string()
+        } else if self.key_prefix.ends_with('/') {
+            format!("{}{}", self.key_prefix, path)
         } else {
             format!("{}/{}", self.key_prefix, path)
         }
@@ -147,6 +152,32 @@ impl Backend {
             .map_err(|e| IoError::other(e.to_string()))?;
 
         Ok(())
+    }
+
+    pub async fn delete_conditional(
+        &self,
+        path: &str,
+        if_match: &str,
+    ) -> Result<Option<DeleteObjectOutput>, IoError> {
+        let key = self.full_key(path);
+
+        let req = self
+            .s3_client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .if_match(if_match);
+
+        match req.send().await {
+            Ok(r) => Ok(Some(r)),
+            Err(e) => {
+                if Self::is_precondition_failed_error(&e) {
+                    Ok(None)
+                } else {
+                    Err(IoError::other(e.to_string()))
+                }
+            }
+        }
     }
 
     pub async fn delete_prefix(&self, prefix: &str) -> Result<(), IoError> {
@@ -348,6 +379,51 @@ impl Backend {
             .map_err(|e| IoError::other(e.to_string()))?;
 
         Ok(())
+    }
+
+    pub async fn put_object_conditional(
+        &self,
+        path: &str,
+        data: impl Into<Bytes>,
+        if_match: Option<&str>,
+    ) -> Result<Option<PutObjectOutput>, IoError> {
+        let key = self.full_key(path);
+
+        let mut req = self
+            .s3_client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .body(ByteStream::from(data.into()));
+
+        if let Some(if_match) = if_match {
+            req = req.if_match(if_match);
+        } else {
+            req = req.if_none_match("*");
+        }
+
+        match req.send().await {
+            Ok(r) => Ok(Some(r)),
+            Err(e) => {
+                if Self::is_precondition_failed_error(&e) {
+                    Ok(None)
+                } else {
+                    Err(IoError::other(e.to_string()))
+                }
+            }
+        }
+    }
+
+    fn is_precondition_failed_error<T>(e: &SdkError<T>) -> bool
+    where
+        T: ProvideErrorMetadata,
+    {
+        if let SdkError::ServiceError(err) = e {
+            if err.err().meta().code() == Some("PreconditionFailed") {
+                return true;
+            }
+        }
+        false
     }
 
     pub async fn copy_object(&self, source: &str, destination: &str) -> Result<(), IoError> {
