@@ -437,17 +437,19 @@ impl Registry {
             )
             .await?;
 
-        if let Ok(Some(presigned_url)) = self.blob_store.get_blob_url(&manifest.digest).await {
-            let mut builder = Response::builder()
-                .status(StatusCode::TEMPORARY_REDIRECT)
-                .header(LOCATION, presigned_url)
-                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string());
+        if self.enable_redirect {
+            if let Ok(Some(presigned_url)) = self.blob_store.get_blob_url(&manifest.digest).await {
+                let mut builder = Response::builder()
+                    .status(StatusCode::TEMPORARY_REDIRECT)
+                    .header(LOCATION, presigned_url)
+                    .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string());
 
-            if let Some(content_type) = manifest.media_type {
-                builder = builder.header(CONTENT_TYPE, content_type);
+                if let Some(content_type) = manifest.media_type {
+                    builder = builder.header(CONTENT_TYPE, content_type);
+                }
+
+                return builder.body(ResponseBody::empty()).map_err(Into::into);
             }
-
-            return builder.body(ResponseBody::empty()).map_err(Into::into);
         }
 
         let res = if let Some(content_type) = manifest.media_type {

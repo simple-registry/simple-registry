@@ -115,7 +115,8 @@ pub mod tests {
         let metadata_store = config.resolve_metadata_config().to_backend().unwrap();
         let repositories = Arc::new(HashMap::new());
 
-        let registry = Registry::new(blob_store, metadata_store, repositories, false, 10).unwrap();
+        let registry =
+            Registry::new(blob_store, metadata_store, repositories, false, true, 10).unwrap();
 
         ServerContext::new(&config, registry).unwrap()
     }
@@ -159,6 +160,7 @@ pub mod tests {
             metadata_store,
             repositories,
             config.global.update_pull_time,
+            config.global.enable_redirect,
             config.global.max_concurrent_cache_jobs,
         )
         .unwrap()
@@ -624,6 +626,7 @@ pub mod tests {
             metadata_store,
             repositories,
             config.global.update_pull_time,
+            config.global.enable_redirect,
             config.global.max_concurrent_cache_jobs,
         )
         .unwrap();

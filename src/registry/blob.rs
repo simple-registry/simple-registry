@@ -240,7 +240,7 @@ impl Registry {
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.get_repository_for_namespace(namespace)?;
 
-        if range.is_none() {
+        if range.is_none() && self.enable_redirect {
             if let Ok(Some(presigned_url)) = self.blob_store.get_blob_url(digest).await {
                 return Response::builder()
                     .status(StatusCode::TEMPORARY_REDIRECT)

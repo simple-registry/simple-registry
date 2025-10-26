@@ -48,6 +48,8 @@ pub struct GlobalConfig {
     pub max_concurrent_cache_jobs: usize,
     #[serde(default = "GlobalConfig::default_update_pull_time")]
     pub update_pull_time: bool,
+    #[serde(default = "GlobalConfig::default_enable_redirect")]
+    pub enable_redirect: bool,
     #[serde(default)]
     pub access_policy: AccessPolicyConfig,
     #[serde(default)]
@@ -65,6 +67,7 @@ impl Default for GlobalConfig {
             max_concurrent_requests: GlobalConfig::default_max_concurrent_requests(),
             max_concurrent_cache_jobs: GlobalConfig::default_max_concurrent_cache_jobs(),
             update_pull_time: GlobalConfig::default_update_pull_time(),
+            enable_redirect: GlobalConfig::default_enable_redirect(),
             access_policy: AccessPolicyConfig::default(),
             retention_policy: RetentionPolicyConfig::default(),
             immutable_tags: false,
@@ -85,6 +88,10 @@ impl GlobalConfig {
 
     fn default_update_pull_time() -> bool {
         false
+    }
+
+    fn default_enable_redirect() -> bool {
+        true
     }
 }
 
