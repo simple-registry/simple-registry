@@ -437,6 +437,19 @@ impl Registry {
             )
             .await?;
 
+        if let Ok(Some(presigned_url)) = self.blob_store.get_blob_url(&manifest.digest).await {
+            let mut builder = Response::builder()
+                .status(StatusCode::TEMPORARY_REDIRECT)
+                .header(LOCATION, presigned_url)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string());
+
+            if let Some(content_type) = manifest.media_type {
+                builder = builder.header(CONTENT_TYPE, content_type);
+            }
+
+            return builder.body(ResponseBody::empty()).map_err(Into::into);
+        }
+
         let res = if let Some(content_type) = manifest.media_type {
             Response::builder()
                 .status(StatusCode::OK)
@@ -911,7 +924,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(
                 response
                     .headers()
@@ -920,21 +932,34 @@ mod tests {
                     .map(std::string::ToString::to_string),
                 Some(put_response.digest.to_string())
             );
-            assert_eq!(
-                response
-                    .headers()
-                    .get(CONTENT_TYPE)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
-                Some(media_type)
-            );
 
-            // Read response body
-            let stream = response.into_data_stream().map_err(std::io::Error::other);
-            let mut reader = StreamReader::new(stream);
-            let mut buf = Vec::new();
-            reader.read_to_end(&mut buf).await.unwrap();
-            assert_eq!(buf, content);
+            if response.status() == StatusCode::TEMPORARY_REDIRECT {
+                assert!(response.headers().get(LOCATION).is_some());
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(CONTENT_TYPE)
+                        .and_then(|h| h.to_str().ok())
+                        .map(std::string::ToString::to_string),
+                    Some(media_type)
+                );
+            } else {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(CONTENT_TYPE)
+                        .and_then(|h| h.to_str().ok())
+                        .map(std::string::ToString::to_string),
+                    Some(media_type)
+                );
+
+                let stream = response.into_data_stream().map_err(std::io::Error::other);
+                let mut reader = StreamReader::new(stream);
+                let mut buf = Vec::new();
+                reader.read_to_end(&mut buf).await.unwrap();
+                assert_eq!(buf, content);
+            }
         }
     }
 

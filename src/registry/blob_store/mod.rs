@@ -67,6 +67,8 @@ pub trait BlobStore: Send + Sync {
         digest: &Digest,
         start_offset: Option<u64>,
     ) -> Result<Box<dyn Reader>, Error>;
+
+    async fn get_blob_url(&self, digest: &Digest) -> Result<Option<String>, Error>;
 }
 
 #[cfg(test)]

@@ -587,6 +587,28 @@ impl Backend {
 
         Ok(parts)
     }
+
+    pub async fn generate_presigned_url(
+        &self,
+        path: &str,
+        expires_in: Duration,
+    ) -> Result<String, IoError> {
+        let key = self.full_key(path);
+
+        let presigned = self
+            .s3_client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .presigned(
+                aws_sdk_s3::presigning::PresigningConfig::expires_in(expires_in)
+                    .map_err(|e| IoError::other(e.to_string()))?,
+            )
+            .await
+            .map_err(|e| IoError::other(e.to_string()))?;
+
+        Ok(presigned.uri().to_string())
+    }
 }
 
 #[cfg(test)]

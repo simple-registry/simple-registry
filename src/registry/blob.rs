@@ -240,6 +240,17 @@ impl Registry {
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.get_repository_for_namespace(namespace)?;
 
+        if range.is_none() {
+            if let Ok(Some(presigned_url)) = self.blob_store.get_blob_url(digest).await {
+                return Response::builder()
+                    .status(StatusCode::TEMPORARY_REDIRECT)
+                    .header(hyper::header::LOCATION, presigned_url)
+                    .header(DOCKER_CONTENT_DIGEST, digest.to_string())
+                    .body(ResponseBody::empty())
+                    .map_err(Into::into);
+            }
+        }
+
         let res = match self
             .get_blob(repository, mime_types, namespace, digest, range)
             .await?
@@ -562,7 +573,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(
                 response
                     .headers()
@@ -571,20 +581,26 @@ mod tests {
                     .map(std::string::ToString::to_string),
                 Some(digest.to_string())
             );
-            assert_eq!(
-                response
-                    .headers()
-                    .get(CONTENT_LENGTH)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
-                Some(content.len().to_string())
-            );
 
-            let stream = response.into_data_stream().map_err(std::io::Error::other);
-            let mut reader = StreamReader::new(stream);
-            let mut buf = Vec::new();
-            reader.read_to_end(&mut buf).await.unwrap();
-            assert_eq!(buf, content);
+            if response.status() == StatusCode::TEMPORARY_REDIRECT {
+                assert!(response.headers().get(hyper::header::LOCATION).is_some());
+            } else {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(CONTENT_LENGTH)
+                        .and_then(|h| h.to_str().ok())
+                        .map(std::string::ToString::to_string),
+                    Some(content.len().to_string())
+                );
+
+                let stream = response.into_data_stream().map_err(std::io::Error::other);
+                let mut reader = StreamReader::new(stream);
+                let mut buf = Vec::new();
+                reader.read_to_end(&mut buf).await.unwrap();
+                assert_eq!(buf, content);
+            }
         }
     }
 
