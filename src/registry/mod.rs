@@ -41,6 +41,7 @@ pub struct Registry {
     blob_store: Arc<dyn BlobStore + Send + Sync>,
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
     repositories: Arc<HashMap<String, Repository>>,
+    enable_redirect: bool,
     update_pull_time: bool,
     task_queue: TaskQueue,
 }
@@ -58,10 +59,12 @@ impl Registry {
         metadata_store: Arc<dyn MetadataStore>,
         repositories: Arc<HashMap<String, Repository>>,
         update_pull_time: bool,
+        enable_redirect: bool,
         concurrent_cache_jobs: usize,
     ) -> Result<Self, Error> {
         let res = Self {
             update_pull_time,
+            enable_redirect,
             blob_store,
             metadata_store,
             repositories,
@@ -130,6 +133,7 @@ pub mod test_utils {
             metadata_store,
             repositories_config,
             global.update_pull_time,
+            global.enable_redirect,
             global.max_concurrent_cache_jobs,
         )
         .unwrap()

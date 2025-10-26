@@ -5,7 +5,7 @@ use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::header::{AsHeaderName, HeaderName, ACCEPT, AUTHORIZATION};
-use hyper::http::request::Parts;
+use hyper::http::{request, response};
 use regex::Regex;
 use std::io;
 use std::sync::LazyLock;
@@ -18,25 +18,25 @@ static RANGE_RE: LazyLock<Regex> =
 static BEARER_PREFIX: &str = "Bearer ";
 static BASIC_PREFIX: &str = "Basic ";
 
-pub trait HeaderExt {
-    fn get_header<K: AsHeaderName>(&self, header: K) -> Option<String>;
-    fn range(&self, header: HeaderName) -> Result<Option<(u64, Option<u64>)>, Error>;
-    fn accepted_content_types(&self) -> Vec<String>;
-    fn bearer_token(&self) -> Option<String>;
-    fn basic_auth(&self) -> Option<(String, String)>;
+pub trait HasHeaders {
+    fn headers(&self) -> &hyper::HeaderMap;
 }
 
-fn invalid_range_header(header: &str) -> Error {
-    let msg = format!("Invalid Range header format: '{header}'");
-    Error::RangeNotSatisfiable(msg)
+impl HasHeaders for request::Parts {
+    fn headers(&self) -> &hyper::HeaderMap {
+        &self.headers
+    }
 }
 
-impl HeaderExt for Parts {
-    fn get_header<K>(&self, header: K) -> Option<String>
-    where
-        K: AsHeaderName,
-    {
-        self.headers
+impl HasHeaders for response::Parts {
+    fn headers(&self) -> &hyper::HeaderMap {
+        &self.headers
+    }
+}
+
+pub trait HeaderExt: HasHeaders {
+    fn get_header<K: AsHeaderName>(&self, header: K) -> Option<String> {
+        self.headers()
             .get(header)
             .and_then(|header| header.to_str().ok())
             .map(ToString::to_string)
@@ -78,7 +78,7 @@ impl HeaderExt for Parts {
     }
 
     fn accepted_content_types(&self) -> Vec<String> {
-        self.headers
+        self.headers()
             .get_all(ACCEPT)
             .iter()
             .filter_map(|h| h.to_str().ok())
@@ -104,6 +104,14 @@ impl HeaderExt for Parts {
         Some((username.to_string(), password.to_string()))
     }
 }
+
+fn invalid_range_header(header: &str) -> Error {
+    let msg = format!("Invalid Range header format: '{header}'");
+    Error::RangeNotSatisfiable(msg)
+}
+
+impl HeaderExt for request::Parts {}
+impl HeaderExt for response::Parts {}
 
 pub trait IntoAsyncRead {
     fn into_async_read(self) -> impl AsyncRead;

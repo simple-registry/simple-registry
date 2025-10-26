@@ -415,4 +415,14 @@ impl BlobStore for Backend {
 
         Ok(Box::new(res.body.into_async_read()))
     }
+
+    #[instrument(skip(self))]
+    async fn get_blob_url(&self, digest: &Digest) -> Result<Option<String>, Error> {
+        let path = path_builder::blob_path(digest);
+        let url = self
+            .store
+            .generate_presigned_url(&path, std::time::Duration::from_secs(1800)) // TODO: make configurable
+            .await?;
+        Ok(Some(url))
+    }
 }

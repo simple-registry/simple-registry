@@ -297,4 +297,9 @@ impl BlobStore for Backend {
 
         Ok(Box::new(file))
     }
+
+    #[instrument(skip(self))]
+    async fn get_blob_url(&self, _digest: &Digest) -> Result<Option<String>, Error> {
+        Ok(None)
+    }
 }

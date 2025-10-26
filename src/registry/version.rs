@@ -22,6 +22,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::server::request_ext::HeaderExt;
     use crate::registry::tests::backends;
 
     #[tokio::test]
@@ -30,20 +31,14 @@ mod tests {
             let response = test_case.registry().handle_get_api_version().await.unwrap();
 
             assert_eq!(response.status(), StatusCode::OK);
+            let (parts, _body) = response.into_parts();
+
             assert_eq!(
-                response
-                    .headers()
-                    .get(DOCKER_DISTRIBUTION_API_VERSION)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
+                parts.get_header(DOCKER_DISTRIBUTION_API_VERSION),
                 Some("registry/2.0".to_string())
             );
             assert_eq!(
-                response
-                    .headers()
-                    .get(X_POWERED_BY)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
+                parts.get_header(X_POWERED_BY),
                 Some("Simple-Registry".to_string())
             );
         }

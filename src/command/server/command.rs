@@ -97,6 +97,7 @@ fn build_registry(config: &Configuration) -> Result<Registry, Error> {
         metadata_store,
         repositories,
         config.global.update_pull_time,
+        config.global.enable_redirect,
         config.global.max_concurrent_cache_jobs,
     ) else {
         let msg = "Failed to initialize registry".to_string();
@@ -522,6 +523,7 @@ mod tests {
             metadata_store,
             repositories,
             config.global.update_pull_time,
+            config.global.enable_redirect,
             config.global.max_concurrent_cache_jobs,
         );
 
