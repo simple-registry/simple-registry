@@ -240,11 +240,8 @@ impl RegistryClient {
     }
 
     async fn authenticate(&self, response: &Response) -> Result<String, Error> {
-        let auth_header = response
-            .headers()
-            .get(WWW_AUTHENTICATE)
-            .and_then(|h| h.to_str().ok())
-            .ok_or_else(|| Error::Unauthorized("Missing WWW-Authenticate".to_string()))?;
+        let auth_header: String = parse_header(response, WWW_AUTHENTICATE)
+            .map_err(|_| Error::Unauthorized("Missing WWW-Authenticate".to_string()))?;
 
         if let Some(bearer_params) = auth_header.strip_prefix("Bearer ") {
             let mut params = std::collections::HashMap::new();

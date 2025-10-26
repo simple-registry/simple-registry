@@ -529,6 +529,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::server::request_ext::HeaderExt;
     use crate::registry::tests::{backends, FSRegistryTestCase};
     use futures_util::TryStreamExt;
     use http_body_util::BodyExt;
@@ -870,30 +871,17 @@ mod tests {
                 .unwrap();
 
             assert_eq!(response.status(), StatusCode::OK);
+            let (parts, _) = response.into_parts();
+
             assert_eq!(
-                response
-                    .headers()
-                    .get(DOCKER_CONTENT_DIGEST)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
+                parts.get_header(DOCKER_CONTENT_DIGEST),
                 Some(put_response.digest.to_string())
             );
             assert_eq!(
-                response
-                    .headers()
-                    .get(CONTENT_LENGTH)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
+                parts.get_header(CONTENT_LENGTH),
                 Some(content.len().to_string())
             );
-            assert_eq!(
-                response
-                    .headers()
-                    .get(CONTENT_TYPE)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
-                Some(media_type)
-            );
+            assert_eq!(parts.get_header(CONTENT_TYPE), Some(media_type));
         }
     }
 
@@ -924,37 +912,22 @@ mod tests {
                 .await
                 .unwrap();
 
+            let status = response.status();
+            let (parts, body) = response.into_parts();
+
             assert_eq!(
-                response
-                    .headers()
-                    .get(DOCKER_CONTENT_DIGEST)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
+                parts.get_header(DOCKER_CONTENT_DIGEST),
                 Some(put_response.digest.to_string())
             );
 
-            if response.status() == StatusCode::TEMPORARY_REDIRECT {
-                assert!(response.headers().get(LOCATION).is_some());
-                assert_eq!(
-                    response
-                        .headers()
-                        .get(CONTENT_TYPE)
-                        .and_then(|h| h.to_str().ok())
-                        .map(std::string::ToString::to_string),
-                    Some(media_type)
-                );
+            if status == StatusCode::TEMPORARY_REDIRECT {
+                assert!(parts.headers.get(LOCATION).is_some());
+                assert_eq!(parts.get_header(CONTENT_TYPE), Some(media_type));
             } else {
-                assert_eq!(response.status(), StatusCode::OK);
-                assert_eq!(
-                    response
-                        .headers()
-                        .get(CONTENT_TYPE)
-                        .and_then(|h| h.to_str().ok())
-                        .map(std::string::ToString::to_string),
-                    Some(media_type)
-                );
+                assert_eq!(parts.status, StatusCode::OK);
+                assert_eq!(parts.get_header(CONTENT_TYPE), Some(media_type));
 
-                let stream = response.into_data_stream().map_err(std::io::Error::other);
+                let stream = body.into_data_stream().map_err(std::io::Error::other);
                 let mut reader = StreamReader::new(stream);
                 let mut buf = Vec::new();
                 reader.read_to_end(&mut buf).await.unwrap();
@@ -981,19 +954,12 @@ mod tests {
                 .expect("put manifest failed");
 
             assert_eq!(response.status(), StatusCode::CREATED);
-            let digest = response
-                .headers()
-                .get(DOCKER_CONTENT_DIGEST)
-                .and_then(|h| h.to_str().ok())
-                .map(std::string::ToString::to_string)
-                .unwrap();
+            let (parts, _) = response.into_parts();
+
+            let digest = parts.get_header(DOCKER_CONTENT_DIGEST).unwrap();
 
             assert_eq!(
-                response
-                    .headers()
-                    .get(LOCATION)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
+                parts.get_header(LOCATION),
                 Some(format!("/v2/{namespace}/manifests/{tag}"))
             );
 

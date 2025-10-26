@@ -288,6 +288,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::server::request_ext::HeaderExt;
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::backends;
     use futures_util::TryStreamExt;
@@ -462,21 +463,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(response.status(), StatusCode::OK);
+            let (parts, _) = response.into_parts();
+
+            assert_eq!(parts.status, StatusCode::OK);
             assert_eq!(
-                response
-                    .headers()
-                    .get(DOCKER_CONTENT_DIGEST)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
+                parts.get_header(DOCKER_CONTENT_DIGEST),
                 Some(digest.to_string())
             );
             assert_eq!(
-                response
-                    .headers()
-                    .get(CONTENT_LENGTH)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
+                parts.get_header(CONTENT_LENGTH),
                 Some(content.len().to_string())
             );
         }
@@ -572,30 +567,24 @@ mod tests {
                 .handle_get_blob(namespace, &digest, &accepted_content_types, None)
                 .await
                 .unwrap();
+            let status = response.status();
+            let (parts, body) = response.into_parts();
 
             assert_eq!(
-                response
-                    .headers()
-                    .get(DOCKER_CONTENT_DIGEST)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
+                parts.get_header(DOCKER_CONTENT_DIGEST),
                 Some(digest.to_string())
             );
 
-            if response.status() == StatusCode::TEMPORARY_REDIRECT {
-                assert!(response.headers().get(hyper::header::LOCATION).is_some());
+            if status == StatusCode::TEMPORARY_REDIRECT {
+                assert!(parts.headers.get(hyper::header::LOCATION).is_some());
             } else {
-                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(parts.status, StatusCode::OK);
                 assert_eq!(
-                    response
-                        .headers()
-                        .get(CONTENT_LENGTH)
-                        .and_then(|h| h.to_str().ok())
-                        .map(std::string::ToString::to_string),
+                    parts.get_header(CONTENT_LENGTH),
                     Some(content.len().to_string())
                 );
 
-                let stream = response.into_data_stream().map_err(std::io::Error::other);
+                let stream = body.into_data_stream().map_err(std::io::Error::other);
                 let mut reader = StreamReader::new(stream);
                 let mut buf = Vec::new();
                 reader.read_to_end(&mut buf).await.unwrap();
@@ -621,32 +610,19 @@ mod tests {
                 .unwrap();
 
             assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            let (parts, body) = response.into_parts();
+
             assert_eq!(
-                response
-                    .headers()
-                    .get(DOCKER_CONTENT_DIGEST)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
+                parts.get_header(DOCKER_CONTENT_DIGEST),
                 Some(digest.to_string())
             );
+            assert_eq!(parts.get_header(CONTENT_LENGTH), Some("6".to_string()));
             assert_eq!(
-                response
-                    .headers()
-                    .get(CONTENT_LENGTH)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
-                Some("6".to_string())
-            );
-            assert_eq!(
-                response
-                    .headers()
-                    .get(CONTENT_RANGE)
-                    .and_then(|h| h.to_str().ok())
-                    .map(std::string::ToString::to_string),
+                parts.get_header(CONTENT_RANGE),
                 Some(format!("bytes 5-10/{}", content.len()))
             );
 
-            let stream = response.into_data_stream().map_err(std::io::Error::other);
+            let stream = body.into_data_stream().map_err(std::io::Error::other);
             let mut reader = StreamReader::new(stream);
             let mut buf = Vec::new();
             reader.read_to_end(&mut buf).await.unwrap();
