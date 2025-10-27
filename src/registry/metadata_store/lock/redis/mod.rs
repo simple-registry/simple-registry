@@ -16,9 +16,10 @@ use tracing::debug;
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
 pub struct LockConfig {
     pub url: String,
-    pub ttl: usize,
     #[serde(default)]
     pub key_prefix: String,
+    #[serde(default = "LockConfig::default_ttl")]
+    pub ttl: usize,
     #[serde(default = "LockConfig::default_max_retries")]
     pub max_retries: u32,
     #[serde(default = "LockConfig::default_retry_delay_ms")]
@@ -26,6 +27,10 @@ pub struct LockConfig {
 }
 
 impl LockConfig {
+    fn default_ttl() -> usize {
+        30
+    }
+
     fn default_max_retries() -> u32 {
         100
     }
@@ -50,8 +55,8 @@ impl Default for LockConfig {
 #[derive(Debug, Clone)]
 pub struct RedisBackend {
     client: Arc<Client>,
-    ttl: usize,
     key_prefix: String,
+    ttl: usize,
     max_retries: u32,
     retry_delay_ms: u64,
 }

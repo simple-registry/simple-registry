@@ -1,7 +1,7 @@
 use crate::oci::{Descriptor, Digest, Manifest};
 use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::metadata_store::lock::{self, LockBackend, MemoryBackend};
-use crate::registry::metadata_store::{BlobIndex, Error};
+pub(crate) use crate::registry::metadata_store::lock::{LockBackend, MemoryBackend};
+use crate::registry::metadata_store::{lock, BlobIndex, Error};
 use crate::registry::metadata_store::{
     BlobIndexOperation, LinkMetadata, LockConfig, MetadataStore,
 };
@@ -21,6 +21,8 @@ pub struct BackendConfig {
     pub region: String,
     #[serde(default)]
     pub key_prefix: String,
+    #[serde(default)]
+    pub use_conditional_writes: bool,
     #[serde(default)]
     pub redis: Option<LockConfig>,
 }
@@ -63,17 +65,33 @@ impl Backend {
             multipart_part_size: data_store::s3::BackendConfig::default_multipart_part_size(),
         })?;
 
-        let lock: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync> =
-            if let Some(redis_config) = &config.redis {
-                info!("Using Redis lock store for S3 metadata-store");
-                let backend = lock::RedisBackend::new(redis_config).map_err(|e| {
-                    Error::Lock(format!("Failed to initialize Redis lock store: {e}"))
-                })?;
-                Arc::new(backend)
-            } else {
-                info!("Using in-memory lock store for S3 metadata-store");
-                Arc::new(MemoryBackend::new())
+        let lock: Arc<dyn LockBackend<Guard = Box<dyn Send>> + Send + Sync> = if config
+            .use_conditional_writes
+        {
+            info!("Using S3 conditional writes for distributed locking");
+            let s3_config = lock::s3::LockConfig {
+                access_key_id: config.access_key_id.clone(),
+                secret_key: config.secret_key.clone(),
+                endpoint: config.endpoint.clone(),
+                bucket: config.bucket.clone(),
+                region: config.region.clone(),
+                key_prefix: "locks/".to_string(),
+                ttl: 10,
+                max_retries: 1000,
+                retry_delay_ms: 10,
             };
+            let backend = lock::S3Backend::new(&s3_config)
+                .map_err(|e| Error::Lock(format!("Failed to initialize Redis lock store: {e}")))?;
+            Arc::new(backend)
+        } else if let Some(redis_config) = &config.redis {
+            info!("Using Redis lock store for S3 metadata-store");
+            let backend = lock::RedisBackend::new(redis_config)
+                .map_err(|e| Error::Lock(format!("Failed to initialize Redis lock store: {e}")))?;
+            Arc::new(backend)
+        } else {
+            info!("Using in-memory lock store for S3 metadata-store");
+            Arc::new(MemoryBackend::new())
+        };
 
         Ok(Self { store, lock })
     }
