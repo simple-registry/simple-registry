@@ -17,7 +17,7 @@ pub mod repository;
 mod retention_policy;
 pub mod task_queue;
 #[cfg(test)]
-mod tests;
+pub mod tests;
 pub mod upload;
 mod version;
 
