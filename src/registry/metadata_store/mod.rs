@@ -93,8 +93,9 @@ mod tests {
     use crate::registry::tests::backends;
     use chrono::{Duration, Utc};
     use std::collections::HashMap;
+    use std::sync::Arc;
 
-    pub async fn test_datastore_list_namespaces(b: &dyn BlobStore, m: &dyn MetadataStore) {
+    pub async fn test_datastore_list_namespaces(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore>) {
         let namespaces = ["repo1", "repo2", "repo3/nested"];
         let digest = b.create_blob(b"test blob content").await.unwrap();
 
@@ -136,7 +137,7 @@ mod tests {
         assert_eq!(all_namespaces, namespaces);
     }
 
-    pub async fn test_datastore_list_tags(b: &dyn BlobStore, m: &dyn MetadataStore) {
+    pub async fn test_datastore_list_tags(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore>) {
         let namespace = "test-repo";
         let digest = b.create_blob(b"test blob content").await.unwrap();
 
@@ -186,7 +187,7 @@ mod tests {
         assert!(!tags_after_delete.contains(&delete_tag.to_string()));
     }
 
-    pub async fn test_datastore_list_referrers(b: &dyn BlobStore, m: &dyn MetadataStore) {
+    pub async fn test_datastore_list_referrers(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore>) {
         let namespace = "test-repo";
         let base_digest = b.create_blob(b"base manifest content").await.unwrap();
         let base_link = LinkKind::Digest(base_digest.clone());
@@ -267,7 +268,7 @@ mod tests {
         assert!(non_matching_referrers.is_empty());
     }
 
-    pub async fn test_datastore_list_revisions(b: &dyn BlobStore, m: &dyn MetadataStore) {
+    pub async fn test_datastore_list_revisions(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore>) {
         let namespace = "test-repo";
 
         let manifest_contents = [
@@ -318,7 +319,7 @@ mod tests {
         assert!(token3.is_none());
     }
 
-    pub async fn test_datastore_link_operations(b: &dyn BlobStore, m: &dyn MetadataStore) {
+    pub async fn test_datastore_link_operations(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore>) {
         let namespace = "test-namespace";
         let digest = b.create_blob(b"test blob content").await.unwrap();
 
