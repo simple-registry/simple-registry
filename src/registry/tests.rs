@@ -106,7 +106,7 @@ impl S3RegistryTestCase {
             endpoint: "http://127.0.0.1:9000".to_string(),
             region: "region".to_string(),
             bucket: "registry".to_string(),
-            key_prefix: key_prefix.to_string(),
+            key_prefix: key_prefix.clone(),
             multipart_copy_threshold: ByteSize::mib(5),
             multipart_copy_chunk_size: ByteSize::mib(5),
             multipart_copy_jobs: 4,
@@ -121,7 +121,7 @@ impl S3RegistryTestCase {
             endpoint: "http://127.0.0.1:9000".to_string(),
             region: "region".to_string(),
             bucket: "registry".to_string(),
-            key_prefix: key_prefix.to_string(),
+            key_prefix: key_prefix.clone(),
             redis: None,
         })
         .unwrap();
