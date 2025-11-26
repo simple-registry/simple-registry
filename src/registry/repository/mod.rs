@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tracing::instrument;
 mod registry_client;
 
-use crate::registry::blob_store::Reader;
+use crate::registry::blob_store::BoxedReader;
 use registry_client::RegistryClient;
 
 use crate::registry::access_policy::AccessPolicyConfig;
@@ -79,7 +79,7 @@ impl Repository {
         accepted_types: &[String],
         namespace: &str,
         digest: &Digest,
-    ) -> Result<(u64, Box<dyn Reader>), Error> {
+    ) -> Result<(u64, BoxedReader), Error> {
         for upstream in &self.upstreams {
             let location = upstream.get_blob_path(&self.name, namespace, digest);
             if let Ok(response) = upstream.get_blob(accepted_types, &location).await {

@@ -13,8 +13,7 @@ use tokio::io::AsyncRead;
 
 pub use error::Error;
 
-pub trait Reader: AsyncRead + Unpin + Send + Sync {}
-impl<T> Reader for T where T: AsyncRead + Unpin + Send + Sync {}
+pub type BoxedReader = Box<dyn AsyncRead + Unpin + Send + Sync>;
 
 #[async_trait]
 pub trait BlobStore: Send + Sync {
@@ -66,7 +65,7 @@ pub trait BlobStore: Send + Sync {
         &self,
         digest: &Digest,
         start_offset: Option<u64>,
-    ) -> Result<Box<dyn Reader>, Error>;
+    ) -> Result<BoxedReader, Error>;
 
     async fn get_blob_url(&self, digest: &Digest) -> Result<Option<String>, Error>;
 }

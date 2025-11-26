@@ -1,6 +1,6 @@
 use crate::command::server::response_body::ResponseBody;
 use crate::oci::Digest;
-use crate::registry::blob_store::{BlobStore, Reader};
+use crate::registry::blob_store::{BlobStore, BoxedReader};
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::{blob_store, task_queue, Error, Registry, Repository};
 use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE};
@@ -92,7 +92,7 @@ impl Registry {
         namespace: &str,
         digest: &Digest,
         range: Option<(u64, Option<u64>)>,
-    ) -> Result<GetBlobResponse<impl Reader>, Error> {
+    ) -> Result<GetBlobResponse<BoxedReader>, Error> {
         let local_blob = self.get_local_blob(digest, range).await;
 
         if let Ok(response) = local_blob {
@@ -142,7 +142,7 @@ impl Registry {
         &self,
         digest: &Digest,
         range: Option<(u64, Option<u64>)>,
-    ) -> Result<GetBlobResponse<Box<dyn Reader>>, Error> {
+    ) -> Result<GetBlobResponse<BoxedReader>, Error> {
         let total_length = self.blob_store.get_blob_size(digest).await?;
 
         let start = if let Some((start, _)) = range {
