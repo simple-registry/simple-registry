@@ -4,7 +4,7 @@ pub fn paginate<T>(
     continuation_token: Option<String>,
 ) -> (Vec<T>, Option<String>)
 where
-    T: Clone + ToString + Ord,
+    T: Clone + ToString,
 {
     let start = match continuation_token {
         Some(token) => match items.iter().position(|item| item.to_string() == token) {
