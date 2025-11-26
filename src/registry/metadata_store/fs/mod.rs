@@ -113,7 +113,7 @@ impl MetadataStore for Backend {
     ) -> Result<(Vec<String>, Option<String>), Error> {
         let base_path = path_builder::repository_dir();
 
-        let mut repositories = self.collect_repositories(&base_path).await;
+        let mut repositories = self.collect_repositories(base_path).await;
         repositories.dedup();
 
         Ok(pagination::paginate(&repositories, n, last))

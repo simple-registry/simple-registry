@@ -99,7 +99,7 @@ impl MetadataStore for Backend {
         loop {
             let (objects, next_token) = self
                 .store
-                .list_objects(&repo_dir, 1000, continuation_token)
+                .list_objects(repo_dir, 1000, continuation_token)
                 .await?;
 
             for key in objects {
