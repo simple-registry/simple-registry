@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests;
 
-use crate::cache::{Cache, SerializingCache};
+use crate::cache::{self, Cache};
 use crate::command::server::client_identity::ClientIdentity;
 use crate::command::server::error::Error;
 use crate::command::server::route::Route;
@@ -350,7 +350,7 @@ async fn cache_retrieve(
     name: &str,
     cache_key: &str,
 ) -> Result<Option<bool>, Error> {
-    let Ok(Some(cached)) = cache.retrieve::<bool>(cache_key).await else {
+    let Ok(Some(cached)) = cache::retrieve::<bool>(cache.as_ref(), cache_key).await else {
         return Ok(None);
     };
 
@@ -451,10 +451,9 @@ impl WebhookAuthorizer {
             .inc();
 
         if let Ok(cache_key) = &cache_key {
-            let _ = self
-                .cache
-                .store(cache_key, &allowed, self.config.cache_ttl)
-                .await;
+            let _ =
+                cache::store(self.cache.as_ref(), cache_key, &allowed, self.config.cache_ttl)
+                    .await;
         }
 
         Ok(allowed)

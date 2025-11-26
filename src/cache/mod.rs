@@ -9,7 +9,7 @@ mod serializing_cache;
 
 pub use config::Config;
 pub use error::Error;
-pub use serializing_cache::SerializingCache;
+pub use serializing_cache::{retrieve, store};
 
 /// Trait for cache implementations that can store and retrieve values with a given TTL
 #[async_trait]

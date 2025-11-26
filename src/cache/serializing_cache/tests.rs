@@ -1,4 +1,4 @@
-use crate::cache::{Cache, Error, SerializingCache};
+use crate::cache::{retrieve, store, Cache, Error};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -80,8 +80,7 @@ async fn test_retrieve_success() {
     let serialized = serde_json::to_string(&test_data).unwrap();
     cache.set_data(Some(serialized));
 
-    let cache_trait: &dyn Cache = &cache;
-    let result: Result<Option<TestData>, Error> = cache_trait.retrieve("test_key").await;
+    let result: Result<Option<TestData>, Error> = retrieve(&cache, "test_key").await;
 
     assert!(result.is_ok());
     let retrieved = result.unwrap();
@@ -94,8 +93,7 @@ async fn test_retrieve_not_found() {
     let cache = StubCache::new();
     cache.set_data(None);
 
-    let cache_trait: &dyn Cache = &cache;
-    let result: Result<Option<TestData>, Error> = cache_trait.retrieve("test_key").await;
+    let result: Result<Option<TestData>, Error> = retrieve(&cache, "test_key").await;
 
     assert!(result.is_ok());
     assert!(result.unwrap().is_none());
@@ -106,8 +104,7 @@ async fn test_retrieve_backend_error() {
     let cache = StubCache::new();
     cache.set_retrieve_error(Some("Backend failure".to_string()));
 
-    let cache_trait: &dyn Cache = &cache;
-    let result: Result<Option<TestData>, Error> = cache_trait.retrieve("test_key").await;
+    let result: Result<Option<TestData>, Error> = retrieve(&cache, "test_key").await;
 
     assert!(matches!(result, Err(Error::Execution(_))));
 }
@@ -117,8 +114,7 @@ async fn test_retrieve_deserialization_error() {
     let cache = StubCache::new();
     cache.set_data(Some("invalid json".to_string()));
 
-    let cache_trait: &dyn Cache = &cache;
-    let result: Result<Option<TestData>, Error> = cache_trait.retrieve("test_key").await;
+    let result: Result<Option<TestData>, Error> = retrieve(&cache, "test_key").await;
 
     assert!(matches!(result, Err(Error::Execution(_))));
 }
@@ -131,8 +127,7 @@ async fn test_store_success() {
         value: 42,
     };
 
-    let cache_trait: &dyn Cache = &cache;
-    let result = cache_trait.store("test_key", &test_data, 60).await;
+    let result = store(&cache, "test_key", &test_data, 60).await;
 
     assert!(result.is_ok());
 
@@ -152,8 +147,7 @@ async fn test_store_backend_error() {
         value: 42,
     };
 
-    let cache_trait: &dyn Cache = &cache;
-    let result = cache_trait.store("test_key", &test_data, 60).await;
+    let result = store(&cache, "test_key", &test_data, 60).await;
 
     assert!(matches!(result, Err(Error::Execution(_))));
 }
@@ -179,8 +173,7 @@ async fn test_store_serialization_error() {
     let cache = StubCache::new();
     let bad_data = UnserializableData { value: 42 };
 
-    let cache_trait: &dyn Cache = &cache;
-    let result = cache_trait.store("test_key", &bad_data, 60).await;
+    let result = store(&cache, "test_key", &bad_data, 60).await;
 
     assert!(matches!(result, Err(Error::Execution(_))));
 }

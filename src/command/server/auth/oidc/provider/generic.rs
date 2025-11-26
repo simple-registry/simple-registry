@@ -1,5 +1,4 @@
-use crate::cache::Cache;
-use crate::cache::SerializingCache;
+use crate::cache::{self, Cache};
 use crate::command::server::auth::oidc::{Jwk, OidcProvider};
 use crate::command::server::error::Error;
 use crate::command::server::{sha256_hash, OidcClaims};
@@ -195,7 +194,7 @@ async fn fetch_jwks(
     let issuer_hash = sha256_hash(provider.issuer());
     let cache_key = format!("oidc:{provider_name}:jwks:{issuer_hash}");
 
-    if let Ok(Some(cached)) = cache.retrieve::<Jwks>(&cache_key).await {
+    if let Ok(Some(cached)) = cache::retrieve::<Jwks>(cache, &cache_key).await {
         debug!("Using cached JWKS for provider: {provider_name}");
         return Ok(cached);
     }
@@ -203,9 +202,7 @@ async fn fetch_jwks(
     let jwks_url = get_jwks_url(provider, client, cache).await?;
     let jwks = query_json::<Jwks>(client, &jwks_url).await?;
 
-    let _ = cache
-        .store(&cache_key, &jwks, provider.jwks_refresh_interval())
-        .await;
+    let _ = cache::store(cache, &cache_key, &jwks, provider.jwks_refresh_interval()).await;
     info!("Fetched JWKS from {jwks_url}");
     Ok(jwks)
 }
@@ -219,7 +216,7 @@ async fn fetch_oidc_configuration(
     let issuer_hash = sha256_hash(provider.issuer());
     let cache_key = format!("oidc:{provider_name}:config:{issuer_hash}");
 
-    if let Ok(Some(cached)) = cache.retrieve::<OpenIdConfiguration>(&cache_key).await {
+    if let Ok(Some(cached)) = cache::retrieve::<OpenIdConfiguration>(cache, &cache_key).await {
         debug!("Using cached OIDC configuration");
         return Ok(cached);
     }
@@ -235,9 +232,7 @@ async fn fetch_oidc_configuration(
         )));
     }
 
-    let _ = cache
-        .store(&cache_key, &config, provider.jwks_refresh_interval())
-        .await;
+    let _ = cache::store(cache, &cache_key, &config, provider.jwks_refresh_interval()).await;
     info!("Fetched OIDC configuration from {config_url}");
     Ok(config)
 }
