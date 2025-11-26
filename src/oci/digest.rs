@@ -1,11 +1,11 @@
 use crate::oci::Error;
-use serde::de::Visitor;
-use serde::{de, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Ord, Eq, Hash, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Ord, Eq, Hash, PartialEq, PartialOrd, Deserialize)]
+#[serde(try_from = "String")]
 pub enum Digest {
     Sha256(String),
 }
@@ -79,35 +79,17 @@ impl TryFrom<&str> for Digest {
     }
 }
 
-impl Display for Digest {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.algorithm(), self.hash())
+impl TryFrom<String> for Digest {
+    type Error = Error;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::try_from(s.as_str())
     }
 }
 
-impl<'de> Deserialize<'de> for Digest {
-    fn deserialize<D>(deserializer: D) -> Result<Digest, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct DigestVisitor;
-
-        impl Visitor<'_> for DigestVisitor {
-            type Value = Digest;
-
-            fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
-                formatter.write_str("a valid digest string")
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Digest, E>
-            where
-                E: de::Error,
-            {
-                Digest::try_from(value).map_err(de::Error::custom)
-            }
-        }
-
-        deserializer.deserialize_str(DigestVisitor)
+impl Display for Digest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.algorithm(), self.hash())
     }
 }
 
@@ -123,51 +105,25 @@ impl Serialize for Digest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::convert::TryInto;
+
+    const VALID_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
-    fn test_digest_try_from() {
-        let digest: Digest =
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                .try_into()
-                .unwrap();
-
+    fn test_parse() {
+        let digest = Digest::from_str(&format!("sha256:{VALID_HASH}")).unwrap();
         assert_eq!(digest.algorithm(), "sha256");
-        assert_eq!(
-            digest.hash(),
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        );
+        assert_eq!(digest.hash(), VALID_HASH);
         assert_eq!(digest.hash_prefix(), "01");
     }
 
     #[test]
-    fn test_digest_try_from_invalid() {
-        let digest: Result<Digest, Error> = "sha256:invalid".try_into();
-        assert!(digest.is_err());
+    fn test_parse_invalid() {
+        assert!(Digest::from_str("sha256:invalid").is_err());
     }
 
     #[test]
-    fn test_digest_display() {
-        let digest: Digest = Digest::Sha256(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
-        );
-        assert_eq!(
-            digest.to_string(),
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        );
-    }
-
-    #[test]
-    fn test_digest_deserialize() {
-        let digest: Digest = serde_json::from_str(
-            r#""sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef""#,
-        )
-        .unwrap();
-        assert_eq!(
-            digest,
-            Digest::Sha256(
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()
-            )
-        );
+    fn test_display() {
+        let digest = Digest::Sha256(VALID_HASH.to_string());
+        assert_eq!(digest.to_string(), format!("sha256:{VALID_HASH}"));
     }
 }
