@@ -451,9 +451,13 @@ impl WebhookAuthorizer {
             .inc();
 
         if let Ok(cache_key) = &cache_key {
-            let _ =
-                cache::store(self.cache.as_ref(), cache_key, &allowed, self.config.cache_ttl)
-                    .await;
+            let _ = cache::store(
+                self.cache.as_ref(),
+                cache_key,
+                &allowed,
+                self.config.cache_ttl,
+            )
+            .await;
         }
 
         Ok(allowed)
