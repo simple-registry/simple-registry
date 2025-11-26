@@ -69,7 +69,7 @@ impl Registry {
             blob_store,
             metadata_store,
             repositories,
-            task_queue: TaskQueue::new(concurrent_cache_jobs)?,
+            task_queue: TaskQueue::new(concurrent_cache_jobs, "cache-worker")?,
         };
 
         Ok(res)

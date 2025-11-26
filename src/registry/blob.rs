@@ -131,7 +131,7 @@ impl Registry {
 
             info!("Caching of {digest_string} completed");
             Ok(())
-        })?;
+        });
         info!("Scheduled blob copy task '{task_key}'");
         //
 
