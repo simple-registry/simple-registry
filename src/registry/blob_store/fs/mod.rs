@@ -5,7 +5,7 @@ use crate::oci::Digest;
 use crate::registry::blob_store::hashing_reader::HashingReader;
 use crate::registry::blob_store::sha256_ext::Sha256Ext;
 use crate::registry::blob_store::{BlobStore, BoxedReader, Error};
-use crate::registry::{data_store, path_builder};
+use crate::registry::{data_store, pagination, path_builder};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sha2::{Digest as Sha256Digest, Sha256};
@@ -33,34 +33,6 @@ impl Backend {
         Self {
             store: data_store::fs::Backend::new(config),
         }
-    }
-
-    pub fn paginate<T>(
-        items: &[T],
-        n: u16,
-        continuation_token: Option<String>,
-    ) -> (Vec<T>, Option<String>)
-    where
-        T: Clone + ToString + Ord,
-    {
-        let start = match continuation_token {
-            Some(token) => match items.iter().position(|item| item.to_string() == token) {
-                Some(pos) => pos + 1,
-                None => 0,
-            },
-            None => 0,
-        };
-
-        let end = (start + n as usize).min(items.len());
-        let result = items[start..end].to_vec();
-
-        let next_token = if !result.is_empty() && end < items.len() {
-            Some(result.last().unwrap().to_string())
-        } else {
-            None
-        };
-
-        (result, next_token)
     }
 
     async fn save_hasher(
@@ -121,7 +93,7 @@ impl BlobStore for Backend {
             }
         }
 
-        Ok(Self::paginate(&digests, n, continuation_token))
+        Ok(pagination::paginate(&digests, n, continuation_token))
     }
 
     #[instrument(skip(self))]
@@ -134,7 +106,7 @@ impl BlobStore for Backend {
         let path = path_builder::uploads_root_dir(namespace);
         let uploads = self.store.list_dir(&path).await?;
 
-        Ok(Self::paginate(&uploads, n, continuation_token))
+        Ok(pagination::paginate(&uploads, n, continuation_token))
     }
 
     #[instrument(skip(self))]

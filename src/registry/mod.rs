@@ -12,6 +12,7 @@ pub mod data_store;
 mod error;
 pub mod manifest;
 pub mod metadata_store;
+pub mod pagination;
 mod path_builder;
 pub mod repository;
 mod retention_policy;

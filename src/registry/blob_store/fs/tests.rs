@@ -1,53 +1,9 @@
-use crate::registry::blob_store::fs::Backend;
 use crate::registry::blob_store::tests::{
     test_datastore_blob_operations, test_datastore_list_blobs, test_datastore_list_uploads,
     test_datastore_upload_operations,
 };
 use crate::registry::tests::FSRegistryTestCase;
 use tokio::fs;
-
-// Implementation-specific tests
-#[test]
-fn test_paginate() {
-    let items: Vec<String> = vec![];
-    let (result, token) = Backend::paginate(&items, 10, None);
-    assert!(result.is_empty());
-    assert!(token.is_none());
-
-    let items: Vec<String> = vec![
-        "a".to_string(),
-        "b".to_string(),
-        "c".to_string(),
-        "d".to_string(),
-    ];
-    let (result, token) = Backend::paginate(&items, 10, None);
-    assert_eq!(result, items);
-    assert!(token.is_none());
-
-    let (page1, token1) = Backend::paginate(&items, 2, None);
-    assert_eq!(page1, vec!["a".to_string(), "b".to_string()]);
-    assert_eq!(token1, Some("b".to_string()));
-
-    let (page2, token2) = Backend::paginate(&items, 2, token1);
-    assert_eq!(page2, vec!["c".to_string(), "d".to_string()]);
-    assert_eq!(token2, None);
-
-    let (page1, token1) = Backend::paginate(&items, 1, None);
-    assert_eq!(page1, vec!["a".to_string()]);
-    assert_eq!(token1, Some("a".to_string()));
-
-    let (page2, token2) = Backend::paginate(&items, 1, token1);
-    assert_eq!(page2, vec!["b".to_string()]);
-    assert_eq!(token2, Some("b".to_string()));
-
-    let (page3, token3) = Backend::paginate(&items, 1, token2);
-    assert_eq!(page3, vec!["c".to_string()]);
-    assert_eq!(token3, Some("c".to_string()));
-
-    let (page4, token4) = Backend::paginate(&items, 1, token3);
-    assert_eq!(page4, vec!["d".to_string()]);
-    assert_eq!(token4, None);
-}
 
 #[tokio::test]
 async fn test_write_and_read_file() {
