@@ -54,12 +54,8 @@ pub fn upload_hash_context_path(name: &str, uuid: &str, algorithm: &str, offset:
     )
 }
 
-pub fn upload_start_date_container_dir(name: &str, uuid: &str) -> String {
-    format!("{}/{uuid}", uploads_root_dir(name))
-}
-
 pub fn upload_start_date_path(name: &str, uuid: &str) -> String {
-    format!("{}/startedat", upload_start_date_container_dir(name, uuid),)
+    format!("{}/startedat", upload_container_path(name, uuid))
 }
 
 pub fn manifests_root_dir(namespace: &str) -> String {
@@ -296,14 +292,6 @@ mod tests {
         assert_eq!(
             upload_hash_context_path("namespace", "uuid", "sha256", 0),
             "v2/repositories/namespace/_uploads/uuid/hashstates/sha256/0"
-        );
-    }
-
-    #[test]
-    fn test_upload_start_date_container_dir() {
-        assert_eq!(
-            upload_start_date_container_dir("namespace", "uuid"),
-            "v2/repositories/namespace/_uploads/uuid"
         );
     }
 
