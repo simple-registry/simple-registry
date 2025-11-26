@@ -17,7 +17,7 @@
 
 use crate::command::server::route::Route;
 pub use crate::command::server::ClientIdentity;
-use crate::registry::Error;
+use crate::registry::{cel, Error};
 use cel_interpreter::{Context, Program, Value};
 use serde::Deserialize;
 use tracing::{debug, warn};
@@ -45,26 +45,12 @@ impl AccessPolicy {
     ///
     /// Compiles CEL expressions from the configuration into programs.
     pub fn new(config: &AccessPolicyConfig) -> Result<Self, Error> {
-        let mut compiled_rules = Vec::new();
-
-        for (index, rule) in config.rules.iter().enumerate() {
-            match Program::compile(rule) {
-                Ok(program) => compiled_rules.push(program),
-                Err(e) => {
-                    let msg = format!(
-                        "Failed to compile access policy rule #{} '{}': {}",
-                        index + 1,
-                        rule,
-                        e
-                    );
-                    return Err(Error::Initialization(msg));
-                }
-            }
-        }
+        let rules =
+            cel::compile_rules(&config.rules, "access policy").map_err(Error::Initialization)?;
 
         Ok(Self {
             default_allow: config.default_allow,
-            rules: compiled_rules,
+            rules,
         })
     }
 

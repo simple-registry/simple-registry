@@ -25,6 +25,7 @@
 //! - `size(list)`: Get size of a list
 
 use crate::configuration::Error;
+use crate::registry::cel;
 use cel_interpreter::{Context, Program, Value};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -59,24 +60,10 @@ impl RetentionPolicy {
     ///
     /// Compiles CEL expressions from the configuration into programs.
     pub fn new(config: &RetentionPolicyConfig) -> Result<Self, Error> {
-        let mut compiled_rules = Vec::new();
+        let rules =
+            cel::compile_rules(&config.rules, "retention policy").map_err(Error::Initialization)?;
 
-        for (index, rule) in config.rules.iter().enumerate() {
-            match Program::compile(rule) {
-                Ok(program) => compiled_rules.push(program),
-                Err(e) => {
-                    let msg = Error::Initialization(format!(
-                        "Failed to compile retention policy rule #{} '{rule}': {e}",
-                        index + 1
-                    ));
-                    return Err(msg);
-                }
-            }
-        }
-
-        Ok(Self {
-            rules: compiled_rules,
-        })
+        Ok(Self { rules })
     }
 
     pub fn has_rules(&self) -> bool {
