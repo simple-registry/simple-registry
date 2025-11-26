@@ -422,7 +422,7 @@ impl Backend {
         namespace: &str,
         link: &LinkKind,
     ) -> Result<LinkMetadata, Error> {
-        let link_path = path_builder::get_link_path(link, namespace);
+        let link_path = path_builder::link_path(link, namespace);
         match self.store.read(&link_path).await {
             Ok(data) => LinkMetadata::from_bytes(data),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Error::ReferenceNotFound),
@@ -436,7 +436,7 @@ impl Backend {
         link: &LinkKind,
         metadata: &LinkMetadata,
     ) -> Result<(), Error> {
-        let link_path = path_builder::get_link_path(link, namespace);
+        let link_path = path_builder::link_path(link, namespace);
         let serialized_link_data = Bytes::from(serde_json::to_vec(metadata)?);
         self.store
             .put_object(&link_path, serialized_link_data)
@@ -445,7 +445,7 @@ impl Backend {
     }
 
     async fn delete_link_reference(&self, namespace: &str, link: &LinkKind) -> Result<(), Error> {
-        let link_path = path_builder::get_link_path(link, namespace);
+        let link_path = path_builder::link_path(link, namespace);
         self.store.delete(&link_path).await?;
         Ok(())
     }

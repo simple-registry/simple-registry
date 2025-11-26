@@ -78,11 +78,11 @@ pub fn manifest_referrers_dir(namespace: &str, subject: &Digest) -> String {
     )
 }
 
-pub fn get_link_path(link: &LinkKind, namespace: &str) -> String {
-    format!("{}/link", get_link_container_path(link, namespace))
+pub fn link_path(link: &LinkKind, namespace: &str) -> String {
+    format!("{}/link", link_container_path(link, namespace))
 }
 
-pub fn get_link_container_path(link: &LinkKind, namespace: &str) -> String {
+pub fn link_container_path(link: &LinkKind, namespace: &str) -> String {
     match link {
         LinkKind::Tag(tag) => {
             format!("{REPOS_ROOT}/{namespace}/_manifests/tags/{tag}/current")
@@ -190,41 +190,41 @@ mod tests {
 
         let tag = LinkKind::Tag("v1.0".to_string());
         assert_eq!(
-            get_link_path(&tag, "ns"),
+            link_path(&tag, "ns"),
             "v2/repositories/ns/_manifests/tags/v1.0/current/link"
         );
         assert_eq!(
-            get_link_container_path(&tag, "ns"),
+            link_container_path(&tag, "ns"),
             "v2/repositories/ns/_manifests/tags/v1.0/current"
         );
 
         let revision = LinkKind::Digest(digest.clone());
         assert_eq!(
-            get_link_path(&revision, "ns"),
+            link_path(&revision, "ns"),
             "v2/repositories/ns/_manifests/revisions/sha256/digest123/link"
         );
         assert_eq!(
-            get_link_container_path(&revision, "ns"),
+            link_container_path(&revision, "ns"),
             "v2/repositories/ns/_manifests/revisions/sha256/digest123"
         );
 
         let layer = LinkKind::Layer(digest.clone());
         assert_eq!(
-            get_link_path(&layer, "ns"),
+            link_path(&layer, "ns"),
             "v2/repositories/ns/_layers/sha256/digest123/link"
         );
         assert_eq!(
-            get_link_container_path(&layer, "ns"),
+            link_container_path(&layer, "ns"),
             "v2/repositories/ns/_layers/sha256/digest123"
         );
 
         let config = LinkKind::Config(digest.clone());
         assert_eq!(
-            get_link_path(&config, "ns"),
+            link_path(&config, "ns"),
             "v2/repositories/ns/_config/sha256/digest123/link"
         );
         assert_eq!(
-            get_link_container_path(&config, "ns"),
+            link_container_path(&config, "ns"),
             "v2/repositories/ns/_config/sha256/digest123"
         );
 
@@ -232,11 +232,11 @@ mod tests {
         let referrer = Digest::Sha256("referrer789".to_string());
         let referrer_link = LinkKind::Referrer(subject, referrer);
         assert_eq!(
-            get_link_path(&referrer_link, "ns"),
+            link_path(&referrer_link, "ns"),
             "v2/repositories/ns/_manifests/referrers/sha256/subject456/sha256/referrer789/link"
         );
         assert_eq!(
-            get_link_container_path(&referrer_link, "ns"),
+            link_container_path(&referrer_link, "ns"),
             "v2/repositories/ns/_manifests/referrers/sha256/subject456/sha256/referrer789"
         );
     }

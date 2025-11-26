@@ -331,7 +331,7 @@ impl Backend {
         namespace: &str,
         link: &LinkKind,
     ) -> Result<LinkMetadata, Error> {
-        let link_path = path_builder::get_link_path(link, namespace);
+        let link_path = path_builder::link_path(link, namespace);
 
         let link = self.store.read(&link_path).await?;
         LinkMetadata::from_bytes(link)
@@ -343,14 +343,14 @@ impl Backend {
         link: &LinkKind,
         metadata: &LinkMetadata,
     ) -> Result<(), Error> {
-        let link_path = path_builder::get_link_path(link, namespace);
+        let link_path = path_builder::link_path(link, namespace);
         let serialized_link_data = serde_json::to_vec(metadata)?;
         self.store.write(&link_path, &serialized_link_data).await?;
         Ok(())
     }
 
     async fn delete_link_reference(&self, namespace: &str, link: &LinkKind) -> Result<(), Error> {
-        let path = path_builder::get_link_container_path(link, namespace);
+        let path = path_builder::link_container_path(link, namespace);
         debug!("Deleting link at path: {path}");
 
         self.store.delete_dir(&path).await?;
