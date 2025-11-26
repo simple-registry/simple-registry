@@ -1,10 +1,10 @@
+use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::thread;
 use tokio::runtime::{self, Handle};
-use tokio::sync::RwLock;
 use tracing::info;
 
 #[derive(Debug)]
@@ -26,7 +26,7 @@ impl std::error::Error for Error {}
 
 pub struct TaskQueue {
     handle: Handle,
-    active_tasks: Arc<RwLock<HashSet<String>>>,
+    active_tasks: Arc<Mutex<HashSet<String>>>,
     _runtime_thread: thread::JoinHandle<()>,
 }
 
@@ -47,7 +47,7 @@ impl TaskQueue {
 
         Ok(Self {
             handle,
-            active_tasks: Arc::new(RwLock::new(HashSet::new())),
+            active_tasks: Arc::new(Mutex::new(HashSet::new())),
             _runtime_thread: runtime_thread,
         })
     }
@@ -56,23 +56,17 @@ impl TaskQueue {
     where
         Fut: Future<Output = Result<(), Error>> + Send + 'static,
     {
-        let reference = reference.to_string();
-        let active_tasks = self.active_tasks.clone();
-
-        let already_running = self
-            .handle
-            .block_on(async { active_tasks.read().await.contains(&reference) });
-
-        if already_running {
+        if !self.active_tasks.lock().insert(reference.to_string()) {
             return;
         }
 
-        info!("Submitting task: {reference}");
+        info!("Starting task: {reference}");
 
+        let reference = reference.to_string();
+        let active_tasks = self.active_tasks.clone();
         self.handle.spawn(async move {
-            active_tasks.write().await.insert(reference.clone());
             let _ = fut.await;
-            active_tasks.write().await.remove(&reference);
+            active_tasks.lock().remove(&reference);
         });
     }
 }
