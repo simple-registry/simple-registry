@@ -70,48 +70,28 @@ impl AccessPolicy {
         }
 
         let context = Self::build_context(request, identity)?;
+        let rule_kind = if self.default_allow { "deny" } else { "allow" };
 
-        if self.default_allow {
-            for (index, rule) in self.rules.iter().enumerate() {
-                let rule_index = index + 1;
-                match rule.execute(&context) {
-                    Ok(Value::Bool(true)) => {
-                        debug!("Deny rule {rule_index} matched");
+        for (index, rule) in self.rules.iter().enumerate() {
+            let rule_index = index + 1;
+            match rule.execute(&context) {
+                Ok(Value::Bool(true)) => {
+                    debug!("{rule_kind} rule {rule_index} matched");
+                    return Ok(!self.default_allow);
+                }
+                Ok(Value::Bool(false)) => {}
+                Ok(value) => {
+                    warn!("Access policy {rule_kind} rule {rule_index} returned non-boolean value: {value:?}");
+                    if self.default_allow {
                         return Ok(false);
                     }
-                    Ok(Value::Bool(false)) => {}
-                    Ok(value) => {
-                        warn!("Access policy deny rule {rule_index} returned non-boolean value: {value:?}, treating as deny");
-                        return Ok(false);
-                    }
-                    Err(e) => {
-                        warn!("Access policy deny rule {rule_index} evaluation failed: {e}, skipping rule");
-                        // Continue to next rule
-                    }
+                }
+                Err(e) => {
+                    warn!("Access policy {rule_kind} rule {rule_index} evaluation failed: {e}");
                 }
             }
-            Ok(true)
-        } else {
-            for (index, rule) in self.rules.iter().enumerate() {
-                let rule_index = index + 1;
-                match rule.execute(&context) {
-                    Ok(Value::Bool(true)) => {
-                        debug!("Allow rule #{} matched", index + 1);
-                        return Ok(true);
-                    }
-                    Ok(Value::Bool(false)) => {}
-                    Ok(value) => {
-                        warn!("Access policy allow rule {rule_index} returned non-boolean value: {value:?}, skipping rule");
-                        // Continue to next rule
-                    }
-                    Err(e) => {
-                        warn!("Access policy allow rule {rule_index} evaluation failed: {e}, skipping rule");
-                        // Continue to next rule
-                    }
-                }
-            }
-            Ok(false)
         }
+        Ok(self.default_allow)
     }
 
     fn build_context<'a>(
