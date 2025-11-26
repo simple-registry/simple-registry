@@ -53,10 +53,6 @@ impl Registry {
         let (namespaces, next_last) = self.metadata_store.list_namespaces(n, last).await?;
         let link = next_last.map(|next_last| format!("/v2/_catalog?n={n}&last={next_last}"));
 
-        let namespaces = namespaces
-            .into_iter()
-            .map(|digest| digest.to_string())
-            .collect();
         Ok((namespaces, link))
     }
 

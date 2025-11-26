@@ -1,5 +1,4 @@
-use crate::cache::Cache;
-use crate::cache::SerializingCache;
+use crate::cache::{Cache, CacheExt};
 use crate::command::server::auth::oidc::{Jwk, OidcProvider};
 use crate::command::server::error::Error;
 use crate::command::server::{sha256_hash, OidcClaims};

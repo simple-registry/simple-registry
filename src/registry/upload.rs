@@ -167,7 +167,7 @@ impl Registry {
                 .status(StatusCode::ACCEPTED)
                 .header(LOCATION, location)
                 .header(RANGE, "0-0")
-                .header(DOCKER_UPLOAD_UUID, session_uuid.to_string())
+                .header(DOCKER_UPLOAD_UUID, session_uuid.clone())
                 .body(ResponseBody::empty())?,
         };
 

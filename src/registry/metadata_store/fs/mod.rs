@@ -4,7 +4,7 @@ use crate::registry::metadata_store::lock::{self, LockBackend, MemoryBackend};
 use crate::registry::metadata_store::{
     BlobIndex, BlobIndexOperation, Error, LinkMetadata, LockConfig, MetadataStore,
 };
-use crate::registry::{data_store, path_builder};
+use crate::registry::{data_store, pagination, path_builder};
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -56,34 +56,6 @@ impl Backend {
             };
 
         Ok(Self { store, lock })
-    }
-
-    pub fn paginate<T>(
-        items: &[T],
-        n: u16,
-        continuation_token: Option<String>,
-    ) -> (Vec<T>, Option<String>)
-    where
-        T: Clone + ToString + Ord,
-    {
-        let start = match continuation_token {
-            Some(token) => match items.iter().position(|item| item.to_string() == token) {
-                Some(pos) => pos + 1,
-                None => 0,
-            },
-            None => 0,
-        };
-
-        let end = (start + n as usize).min(items.len());
-        let result = items[start..end].to_vec();
-
-        let next_token = if !result.is_empty() && end < items.len() {
-            Some(result.last().unwrap().to_string())
-        } else {
-            None
-        };
-
-        (result, next_token)
     }
 
     //
@@ -141,10 +113,10 @@ impl MetadataStore for Backend {
     ) -> Result<(Vec<String>, Option<String>), Error> {
         let base_path = path_builder::repository_dir();
 
-        let mut repositories = self.collect_repositories(&base_path).await;
+        let mut repositories = self.collect_repositories(base_path).await;
         repositories.dedup();
 
-        Ok(Self::paginate(&repositories, n, last))
+        Ok(pagination::paginate(&repositories, n, last))
     }
 
     #[instrument(skip(self))]
@@ -159,7 +131,7 @@ impl MetadataStore for Backend {
         let mut tags = self.store.list_dir(&path).await?;
         tags.sort();
 
-        Ok(Self::paginate(&tags, n, last))
+        Ok(pagination::paginate(&tags, n, last))
     }
 
     #[instrument(skip(self))]
@@ -213,7 +185,7 @@ impl MetadataStore for Backend {
             revisions.push(Digest::Sha256(revision));
         }
 
-        Ok(Self::paginate(&revisions, n, continuation_token))
+        Ok(pagination::paginate(&revisions, n, continuation_token))
     }
 
     #[instrument(skip(self))]
@@ -359,7 +331,7 @@ impl Backend {
         namespace: &str,
         link: &LinkKind,
     ) -> Result<LinkMetadata, Error> {
-        let link_path = path_builder::get_link_path(link, namespace);
+        let link_path = path_builder::link_path(link, namespace);
 
         let link = self.store.read(&link_path).await?;
         LinkMetadata::from_bytes(link)
@@ -371,14 +343,14 @@ impl Backend {
         link: &LinkKind,
         metadata: &LinkMetadata,
     ) -> Result<(), Error> {
-        let link_path = path_builder::get_link_path(link, namespace);
+        let link_path = path_builder::link_path(link, namespace);
         let serialized_link_data = serde_json::to_vec(metadata)?;
         self.store.write(&link_path, &serialized_link_data).await?;
         Ok(())
     }
 
     async fn delete_link_reference(&self, namespace: &str, link: &LinkKind) -> Result<(), Error> {
-        let path = path_builder::get_link_container_path(link, namespace);
+        let path = path_builder::link_container_path(link, namespace);
         debug!("Deleting link at path: {path}");
 
         self.store.delete_dir(&path).await?;

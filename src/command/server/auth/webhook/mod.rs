@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests;
 
-use crate::cache::{Cache, SerializingCache};
+use crate::cache::{Cache, CacheExt};
 use crate::command::server::client_identity::ClientIdentity;
 use crate::command::server::error::Error;
 use crate::command::server::route::Route;

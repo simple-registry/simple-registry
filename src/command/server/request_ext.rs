@@ -18,23 +18,9 @@ static RANGE_RE: LazyLock<Regex> =
 static BEARER_PREFIX: &str = "Bearer ";
 static BASIC_PREFIX: &str = "Basic ";
 
-pub trait HasHeaders {
+pub trait HeaderExt {
     fn headers(&self) -> &hyper::HeaderMap;
-}
 
-impl HasHeaders for request::Parts {
-    fn headers(&self) -> &hyper::HeaderMap {
-        &self.headers
-    }
-}
-
-impl HasHeaders for response::Parts {
-    fn headers(&self) -> &hyper::HeaderMap {
-        &self.headers
-    }
-}
-
-pub trait HeaderExt: HasHeaders {
     fn get_header<K: AsHeaderName>(&self, header: K) -> Option<String> {
         self.headers()
             .get(header)
@@ -110,8 +96,17 @@ fn invalid_range_header(header: &str) -> Error {
     Error::RangeNotSatisfiable(msg)
 }
 
-impl HeaderExt for request::Parts {}
-impl HeaderExt for response::Parts {}
+impl HeaderExt for request::Parts {
+    fn headers(&self) -> &hyper::HeaderMap {
+        &self.headers
+    }
+}
+
+impl HeaderExt for response::Parts {
+    fn headers(&self) -> &hyper::HeaderMap {
+        &self.headers
+    }
+}
 
 pub trait IntoAsyncRead {
     fn into_async_read(self) -> impl AsyncRead;

@@ -5,7 +5,7 @@ mod bearer_token;
 
 use crate::cache::Cache;
 use crate::oci::{Digest, Reference};
-use crate::registry::blob_store::Reader;
+use crate::registry::blob_store::BoxedReader;
 use crate::registry::Error;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -186,7 +186,7 @@ impl RegistryClient {
         &self,
         accepted_types: &[String],
         location: &str,
-    ) -> Result<(u64, Box<dyn Reader>), Error> {
+    ) -> Result<(u64, BoxedReader), Error> {
         let response = self.query(&Method::GET, accepted_types, location).await?;
 
         if !response.status().is_success() {

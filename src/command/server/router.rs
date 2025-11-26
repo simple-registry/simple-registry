@@ -1,9 +1,14 @@
 use super::route::Route;
 use crate::oci::{Digest, Reference};
 use hyper::{Method, Uri};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::str::FromStr;
 use uuid::Uuid;
+
+fn parse_query<T: DeserializeOwned + Default>(params: &str) -> T {
+    serde_urlencoded::from_str(params).unwrap_or_default()
+}
 
 pub fn parse<'a>(method: &Method, uri: &'a Uri) -> Route<'a> {
     let path = uri.path();
@@ -14,7 +19,7 @@ pub fn parse<'a>(method: &Method, uri: &'a Uri) -> Route<'a> {
         "/metrics" if method == Method::GET => return Route::Metrics,
         "/v2" | "/v2/" if method == Method::GET => return Route::ApiVersion,
         "/v2/_catalog" if method == Method::GET => {
-            let (n, last) = if let Some(p) = params.map(PaginationQuery::from_params) {
+            let (n, last) = if let Some(p) = params.map(parse_query::<PaginationQuery>) {
                 (p.n, p.last)
             } else {
                 (None, None)
@@ -62,10 +67,6 @@ struct DigestQuery {
 }
 
 impl DigestQuery {
-    fn from_params(params: &str) -> Self {
-        serde_urlencoded::from_str(params).ok().unwrap_or_default()
-    }
-
     fn to_digest(&self) -> Option<Digest> {
         self.digest.as_ref().and_then(|d| d.parse().ok())
     }
@@ -74,25 +75,13 @@ impl DigestQuery {
 #[derive(Deserialize, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 struct ArtifactTypeQuery {
-    pub artifact_type: Option<String>,
-}
-
-impl ArtifactTypeQuery {
-    fn from_params(params: &str) -> Self {
-        serde_urlencoded::from_str(params).ok().unwrap_or_default()
-    }
+    artifact_type: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 struct PaginationQuery {
-    pub n: Option<u16>,
-    pub last: Option<String>,
-}
-
-impl PaginationQuery {
-    fn from_params(params: &str) -> Self {
-        serde_urlencoded::from_str(params).ok().unwrap_or_default()
-    }
+    n: Option<u16>,
+    last: Option<String>,
 }
 
 fn try_parse_uploads<'a>(
@@ -106,7 +95,7 @@ fn try_parse_uploads<'a>(
         if let Some(namespace) = path.strip_suffix(suffix) {
             if method == Method::POST {
                 let digest = params
-                    .map(DigestQuery::from_params)
+                    .map(parse_query::<DigestQuery>)
                     .and_then(|r| r.to_digest());
 
                 return Some(Route::StartUpload { namespace, digest });
@@ -133,7 +122,7 @@ fn try_parse_upload<'a>(
             Method::PATCH => return Some(Route::PatchUpload { namespace, uuid }),
             Method::PUT => {
                 if let Some(digest) = params
-                    .map(DigestQuery::from_params)
+                    .map(parse_query::<DigestQuery>)
                     .and_then(|r| r.to_digest())
                 {
                     return Some(Route::PutUpload {
@@ -220,7 +209,7 @@ fn try_find_referrers<'a>(
         let digest = Digest::from_str(digest).ok()?;
 
         let artifact_type = params
-            .map(ArtifactTypeQuery::from_params)
+            .map(parse_query::<ArtifactTypeQuery>)
             .and_then(|f| f.artifact_type);
 
         if *method == Method::GET {
@@ -238,7 +227,7 @@ fn try_find_referrers<'a>(
 fn try_find_tags<'a>(method: &Method, path: &'a str, params: Option<&'a str>) -> Option<Route<'a>> {
     if let Some(namespace) = path.strip_suffix("/tags/list") {
         if *method == Method::GET {
-            let (n, last) = if let Some(p) = params.map(PaginationQuery::from_params) {
+            let (n, last) = if let Some(p) = params.map(parse_query::<PaginationQuery>) {
                 (p.n, p.last)
             } else {
                 (None, None)
@@ -701,7 +690,7 @@ mod tests {
     fn test_digest_query_from_params() {
         let params =
             "digest=sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
-        let query = DigestQuery::from_params(params);
+        let query: DigestQuery = parse_query(params);
         assert!(query.digest.is_some());
         assert_eq!(
             query.digest.unwrap(),
@@ -712,7 +701,7 @@ mod tests {
     #[test]
     fn test_digest_query_from_empty_params() {
         let params = "";
-        let query = DigestQuery::from_params(params);
+        let query: DigestQuery = parse_query(params);
         assert!(query.digest.is_none());
     }
 
@@ -744,7 +733,7 @@ mod tests {
     #[test]
     fn test_artifact_type_query_from_params() {
         let params = "artifactType=application/vnd.oci.image.manifest.v1%2Bjson";
-        let query = ArtifactTypeQuery::from_params(params);
+        let query: ArtifactTypeQuery = parse_query(params);
         assert!(query.artifact_type.is_some());
         assert_eq!(
             query.artifact_type.unwrap(),
@@ -755,14 +744,14 @@ mod tests {
     #[test]
     fn test_artifact_type_query_from_empty_params() {
         let params = "";
-        let query = ArtifactTypeQuery::from_params(params);
+        let query: ArtifactTypeQuery = parse_query(params);
         assert!(query.artifact_type.is_none());
     }
 
     #[test]
     fn test_pagination_query_from_params() {
         let params = "n=100&last=previous-item";
-        let query = PaginationQuery::from_params(params);
+        let query: PaginationQuery = parse_query(params);
         assert_eq!(query.n, Some(100));
         assert_eq!(query.last, Some("previous-item".to_string()));
     }
@@ -770,7 +759,7 @@ mod tests {
     #[test]
     fn test_pagination_query_from_empty_params() {
         let params = "";
-        let query = PaginationQuery::from_params(params);
+        let query: PaginationQuery = parse_query(params);
         assert!(query.n.is_none());
         assert!(query.last.is_none());
     }
@@ -778,7 +767,7 @@ mod tests {
     #[test]
     fn test_pagination_query_partial_params() {
         let params = "n=25";
-        let query = PaginationQuery::from_params(params);
+        let query: PaginationQuery = parse_query(params);
         assert_eq!(query.n, Some(25));
         assert!(query.last.is_none());
     }

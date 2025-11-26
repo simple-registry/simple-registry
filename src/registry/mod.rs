@@ -7,11 +7,13 @@ use tracing::instrument;
 mod access_policy;
 pub mod blob;
 pub mod blob_store;
+mod cel;
 pub mod content_discovery;
 pub mod data_store;
 mod error;
 pub mod manifest;
 pub mod metadata_store;
+pub mod pagination;
 mod path_builder;
 pub mod repository;
 mod retention_policy;
@@ -68,7 +70,7 @@ impl Registry {
             blob_store,
             metadata_store,
             repositories,
-            task_queue: TaskQueue::new(concurrent_cache_jobs)?,
+            task_queue: TaskQueue::new(concurrent_cache_jobs, "cache-worker")?,
         };
 
         Ok(res)
