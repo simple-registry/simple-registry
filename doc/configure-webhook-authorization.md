@@ -134,9 +134,9 @@ Always included:
   - `delete-blob` - Delete blob
   - `start-upload` - Start blob upload
   - `get-upload` - Get upload status
-  - `patch-upload` - Continue chunked upload
-  - `put-upload` - Complete upload
-  - `delete-upload` - Cancel upload
+  - `update-upload` - Continue chunked upload
+  - `complete-upload` - Complete upload
+  - `cancel-upload` - Cancel upload
   - `list-tags` - List repository tags
   - `list-catalog` - List repositories
   - `get-referrers` - Get referring manifests
