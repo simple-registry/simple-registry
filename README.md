@@ -34,6 +34,7 @@ Options:
   --help, help      display usage information
 
 Commands:
+  argon             Generate Argon2 password hashes for basic auth
   scrub             Check the storage backend for inconsistencies
   server            Run the registry listeners
 
@@ -49,8 +50,11 @@ In addition to the standard distribution endpoints, Simple-Registry provides the
 ### Metrics
 
 - `http_requests_total` (counter): Total number of HTTP requests made.
-- `http_request_duration_milliseconds_bucket`, `http_request_duration_milliseconds_sum`, `http_request_duration_milliseconds_count` (histogram): The HTTP request latencies in milliseconds.
+- `http_request_duration_ms` (histogram): The HTTP request latencies in milliseconds.
 - `http_requests_in_flight` (gauge): The current number of HTTP requests being served.
+- `auth_attempts_total` (counter): Total number of authentication attempts (labels: `method`, `result`).
+- `webhook_authorization_requests_total` (counter): Total webhook authorization requests (labels: `webhook`, `result`).
+- `webhook_authorization_duration_seconds` (histogram): Webhook authorization request duration (label: `webhook`).
 
 ## Configuration
 

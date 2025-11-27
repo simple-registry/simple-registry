@@ -69,6 +69,7 @@ The following variables are available in the CEL expressions:
 
 - `identity.id`: The identity ID as specified in the configuration file
 - `identity.username`: The username for the identity
+- `identity.client_ip`: The client's IP address (if available)
 - `identity.certificate.common_names`: The list of common names from the client certificate
 - `identity.certificate.organizations`: The list of organizations from the client certificate
 - `identity.oidc`: OIDC authentication details (when using OIDC authentication)
