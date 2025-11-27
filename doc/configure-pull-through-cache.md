@@ -20,7 +20,7 @@ Configure one or more upstream registries for a namespace:
 
 ```toml
 [[repository."library".upstream]]
-url = "https://registry-1.docker.io/v2/library"
+url = "https://registry-1.docker.io"
 username = "myuser"
 password = "mypassword"
 ```
@@ -32,19 +32,19 @@ Configure multiple upstreams for high availability:
 ```toml
 # Primary upstream
 [[repository."library".upstream]]
-url = "https://primary.registry.io/v2/library"
+url = "https://primary.registry.io"
 client_certificate = "/path/to/client.crt"
 client_private_key = "/path/to/client.key"
 
 # Secondary fallback
 [[repository."library".upstream]]
-url = "https://secondary.registry.io/v2/library"
+url = "https://secondary.registry.io"
 username = "backup_user"
 password = "backup_password"
 
 # Tertiary fallback (anonymous)
 [[repository."library".upstream]]
-url = "https://public.registry.io/v2/library"
+url = "https://public.registry.io"
 ```
 
 ### Configuration Options
@@ -85,7 +85,7 @@ immutable_tags = true
 immutable_tags_exclusions = ["^latest$", "^nightly-.*$"]
 
 [[repository."library".upstream]]
-url = "https://registry-1.docker.io/v2/library"
+url = "https://registry-1.docker.io"
 ```
 
 **Behavior**:

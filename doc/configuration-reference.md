@@ -334,17 +334,12 @@ Example:
 
 ```toml
 [[repository."library".upstream]]
-url = "https://docker.io/v2/library"
-client_certificate = "/path/to/client.crt"
-client_private_key = "/path/to/client.key"
-
-[[repository."library".upstream]]
-url = "https://registry-1.docker.io/v2/library"
+url = "https://registry-1.docker.io"
 username = "username"
 password = "password"
 
 [[repository."library".upstream]]
-url = "https://index.docker.io/v2/library"
+url = "https://index.docker.io"
 # server_ca_bundle = "/path/to/ca.crt" # specify authorized server CAs
 # anonymous access
 ```
