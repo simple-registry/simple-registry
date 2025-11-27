@@ -134,9 +134,9 @@ Always included:
   - `delete-blob` - Delete blob
   - `start-upload` - Start blob upload
   - `get-upload` - Get upload status
-  - `patch-upload` - Continue chunked upload
-  - `put-upload` - Complete upload
-  - `delete-upload` - Cancel upload
+  - `update-upload` - Continue chunked upload
+  - `complete-upload` - Complete upload
+  - `cancel-upload` - Cancel upload
   - `list-tags` - List repository tags
   - `list-catalog` - List repositories
   - `get-referrers` - Get referring manifests
@@ -165,7 +165,7 @@ Webhooks run **after** CEL policies are evaluated. This allows you to:
 ```toml
 # CEL handles basic access control
 [global.access_policy]
-default_decision = "allow"
+default_allow = true
 rules = [
     'identity.username != null',  # Require authentication
 ]

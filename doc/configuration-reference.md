@@ -37,7 +37,7 @@ This should be set according to the number of CPU cores available on the server.
 - `max_concurrent_cache_jobs` (usize): The maximum number of concurrent cache jobs the server can handle (default: 4).
 - `update_pull_time` (bool): When set to true, the registry will update the pull time metadata for blobs,
   which is useful for garbage collection and retention policies (default: false).
-- `enable_redirects` (bool): When set to true, the registry may return HTTP redirects (Status 307) for blob downloads
+- `enable_redirect` (bool): When set to true, the registry may return HTTP redirects (Status 307) for blob downloads
   (default: true).
 - `access_policy` (optional): Global access control policy that applies to all repositories. See Access Policy section below.
 - `retention_policy` (optional): Global retention policy that applies to all repositories. See Retention Policy section below.
@@ -334,17 +334,12 @@ Example:
 
 ```toml
 [[repository."library".upstream]]
-url = "https://docker.io/v2/library"
-client_certificate = "/path/to/client.crt"
-client_private_key = "/path/to/client.key"
-
-[[repository."library".upstream]]
-url = "https://registry-1.docker.io/v2/library"
+url = "https://registry-1.docker.io"
 username = "username"
 password = "password"
 
 [[repository."library".upstream]]
-url = "https://index.docker.io/v2/library"
+url = "https://index.docker.io"
 # server_ca_bundle = "/path/to/ca.crt" # specify authorized server CAs
 # anonymous access
 ```
