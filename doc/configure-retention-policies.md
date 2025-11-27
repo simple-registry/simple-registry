@@ -81,5 +81,8 @@ In the example above, a manifest is kept if at least one of the following condit
 In addition to those variables, some helper functions are available:
 - `now()`: Returns the current time in seconds since epoch (1st of January 1970).
 - `days(d)`: Returns the number of seconds in `d` days.
+- `hours(h)`: Returns the number of seconds in `h` hours.
+- `minutes(m)`: Returns the number of seconds in `m` minutes.
 - `top(s, collection, k)`: Check if `s` is among the top `k` elements of `collection`.
+- `size(collection)`: Returns the number of elements in `collection`.
 
