@@ -165,7 +165,7 @@ Webhooks run **after** CEL policies are evaluated. This allows you to:
 ```toml
 # CEL handles basic access control
 [global.access_policy]
-default_decision = "allow"
+default_allow = true
 rules = [
     'identity.username != null',  # Require authentication
 ]
