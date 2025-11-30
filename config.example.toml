@@ -68,7 +68,7 @@ default_allow = true
 
 [repository."test".access_policy]
 default_allow = false
-policies = [
+rules = [
     'identity.username in ["philippe"]',
     '"philippe" in identity.certificate.common_names',
     '"admins" in identity.certificate.organizations',
