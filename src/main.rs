@@ -23,6 +23,9 @@ mod oci;
 mod registry;
 mod watcher;
 
+#[cfg(test)]
+mod e2e;
+
 // TODO: to be moved
 fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), configuration::Error> {
     if let Some(ObservabilityConfig {

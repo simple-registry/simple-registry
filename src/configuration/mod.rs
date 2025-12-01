@@ -51,6 +51,8 @@ pub struct GlobalConfig {
     #[serde(default = "GlobalConfig::default_enable_redirect")]
     pub enable_redirect: bool,
     #[serde(default)]
+    pub require_authentication: bool,
+    #[serde(default)]
     pub access_policy: AccessPolicyConfig,
     #[serde(default)]
     pub retention_policy: RetentionPolicyConfig,
@@ -68,6 +70,7 @@ impl Default for GlobalConfig {
             max_concurrent_cache_jobs: GlobalConfig::default_max_concurrent_cache_jobs(),
             update_pull_time: GlobalConfig::default_update_pull_time(),
             enable_redirect: GlobalConfig::default_enable_redirect(),
+            require_authentication: false,
             access_policy: AccessPolicyConfig::default(),
             retention_policy: RetentionPolicyConfig::default(),
             immutable_tags: false,

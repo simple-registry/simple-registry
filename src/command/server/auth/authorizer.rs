@@ -16,6 +16,7 @@ const ACCESS_DENIED: &str = "Access denied";
 
 /// Centralized authorization component that handles all access control decisions
 pub struct Authorizer {
+    global_require_authentication: bool,
     global_access_policy: Option<AccessPolicy>,
     global_authorization_webhook: Option<String>,
     global_immutable_tags: bool,
@@ -98,6 +99,7 @@ impl Authorizer {
             .collect();
 
         Ok(Self {
+            global_require_authentication: config.global.require_authentication,
             global_access_policy,
             global_authorization_webhook: config.global.authorization_webhook.clone(),
             global_immutable_tags: config.global.immutable_tags,
@@ -115,6 +117,14 @@ impl Authorizer {
         request: &Parts,
         registry: &Registry,
     ) -> Result<(), Error> {
+        if self.global_require_authentication
+            && matches!(route, Route::ApiVersion)
+            && identity.id.is_none()
+        {
+            debug!("Authentication required but no credentials provided");
+            return Err(Error::Unauthorized("Authentication required".to_string()));
+        }
+
         if let Some(global_policy) = &self.global_access_policy {
             debug!("Evaluating global access policy");
             if global_policy.evaluate(route, identity) != Ok(true) {
@@ -617,5 +627,81 @@ mod tests {
     fn test_log_denial() {
         let identity = ClientIdentity::new(None);
         log_denial("test reason", &identity);
+    }
+
+    fn create_test_registry() -> Registry {
+        use crate::registry::repository::Repository;
+
+        let config = create_minimal_config();
+        let blob_store = config.blob_store.to_backend().unwrap();
+        let metadata_store = config.resolve_metadata_config().to_backend().unwrap();
+
+        Registry::new(
+            blob_store,
+            metadata_store,
+            Arc::new(HashMap::<String, Repository>::new()),
+            false,
+            false,
+            1,
+        )
+        .unwrap()
+    }
+
+    fn create_config_with_require_auth() -> Configuration {
+        let toml = r#"
+            [blob_store.fs]
+            root_dir = "/tmp/test"
+
+            [metadata_store.fs]
+            root_dir = "/tmp/test"
+
+            [cache.memory]
+
+            [server]
+            bind_address = "0.0.0.0"
+            port = 8000
+
+            [global]
+            update_pull_time = false
+            max_concurrent_cache_jobs = 10
+            require_authentication = true
+        "#;
+        toml::from_str(toml).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_api_version_rejects_unauthenticated_when_require_auth_enabled() {
+        let config = create_config_with_require_auth();
+        let cache = cache::Config::Memory.to_backend().unwrap();
+        let authorizer = Authorizer::new(&config, &cache).unwrap();
+        let registry = create_test_registry();
+
+        let identity = ClientIdentity::new(None);
+        let request = hyper::Request::builder().body(()).unwrap();
+        let (parts, _) = request.into_parts();
+
+        let result = authorizer
+            .authorize_request(&Route::ApiVersion, &identity, &parts, &registry)
+            .await;
+
+        assert!(matches!(result, Err(Error::Unauthorized(_))));
+    }
+
+    #[tokio::test]
+    async fn test_api_version_allows_unauthenticated_when_require_auth_disabled() {
+        let config = create_minimal_config();
+        let cache = cache::Config::Memory.to_backend().unwrap();
+        let authorizer = Authorizer::new(&config, &cache).unwrap();
+        let registry = create_test_registry();
+
+        let identity = ClientIdentity::new(None);
+        let request = hyper::Request::builder().body(()).unwrap();
+        let (parts, _) = request.into_parts();
+
+        let result = authorizer
+            .authorize_request(&Route::ApiVersion, &identity, &parts, &registry)
+            .await;
+
+        assert!(result.is_ok());
     }
 }
