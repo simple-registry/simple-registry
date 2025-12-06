@@ -770,8 +770,7 @@ mod tests {
             )
             .await;
 
-        if result.is_err() {
-            let err = result.unwrap_err();
+        if let Err(err) = result {
             assert!(err.to_string().contains("error") || err.to_string().contains("refused"));
         }
     }
@@ -797,8 +796,7 @@ mod tests {
             .abort_multipart_upload("test/file.txt", "test-upload-id")
             .await;
 
-        if result.is_err() {
-            let err = result.unwrap_err();
+        if let Err(err) = result {
             assert!(err.to_string().contains("error") || err.to_string().contains("refused"));
         }
     }
