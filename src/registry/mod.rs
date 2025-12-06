@@ -1,7 +1,8 @@
-use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
+
+use regex::Regex;
 use tracing::instrument;
 
 mod access_policy;
@@ -23,17 +24,16 @@ pub mod tests;
 pub mod upload;
 mod version;
 
-use crate::cache;
-
-pub use repository::Repository;
-
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
-use crate::registry::task_queue::TaskQueue;
 pub use access_policy::{AccessPolicy, AccessPolicyConfig};
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
+pub use repository::Repository;
 pub use retention_policy::{ManifestImage, RetentionPolicy, RetentionPolicyConfig};
+
+use crate::cache;
+use crate::registry::blob_store::BlobStore;
+use crate::registry::metadata_store::MetadataStore;
+use crate::registry::task_queue::TaskQueue;
 
 static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap()

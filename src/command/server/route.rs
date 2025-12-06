@@ -1,6 +1,7 @@
-use crate::oci::{Digest, Reference};
 use serde::Serialize;
 use uuid::Uuid;
+
+use crate::oci::{Digest, Reference};
 
 /// Route represents the parsed request path and action.
 /// Serializes to a flat structure compatible with CEL policy expressions.
@@ -190,9 +191,10 @@ impl<'a> Route<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
     use crate::oci::Digest;
-    use std::str::FromStr;
 
     #[test]
     fn test_serialization_compatibility() {

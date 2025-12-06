@@ -1,22 +1,23 @@
 pub mod jwk;
 pub mod provider;
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use hyper::http::request::Parts;
+pub use jwk::Jwk;
+pub use provider::OidcProvider;
+use reqwest::Client;
+use serde::Deserialize;
+use tracing::debug;
+
 use crate::cache::Cache;
 use crate::command::server::auth::oidc::provider::{generic, github};
 use crate::command::server::auth::{AuthMiddleware, AuthResult};
 use crate::command::server::error::Error;
 use crate::command::server::request_ext::HeaderExt;
 use crate::command::server::{ClientIdentity, OidcClaims};
-use async_trait::async_trait;
-use hyper::http::request::Parts;
-use reqwest::Client;
-use serde::Deserialize;
-use std::sync::Arc;
-use std::time::Duration;
-use tracing::debug;
-
-pub use jwk::Jwk;
-pub use provider::OidcProvider;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "provider", rename_all = "lowercase")]
@@ -128,18 +129,20 @@ impl AuthMiddleware for OidcValidator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cache;
-    use crate::command::server::auth::{AuthMiddleware, AuthResult};
-    use crate::command::server::ClientIdentity;
+    use std::net::SocketAddr;
+
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
     use hyper::header::AUTHORIZATION;
     use hyper::Request;
     use serde_json::json;
-    use std::net::SocketAddr;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::cache;
+    use crate::command::server::auth::{AuthMiddleware, AuthResult};
+    use crate::command::server::ClientIdentity;
 
     fn build_config(mock_server: &MockServer) -> Config {
         Config::Generic(generic::ProviderConfig {

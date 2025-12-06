@@ -1,17 +1,19 @@
 #[cfg(test)]
 mod tests;
 
-use crate::registry::metadata_store::lock::LockBackend;
-use crate::registry::metadata_store::Error;
-use async_trait::async_trait;
-use redis::Client;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
+
+use async_trait::async_trait;
+use redis::Client;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::debug;
+
+use crate::registry::metadata_store::lock::LockBackend;
+use crate::registry::metadata_store::Error;
 
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
 pub struct LockConfig {

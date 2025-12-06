@@ -1,11 +1,12 @@
-use crate::command::server::response_body::ResponseBody;
-use crate::oci::Digest;
-use crate::registry::{blob_store, Error, Registry};
 use hyper::header::{CONTENT_LENGTH, LOCATION, RANGE};
 use hyper::{Response, StatusCode};
 use tokio::io::AsyncRead;
 use tracing::{error, instrument, warn};
 use uuid::Uuid;
+
+use crate::command::server::response_body::ResponseBody;
+use crate::oci::Digest;
+use crate::registry::{blob_store, Error, Registry};
 
 pub const DOCKER_UPLOAD_UUID: &str = "Docker-Upload-UUID";
 pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
@@ -263,12 +264,14 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
+    use uuid::Uuid;
+
     use super::*;
     use crate::command::server::request_ext::HeaderExt;
     use crate::registry::path_builder;
     use crate::registry::tests::{backends, FSRegistryTestCase};
-    use std::io::Cursor;
-    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_start_upload() {

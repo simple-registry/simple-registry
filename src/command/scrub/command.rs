@@ -1,3 +1,10 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use argh::FromArgs;
+use chrono::Duration;
+use tracing::{error, info};
+
 use crate::cache;
 use crate::cache::Cache;
 use crate::command::scrub::check::{
@@ -8,11 +15,6 @@ use crate::configuration::Configuration;
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::{blob_store, repository, Repository, RetentionPolicy, RetentionPolicyConfig};
-use argh::FromArgs;
-use chrono::Duration;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tracing::{error, info};
 
 #[derive(FromArgs, PartialEq, Debug)]
 #[allow(clippy::struct_excessive_bools)]

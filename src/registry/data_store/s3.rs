@@ -1,4 +1,6 @@
-use crate::registry::data_store::Error;
+use std::io::{Error as IoError, ErrorKind};
+use std::time::Duration;
+
 use aws_sdk_s3::config::{timeout::TimeoutConfig, BehaviorVersion, Credentials, Region};
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
@@ -7,8 +9,8 @@ use aws_sdk_s3::{Client as S3Client, Config as S3Config};
 use bytes::Bytes;
 use bytesize::ByteSize;
 use serde::Deserialize;
-use std::io::{Error as IoError, ErrorKind};
-use std::time::Duration;
+
+use crate::registry::data_store::Error;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {

@@ -1,3 +1,12 @@
+use std::fs;
+use std::path::PathBuf;
+use std::str::FromStr;
+
+use hyper::http::request::Builder;
+use hyper::{HeaderMap, Method};
+use wiremock::matchers::{header, method};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
 use crate::cache;
 use crate::command::server::auth::webhook::{
     build_header_name, build_header_value, build_headers, load_certificate_bundle, load_file,
@@ -11,13 +20,6 @@ use crate::command::server::auth::webhook::{
 use crate::command::server::route::Route;
 use crate::command::server::{ClientIdentity, Error};
 use crate::oci::{Digest, Reference};
-use hyper::http::request::Builder;
-use hyper::{HeaderMap, Method};
-use std::fs;
-use std::path::PathBuf;
-use std::str::FromStr;
-use wiremock::matchers::{header, method};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 static TEST_BUNDLE: &str = r"-----BEGIN CERTIFICATE-----
 MIIDgjCCAmqgAwIBAgIUFCYlDkKrxnJCnCtYXKvA9BaXnfowDQYJKoZIhvcNAQEL

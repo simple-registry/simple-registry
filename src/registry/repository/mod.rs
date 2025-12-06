@@ -1,17 +1,19 @@
+use std::sync::Arc;
+
+use serde::Deserialize;
+use tracing::instrument;
+
 use crate::cache::Cache;
 use crate::oci::{Digest, Reference};
-use serde::Deserialize;
-use std::sync::Arc;
-use tracing::instrument;
 mod registry_client;
 
-use crate::registry::blob_store::BoxedReader;
 use registry_client::RegistryClient;
+pub use registry_client::RegistryClientConfig;
 
 use crate::registry::access_policy::AccessPolicyConfig;
+use crate::registry::blob_store::BoxedReader;
 use crate::registry::retention_policy::{RetentionPolicy, RetentionPolicyConfig};
 use crate::registry::Error;
-pub use registry_client::RegistryClientConfig;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Config {
@@ -127,10 +129,11 @@ impl Repository {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cache;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::cache;
 
     #[tokio::test]
     async fn test_is_pull_through_empty() {

@@ -1,7 +1,9 @@
-use crate::registry;
+use std::fmt;
+
 use hyper::StatusCode;
 use serde_json::json;
-use std::fmt;
+
+use crate::registry;
 
 #[derive(Debug, PartialEq)]
 pub enum Error {

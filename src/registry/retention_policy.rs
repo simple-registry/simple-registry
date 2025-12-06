@@ -24,13 +24,15 @@
 //! - `top(tag, list, n)`: Check if tag is in top N of list
 //! - `size(list)`: Get size of a list
 
-use crate::configuration::Error;
-use crate::registry::cel;
+use std::sync::Arc;
+
 use cel_interpreter::{Context, Program, Value};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tracing::debug;
+
+use crate::configuration::Error;
+use crate::registry::cel;
 
 /// Configuration for retention policies.
 #[derive(Clone, Debug, Default, Deserialize)]

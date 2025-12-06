@@ -1,3 +1,8 @@
+use std::io::Cursor;
+
+use sha2::{Digest as ShaDigest, Sha256};
+use uuid::Uuid;
+
 use crate::registry::blob_store::sha256_ext::Sha256Ext;
 use crate::registry::blob_store::tests::{
     test_datastore_blob_operations, test_datastore_list_blobs, test_datastore_list_uploads,
@@ -5,9 +10,6 @@ use crate::registry::blob_store::tests::{
 };
 use crate::registry::blob_store::BlobStore;
 use crate::registry::tests::S3RegistryTestCase;
-use sha2::{Digest as ShaDigest, Sha256};
-use std::io::Cursor;
-use uuid::Uuid;
 
 #[tokio::test]
 async fn test_list_uploads() {

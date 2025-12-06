@@ -1,4 +1,6 @@
-use crate::registry::Error;
+use std::sync::atomic::AtomicU64;
+use std::sync::LazyLock;
+
 use prometheus::{
     register_histogram_with_registry, register_int_counter_vec_with_registry,
     register_int_counter_with_registry, register_int_gauge_with_registry,
@@ -7,9 +9,9 @@ use prometheus::{
     Encoder, Histogram, IntCounter, IntCounterVec, IntGauge, Registry as PrometheusRegistry,
     TextEncoder,
 };
-use std::sync::atomic::AtomicU64;
-use std::sync::LazyLock;
 use tracing::error;
+
+use crate::registry::Error;
 
 pub static IN_FLIGHT_REQUESTS: AtomicU64 = AtomicU64::new(0);
 

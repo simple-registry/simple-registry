@@ -1,8 +1,9 @@
-use crate::cache::{Cache, Error};
 use async_trait::async_trait;
 use redis::AsyncCommands;
 use serde::Deserialize;
 use tracing::info;
+
+use crate::cache::{Cache, Error};
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct BackendConfig {
@@ -49,9 +50,11 @@ impl Cache for Backend {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
     use tokio::time;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_store_and_retrieve() {

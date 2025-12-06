@@ -1,9 +1,11 @@
 pub mod generic;
 pub mod github;
 
-use crate::command::server::error::Error;
-use async_trait::async_trait;
 use std::collections::HashMap;
+
+use async_trait::async_trait;
+
+use crate::command::server::error::Error;
 
 #[async_trait]
 pub trait OidcProvider: Send + Sync {

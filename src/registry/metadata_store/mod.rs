@@ -1,10 +1,12 @@
 mod error;
 
-use crate::oci::{Descriptor, Digest};
+use std::collections::{HashMap, HashSet};
+
 use async_trait::async_trait;
 pub use error::Error;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+
+use crate::oci::{Descriptor, Digest};
 
 mod config;
 pub mod fs;
@@ -13,10 +15,11 @@ mod link_metadata;
 mod lock;
 pub mod s3;
 
-use crate::registry::metadata_store::link_kind::LinkKind;
 pub use config::MetadataStoreConfig;
 pub use link_metadata::LinkMetadata;
 pub use lock::redis::LockConfig;
+
+use crate::registry::metadata_store::link_kind::LinkKind;
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct BlobIndex {
@@ -86,14 +89,16 @@ pub trait MetadataStore: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use chrono::{Duration, Utc};
+
     use crate::oci::Descriptor;
     use crate::registry::blob_store::BlobStore;
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::metadata_store::MetadataStore;
     use crate::registry::tests::backends;
-    use chrono::{Duration, Utc};
-    use std::collections::HashMap;
-    use std::sync::Arc;
 
     pub async fn test_datastore_list_namespaces(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore>) {
         let namespaces = ["repo1", "repo2", "repo3/nested"];

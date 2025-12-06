@@ -5,14 +5,15 @@ pub mod mtls;
 pub mod oidc;
 pub mod webhook;
 
-use crate::command::server::error::Error;
-use crate::command::server::ClientIdentity;
 use async_trait::async_trait;
 pub use authenticator::Authenticator;
 pub use authorizer::Authorizer;
 pub use basic_auth::BasicAuthValidator;
 use hyper::http::request::Parts;
 pub use mtls::{MtlsValidator, PeerCertificate};
+
+use crate::command::server::error::Error;
+use crate::command::server::ClientIdentity;
 
 /// Result of authentication attempt
 #[derive(Debug)]

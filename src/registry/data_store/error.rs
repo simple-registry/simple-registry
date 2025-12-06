@@ -39,8 +39,9 @@ impl From<serde_json::Error> for Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io;
+
+    use super::*;
 
     #[test]
     fn test_display() {

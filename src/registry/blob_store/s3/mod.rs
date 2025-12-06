@@ -2,20 +2,22 @@ mod chunked_reader;
 #[cfg(test)]
 pub mod tests;
 
-use crate::oci::Digest;
-use crate::registry::blob_store::hashing_reader::HashingReader;
-use crate::registry::blob_store::sha256_ext::Sha256Ext;
-use crate::registry::blob_store::{BlobStore, BoxedReader, Error};
-use crate::registry::{data_store, path_builder};
+use std::fmt::{Debug, Formatter};
+use std::io::Cursor;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use chunked_reader::ChunkedReader;
 use sha2::{Digest as ShaDigestTrait, Sha256};
-use std::fmt::{Debug, Formatter};
-use std::io::Cursor;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{debug, info, instrument};
+
+use crate::oci::Digest;
+use crate::registry::blob_store::hashing_reader::HashingReader;
+use crate::registry::blob_store::sha256_ext::Sha256Ext;
+use crate::registry::blob_store::{BlobStore, BoxedReader, Error};
+use crate::registry::{data_store, path_builder};
 
 #[derive(Clone)]
 pub struct Backend {

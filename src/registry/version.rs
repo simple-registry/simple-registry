@@ -1,7 +1,8 @@
-use crate::command::server::response_body::ResponseBody;
-use crate::registry::{Error, Registry};
 use hyper::{Response, StatusCode};
 use tracing::instrument;
+
+use crate::command::server::response_body::ResponseBody;
+use crate::registry::{Error, Registry};
 
 pub const DOCKER_DISTRIBUTION_API_VERSION: &str = "Docker-Distribution-API-Version";
 pub const X_POWERED_BY: &str = "X-Powered-By";

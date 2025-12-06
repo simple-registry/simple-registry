@@ -1,12 +1,14 @@
-use crate::cache::{Cache, Error};
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 use tracing::info;
+
+use crate::cache::{Cache, Error};
 
 #[derive(Debug)]
 pub struct Backend {
@@ -70,9 +72,11 @@ impl Cache for Backend {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
     use tokio::time;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_store_and_retrieve() {

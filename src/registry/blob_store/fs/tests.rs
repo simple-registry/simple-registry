@@ -1,9 +1,10 @@
+use tokio::fs;
+
 use crate::registry::blob_store::tests::{
     test_datastore_blob_operations, test_datastore_list_blobs, test_datastore_list_uploads,
     test_datastore_upload_operations,
 };
 use crate::registry::tests::FSRegistryTestCase;
-use tokio::fs;
 
 #[tokio::test]
 async fn test_write_and_read_file() {

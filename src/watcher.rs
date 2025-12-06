@@ -1,13 +1,15 @@
-use crate::command::server;
-use crate::command::server::listeners::tls::ServerTlsConfig;
-use crate::configuration::{Configuration, Error, ServerConfig};
-use notify::event::ModifyKind;
-use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use notify::event::ModifyKind;
+use notify::{Event, EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use tracing::{error, info};
+
+use crate::command::server;
+use crate::command::server::listeners::tls::ServerTlsConfig;
+use crate::configuration::{Configuration, Error, ServerConfig};
 
 pub struct ConfigWatcher {
     _handle: tokio::task::JoinHandle<()>,

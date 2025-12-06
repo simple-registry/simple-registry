@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
+use serde::Deserialize;
+
 use crate::registry::blob_store::{fs, s3, BlobStore, Error};
 use crate::registry::data_store;
-use serde::Deserialize;
-use std::sync::Arc;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[allow(clippy::large_enum_variant)]

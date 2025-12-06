@@ -5,13 +5,13 @@ mod hashing_reader;
 pub mod s3;
 mod sha256_ext;
 
-use crate::oci::Digest;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 pub use config::BlobStorageConfig;
+pub use error::Error;
 use tokio::io::AsyncRead;
 
-pub use error::Error;
+use crate::oci::Digest;
 
 pub type BoxedReader = Box<dyn AsyncRead + Unpin + Send + Sync>;
 
@@ -72,12 +72,14 @@ pub trait BlobStore: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::registry::blob_store::sha256_ext::Sha256Ext;
+    use std::io::Cursor;
+
     use chrono::Duration;
     use sha2::{Digest, Sha256};
-    use std::io::Cursor;
     use uuid::Uuid;
+
+    use super::*;
+    use crate::registry::blob_store::sha256_ext::Sha256Ext;
 
     pub async fn test_datastore_list_uploads(store: &impl BlobStore) {
         let namespace = "test-repo";

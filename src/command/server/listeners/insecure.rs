@@ -1,14 +1,16 @@
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+
+use arc_swap::ArcSwap;
+use hyper_util::rt::TokioIo;
+use serde::Deserialize;
+use tracing::{debug, info};
+
 use crate::command::server::error::Error;
 use crate::command::server::listeners::{accept, build_listener};
 use crate::command::server::serve_request;
 use crate::command::server::ServerContext;
-use arc_swap::ArcSwap;
-use hyper_util::rt::TokioIo;
-use serde::Deserialize;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
-use tracing::{debug, info};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
@@ -98,9 +100,10 @@ impl InsecureListener {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv6Addr;
+
     use super::*;
     use crate::command::server::server_context::tests::create_test_server_context;
-    use std::net::Ipv6Addr;
 
     #[test]
     fn test_config_default_values() {

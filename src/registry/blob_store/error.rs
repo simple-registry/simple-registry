@@ -1,16 +1,18 @@
-use crate::oci;
-use crate::registry::data_store;
+use std::fmt::Debug;
+use std::num::TryFromIntError;
+use std::string::FromUtf8Error;
+use std::{fmt, io};
+
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::head_object::HeadObjectError;
 use aws_sdk_s3::primitives::ByteStreamError;
 use sha2::digest::crypto_common::hazmat::DeserializeStateError;
-use std::fmt::Debug;
-use std::num::TryFromIntError;
-use std::string::FromUtf8Error;
-use std::{fmt, io};
 use tracing::error;
+
+use crate::oci;
+use crate::registry::data_store;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
@@ -133,13 +135,14 @@ impl From<oci::Error> for Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use aws_sdk_s3::error::SdkError;
     use aws_sdk_s3::operation::get_object::GetObjectError;
     use aws_sdk_s3::operation::head_object::HeadObjectError;
     use aws_sdk_s3::operation::put_object::PutObjectError;
     use aws_sdk_s3::primitives::ByteStreamError;
     use sha2::digest::crypto_common::hazmat::DeserializeStateError;
+
+    use super::*;
 
     #[test]
     fn test_error_display() {

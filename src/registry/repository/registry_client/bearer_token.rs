@@ -1,5 +1,6 @@
-use crate::registry::Error;
 use serde::Deserialize;
+
+use crate::registry::Error;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct BearerToken {

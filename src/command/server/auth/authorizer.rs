@@ -1,3 +1,10 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use hyper::http::request::Parts;
+use regex::Regex;
+use tracing::{debug, error, info, instrument};
+
 use crate::cache::Cache;
 use crate::command::server::auth::webhook::WebhookAuthorizer;
 use crate::command::server::error::Error;
@@ -6,11 +13,6 @@ use crate::command::server::ClientIdentity;
 use crate::configuration::Configuration;
 use crate::oci::Reference;
 use crate::registry::{AccessPolicy, Registry};
-use hyper::http::request::Parts;
-use regex::Regex;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tracing::{debug, error, info, instrument};
 
 const ACCESS_DENIED: &str = "Access denied";
 

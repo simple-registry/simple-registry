@@ -1,14 +1,16 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use bytesize::ByteSize;
+use tempfile::TempDir;
+use uuid::Uuid;
+
 use crate::registry::blob_store::BlobStore;
 use crate::registry::data_store;
 use crate::registry::metadata_store;
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::test_utils::create_test_registry;
 use crate::registry::{blob_store, Registry, Repository};
-use bytesize::ByteSize;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tempfile::TempDir;
-use uuid::Uuid;
 
 pub trait RegistryTestCase {
     fn registry(&self) -> &Registry;

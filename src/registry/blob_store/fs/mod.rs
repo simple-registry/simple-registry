@@ -1,20 +1,22 @@
 #[cfg(test)]
 pub mod tests;
 
+use std::fmt;
+use std::fmt::{Debug, Formatter};
+use std::io::{ErrorKind, SeekFrom};
+use std::path::PathBuf;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use sha2::{Digest as Sha256Digest, Sha256};
+use tokio::io::{AsyncRead, AsyncSeekExt};
+use tracing::{error, info, instrument};
+
 use crate::oci::Digest;
 use crate::registry::blob_store::hashing_reader::HashingReader;
 use crate::registry::blob_store::sha256_ext::Sha256Ext;
 use crate::registry::blob_store::{BlobStore, BoxedReader, Error};
 use crate::registry::{data_store, pagination, path_builder};
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use sha2::{Digest as Sha256Digest, Sha256};
-use std::fmt;
-use std::fmt::{Debug, Formatter};
-use std::io::{ErrorKind, SeekFrom};
-use std::path::PathBuf;
-use tokio::io::{AsyncRead, AsyncSeekExt};
-use tracing::{error, info, instrument};
 
 #[derive(Clone)]
 pub struct Backend {

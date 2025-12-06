@@ -3,10 +3,11 @@ mod tests;
 
 mod bearer_token;
 
-use crate::cache::Cache;
-use crate::oci::{Digest, Reference};
-use crate::registry::blob_store::BoxedReader;
-use crate::registry::Error;
+use std::fs;
+use std::io;
+use std::sync::Arc;
+use std::time::Duration;
+
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use bearer_token::BearerToken;
@@ -15,14 +16,15 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, WWW_A
 use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client, Identity, Method, Response, StatusCode};
 use serde::Deserialize;
-use std::fs;
-use std::io;
-use std::sync::Arc;
-use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 use tokio_util::io::StreamReader;
 use tracing::{info, warn};
+
+use crate::cache::Cache;
+use crate::oci::{Digest, Reference};
+use crate::registry::blob_store::BoxedReader;
+use crate::registry::Error;
 
 pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
 

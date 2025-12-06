@@ -1,5 +1,6 @@
-use argon2::password_hash;
 use std::{fmt, io};
+
+use argon2::password_hash;
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
