@@ -111,8 +111,8 @@ impl S3RegistryTestCase {
             key_prefix: key_prefix.clone(),
             multipart_copy_threshold: ByteSize::mib(5),
             multipart_copy_chunk_size: ByteSize::mib(5),
-            multipart_copy_jobs: 4,
             multipart_part_size: ByteSize::mib(5),
+            ..Default::default()
         })
         .unwrap();
         let blob_store = Arc::new(blob_store);
