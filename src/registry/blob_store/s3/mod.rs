@@ -229,15 +229,6 @@ impl BlobStore for Backend {
             let chunk = Bytes::from(chunk);
             let chunk_len = chunk.len() as u64;
 
-            // We always need the full hash state for the upload summary
-            self.save_hasher(
-                name,
-                uuid,
-                uploaded_size + chunk_len,
-                reader.serialized_state(),
-            )
-            .await?;
-
             // Last chunk for this write(), store remaining data in staging
             if chunk.len() < self.multipart_part_size {
                 reader.mark_finished();
@@ -247,8 +238,19 @@ impl BlobStore for Backend {
                 self.store
                     .upload_part(&upload_path, &upload_id, uploaded_parts, chunk)
                     .await?;
-                uploaded_size += chunk_len;
                 uploaded_parts += 1;
+            }
+
+            self.save_hasher(
+                name,
+                uuid,
+                uploaded_size + chunk_len,
+                reader.serialized_state(),
+            )
+            .await?;
+
+            if chunk_len >= self.multipart_part_size as u64 {
+                uploaded_size += chunk_len;
             }
         }
 
