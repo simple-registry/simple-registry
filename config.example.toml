@@ -40,7 +40,11 @@ root_dir = "./data-simple-registry"
 #region = "<zone/region>"
 #multipart_copy_threshold = "5GiB"
 #multipart_copy_chunk_size = "100MiB"
-#multipart_copy_jobs = 10
+#multipart_copy_jobs = 4
+#multipart_part_size = "50MiB"
+#max_attempts = 3
+#operation_timeout_secs = 900
+#operation_attempt_timeout_secs = 300
 
 [observability.tracing]
 endpoint = "http://127.0.0.1:4317"

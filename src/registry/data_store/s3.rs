@@ -1,6 +1,7 @@
 use std::io::{Error as IoError, ErrorKind};
 use std::time::Duration;
 
+use aws_sdk_s3::config::retry::RetryConfig;
 use aws_sdk_s3::config::{timeout::TimeoutConfig, BehaviorVersion, Credentials, Region};
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
@@ -12,40 +13,41 @@ use serde::Deserialize;
 
 use crate::registry::data_store::Error;
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct BackendConfig {
     pub access_key_id: String,
     pub secret_key: String,
     pub endpoint: String,
     pub bucket: String,
     pub region: String,
-    #[serde(default)]
     pub key_prefix: String,
-    #[serde(default = "BackendConfig::default_multipart_copy_threshold")]
     pub multipart_copy_threshold: ByteSize,
-    #[serde(default = "BackendConfig::default_multipart_copy_chunk_size")]
     pub multipart_copy_chunk_size: ByteSize,
-    #[serde(default = "BackendConfig::default_multipart_copy_jobs")]
     pub multipart_copy_jobs: usize,
-    #[serde(default = "BackendConfig::default_multipart_part_size")]
     pub multipart_part_size: ByteSize,
+    pub operation_timeout_secs: u64,
+    pub operation_attempt_timeout_secs: u64,
+    pub max_attempts: u32,
 }
 
-impl BackendConfig {
-    pub fn default_multipart_copy_threshold() -> ByteSize {
-        ByteSize::gb(5)
-    }
-
-    pub fn default_multipart_copy_chunk_size() -> ByteSize {
-        ByteSize::mb(100)
-    }
-
-    pub fn default_multipart_copy_jobs() -> usize {
-        4
-    }
-
-    pub fn default_multipart_part_size() -> ByteSize {
-        ByteSize::mib(50)
+impl Default for BackendConfig {
+    fn default() -> Self {
+        Self {
+            access_key_id: String::new(),
+            secret_key: String::new(),
+            endpoint: String::new(),
+            bucket: String::new(),
+            region: String::new(),
+            key_prefix: String::new(),
+            multipart_copy_threshold: ByteSize::gb(5),
+            multipart_copy_chunk_size: ByteSize::mb(100),
+            multipart_copy_jobs: 4,
+            multipart_part_size: ByteSize::mib(50),
+            operation_timeout_secs: 900,
+            operation_attempt_timeout_secs: 300,
+            max_attempts: 3,
+        }
     }
 }
 
@@ -79,9 +81,11 @@ impl Backend {
         );
 
         let timeout = TimeoutConfig::builder()
-            .operation_timeout(Duration::from_secs(10))
-            .operation_attempt_timeout(Duration::from_secs(10))
+            .operation_timeout(Duration::from_secs(config.operation_timeout_secs))
+            .operation_attempt_timeout(Duration::from_secs(config.operation_attempt_timeout_secs))
             .build();
+
+        let retry = RetryConfig::standard().with_max_attempts(config.max_attempts);
 
         let client_config = S3Config::builder()
             .behavior_version(BehaviorVersion::latest())
@@ -89,6 +93,7 @@ impl Backend {
             .endpoint_url(&config.endpoint)
             .credentials_provider(credentials)
             .timeout_config(timeout)
+            .retry_config(retry)
             .force_path_style(true)
             .build();
 
@@ -617,88 +622,48 @@ impl Backend {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_default_multipart_copy_threshold() {
-        assert_eq!(
-            BackendConfig::default_multipart_copy_threshold(),
-            ByteSize::gb(5)
-        );
-    }
-
-    #[test]
-    fn test_default_multipart_copy_chunk_size() {
-        assert_eq!(
-            BackendConfig::default_multipart_copy_chunk_size(),
-            ByteSize::mb(100)
-        );
-    }
-
-    #[test]
-    fn test_default_multipart_copy_jobs() {
-        assert_eq!(BackendConfig::default_multipart_copy_jobs(), 4);
-    }
-
-    #[test]
-    fn test_default_multipart_part_size() {
-        assert_eq!(
-            BackendConfig::default_multipart_part_size(),
-            ByteSize::mib(50)
-        );
-    }
-
-    #[test]
-    fn test_new_multipart_part_size_too_small() {
-        let config = BackendConfig {
+    fn test_config(overrides: impl FnOnce(&mut BackendConfig)) -> BackendConfig {
+        let mut config = BackendConfig {
             access_key_id: "key".to_string(),
             secret_key: "secret".to_string(),
             endpoint: "http://localhost:9000".to_string(),
             bucket: "test".to_string(),
             region: "us-east-1".to_string(),
-            key_prefix: String::new(),
-            multipart_copy_threshold: ByteSize::gb(5),
-            multipart_copy_chunk_size: ByteSize::mb(100),
-            multipart_copy_jobs: 4,
-            multipart_part_size: ByteSize::mib(4), // Less than 5 MiB
+            ..Default::default()
         };
+        overrides(&mut config);
+        config
+    }
 
+    #[test]
+    fn test_default_values() {
+        let config = BackendConfig::default();
+        assert_eq!(config.multipart_copy_threshold, ByteSize::gb(5));
+        assert_eq!(config.multipart_copy_chunk_size, ByteSize::mb(100));
+        assert_eq!(config.multipart_copy_jobs, 4);
+        assert_eq!(config.multipart_part_size, ByteSize::mib(50));
+        assert_eq!(config.operation_timeout_secs, 900);
+        assert_eq!(config.operation_attempt_timeout_secs, 300);
+        assert_eq!(config.max_attempts, 3);
+    }
+
+    #[test]
+    fn test_new_multipart_part_size_too_small() {
+        let config = test_config(|c| c.multipart_part_size = ByteSize::mib(4));
         let result = Backend::new(&config);
         assert!(matches!(result, Err(Error::Configuration(_))));
     }
 
     #[test]
     fn test_new_multipart_copy_chunk_size_too_large() {
-        let config = BackendConfig {
-            access_key_id: "key".to_string(),
-            secret_key: "secret".to_string(),
-            endpoint: "http://localhost:9000".to_string(),
-            bucket: "test".to_string(),
-            region: "us-east-1".to_string(),
-            key_prefix: String::new(),
-            multipart_copy_threshold: ByteSize::gb(5),
-            multipart_copy_chunk_size: ByteSize::gib(6), // More than 5 GiB
-            multipart_copy_jobs: 4,
-            multipart_part_size: ByteSize::mib(50),
-        };
-
+        let config = test_config(|c| c.multipart_copy_chunk_size = ByteSize::gib(6));
         let result = Backend::new(&config);
         assert!(matches!(result, Err(Error::Configuration(_))));
     }
 
     #[test]
     fn test_new_valid_config() {
-        let config = BackendConfig {
-            access_key_id: "key".to_string(),
-            secret_key: "secret".to_string(),
-            endpoint: "http://localhost:9000".to_string(),
-            bucket: "test".to_string(),
-            region: "us-east-1".to_string(),
-            key_prefix: String::new(),
-            multipart_copy_threshold: ByteSize::gb(5),
-            multipart_copy_chunk_size: ByteSize::mb(100),
-            multipart_copy_jobs: 4,
-            multipart_part_size: ByteSize::mib(50),
-        };
-
+        let config = test_config(|_| {});
         let result = Backend::new(&config);
         assert!(result.is_ok());
         let backend = result.unwrap();
@@ -708,56 +673,25 @@ mod tests {
 
     #[test]
     fn test_full_key_without_prefix() {
-        let config = BackendConfig {
-            access_key_id: "key".to_string(),
-            secret_key: "secret".to_string(),
-            endpoint: "http://localhost:9000".to_string(),
-            bucket: "test".to_string(),
-            region: "us-east-1".to_string(),
-            key_prefix: String::new(),
-            multipart_copy_threshold: ByteSize::gb(5),
-            multipart_copy_chunk_size: ByteSize::mb(100),
-            multipart_copy_jobs: 4,
-            multipart_part_size: ByteSize::mib(50),
-        };
-
+        let config = test_config(|_| {});
         let backend = Backend::new(&config).unwrap();
         assert_eq!(backend.full_key("test/file.txt"), "test/file.txt");
     }
 
     #[test]
     fn test_full_key_with_prefix() {
-        let config = BackendConfig {
-            access_key_id: "key".to_string(),
-            secret_key: "secret".to_string(),
-            endpoint: "http://localhost:9000".to_string(),
-            bucket: "test".to_string(),
-            region: "us-east-1".to_string(),
-            key_prefix: "prefix".to_string(),
-            multipart_copy_threshold: ByteSize::gb(5),
-            multipart_copy_chunk_size: ByteSize::mb(100),
-            multipart_copy_jobs: 4,
-            multipart_part_size: ByteSize::mib(50),
-        };
-
+        let config = test_config(|c| c.key_prefix = "prefix".to_string());
         let backend = Backend::new(&config).unwrap();
         assert_eq!(backend.full_key("test/file.txt"), "prefix/test/file.txt");
     }
 
     #[tokio::test]
     async fn test_upload_part_returns_etag() {
-        let config = BackendConfig {
-            access_key_id: "minioadmin".to_string(),
-            secret_key: "minioadmin".to_string(),
-            endpoint: "http://localhost:9000".to_string(),
-            bucket: "test-bucket".to_string(),
-            region: "us-east-1".to_string(),
-            key_prefix: String::new(),
-            multipart_copy_threshold: ByteSize::gb(5),
-            multipart_copy_chunk_size: ByteSize::mb(100),
-            multipart_copy_jobs: 4,
-            multipart_part_size: ByteSize::mib(50),
-        };
+        let config = test_config(|c| {
+            c.access_key_id = "minioadmin".to_string();
+            c.secret_key = "minioadmin".to_string();
+            c.bucket = "test-bucket".to_string();
+        });
 
         let backend = Backend::new(&config).unwrap();
 
@@ -777,18 +711,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_abort_multipart_upload() {
-        let config = BackendConfig {
-            access_key_id: "minioadmin".to_string(),
-            secret_key: "minioadmin".to_string(),
-            endpoint: "http://localhost:9000".to_string(),
-            bucket: "test-bucket".to_string(),
-            region: "us-east-1".to_string(),
-            key_prefix: String::new(),
-            multipart_copy_threshold: ByteSize::gb(5),
-            multipart_copy_chunk_size: ByteSize::mb(100),
-            multipart_copy_jobs: 4,
-            multipart_part_size: ByteSize::mib(50),
-        };
+        let config = test_config(|c| {
+            c.access_key_id = "minioadmin".to_string();
+            c.secret_key = "minioadmin".to_string();
+            c.bucket = "test-bucket".to_string();
+        });
 
         let backend = Backend::new(&config).unwrap();
 
