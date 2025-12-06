@@ -43,7 +43,7 @@ root_dir = "./data-simple-registry"
 #multipart_copy_jobs = 4
 #multipart_part_size = "50MiB"
 #max_attempts = 3
-#operation_timeout_secs = 600
+#operation_timeout_secs = 900
 #operation_attempt_timeout_secs = 300
 
 [observability.tracing]

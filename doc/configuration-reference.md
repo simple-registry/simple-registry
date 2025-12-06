@@ -79,7 +79,7 @@ Multiple blob storage backends are supported: filesystem or s3-backed.
 - `multipart_copy_chunk_size` (uint64 | string): The chunk size for multipart copy in bytes (default: 100MB)
 - `multipart_copy_jobs` (usize): The max number of concurrent multipart copy jobs (default: 4)
 - `max_attempts` (u32): Maximum number of retry attempts for S3 operations (default: 3)
-- `operation_timeout_secs` (u64): Total timeout in seconds for S3 operations including all retries (default: 600)
+- `operation_timeout_secs` (u64): Total timeout in seconds for S3 operations including all retries (default: 900)
 - `operation_attempt_timeout_secs` (u64): Timeout in seconds for each individual S3 operation attempt (default: 300)
 
 ## Metadata storage (`metadata_store`)

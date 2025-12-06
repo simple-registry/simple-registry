@@ -44,7 +44,7 @@ impl Default for BackendConfig {
             multipart_copy_chunk_size: ByteSize::mb(100),
             multipart_copy_jobs: 4,
             multipart_part_size: ByteSize::mib(50),
-            operation_timeout_secs: 600,
+            operation_timeout_secs: 900,
             operation_attempt_timeout_secs: 300,
             max_attempts: 3,
         }
@@ -642,7 +642,7 @@ mod tests {
         assert_eq!(config.multipart_copy_chunk_size, ByteSize::mb(100));
         assert_eq!(config.multipart_copy_jobs, 4);
         assert_eq!(config.multipart_part_size, ByteSize::mib(50));
-        assert_eq!(config.operation_timeout_secs, 600);
+        assert_eq!(config.operation_timeout_secs, 900);
         assert_eq!(config.operation_attempt_timeout_secs, 300);
         assert_eq!(config.max_attempts, 3);
     }
