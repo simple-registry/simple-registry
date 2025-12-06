@@ -1,4 +1,6 @@
-use crate::command::server::error::Error;
+use std::io;
+use std::sync::LazyLock;
+
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use futures_util::TryStreamExt;
@@ -7,10 +9,10 @@ use hyper::body::Incoming;
 use hyper::header::{AsHeaderName, HeaderName, ACCEPT, AUTHORIZATION};
 use hyper::http::{request, response};
 use regex::Regex;
-use std::io;
-use std::sync::LazyLock;
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
+
+use crate::command::server::error::Error;
 
 static RANGE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:bytes=)?(?P<start>\d+)-(?P<end>\d+)?$").unwrap());
@@ -121,10 +123,11 @@ impl IntoAsyncRead for Incoming {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::command::server::response_body::ResponseBody;
     use hyper::header::{HeaderValue, RANGE, USER_AGENT};
     use hyper::Request;
+
+    use super::*;
+    use crate::command::server::response_body::ResponseBody;
 
     #[test]
     fn test_get_header_exists() {

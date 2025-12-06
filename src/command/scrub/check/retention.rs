@@ -1,11 +1,13 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use futures_util::future::join_all;
+use tracing::{debug, info};
+
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::{LinkMetadata, MetadataStore};
 use crate::registry::repository::Repository;
 use crate::registry::{Error, ManifestImage, RetentionPolicy};
-use futures_util::future::join_all;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tracing::{debug, info};
 
 struct TagWithMetadata {
     name: String,

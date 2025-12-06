@@ -1,5 +1,6 @@
-use redis::RedisError;
 use std::fmt;
+
+use redis::RedisError;
 use tracing::warn;
 
 #[derive(Debug, PartialEq)]
@@ -25,8 +26,9 @@ impl From<RedisError> for Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use redis::RedisError;
+
+    use super::*;
 
     #[test]
     fn test_error_display() {

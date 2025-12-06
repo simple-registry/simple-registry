@@ -1,9 +1,10 @@
-use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::thread;
+
+use parking_lot::Mutex;
 use tokio::runtime::{self, Handle};
 use tracing::info;
 

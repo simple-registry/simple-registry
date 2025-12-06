@@ -1,15 +1,17 @@
-use crate::cache::{Cache, CacheExt};
-use crate::command::server::auth::oidc::{Jwk, OidcProvider};
-use crate::command::server::error::Error;
-use crate::command::server::{sha256_hash, OidcClaims};
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use jsonwebtoken::{decode, decode_header, Validation};
 use reqwest::header::ACCEPT;
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tracing::{debug, info, warn};
+
+use crate::cache::{Cache, CacheExt};
+use crate::command::server::auth::oidc::{Jwk, OidcProvider};
+use crate::command::server::error::Error;
+use crate::command::server::{sha256_hash, OidcClaims};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProviderConfig {
@@ -243,13 +245,14 @@ async fn fetch_oidc_configuration(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cache;
-    use crate::command::server::auth::oidc::tests::{create_rsa_keypair, rsa_public_key_to_jwk};
     use jsonwebtoken::Algorithm;
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+    use crate::cache;
+    use crate::command::server::auth::oidc::tests::{create_rsa_keypair, rsa_public_key_to_jwk};
 
     fn build_test_provider_config(uri: &str) -> ProviderConfig {
         ProviderConfig {

@@ -2,20 +2,22 @@ mod chunked_reader;
 #[cfg(test)]
 pub mod tests;
 
-use crate::oci::Digest;
-use crate::registry::blob_store::hashing_reader::HashingReader;
-use crate::registry::blob_store::sha256_ext::Sha256Ext;
-use crate::registry::blob_store::{BlobStore, BoxedReader, Error};
-use crate::registry::{data_store, path_builder};
+use std::fmt::{Debug, Formatter};
+use std::io::Cursor;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use chunked_reader::ChunkedReader;
 use sha2::{Digest as ShaDigestTrait, Sha256};
-use std::fmt::{Debug, Formatter};
-use std::io::Cursor;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{debug, info, instrument};
+
+use crate::oci::Digest;
+use crate::registry::blob_store::hashing_reader::HashingReader;
+use crate::registry::blob_store::sha256_ext::Sha256Ext;
+use crate::registry::blob_store::{BlobStore, BoxedReader, Error};
+use crate::registry::{data_store, path_builder};
 
 #[derive(Clone)]
 pub struct Backend {
@@ -229,15 +231,6 @@ impl BlobStore for Backend {
             let chunk = Bytes::from(chunk);
             let chunk_len = chunk.len() as u64;
 
-            // We always need the full hash state for the upload summary
-            self.save_hasher(
-                name,
-                uuid,
-                uploaded_size + chunk_len,
-                reader.serialized_state(),
-            )
-            .await?;
-
             // Last chunk for this write(), store remaining data in staging
             if chunk.len() < self.multipart_part_size {
                 reader.mark_finished();
@@ -247,8 +240,19 @@ impl BlobStore for Backend {
                 self.store
                     .upload_part(&upload_path, &upload_id, uploaded_parts, chunk)
                     .await?;
-                uploaded_size += chunk_len;
                 uploaded_parts += 1;
+            }
+
+            self.save_hasher(
+                name,
+                uuid,
+                uploaded_size + chunk_len,
+                reader.serialized_state(),
+            )
+            .await?;
+
+            if chunk_len >= self.multipart_part_size as u64 {
+                uploaded_size += chunk_len;
             }
         }
 

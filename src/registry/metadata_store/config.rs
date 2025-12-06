@@ -1,6 +1,7 @@
+use serde::Deserialize;
+
 use crate::registry::metadata_store;
 use crate::registry::metadata_store::{Error, MetadataStore};
-use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[allow(clippy::large_enum_variant)]

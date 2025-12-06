@@ -1,13 +1,15 @@
 #[cfg(test)]
 mod tests;
 
-use crate::registry::metadata_store::{lock::LockBackend, Error};
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
+
+use async_trait::async_trait;
 use tokio::sync::Mutex;
+
+use crate::registry::metadata_store::{lock::LockBackend, Error};
 
 #[derive(Debug, Default, Clone)]
 pub struct MemoryBackend {

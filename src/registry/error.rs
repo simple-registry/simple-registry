@@ -1,12 +1,14 @@
-use crate::registry::task_queue;
-use crate::registry::{blob_store, cache, metadata_store};
-use crate::{configuration, oci};
+use std::cmp::PartialEq;
+use std::fmt::{Debug, Display};
+
 use cel_interpreter::SerializationError;
 use hyper::header::InvalidHeaderValue;
 use hyper::http::uri::InvalidUri;
-use std::cmp::PartialEq;
-use std::fmt::{Debug, Display};
 use tracing::{debug, warn};
+
+use crate::registry::task_queue;
+use crate::registry::{blob_store, cache, metadata_store};
+use crate::{configuration, oci};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {

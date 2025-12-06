@@ -1,10 +1,12 @@
 #[cfg(test)]
 mod tests;
 
-use crate::cache::{Cache, CacheExt};
-use crate::command::server::client_identity::ClientIdentity;
-use crate::command::server::error::Error;
-use crate::command::server::route::Route;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::time::Duration;
+
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::http::request::Parts;
 use hyper::http::HeaderMap;
@@ -14,12 +16,12 @@ use reqwest::header::AUTHORIZATION;
 use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client, Identity};
 use serde::Deserialize;
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::LazyLock;
-use std::time::Duration;
 use tracing::warn;
+
+use crate::cache::{Cache, CacheExt};
+use crate::command::server::client_identity::ClientIdentity;
+use crate::command::server::error::Error;
+use crate::command::server::route::Route;
 
 static WEBHOOK_REQUESTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(

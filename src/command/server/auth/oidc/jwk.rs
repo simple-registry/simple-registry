@@ -1,7 +1,8 @@
-use crate::command::server::error::Error;
 use jsonwebtoken::DecodingKey;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
+
+use crate::command::server::error::Error;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kty")]

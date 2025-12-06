@@ -1,6 +1,8 @@
-use crate::registry::metadata_store::Error;
-use async_trait::async_trait;
 use std::fmt::Debug;
+
+use async_trait::async_trait;
+
+use crate::registry::metadata_store::Error;
 
 pub mod memory;
 pub mod redis;

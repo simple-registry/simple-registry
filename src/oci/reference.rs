@@ -1,10 +1,12 @@
-use crate::oci::{Digest, Error};
-use regex::Regex;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 use std::sync::LazyLock;
+
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+
+use crate::oci::{Digest, Error};
 
 static TAG_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\w[\w.-]{0,127}$").unwrap());
 

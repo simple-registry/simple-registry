@@ -1,12 +1,14 @@
-use crate::command::server::auth::{AuthMiddleware, AuthResult};
-use crate::command::server::error::Error;
-use crate::command::server::{ClientCertificate, ClientIdentity};
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use hyper::http::request::Parts;
-use std::sync::Arc;
 use tracing::{debug, instrument};
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
+
+use crate::command::server::auth::{AuthMiddleware, AuthResult};
+use crate::command::server::error::Error;
+use crate::command::server::{ClientCertificate, ClientIdentity};
 
 /// Extension type for passing peer certificate data from TLS layer
 #[derive(Clone)]
@@ -80,8 +82,9 @@ impl AuthMiddleware for MtlsValidator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hyper::Request;
+
+    use super::*;
 
     fn generate_test_certificate() -> Vec<u8> {
         use std::process::Command;

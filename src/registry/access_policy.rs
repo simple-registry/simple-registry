@@ -15,12 +15,13 @@
 //! - `identity`: Client identity information (id, username, certificate details)
 //! - `request`: Request details (action, namespace, digest, reference)
 
-use crate::command::server::route::Route;
-pub use crate::command::server::ClientIdentity;
-use crate::registry::{cel, Error};
 use cel_interpreter::{Context, Program, Value};
 use serde::Deserialize;
 use tracing::{debug, warn};
+
+use crate::command::server::route::Route;
+pub use crate::command::server::ClientIdentity;
+use crate::registry::{cel, Error};
 
 /// Configuration for access control policies.
 #[derive(Clone, Debug, Default, Deserialize)]

@@ -1,13 +1,15 @@
-use crate::command::server::auth::basic_auth::{build_users, Config};
-use crate::command::server::auth::{AuthMiddleware, AuthResult, BasicAuthValidator};
-use crate::command::server::ClientIdentity;
+use std::collections::HashMap;
+
 use argon2::{Argon2, PasswordVerifier};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use hyper::http::request::Parts;
 use hyper::Request;
 use serde::Deserialize;
-use std::collections::HashMap;
+
+use crate::command::server::auth::basic_auth::{build_users, Config};
+use crate::command::server::auth::{AuthMiddleware, AuthResult, BasicAuthValidator};
+use crate::command::server::ClientIdentity;
 
 #[derive(Deserialize)]
 struct TestConfig {

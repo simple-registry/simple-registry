@@ -1,11 +1,12 @@
-use crate::command::server::response_body::ResponseBody;
-use crate::oci::Digest;
-use crate::registry::{Error, Registry};
 use hyper::header::{CONTENT_LENGTH, LOCATION, RANGE};
 use hyper::{Response, StatusCode};
 use tokio::io::AsyncRead;
 use tracing::{error, instrument, warn};
 use uuid::Uuid;
+
+use crate::command::server::response_body::ResponseBody;
+use crate::oci::Digest;
+use crate::registry::{blob_store, Error, Registry};
 
 pub const DOCKER_UPLOAD_UUID: &str = "Docker-Upload-UUID";
 pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
@@ -93,11 +94,15 @@ impl Registry {
     {
         let session_id = session_id.to_string();
 
-        let append = self
+        let append = match self
             .blob_store
             .read_upload_summary(namespace, &session_id)
             .await
-            .is_ok();
+        {
+            Ok((_, size, _)) => size > 0,
+            Err(blob_store::Error::UploadNotFound) => false,
+            Err(e) => return Err(e.into()),
+        };
 
         self.blob_store
             .write_upload(namespace, &session_id, Box::new(stream), append)
@@ -259,11 +264,14 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
+    use uuid::Uuid;
+
     use super::*;
     use crate::command::server::request_ext::HeaderExt;
-    use crate::registry::tests::backends;
-    use std::io::Cursor;
-    use uuid::Uuid;
+    use crate::registry::path_builder;
+    use crate::registry::tests::{backends, FSRegistryTestCase};
 
     #[tokio::test]
     async fn test_start_upload() {
@@ -611,5 +619,66 @@ mod tests {
                 .await
                 .is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn test_complete_upload_with_corrupted_hash_state_returns_error() {
+        let test_case = FSRegistryTestCase::new();
+        let registry = test_case.registry();
+        let namespace = "test-repo";
+        let content = b"test content that should not be lost";
+        let session_id = Uuid::new_v4();
+
+        registry
+            .blob_store
+            .create_upload(namespace, &session_id.to_string())
+            .await
+            .unwrap();
+
+        let stream = Cursor::new(content);
+        registry
+            .patch_upload(namespace, session_id, None, stream)
+            .await
+            .unwrap();
+
+        let (upload_digest, size, _) = registry
+            .blob_store
+            .read_upload_summary(namespace, &session_id.to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(size, content.len() as u64);
+
+        let hash_state_path = path_builder::upload_hash_context_path(
+            namespace,
+            &session_id.to_string(),
+            "sha256",
+            size,
+        );
+        let full_path = test_case.temp_dir().path().join(&hash_state_path);
+        std::fs::write(&full_path, b"corrupted data").unwrap();
+
+        let empty_stream = Cursor::new(Vec::new());
+        let result = registry
+            .complete_upload(namespace, session_id, &upload_digest, empty_stream)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "complete_upload should return error when hash state is corrupted, not silently delete data"
+        );
+
+        let upload_path = path_builder::upload_path(namespace, &session_id.to_string());
+        let upload_file_path = test_case.temp_dir().path().join(&upload_path);
+        assert!(
+            upload_file_path.exists(),
+            "upload data should NOT be deleted when hash state is corrupted"
+        );
+
+        let preserved_content = std::fs::read(&upload_file_path).unwrap();
+        assert_eq!(
+            preserved_content, content,
+            "original upload content should be preserved"
+        );
     }
 }

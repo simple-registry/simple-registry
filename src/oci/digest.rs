@@ -1,8 +1,10 @@
-use crate::oci::Error;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
+
+use crate::oci::Error;
 
 #[derive(Debug, Clone, Ord, Eq, Hash, PartialEq, PartialOrd, Deserialize)]
 #[serde(try_from = "String")]

@@ -1,11 +1,8 @@
-use crate::command::server::auth::PeerCertificate;
-use crate::command::server::error::Error;
-use crate::command::server::request_ext::{HeaderExt, IntoAsyncRead};
-use crate::command::server::response_body::ResponseBody;
-use crate::command::server::route::Route;
-use crate::command::server::{router, ServerContext};
-use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
-use crate::oci::Reference;
+use std::convert::Infallible;
+use std::fmt::Debug;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONTENT_RANGE, CONTENT_TYPE, RANGE, WWW_AUTHENTICATE};
@@ -14,14 +11,19 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use opentelemetry::trace::TraceContextExt;
-use std::convert::Infallible;
-use std::fmt::Debug;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::pin;
 use tracing::{debug, error, info, instrument, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+use crate::command::server::auth::PeerCertificate;
+use crate::command::server::error::Error;
+use crate::command::server::request_ext::{HeaderExt, IntoAsyncRead};
+use crate::command::server::response_body::ResponseBody;
+use crate::command::server::route::Route;
+use crate::command::server::{router, ServerContext};
+use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
+use crate::oci::Reference;
 
 pub async fn serve_request<S>(
     stream: TokioIo<S>,

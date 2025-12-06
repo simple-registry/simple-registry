@@ -1,6 +1,8 @@
-use crate::oci::{Digest, Reference};
-use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+
+use serde::{Deserialize, Serialize};
+
+use crate::oci::{Digest, Reference};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum LinkKind {

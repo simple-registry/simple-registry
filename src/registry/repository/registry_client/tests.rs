@@ -1,8 +1,9 @@
+use wiremock::matchers::{header, method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
 use super::*;
 use crate::cache;
 use crate::oci::{Digest, Reference};
-use wiremock::matchers::{header, method, path, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[test]
 fn test_get_upstream_namespace() {

@@ -1,8 +1,9 @@
+use std::any::Any;
+use std::fmt::Debug;
+
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::any::Any;
-use std::fmt::Debug;
 use tracing::{debug, warn};
 
 mod config;
@@ -88,9 +89,11 @@ impl<T: Cache + ?Sized> CacheExt for T {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde::{Deserialize, Serialize};
     use std::sync::{Arc, Mutex};
+
+    use serde::{Deserialize, Serialize};
+
+    use super::*;
 
     #[derive(Debug)]
     struct StubCache {

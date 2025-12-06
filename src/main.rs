@@ -1,19 +1,21 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-use crate::command::{argon, scrub, server};
-use crate::configuration::{Configuration, ObservabilityConfig};
-use crate::watcher::ConfigWatcher;
+use std::sync::Arc;
+
 use argh::FromArgs;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::trace::{RandomIdGenerator, Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
-use std::sync::Arc;
 use tracing::error;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter};
+
+use crate::command::{argon, scrub, server};
+use crate::configuration::{Configuration, ObservabilityConfig};
+use crate::watcher::ConfigWatcher;
 
 mod cache;
 mod command;

@@ -14,8 +14,7 @@ mod sha256_hash_string;
 
 pub use client_identity::{ClientCertificate, ClientIdentity, OidcClaims};
 pub use command::{Command, Options};
+pub use error::Error;
 pub use http_server::serve_request;
 pub use server_context::ServerContext;
-
-pub use error::Error;
 pub use sha256_hash_string::sha256_hash;

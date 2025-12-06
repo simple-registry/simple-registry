@@ -4,17 +4,19 @@ mod retention;
 mod tag;
 mod upload;
 
+use std::sync::Arc;
+
+pub use blob::BlobChecker;
+pub use manifest::ManifestChecker;
+pub use retention::RetentionChecker;
+pub use tag::TagChecker;
+use tracing::{debug, info};
+pub use upload::UploadChecker;
+
 use crate::oci::Digest;
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::Error;
-pub use blob::BlobChecker;
-pub use manifest::ManifestChecker;
-pub use retention::RetentionChecker;
-use std::sync::Arc;
-pub use tag::TagChecker;
-use tracing::{debug, info};
-pub use upload::UploadChecker;
 
 pub async fn ensure_link(
     metadata_store: &Arc<dyn MetadataStore + Send + Sync>,

@@ -1,9 +1,11 @@
-use crate::registry::blob_store::sha256_ext::Sha256Ext;
-use sha2::{Digest, Sha256};
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, ReadBuf};
+
+use crate::registry::blob_store::sha256_ext::Sha256Ext;
 
 pub struct HashingReader<R> {
     inner: R,

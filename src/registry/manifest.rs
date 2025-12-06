@@ -1,12 +1,13 @@
-use crate::command::server::response_body::ResponseBody;
-use crate::oci::{Digest, Manifest, Reference};
-use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::{Error, Registry, Repository};
 use futures_util::future;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
 use hyper::{Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{error, instrument, warn};
+
+use crate::command::server::response_body::ResponseBody;
+use crate::oci::{Digest, Manifest, Reference};
+use crate::registry::metadata_store::link_kind::LinkKind;
+use crate::registry::{Error, Registry, Repository};
 
 pub const OCI_SUBJECT: &str = "OCI-Subject";
 pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
@@ -530,16 +531,18 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::command::server::request_ext::HeaderExt;
-    use crate::registry::tests::{backends, FSRegistryTestCase};
+    use std::io::Cursor;
+    use std::slice;
+
     use futures_util::TryStreamExt;
     use http_body_util::BodyExt;
     use serde_json::json;
-    use std::io::Cursor;
-    use std::slice;
     use tokio::io::AsyncReadExt;
     use tokio_util::io::StreamReader;
+
+    use super::*;
+    use crate::command::server::request_ext::HeaderExt;
+    use crate::registry::tests::{backends, FSRegistryTestCase};
 
     fn create_test_manifest() -> (Vec<u8>, String) {
         let manifest = json!({

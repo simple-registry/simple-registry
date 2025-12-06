@@ -1,10 +1,12 @@
-use super::route::Route;
-use crate::oci::{Digest, Reference};
+use std::str::FromStr;
+
 use hyper::{Method, Uri};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use std::str::FromStr;
 use uuid::Uuid;
+
+use super::route::Route;
+use crate::oci::{Digest, Reference};
 
 fn parse_query<T: DeserializeOwned + Default>(params: &str) -> T {
     serde_urlencoded::from_str(params).unwrap_or_default()

@@ -1,6 +1,7 @@
-use serde::Deserialize;
 use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
+
+use serde::Deserialize;
 use tokio::fs;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -162,9 +163,10 @@ impl Backend {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
     use tokio::io::AsyncWriteExt;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_new() {

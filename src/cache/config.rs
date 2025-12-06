@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
+use serde::Deserialize;
+
 use crate::cache;
 use crate::cache::{Cache, Error};
-use serde::Deserialize;
-use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub enum Config {
@@ -23,9 +25,10 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::any::TypeId;
+
     use super::*;
     use crate::cache::redis::BackendConfig;
-    use std::any::TypeId;
 
     #[tokio::test]
     async fn test_memory_backend() {

@@ -1,7 +1,9 @@
-use crate::command::server::error::Error;
 use std::net::SocketAddr;
+
 use tokio::net::{TcpListener, TcpStream};
 use tracing::debug;
+
+use crate::command::server::error::Error;
 
 pub mod insecure;
 pub mod tls;

@@ -37,8 +37,9 @@ fn generate_password(password: &str) -> Result<String, error::Error> {
 
 #[cfg(test)]
 mod tests {
-    use crate::command::argon::generate_password;
     use argon2::{Argon2, PasswordVerifier};
+
+    use crate::command::argon::generate_password;
 
     #[test]
     fn test_generate_password() {

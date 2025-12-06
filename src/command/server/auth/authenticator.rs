@@ -1,3 +1,11 @@
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use hyper::http::request::Parts;
+use serde::Deserialize;
+use tracing::{debug, instrument, warn};
+
 use super::oidc::OidcValidator;
 use super::{basic_auth, oidc, AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator};
 use crate::cache::Cache;
@@ -6,12 +14,6 @@ use crate::command::server::error::Error;
 use crate::command::server::ClientIdentity;
 use crate::configuration::Configuration;
 use crate::metrics_provider::AUTH_ATTEMPTS;
-use hyper::http::request::Parts;
-use serde::Deserialize;
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use tracing::{debug, instrument, warn};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct AuthConfig {
@@ -146,9 +148,6 @@ impl Authenticator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cache;
-    use crate::configuration::Configuration;
     use argon2::password_hash::rand_core::OsRng;
     use argon2::password_hash::SaltString;
     use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
@@ -156,6 +155,10 @@ mod tests {
     use base64::Engine;
     use hyper::header::AUTHORIZATION;
     use hyper::Request;
+
+    use super::*;
+    use crate::cache;
+    use crate::configuration::Configuration;
 
     fn create_minimal_config() -> Configuration {
         let toml = r#"

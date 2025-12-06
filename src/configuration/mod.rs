@@ -1,10 +1,13 @@
-use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+
+use serde::Deserialize;
 use tracing::info;
 
 mod error;
+
+pub use error::Error;
 
 use crate::cache;
 use crate::command::server::auth::authenticator;
@@ -12,7 +15,6 @@ use crate::command::server::listeners::{insecure, tls};
 use crate::registry::{
     blob_store, metadata_store, repository, AccessPolicyConfig, RetentionPolicyConfig,
 };
-pub use error::Error;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Configuration {
@@ -189,10 +191,11 @@ impl Configuration {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::command::server::auth::oidc;
     use crate::registry::data_store;
-    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_load_minimal_config() {
@@ -946,6 +949,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_from_file() {
         use std::io::Write;
+
         use tempfile::NamedTempFile;
 
         let config_content = r#"
@@ -995,6 +999,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_from_file_with_invalid_content() {
         use std::io::Write;
+
         use tempfile::NamedTempFile;
 
         let invalid_config = r#"
@@ -1018,6 +1023,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_from_file_with_tls_config() {
         use std::io::Write;
+
         use tempfile::NamedTempFile;
 
         let config_content = r#"
@@ -1056,6 +1062,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_from_file_with_validation_error() {
         use std::io::Write;
+
         use tempfile::NamedTempFile;
 
         let config_content = r#"

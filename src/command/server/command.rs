@@ -1,3 +1,8 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use argh::FromArgs;
+
 use super::listeners::insecure::InsecureListener;
 use super::listeners::tls::{ServerTlsConfig, TlsListener};
 use super::ServerContext;
@@ -8,9 +13,6 @@ use crate::configuration::{Configuration, ServerConfig};
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::{blob_store, repository, Registry, Repository};
-use argh::FromArgs;
-use std::collections::HashMap;
-use std::sync::Arc;
 
 pub enum ServiceListener {
     Insecure(InsecureListener),
