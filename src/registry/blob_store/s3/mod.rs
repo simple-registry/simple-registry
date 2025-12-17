@@ -165,7 +165,9 @@ impl BlobStore for Backend {
         n: u16,
         continuation_token: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
-        debug!("Fetching {n} upload(s) for namespace '{namespace}' with continuation token: {continuation_token:?}");
+        debug!(
+            "Fetching {n} upload(s) for namespace '{namespace}' with continuation token: {continuation_token:?}"
+        );
         let uploads_dir = path_builder::uploads_root_dir(namespace);
 
         let (prefixes, _, next_continuation_token) = self

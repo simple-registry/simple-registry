@@ -5,9 +5,9 @@ use tracing::{debug, error};
 use crate::command::scrub::check::ensure_link;
 use crate::oci::Digest;
 use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::MetadataStore;
-use crate::registry::{parse_manifest_digests, Error};
+use crate::registry::metadata_store::link_kind::LinkKind;
+use crate::registry::{Error, parse_manifest_digests};
 
 pub struct ManifestChecker {
     blob_store: Arc<dyn BlobStore + Send + Sync>,

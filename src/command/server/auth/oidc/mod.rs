@@ -131,18 +131,18 @@ impl AuthMiddleware for OidcValidator {
 mod tests {
     use std::net::SocketAddr;
 
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
-    use hyper::header::AUTHORIZATION;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use hyper::Request;
+    use hyper::header::AUTHORIZATION;
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::cache;
-    use crate::command::server::auth::{AuthMiddleware, AuthResult};
     use crate::command::server::ClientIdentity;
+    use crate::command::server::auth::{AuthMiddleware, AuthResult};
 
     fn build_config(mock_server: &MockServer) -> Config {
         Config::Generic(generic::ProviderConfig {
@@ -297,8 +297,8 @@ mod tests {
     }
 
     pub fn rsa_public_key_to_jwk(public_key_pem: &str) -> serde_json::Value {
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
         let public_key_pem = public_key_pem
             .replace("-----BEGIN PUBLIC KEY-----", "")
@@ -324,7 +324,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_token_success() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         let mock_server = MockServer::start().await;
         let (private_key, public_key) = create_rsa_keypair();
@@ -392,7 +392,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_authenticate_with_bearer_token() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         let mock_server = MockServer::start().await;
         let (private_key, public_key) = create_rsa_keypair();
@@ -451,7 +451,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_authenticate_with_basic_auth_matching_provider() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         let mock_server = MockServer::start().await;
         let (private_key, public_key) = create_rsa_keypair();
@@ -589,7 +589,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_authenticate_populates_identity() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         let mock_server = MockServer::start().await;
         let (private_key, public_key) = create_rsa_keypair();

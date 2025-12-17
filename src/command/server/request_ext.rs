@@ -1,12 +1,12 @@
 use std::io;
 use std::sync::LazyLock;
 
-use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
-use hyper::header::{AsHeaderName, HeaderName, ACCEPT, AUTHORIZATION};
+use hyper::header::{ACCEPT, AUTHORIZATION, AsHeaderName, HeaderName};
 use hyper::http::{request, response};
 use regex::Regex;
 use tokio::io::AsyncRead;
@@ -123,8 +123,8 @@ impl IntoAsyncRead for Incoming {
 
 #[cfg(test)]
 mod tests {
-    use hyper::header::{HeaderValue, RANGE, USER_AGENT};
     use hyper::Request;
+    use hyper::header::{HeaderValue, RANGE, USER_AGENT};
 
     use super::*;
     use crate::command::server::response_body::ResponseBody;

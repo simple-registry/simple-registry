@@ -10,7 +10,7 @@ use crate::registry::data_store;
 use crate::registry::metadata_store;
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::test_utils::create_test_registry;
-use crate::registry::{blob_store, Registry, Repository};
+use crate::registry::{Registry, Repository, blob_store};
 
 pub trait RegistryTestCase {
     fn registry(&self) -> &Registry;

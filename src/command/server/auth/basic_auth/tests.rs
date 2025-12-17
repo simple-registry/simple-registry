@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
 use argon2::{Argon2, PasswordVerifier};
-use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use hyper::http::request::Parts;
+use base64::prelude::BASE64_STANDARD;
 use hyper::Request;
+use hyper::http::request::Parts;
 use serde::Deserialize;
 
-use crate::command::server::auth::basic_auth::{build_users, Config};
-use crate::command::server::auth::{AuthMiddleware, AuthResult, BasicAuthValidator};
 use crate::command::server::ClientIdentity;
+use crate::command::server::auth::basic_auth::{Config, build_users};
+use crate::command::server::auth::{AuthMiddleware, AuthResult, BasicAuthValidator};
 
 #[derive(Deserialize)]
 struct TestConfig {
@@ -64,15 +64,19 @@ fn test_build_users() {
 
     let (id1, pass1) = users.get("user1").unwrap();
     assert_eq!(id1, "id_1");
-    assert!(Argon2::default()
-        .verify_password("password1".as_bytes(), &pass1.password_hash())
-        .is_ok());
+    assert!(
+        Argon2::default()
+            .verify_password("password1".as_bytes(), &pass1.password_hash())
+            .is_ok()
+    );
 
     let (id2, pass2) = users.get("user2").unwrap();
     assert_eq!(id2, "id_2");
-    assert!(Argon2::default()
-        .verify_password("password2".as_bytes(), &pass2.password_hash())
-        .is_ok());
+    assert!(
+        Argon2::default()
+            .verify_password("password2".as_bytes(), &pass2.password_hash())
+            .is_ok()
+    );
     assert_eq!(users.get("user3"), None);
 }
 

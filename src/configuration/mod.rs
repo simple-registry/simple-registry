@@ -13,7 +13,7 @@ use crate::cache;
 use crate::command::server::auth::authenticator;
 use crate::command::server::listeners::{insecure, tls};
 use crate::registry::{
-    blob_store, metadata_store, repository, AccessPolicyConfig, RetentionPolicyConfig,
+    AccessPolicyConfig, RetentionPolicyConfig, blob_store, metadata_store, repository,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -152,7 +152,9 @@ impl Configuration {
         for (repository, config) in &self.repository {
             if let Some(webhook_name) = &config.authorization_webhook {
                 if !webhook_name.is_empty() && !webhook_names.contains(&webhook_name) {
-                    let msg = format!("Webhook '{webhook_name}' not found (referenced in '{repository}' repository)");
+                    let msg = format!(
+                        "Webhook '{webhook_name}' not found (referenced in '{repository}' repository)"
+                    );
                     return Err(Error::InvalidFormat(msg));
                 }
             }

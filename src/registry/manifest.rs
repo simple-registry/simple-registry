@@ -255,7 +255,9 @@ impl Registry {
             }
             Reference::Digest(provided_digest) => {
                 if provided_digest != &digest {
-                    warn!("Provided digest does not match computed digest: {provided_digest} != {digest}");
+                    warn!(
+                        "Provided digest does not match computed digest: {provided_digest} != {digest}"
+                    );
                     return Err(Error::ManifestInvalid(
                         "Provided digest does not match computed digest".to_string(),
                     ));
@@ -542,7 +544,7 @@ mod tests {
 
     use super::*;
     use crate::command::server::request_ext::HeaderExt;
-    use crate::registry::tests::{backends, FSRegistryTestCase};
+    use crate::registry::tests::{FSRegistryTestCase, backends};
 
     fn create_test_manifest() -> (Vec<u8>, String) {
         let manifest = json!({
@@ -778,16 +780,18 @@ mod tests {
                 .unwrap();
 
             // Verify tag is deleted
-            assert!(registry
-                .get_manifest(
-                    registry.get_repository_for_namespace(namespace).unwrap(),
-                    slice::from_ref(&media_type),
-                    namespace,
-                    Reference::Tag(tag.to_string()),
-                    false,
-                )
-                .await
-                .is_err());
+            assert!(
+                registry
+                    .get_manifest(
+                        registry.get_repository_for_namespace(namespace).unwrap(),
+                        slice::from_ref(&media_type),
+                        namespace,
+                        Reference::Tag(tag.to_string()),
+                        false,
+                    )
+                    .await
+                    .is_err()
+            );
 
             // Test delete manifest by digest
             registry
@@ -796,16 +800,18 @@ mod tests {
                 .unwrap();
 
             // Verify digest is deleted
-            assert!(registry
-                .get_manifest(
-                    registry.get_repository_for_namespace(namespace).unwrap(),
-                    slice::from_ref(&media_type),
-                    namespace,
-                    Reference::Digest(response.digest),
-                    false,
-                )
-                .await
-                .is_err());
+            assert!(
+                registry
+                    .get_manifest(
+                        registry.get_repository_for_namespace(namespace).unwrap(),
+                        slice::from_ref(&media_type),
+                        namespace,
+                        Reference::Digest(response.digest),
+                        false,
+                    )
+                    .await
+                    .is_err()
+            );
         }
     }
 
@@ -1018,16 +1024,18 @@ mod tests {
             assert_eq!(response.status(), StatusCode::ACCEPTED);
 
             // Verify manifest is deleted
-            assert!(registry
-                .get_manifest(
-                    registry.get_repository_for_namespace(namespace).unwrap(),
-                    slice::from_ref(&media_type),
-                    namespace,
-                    Reference::Tag(tag.to_string()),
-                    false,
-                )
-                .await
-                .is_err());
+            assert!(
+                registry
+                    .get_manifest(
+                        registry.get_repository_for_namespace(namespace).unwrap(),
+                        slice::from_ref(&media_type),
+                        namespace,
+                        Reference::Tag(tag.to_string()),
+                        false,
+                    )
+                    .await
+                    .is_err()
+            );
         }
     }
 

@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
 use hyper::{Method, Uri};
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use super::route::Route;
@@ -172,25 +172,25 @@ fn try_find_manifests<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> {
                 return Some(Route::GetManifest {
                     namespace,
                     reference,
-                })
+                });
             }
             Method::HEAD => {
                 return Some(Route::HeadManifest {
                     namespace,
                     reference,
-                })
+                });
             }
             Method::PUT => {
                 return Some(Route::PutManifest {
                     namespace,
                     reference,
-                })
+                });
             }
             Method::DELETE => {
                 return Some(Route::DeleteManifest {
                     namespace,
                     reference,
-                })
+                });
             }
             _ => {}
         }

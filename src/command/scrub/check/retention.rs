@@ -242,9 +242,9 @@ impl RetentionChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::RetentionPolicy;
     use crate::registry::test_utils;
     use crate::registry::tests::backends;
-    use crate::registry::RetentionPolicy;
 
     #[tokio::test]
     async fn test_enforce_retention_with_policy() {

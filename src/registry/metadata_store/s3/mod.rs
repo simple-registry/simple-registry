@@ -153,7 +153,9 @@ impl MetadataStore for Backend {
         n: u16,
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
-        debug!("Listing {n} tag(s) for namespace '{namespace}' starting with continuation_token '{last:?}'");
+        debug!(
+            "Listing {n} tag(s) for namespace '{namespace}' starting with continuation_token '{last:?}'"
+        );
         let tags_dir = path_builder::manifest_tags_dir(namespace);
 
         let mut all_tags = Vec::new();
@@ -227,7 +229,7 @@ impl MetadataStore for Backend {
                 let manifest = match self.store.read(&blob_path).await {
                     Ok(data) => data,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        return Err(Error::ReferenceNotFound)
+                        return Err(Error::ReferenceNotFound);
                     }
                     Err(e) => return Err(e.into()),
                 };
@@ -261,7 +263,9 @@ impl MetadataStore for Backend {
         n: u16,
         continuation_token: Option<String>,
     ) -> Result<(Vec<Digest>, Option<String>), Error> {
-        debug!("Fetching {n} revision(s) for namespace '{namespace}' with continuation token: {continuation_token:?}");
+        debug!(
+            "Fetching {n} revision(s) for namespace '{namespace}' with continuation token: {continuation_token:?}"
+        );
         let revisions_dir = path_builder::manifest_revisions_link_root_dir(namespace, "sha256");
 
         let (prefixes, _, next_last) = self
@@ -284,7 +288,7 @@ impl MetadataStore for Backend {
         let data = match self.store.read(&path).await {
             Ok(data) => data,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(Error::ReferenceNotFound)
+                return Err(Error::ReferenceNotFound);
             }
             Err(e) => return Err(e.into()),
         };

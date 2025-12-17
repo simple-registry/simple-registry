@@ -96,8 +96,8 @@ mod tests {
 
     use crate::oci::Descriptor;
     use crate::registry::blob_store::BlobStore;
-    use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::metadata_store::MetadataStore;
+    use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::tests::backends;
 
     pub async fn test_datastore_list_namespaces(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore>) {

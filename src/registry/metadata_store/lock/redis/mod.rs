@@ -12,8 +12,8 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::debug;
 
-use crate::registry::metadata_store::lock::LockBackend;
 use crate::registry::metadata_store::Error;
+use crate::registry::metadata_store::lock::LockBackend;
 
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
 pub struct LockConfig {

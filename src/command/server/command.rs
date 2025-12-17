@@ -3,16 +3,16 @@ use std::sync::Arc;
 
 use argh::FromArgs;
 
+use super::ServerContext;
 use super::listeners::insecure::InsecureListener;
 use super::listeners::tls::{ServerTlsConfig, TlsListener};
-use super::ServerContext;
 use crate::cache;
 use crate::cache::Cache;
 use crate::command::server::error::Error;
 use crate::configuration::{Configuration, ServerConfig};
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
-use crate::registry::{blob_store, repository, Registry, Repository};
+use crate::registry::{Registry, Repository, blob_store, repository};
 
 pub enum ServiceListener {
     Insecure(InsecureListener),

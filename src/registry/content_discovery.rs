@@ -382,9 +382,11 @@ mod tests {
             let repositories = catalog["repositories"].as_array().unwrap();
             assert_eq!(repositories.len(), namespaces.len());
             for namespace in &namespaces {
-                assert!(repositories
-                    .iter()
-                    .any(|r| r.as_str().unwrap() == *namespace));
+                assert!(
+                    repositories
+                        .iter()
+                        .any(|r| r.as_str().unwrap() == *namespace)
+                );
             }
             assert!(!has_link);
 

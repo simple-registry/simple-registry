@@ -2,7 +2,7 @@ use std::io::{Error as IoError, ErrorKind};
 use std::time::Duration;
 
 use aws_sdk_s3::config::retry::RetryConfig;
-use aws_sdk_s3::config::{timeout::TimeoutConfig, BehaviorVersion, Credentials, Region};
+use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region, timeout::TimeoutConfig};
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};

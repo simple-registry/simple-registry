@@ -9,7 +9,7 @@ use std::sync::{Arc, Weak};
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
-use crate::registry::metadata_store::{lock::LockBackend, Error};
+use crate::registry::metadata_store::{Error, lock::LockBackend};
 
 #[derive(Debug, Default, Clone)]
 pub struct MemoryBackend {

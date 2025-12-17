@@ -282,23 +282,29 @@ mod tests {
 
     #[test]
     fn test_is_write() {
-        assert!(Route::StartUpload {
-            namespace: "test",
-            digest: None,
-        }
-        .is_write());
+        assert!(
+            Route::StartUpload {
+                namespace: "test",
+                digest: None,
+            }
+            .is_write()
+        );
 
-        assert!(Route::PutManifest {
-            namespace: "test",
-            reference: Reference::from_str("v1.0.0").unwrap(),
-        }
-        .is_write());
+        assert!(
+            Route::PutManifest {
+                namespace: "test",
+                reference: Reference::from_str("v1.0.0").unwrap(),
+            }
+            .is_write()
+        );
 
-        assert!(!Route::GetManifest {
-            namespace: "test",
-            reference: Reference::from_str("v1.0.0").unwrap(),
-        }
-        .is_write());
+        assert!(
+            !Route::GetManifest {
+                namespace: "test",
+                reference: Reference::from_str("v1.0.0").unwrap(),
+            }
+            .is_write()
+        );
 
         assert!(!Route::ApiVersion.is_write());
     }

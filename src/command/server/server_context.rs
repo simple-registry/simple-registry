@@ -3,10 +3,10 @@ use std::sync::Arc;
 use hyper::http::request::Parts;
 use tracing::instrument;
 
+use crate::command::server::ClientIdentity;
 use crate::command::server::auth::{Authenticator, Authorizer};
 use crate::command::server::error::Error;
 use crate::command::server::route::Route;
-use crate::command::server::ClientIdentity;
 use crate::configuration::Configuration;
 use crate::registry::Registry;
 
@@ -80,8 +80,8 @@ impl ServerContext {
 pub mod tests {
     use std::collections::HashMap;
 
-    use argon2::password_hash::rand_core::OsRng;
     use argon2::password_hash::SaltString;
+    use argon2::password_hash::rand_core::OsRng;
     use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
     use base64::Engine;
     use hyper::Request;

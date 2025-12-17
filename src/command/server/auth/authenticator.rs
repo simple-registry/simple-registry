@@ -7,11 +7,11 @@ use serde::Deserialize;
 use tracing::{debug, instrument, warn};
 
 use super::oidc::OidcValidator;
-use super::{basic_auth, oidc, AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator};
+use super::{AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator, basic_auth, oidc};
 use crate::cache::Cache;
+use crate::command::server::ClientIdentity;
 use crate::command::server::auth::webhook;
 use crate::command::server::error::Error;
-use crate::command::server::ClientIdentity;
 use crate::configuration::Configuration;
 use crate::metrics_provider::AUTH_ATTEMPTS;
 
@@ -148,13 +148,13 @@ impl Authenticator {
 
 #[cfg(test)]
 mod tests {
-    use argon2::password_hash::rand_core::OsRng;
     use argon2::password_hash::SaltString;
+    use argon2::password_hash::rand_core::OsRng;
     use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
-    use hyper::header::AUTHORIZATION;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use hyper::Request;
+    use hyper::header::AUTHORIZATION;
 
     use super::*;
     use crate::cache;

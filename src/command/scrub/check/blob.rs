@@ -3,10 +3,10 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use crate::oci::Digest;
+use crate::registry::Error;
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::{BlobIndexOperation, MetadataStore};
-use crate::registry::Error;
 
 pub struct BlobChecker {
     blob_store: Arc<dyn BlobStore + Send + Sync>,

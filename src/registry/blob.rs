@@ -11,7 +11,7 @@ use crate::command::server::response_body::ResponseBody;
 use crate::oci::Digest;
 use crate::registry::blob_store::{BlobStore, BoxedReader};
 use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::{blob_store, task_queue, Error, Registry, Repository};
+use crate::registry::{Error, Registry, Repository, blob_store, task_queue};
 
 pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
 
@@ -395,16 +395,20 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &layer_link, false)
-                .await
-                .is_ok());
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &config_link, false)
-                .await
-                .is_ok());
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &layer_link, false)
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &config_link, false)
+                    .await
+                    .is_ok()
+            );
 
             let blob_index = registry
                 .metadata_store
@@ -418,16 +422,20 @@ mod tests {
 
             registry.delete_blob(namespace, &digest).await.unwrap();
 
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &layer_link, false)
-                .await
-                .is_err());
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &config_link, false)
-                .await
-                .is_err());
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &layer_link, false)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &config_link, false)
+                    .await
+                    .is_err()
+            );
         }
     }
 
@@ -503,21 +511,27 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &layer_link, false)
-                .await
-                .is_ok());
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &config_link, false)
-                .await
-                .is_ok());
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &latest_link, false)
-                .await
-                .is_ok());
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &layer_link, false)
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &config_link, false)
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &latest_link, false)
+                    .await
+                    .is_ok()
+            );
 
             assert!(registry.blob_store.read_blob(&digest).await.is_ok());
 
@@ -534,21 +548,27 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &layer_link, false)
-                .await
-                .is_err());
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &config_link, false)
-                .await
-                .is_err());
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &latest_link, false)
-                .await
-                .is_err());
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &layer_link, false)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &config_link, false)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &latest_link, false)
+                    .await
+                    .is_err()
+            );
 
             let blob_index = registry.metadata_store.read_blob_index(&digest).await;
             assert!(blob_index.is_err());

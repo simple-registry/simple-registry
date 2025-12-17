@@ -14,7 +14,7 @@ use crate::command::scrub::error::Error;
 use crate::configuration::Configuration;
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
-use crate::registry::{blob_store, repository, Repository, RetentionPolicy, RetentionPolicyConfig};
+use crate::registry::{Repository, RetentionPolicy, RetentionPolicyConfig, blob_store, repository};
 
 #[derive(FromArgs, PartialEq, Debug)]
 #[allow(clippy::struct_excessive_bools)]

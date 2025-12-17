@@ -3,9 +3,9 @@ use std::sync::Arc;
 use tracing::{debug, error};
 
 use crate::command::scrub::check::ensure_link;
-use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::Error;
+use crate::registry::metadata_store::MetadataStore;
+use crate::registry::metadata_store::link_kind::LinkKind;
 
 pub struct TagChecker {
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,

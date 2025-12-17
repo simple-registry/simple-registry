@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use crate::registry::blob_store::{fs, s3, BlobStore, Error};
+use crate::registry::blob_store::{BlobStore, Error, fs, s3};
 use crate::registry::data_store;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

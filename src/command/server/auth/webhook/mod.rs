@@ -7,11 +7,11 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use hyper::header::{HeaderName, HeaderValue};
-use hyper::http::request::Parts;
-use hyper::http::HeaderMap;
 use hyper::Uri;
-use prometheus::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
+use hyper::header::{HeaderName, HeaderValue};
+use hyper::http::HeaderMap;
+use hyper::http::request::Parts;
+use prometheus::{HistogramVec, IntCounterVec, register_histogram_vec, register_int_counter_vec};
 use reqwest::header::AUTHORIZATION;
 use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client, Identity};
