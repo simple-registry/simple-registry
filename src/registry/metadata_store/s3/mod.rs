@@ -236,16 +236,11 @@ impl MetadataStore for Backend {
                 let manifest_len = manifest.len();
 
                 let manifest = Manifest::from_slice(&manifest)?;
-                let Some(descriptor) = manifest.into_referrer_descriptor(artifact_type.as_ref())
-                else {
-                    continue;
-                };
-
-                referrers.push(Descriptor {
-                    digest: manifest_digest.to_string(),
-                    size: manifest_len as u64,
-                    ..descriptor
-                });
+                if let Some(descriptor) =
+                    manifest.to_descriptor(&artifact_type, manifest_digest, manifest_len as u64)
+                {
+                    referrers.push(descriptor);
+                }
             }
 
             continuation_token = next_token;

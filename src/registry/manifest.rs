@@ -56,19 +56,17 @@ pub fn parse_manifest_digests(
 
     let subject = manifest
         .subject
-        .map(|subject| Digest::try_from(subject.digest.as_str()))
-        .transpose()?;
+        .map(|subject| subject.digest);
 
     let config = manifest
         .config
-        .map(|config| Digest::try_from(config.digest.as_str()))
-        .transpose()?;
+        .map(|config| config.digest);
 
     let layers = manifest
         .layers
-        .iter()
-        .map(|layer| Digest::try_from(layer.digest.as_str()))
-        .collect::<Result<Vec<_>, _>>()?;
+        .into_iter()
+        .map(|layer| layer.digest)
+        .collect::<Vec<_>>();
 
     Ok(ParsedManifestDigests {
         subject,
