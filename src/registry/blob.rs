@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::command::server::response_body::ResponseBody;
 use crate::oci::Digest;
 use crate::registry::blob_store::{BlobStore, BoxedReader};
+use crate::registry::metadata_store::MetadataStoreExt;
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::{Error, Registry, Repository, blob_store, task_queue};
 
@@ -180,14 +181,12 @@ impl Registry {
 
     #[instrument]
     pub async fn delete_blob(&self, namespace: &str, digest: &Digest) -> Result<(), Error> {
-        let link = LinkKind::Layer(digest.clone());
-        if let Err(error) = self.metadata_store.delete_link(namespace, &link).await {
-            warn!("Failed to delete layer link: {error}");
-        }
+        let mut tx = self.metadata_store.begin_transaction(namespace);
+        tx.delete_link(&LinkKind::Layer(digest.clone()));
+        tx.delete_link(&LinkKind::Config(digest.clone()));
 
-        let link = LinkKind::Config(digest.clone());
-        if let Err(error) = self.metadata_store.delete_link(namespace, &link).await {
-            warn!("Failed to delete config link: {error}");
+        if let Err(error) = tx.commit().await {
+            warn!("Failed to delete blob links: {error}");
         }
 
         Ok(())
@@ -384,16 +383,11 @@ mod tests {
 
             let layer_link = LinkKind::Layer(digest.clone());
             let config_link = LinkKind::Config(digest.clone());
-            registry
-                .metadata_store
-                .create_link(namespace, &layer_link, &digest)
-                .await
-                .unwrap();
-            registry
-                .metadata_store
-                .create_link(namespace, &config_link, &digest)
-                .await
-                .unwrap();
+
+            let mut tx = registry.metadata_store.begin_transaction(namespace);
+            tx.create_link(&layer_link, &digest);
+            tx.create_link(&config_link, &digest);
+            tx.commit().await.unwrap();
 
             assert!(
                 registry
@@ -500,16 +494,11 @@ mod tests {
             let layer_link = LinkKind::Layer(digest.clone());
             let config_link = LinkKind::Config(digest.clone());
             let latest_link = LinkKind::Tag("latest".to_string());
-            registry
-                .metadata_store
-                .create_link(namespace, &layer_link, &digest)
-                .await
-                .unwrap();
-            registry
-                .metadata_store
-                .create_link(namespace, &config_link, &digest)
-                .await
-                .unwrap();
+
+            let mut tx = registry.metadata_store.begin_transaction(namespace);
+            tx.create_link(&layer_link, &digest);
+            tx.create_link(&config_link, &digest);
+            tx.commit().await.unwrap();
 
             assert!(
                 registry
@@ -542,11 +531,9 @@ mod tests {
 
             assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-            registry
-                .metadata_store
-                .delete_link(namespace, &latest_link)
-                .await
-                .unwrap();
+            let mut tx = registry.metadata_store.begin_transaction(namespace);
+            tx.delete_link(&latest_link);
+            tx.commit().await.unwrap();
 
             assert!(
                 registry

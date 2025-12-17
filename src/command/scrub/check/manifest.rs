@@ -97,6 +97,7 @@ impl ManifestChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::metadata_store::MetadataStoreExt;
     use crate::registry::test_utils;
     use crate::registry::tests::backends;
 
@@ -138,14 +139,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            metadata_store
-                .create_link(
-                    namespace,
-                    &LinkKind::Digest(manifest_digest.clone()),
-                    &manifest_digest,
-                )
-                .await
-                .unwrap();
+            let mut tx = metadata_store.begin_transaction(namespace);
+            tx.create_link(&LinkKind::Digest(manifest_digest.clone()), &manifest_digest);
+            tx.commit().await.unwrap();
 
             let scrubber = ManifestChecker::new(blob_store.clone(), metadata_store.clone(), false);
 

@@ -15,7 +15,7 @@ use crate::registry::{Registry, Repository, blob_store};
 pub trait RegistryTestCase {
     fn registry(&self) -> &Registry;
     fn blob_store(&self) -> Arc<dyn BlobStore>;
-    fn metadata_store(&self) -> Arc<dyn MetadataStore>;
+    fn metadata_store(&self) -> Arc<dyn MetadataStore + Send + Sync>;
 }
 
 pub fn backends() -> Vec<Box<dyn RegistryTestCase>> {
@@ -86,7 +86,7 @@ impl RegistryTestCase for FSRegistryTestCase {
         self.blob_store.clone()
     }
 
-    fn metadata_store(&self) -> Arc<dyn MetadataStore> {
+    fn metadata_store(&self) -> Arc<dyn MetadataStore + Send + Sync> {
         self.metadata_store.clone()
     }
 }
@@ -153,7 +153,7 @@ impl RegistryTestCase for S3RegistryTestCase {
         self.s3_blob_store.clone()
     }
 
-    fn metadata_store(&self) -> Arc<dyn MetadataStore> {
+    fn metadata_store(&self) -> Arc<dyn MetadataStore + Send + Sync> {
         self.s3_metadata_store.clone()
     }
 }
