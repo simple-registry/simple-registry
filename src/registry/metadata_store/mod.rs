@@ -288,7 +288,7 @@ mod tests {
                 "artifactType": "application/vnd.example.test-artifact",
                 "config": {{
                     "mediaType": "application/vnd.oci.image.config.v1+json",
-                    "digest": "sha256:0123456789abcdef0123456789abcdef",
+                    "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                     "size": 7023
                 }},
                 "layers": []
@@ -311,7 +311,7 @@ mod tests {
         let expected = vec![Descriptor {
             media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
             digest: referrer_digest,
-            size: 722,
+            size: 754,
             annotations: HashMap::new(),
             artifact_type: Some("application/vnd.example.test-artifact".to_string()),
         }];
