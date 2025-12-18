@@ -101,6 +101,8 @@ fn build_registry(config: &Configuration) -> Result<Registry, Error> {
         config.global.update_pull_time,
         config.global.enable_redirect,
         config.global.max_concurrent_cache_jobs,
+        config.global.immutable_tags,
+        config.global.immutable_tags_exclusions.clone(),
     ) else {
         let msg = "Failed to initialize registry".to_string();
         return Err(Error::Initialization(msg));
@@ -527,6 +529,8 @@ mod tests {
             config.global.update_pull_time,
             config.global.enable_redirect,
             config.global.max_concurrent_cache_jobs,
+            config.global.immutable_tags,
+            config.global.immutable_tags_exclusions.clone(),
         );
 
         assert!(registry.is_ok());

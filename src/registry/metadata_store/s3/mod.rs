@@ -278,6 +278,27 @@ impl MetadataStore for Backend {
         Ok((revisions, next_last))
     }
 
+    async fn count_manifests(&self, namespace: &str) -> Result<usize, Error> {
+        let revisions_dir = path_builder::manifest_revisions_link_root_dir(namespace, "sha256");
+        let mut count = 0;
+        let mut continuation_token = None;
+
+        loop {
+            let (prefixes, _, next_token) = self
+                .store
+                .list_prefixes(&revisions_dir, "/", 1000, continuation_token)
+                .await?;
+
+            count += prefixes.len();
+            continuation_token = next_token;
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+
+        Ok(count)
+    }
+
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobIndex, Error> {
         let path = path_builder::blob_index_path(digest);

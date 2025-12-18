@@ -17,6 +17,7 @@ pub fn parse<'a>(method: &Method, uri: &'a Uri) -> Route<'a> {
     let params = uri.query();
 
     match path {
+        "/" if method == Method::GET => return Route::RootRedirect,
         "/healthz" if method == Method::GET => return Route::Healthz,
         "/metrics" if method == Method::GET => return Route::Metrics,
         "/v2" | "/v2/" if method == Method::GET => return Route::ApiVersion,
@@ -32,9 +33,23 @@ pub fn parse<'a>(method: &Method, uri: &'a Uri) -> Route<'a> {
         _ => {}
     }
 
+    if path == "/_ui/config" && method == Method::GET {
+        return Route::UiConfig;
+    }
+
+    if let Some(ui_path) = path.strip_prefix("/_ui")
+        && (method == Method::GET || method == Method::HEAD)
+    {
+        return Route::UiAsset { path: ui_path };
+    }
+
     let Some(path) = path.strip_prefix("/v2/") else {
         return Route::Unknown;
     };
+
+    if let Some(route) = try_parse_extension(method, path) {
+        return route;
+    }
 
     if let Some(route) = try_parse_uploads(method, path, params) {
         return route;
@@ -84,6 +99,32 @@ struct ArtifactTypeQuery {
 struct PaginationQuery {
     n: Option<u16>,
     last: Option<String>,
+}
+
+fn try_parse_extension<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> {
+    if *method != Method::GET {
+        return None;
+    }
+
+    let path = path.strip_prefix("_ext/")?;
+
+    if path == "_repositories" {
+        return Some(Route::ListRepositories);
+    }
+
+    if let Some(repository) = path.strip_suffix("/_namespaces") {
+        return Some(Route::ListNamespaces { repository });
+    }
+
+    if let Some(namespace) = path.strip_suffix("/_revisions") {
+        return Some(Route::ListRevisions { namespace });
+    }
+
+    if let Some(namespace) = path.strip_suffix("/_uploads") {
+        return Some(Route::ListUploads { namespace });
+    }
+
+    None
 }
 
 fn try_parse_uploads<'a>(
@@ -892,6 +933,102 @@ mod tests {
     fn test_parse_invalid_tag_with_plus_sign() {
         let method = Method::GET;
         let uri: Uri = "/v2/myrepo/app/manifests/v1.0.0+build.123".parse().unwrap();
+        let route = parse(&method, &uri);
+        assert!(matches!(route, Route::Unknown));
+    }
+
+    #[test]
+    fn test_parse_root_redirect() {
+        let method = Method::GET;
+        let uri: Uri = "/".parse().unwrap();
+        let route = parse(&method, &uri);
+        assert!(matches!(route, Route::RootRedirect));
+    }
+
+    #[test]
+    fn test_parse_ui_asset_root() {
+        let method = Method::GET;
+        let uri: Uri = "/_ui/".parse().unwrap();
+        let route = parse(&method, &uri);
+        if let Route::UiAsset { path } = route {
+            assert_eq!(path, "/");
+        } else {
+            panic!("Expected UiAsset route");
+        }
+    }
+
+    #[test]
+    fn test_parse_ui_asset_with_path() {
+        let method = Method::GET;
+        let uri: Uri = "/_ui/index.html".parse().unwrap();
+        let route = parse(&method, &uri);
+        if let Route::UiAsset { path } = route {
+            assert_eq!(path, "/index.html");
+        } else {
+            panic!("Expected UiAsset route");
+        }
+    }
+
+    #[test]
+    fn test_parse_ui_asset_head_method() {
+        let method = Method::HEAD;
+        let uri: Uri = "/_ui/style.css".parse().unwrap();
+        let route = parse(&method, &uri);
+        if let Route::UiAsset { path } = route {
+            assert_eq!(path, "/style.css");
+        } else {
+            panic!("Expected UiAsset route");
+        }
+    }
+
+    #[test]
+    fn test_parse_ui_asset_post_not_allowed() {
+        let method = Method::POST;
+        let uri: Uri = "/_ui/index.html".parse().unwrap();
+        let route = parse(&method, &uri);
+        assert!(matches!(route, Route::Unknown));
+    }
+
+    #[test]
+    fn test_parse_list_revisions() {
+        let method = Method::GET;
+        let uri: Uri = "/v2/_ext/myrepo/app/_revisions".parse().unwrap();
+        let route = parse(&method, &uri);
+        if let Route::ListRevisions { namespace } = route {
+            assert_eq!(namespace, "myrepo/app");
+        } else {
+            panic!("Expected ListRevisions route");
+        }
+    }
+
+    #[test]
+    fn test_parse_list_revisions_simple_namespace() {
+        let method = Method::GET;
+        let uri: Uri = "/v2/_ext/library/_revisions".parse().unwrap();
+        let route = parse(&method, &uri);
+        if let Route::ListRevisions { namespace } = route {
+            assert_eq!(namespace, "library");
+        } else {
+            panic!("Expected ListRevisions route");
+        }
+    }
+
+    #[test]
+    fn test_parse_list_revisions_nested_namespace() {
+        let method = Method::GET;
+        let uri: Uri = "/v2/_ext/org/team/project/_revisions".parse().unwrap();
+        let route = parse(&method, &uri);
+        if let Route::ListRevisions { namespace } = route {
+            assert_eq!(namespace, "org/team/project");
+        } else {
+            panic!("Expected ListRevisions route");
+        }
+    }
+
+    #[test]
+    fn test_parse_list_revisions_post_not_allowed() {
+        let method = Method::POST;
+        let uri: Uri = "/v2/_ext/myrepo/_revisions".parse().unwrap();
         let route = parse(&method, &uri);
         assert!(matches!(route, Route::Unknown));
     }

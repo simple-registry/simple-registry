@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{CONTENT_RANGE, CONTENT_TYPE, RANGE, WWW_AUTHENTICATE};
+use hyper::header::{CONTENT_RANGE, CONTENT_TYPE, LOCATION, RANGE, WWW_AUTHENTICATE};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -21,7 +21,7 @@ use crate::command::server::error::Error;
 use crate::command::server::request_ext::{HeaderExt, IntoAsyncRead};
 use crate::command::server::response_body::ResponseBody;
 use crate::command::server::route::Route;
-use crate::command::server::{ServerContext, router};
+use crate::command::server::{ServerContext, router, ui};
 use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
 use crate::oci::Reference;
 
@@ -154,6 +154,12 @@ async fn router(
                 Err(Error::BadRequest(msg))
             }
         }
+        Route::RootRedirect if context.enable_ui => handle_root_redirect(),
+        Route::UiAsset { path } if context.enable_ui => ui::serve_asset(path),
+        Route::UiConfig if context.enable_ui => handle_ui_config(&context),
+        Route::RootRedirect | Route::UiAsset { .. } | Route::UiConfig => {
+            Err(Error::NotFound("UI is disabled".to_string()))
+        }
         Route::ApiVersion => Ok(context.registry.handle_get_api_version().await?),
         Route::StartUpload { namespace, digest } => Ok(context
             .registry
@@ -273,9 +279,41 @@ async fn router(
             .registry
             .handle_list_tags(namespace, n, last)
             .await?),
+        Route::ListRevisions { namespace } => {
+            Ok(context.registry.handle_list_revisions(namespace).await?)
+        }
+        Route::ListUploads { namespace } => {
+            Ok(context.registry.handle_list_uploads(namespace).await?)
+        }
+        Route::ListRepositories => Ok(context.registry.handle_list_repositories().await?),
+        Route::ListNamespaces { repository } => {
+            Ok(context.registry.handle_list_namespaces(repository).await?)
+        }
         Route::Healthz => handle_healthz(),
         Route::Metrics => handle_metrics(),
     }
+}
+
+fn handle_root_redirect() -> Result<Response<ResponseBody>, Error> {
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(LOCATION, "/_ui/")
+        .body(ResponseBody::Fixed(Full::new(Bytes::new())))
+        .map_err(|e| Error::Internal(format!("Failed to build redirect response: {e}")))
+}
+
+fn handle_ui_config(context: &ServerContext) -> Result<Response<ResponseBody>, Error> {
+    let config = serde_json::json!({
+        "name": context.ui_name
+    });
+    let body = serde_json::to_string(&config)
+        .map_err(|e| Error::Internal(format!("Failed to serialize UI config: {e}")))?;
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/json")
+        .body(ResponseBody::Fixed(Full::new(Bytes::from(body))))
+        .map_err(|e| Error::Internal(format!("Failed to build UI config response: {e}")))
 }
 
 fn handle_healthz() -> Result<Response<ResponseBody>, Error> {

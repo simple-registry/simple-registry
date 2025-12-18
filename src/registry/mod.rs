@@ -12,6 +12,7 @@ mod cel;
 pub mod content_discovery;
 pub mod data_store;
 mod error;
+mod ext;
 pub mod manifest;
 pub mod metadata_store;
 pub mod pagination;
@@ -46,6 +47,8 @@ pub struct Registry {
     enable_redirect: bool,
     update_pull_time: bool,
     task_queue: TaskQueue,
+    global_immutable_tags: bool,
+    global_immutable_tags_exclusions: Vec<String>,
 }
 
 impl Debug for Registry {
@@ -56,6 +59,7 @@ impl Debug for Registry {
 
 impl Registry {
     #[instrument(skip(blob_store, metadata_store, repositories))]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         blob_store: Arc<dyn BlobStore>,
         metadata_store: Arc<dyn MetadataStore>,
@@ -63,6 +67,8 @@ impl Registry {
         update_pull_time: bool,
         enable_redirect: bool,
         concurrent_cache_jobs: usize,
+        global_immutable_tags: bool,
+        global_immutable_tags_exclusions: Vec<String>,
     ) -> Result<Self, Error> {
         let res = Self {
             update_pull_time,
@@ -71,6 +77,8 @@ impl Registry {
             metadata_store,
             repositories,
             task_queue: TaskQueue::new(concurrent_cache_jobs, "cache-worker")?,
+            global_immutable_tags,
+            global_immutable_tags_exclusions,
         };
 
         Ok(res)
@@ -138,6 +146,8 @@ pub mod test_utils {
             global.update_pull_time,
             global.enable_redirect,
             global.max_concurrent_cache_jobs,
+            global.immutable_tags,
+            global.immutable_tags_exclusions.clone(),
         )
         .unwrap()
     }

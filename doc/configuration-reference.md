@@ -372,3 +372,41 @@ If not provided, tracing is disabled.
 
 - `endpoint` (string): The endpoint for the tracing service
 - `sampling_rate` (f64): Sampling rate for tracing
+
+## Web UI (`ui`)
+
+The registry includes an optional web interface for browsing repositories, namespaces, and manifests.
+
+- `enabled` (bool): Enable the web UI (default: false)
+- `name` (string): Custom registry name displayed in the UI header and page titles (default: "simple-registry")
+
+When enabled, the UI is accessible at `/_ui/` and the root path `/` redirects to the UI.
+
+Example:
+
+```toml
+[ui]
+enabled = true
+name = "My Container Registry"
+```
+
+### UI Routes
+
+| Route | Description |
+|-------|-------------|
+| `/` | Redirects to `/_ui/` when UI is enabled |
+| `/_ui/` | Web interface home page |
+| `/_ui/config` | Returns UI configuration as JSON |
+
+### Extension API Endpoints
+
+The UI uses extension API endpoints under `/v2/_ext/`:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /v2/_ext/_repositories` | List configured repositories with namespace counts |
+| `GET /v2/_ext/{repository}/_namespaces` | List namespaces with manifest and upload counts |
+| `GET /v2/_ext/{namespace}/_revisions` | List manifest revisions with tags and relationships |
+| `GET /v2/_ext/{namespace}/_uploads` | List uploads in progress |
+
+These endpoints are available regardless of whether the UI is enabled.

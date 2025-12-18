@@ -34,6 +34,8 @@ pub struct Repository {
     pub name: String,
     pub upstreams: Vec<RegistryClient>,
     pub retention_policy: RetentionPolicy,
+    pub immutable_tags: bool,
+    pub immutable_tags_exclusions: Vec<String>,
 }
 
 impl Repository {
@@ -49,6 +51,8 @@ impl Repository {
             name: name.to_string(),
             upstreams,
             retention_policy,
+            immutable_tags: config.immutable_tags,
+            immutable_tags_exclusions: config.immutable_tags_exclusions.clone(),
         })
     }
 
