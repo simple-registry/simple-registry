@@ -113,12 +113,9 @@ mod tests {
                 test_utils::create_test_blob(registry, namespace, b"test manifest").await;
 
             let mut tx = metadata_store.begin_transaction(namespace);
+            tx.delete_link(&LinkKind::Digest(blob_digest.clone()));
             tx.create_link(&LinkKind::Tag("v1.0.0".to_string()), &blob_digest);
             tx.commit().await.unwrap();
-
-            let mut tx = metadata_store.begin_transaction(namespace);
-            tx.delete_link(&LinkKind::Digest(blob_digest.clone()));
-            tx.commit().await.ok();
 
             let scrubber = TagChecker::new(metadata_store.clone(), false);
 
