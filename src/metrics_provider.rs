@@ -1,13 +1,13 @@
-use std::sync::atomic::AtomicU64;
 use std::sync::LazyLock;
+use std::sync::atomic::AtomicU64;
 
-use prometheus::{
-    register_histogram_with_registry, register_int_counter_vec_with_registry,
-    register_int_counter_with_registry, register_int_gauge_with_registry,
-};
 use prometheus::{
     Encoder, Histogram, IntCounter, IntCounterVec, IntGauge, Registry as PrometheusRegistry,
     TextEncoder,
+};
+use prometheus::{
+    register_histogram_with_registry, register_int_counter_vec_with_registry,
+    register_int_counter_with_registry, register_int_gauge_with_registry,
 };
 use tracing::error;
 

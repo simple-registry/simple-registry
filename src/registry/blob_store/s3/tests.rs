@@ -3,12 +3,12 @@ use std::io::Cursor;
 use sha2::{Digest as ShaDigest, Sha256};
 use uuid::Uuid;
 
+use crate::registry::blob_store::BlobStore;
 use crate::registry::blob_store::sha256_ext::Sha256Ext;
 use crate::registry::blob_store::tests::{
     test_datastore_blob_operations, test_datastore_list_blobs, test_datastore_list_uploads,
     test_datastore_upload_operations,
 };
-use crate::registry::blob_store::BlobStore;
 use crate::registry::tests::S3RegistryTestCase;
 
 #[tokio::test]

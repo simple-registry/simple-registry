@@ -1,8 +1,8 @@
 mod error;
 
 use argh::FromArgs;
-use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
+use argon2::password_hash::rand_core::OsRng;
 use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
 
 #[derive(FromArgs, PartialEq, Debug)]

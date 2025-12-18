@@ -2,7 +2,7 @@ use std::io::{Error as IoError, ErrorKind};
 use std::time::Duration;
 
 use aws_sdk_s3::config::retry::RetryConfig;
-use aws_sdk_s3::config::{timeout::TimeoutConfig, BehaviorVersion, Credentials, Region};
+use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region, timeout::TimeoutConfig};
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
@@ -247,23 +247,23 @@ impl Backend {
 
         let mut prefixes = Vec::new();
         for prefix in res.common_prefixes.unwrap_or_default() {
-            if let Some(p) = prefix.prefix {
-                if let Some(name) = p.strip_prefix(&full_prefix) {
-                    let name = name
-                        .strip_suffix(delimiter)
-                        .unwrap_or(name)
-                        .trim_start_matches('/');
-                    prefixes.push(name.to_string());
-                }
+            if let Some(p) = prefix.prefix
+                && let Some(name) = p.strip_prefix(&full_prefix)
+            {
+                let name = name
+                    .strip_suffix(delimiter)
+                    .unwrap_or(name)
+                    .trim_start_matches('/');
+                prefixes.push(name.to_string());
             }
         }
 
         let mut objects = Vec::new();
         for object in res.contents.unwrap_or_default() {
-            if let Some(key) = object.key {
-                if let Some(name) = key.strip_prefix(&full_prefix) {
-                    objects.push(name.to_string());
-                }
+            if let Some(key) = object.key
+                && let Some(name) = key.strip_prefix(&full_prefix)
+            {
+                objects.push(name.to_string());
             }
         }
 

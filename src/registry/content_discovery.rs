@@ -162,6 +162,7 @@ mod tests {
 
     use super::*;
     use crate::oci::Reference;
+    use crate::registry::metadata_store::MetadataStoreExt;
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::backends;
@@ -179,11 +180,9 @@ mod tests {
             let test_content = b"test content";
             let test_digest = registry.blob_store.create_blob(test_content).await.unwrap();
             let tag_link = LinkKind::Tag("latest".to_string());
-            registry
-                .metadata_store
-                .create_link(namespace, &tag_link, &test_digest)
-                .await
-                .unwrap();
+            let mut tx = registry.metadata_store.begin_transaction(namespace);
+            tx.create_link(&tag_link, &test_digest);
+            tx.commit().await.unwrap();
 
             let referrers = registry
                 .get_referrers(namespace, &digest, None)
@@ -230,14 +229,11 @@ mod tests {
             let test_content = b"test content";
             let test_digest = registry.blob_store.create_blob(test_content).await.unwrap();
             let tags = ["latest", "v1.0", "v2.0"];
+            let mut tx = registry.metadata_store.begin_transaction(namespace);
             for tag in tags {
-                let tag_link = LinkKind::Tag(tag.to_string());
-                registry
-                    .metadata_store
-                    .create_link(namespace, &tag_link, &test_digest)
-                    .await
-                    .unwrap();
+                tx.create_link(&LinkKind::Tag(tag.to_string()), &test_digest);
             }
+            tx.commit().await.unwrap();
 
             let (tags, token) = registry.list_tags(namespace, None, None).await.unwrap();
             assert_eq!(tags.len(), 3);
@@ -327,11 +323,9 @@ mod tests {
                 base_manifest_digest.clone(),
                 referrer_manifest_digest.clone(),
             );
-            registry
-                .metadata_store
-                .create_link(namespace, &referrer_link, &referrer_manifest_digest)
-                .await
-                .unwrap();
+            let mut tx = registry.metadata_store.begin_transaction(namespace);
+            tx.create_link(&referrer_link, &referrer_manifest_digest);
+            tx.commit().await.unwrap();
 
             let response = registry
                 .handle_get_referrers(namespace, &base_manifest_digest, None)
@@ -363,11 +357,9 @@ mod tests {
             for namespace in &namespaces {
                 let (digest, _) = create_test_blob(registry, namespace, content).await;
                 let tag_link = LinkKind::Tag("latest".to_string());
-                registry
-                    .metadata_store
-                    .create_link(namespace, &tag_link, &digest)
-                    .await
-                    .unwrap();
+                let mut tx = registry.metadata_store.begin_transaction(namespace);
+                tx.create_link(&tag_link, &digest);
+                tx.commit().await.unwrap();
             }
 
             let response = registry.handle_list_catalog(None, None).await.unwrap();
@@ -382,9 +374,11 @@ mod tests {
             let repositories = catalog["repositories"].as_array().unwrap();
             assert_eq!(repositories.len(), namespaces.len());
             for namespace in &namespaces {
-                assert!(repositories
-                    .iter()
-                    .any(|r| r.as_str().unwrap() == *namespace));
+                assert!(
+                    repositories
+                        .iter()
+                        .any(|r| r.as_str().unwrap() == *namespace)
+                );
             }
             assert!(!has_link);
 
@@ -412,14 +406,11 @@ mod tests {
             let (digest, _) = create_test_blob(registry, namespace, content).await;
 
             let tags = ["v1", "v2", "latest"];
+            let mut tx = registry.metadata_store.begin_transaction(namespace);
             for tag in tags {
-                let tag_link = LinkKind::Tag(tag.to_string());
-                registry
-                    .metadata_store
-                    .create_link(namespace, &tag_link, &digest)
-                    .await
-                    .unwrap();
+                tx.create_link(&LinkKind::Tag(tag.to_string()), &digest);
             }
+            tx.commit().await.unwrap();
 
             let response = registry
                 .handle_list_tags(namespace, None, None)

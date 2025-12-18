@@ -19,9 +19,9 @@ use cel_interpreter::{Context, Program, Value};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::command::server::route::Route;
 pub use crate::command::server::ClientIdentity;
-use crate::registry::{cel, Error};
+use crate::command::server::route::Route;
+use crate::registry::{Error, cel};
 
 /// Configuration for access control policies.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -82,7 +82,9 @@ impl AccessPolicy {
                 }
                 Ok(Value::Bool(false)) => {}
                 Ok(value) => {
-                    warn!("Access policy {rule_kind} rule {rule_index} returned non-boolean value: {value:?}");
+                    warn!(
+                        "Access policy {rule_kind} rule {rule_index} returned non-boolean value: {value:?}"
+                    );
                     if self.default_allow {
                         return Ok(false);
                     }

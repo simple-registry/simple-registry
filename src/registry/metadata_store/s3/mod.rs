@@ -10,7 +10,7 @@ use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::lock::{self, LockBackend, MemoryBackend};
 use crate::registry::metadata_store::{BlobIndex, Error};
 use crate::registry::metadata_store::{
-    BlobIndexOperation, LinkMetadata, LockConfig, MetadataStore,
+    BlobIndexOperation, LinkMetadata, LinkOperation, LockConfig, MetadataStore,
 };
 use crate::registry::{data_store, path_builder};
 
@@ -153,7 +153,9 @@ impl MetadataStore for Backend {
         n: u16,
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
-        debug!("Listing {n} tag(s) for namespace '{namespace}' starting with continuation_token '{last:?}'");
+        debug!(
+            "Listing {n} tag(s) for namespace '{namespace}' starting with continuation_token '{last:?}'"
+        );
         let tags_dir = path_builder::manifest_tags_dir(namespace);
 
         let mut all_tags = Vec::new();
@@ -227,23 +229,20 @@ impl MetadataStore for Backend {
                 let manifest = match self.store.read(&blob_path).await {
                     Ok(data) => data,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        return Err(Error::ReferenceNotFound)
+                        return Err(Error::ReferenceNotFound);
                     }
                     Err(e) => return Err(e.into()),
                 };
                 let manifest_len = manifest.len();
 
                 let manifest = Manifest::from_slice(&manifest)?;
-                let Some(descriptor) = manifest.into_referrer_descriptor(artifact_type.as_ref())
-                else {
-                    continue;
-                };
-
-                referrers.push(Descriptor {
-                    digest: manifest_digest.to_string(),
-                    size: manifest_len as u64,
-                    ..descriptor
-                });
+                if let Some(descriptor) = manifest.to_descriptor(
+                    artifact_type.as_ref(),
+                    manifest_digest,
+                    manifest_len as u64,
+                ) {
+                    referrers.push(descriptor);
+                }
             }
 
             continuation_token = next_token;
@@ -261,7 +260,9 @@ impl MetadataStore for Backend {
         n: u16,
         continuation_token: Option<String>,
     ) -> Result<(Vec<Digest>, Option<String>), Error> {
-        debug!("Fetching {n} revision(s) for namespace '{namespace}' with continuation token: {continuation_token:?}");
+        debug!(
+            "Fetching {n} revision(s) for namespace '{namespace}' with continuation token: {continuation_token:?}"
+        );
         let revisions_dir = path_builder::manifest_revisions_link_root_dir(namespace, "sha256");
 
         let (prefixes, _, next_last) = self
@@ -284,7 +285,7 @@ impl MetadataStore for Backend {
         let data = match self.store.read(&path).await {
             Ok(data) => data,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(Error::ReferenceNotFound)
+                return Err(Error::ReferenceNotFound);
             }
             Err(e) => return Err(e.into()),
         };
@@ -302,11 +303,10 @@ impl MetadataStore for Backend {
     ) -> Result<(), Error> {
         let path = path_builder::blob_index_path(digest);
 
-        let res = self.store.read(&path).await;
-
-        let mut reference_index = match res {
+        let mut reference_index = match self.store.read(&path).await {
             Ok(data) => serde_json::from_slice::<BlobIndex>(&data)?,
-            Err(_) => BlobIndex::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BlobIndex::default(),
+            Err(e) => return Err(e.into()),
         };
 
         let mut index = reference_index
@@ -339,49 +339,13 @@ impl MetadataStore for Backend {
     }
 
     #[instrument(skip(self))]
-    async fn create_link(
-        &self,
-        namespace: &str,
-        link: &LinkKind,
-        digest: &Digest,
-    ) -> Result<LinkMetadata, Error> {
-        let _guard = self.lock.acquire(&link.to_string()).await?;
-        let link_data = self.read_link_reference(namespace, link).await;
-
-        if let Ok(link_data) = link_data {
-            if &link_data.target != digest {
-                let _blob_guard = self.lock.acquire(link_data.target.as_str()).await?;
-                self.update_blob_index(
-                    namespace,
-                    &link_data.target,
-                    BlobIndexOperation::Remove(link.clone()),
-                )
-                .await?;
-
-                let _blob_guard = self.lock.acquire(digest.as_str()).await?;
-                self.update_blob_index(namespace, digest, BlobIndexOperation::Insert(link.clone()))
-                    .await?;
-            }
-        } else {
-            let _blob_guard = self.lock.acquire(digest.as_str()).await?;
-            self.update_blob_index(namespace, digest, BlobIndexOperation::Insert(link.clone()))
-                .await?;
-        }
-
-        let metadata = LinkMetadata::from_digest(digest.clone());
-        self.write_link_reference(namespace, link, &metadata)
-            .await?;
-        Ok(metadata)
-    }
-
-    #[instrument(skip(self))]
     async fn read_link(
         &self,
         namespace: &str,
         link: &LinkKind,
         update_access_time: bool,
     ) -> Result<LinkMetadata, Error> {
-        let _guard = self.lock.acquire(&link.to_string()).await?;
+        let _guard = self.lock.acquire(&[link.to_string()]).await?;
 
         if update_access_time {
             let link_data = self.read_link_reference(namespace, link).await?.accessed();
@@ -394,22 +358,119 @@ impl MetadataStore for Backend {
     }
 
     #[instrument(skip(self))]
-    async fn delete_link(&self, namespace: &str, link: &LinkKind) -> Result<(), Error> {
-        let _guard = self.lock.acquire(&link.to_string()).await?;
-        let metadata = self.read_link_reference(namespace, link).await;
+    async fn update_links(
+        &self,
+        namespace: &str,
+        operations: &[LinkOperation],
+    ) -> Result<(), Error> {
+        if operations.is_empty() {
+            return Ok(());
+        }
 
-        let digest = match metadata {
-            Ok(link_data) => link_data.target,
-            Err(Error::ReferenceNotFound) => return Ok(()),
-            Err(e) => return Err(e),
-        };
+        loop {
+            let mut lock_keys: Vec<String> = Vec::new();
+            let mut creates: Vec<(LinkKind, Digest, Option<Digest>)> = Vec::new();
+            let mut deletes: Vec<(LinkKind, Digest)> = Vec::new();
 
-        let _blob_guard = self.lock.acquire(digest.as_str()).await?;
-        self.delete_link_reference(namespace, link).await?;
-        self.update_blob_index(namespace, &digest, BlobIndexOperation::Remove(link.clone()))
-            .await?;
+            for op in operations {
+                match op {
+                    LinkOperation::Create { link, target } => {
+                        lock_keys.push(link.to_string());
+                        lock_keys.push(format!("blob:{target}"));
+                        let old_target = self
+                            .read_link_reference(namespace, link)
+                            .await
+                            .ok()
+                            .map(|m| m.target);
+                        if let Some(ref old) = old_target {
+                            lock_keys.push(format!("blob:{old}"));
+                        }
+                        creates.push((link.clone(), target.clone(), old_target));
+                    }
+                    LinkOperation::Delete(link) => {
+                        if let Ok(metadata) = self.read_link_reference(namespace, link).await {
+                            lock_keys.push(link.to_string());
+                            lock_keys.push(format!("blob:{}", metadata.target));
+                            deletes.push((link.clone(), metadata.target));
+                        }
+                    }
+                }
+            }
 
-        Ok(())
+            if creates.is_empty() && deletes.is_empty() {
+                return Ok(());
+            }
+
+            lock_keys.sort();
+            lock_keys.dedup();
+            let _guard = self.lock.acquire(&lock_keys).await?;
+
+            let mut needs_retry = false;
+            for (link, _, expected_old) in &creates {
+                let current = self
+                    .read_link_reference(namespace, link)
+                    .await
+                    .ok()
+                    .map(|m| m.target);
+                if current != *expected_old {
+                    needs_retry = true;
+                    break;
+                }
+            }
+            if needs_retry {
+                continue;
+            }
+
+            let mut valid_deletes = Vec::new();
+            for (link, target) in deletes {
+                match self.read_link_reference(namespace, &link).await {
+                    Ok(metadata) if metadata.target == target => {
+                        valid_deletes.push((link, target));
+                    }
+                    Ok(_) => {
+                        needs_retry = true;
+                        break;
+                    }
+                    Err(Error::ReferenceNotFound) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            if needs_retry {
+                continue;
+            }
+
+            for (link, target, old_target) in &creates {
+                self.update_blob_index(namespace, target, BlobIndexOperation::Insert(link.clone()))
+                    .await?;
+                if let Some(old) = old_target
+                    && *old != *target
+                {
+                    self.update_blob_index(
+                        namespace,
+                        old,
+                        BlobIndexOperation::Remove(link.clone()),
+                    )
+                    .await?;
+                }
+            }
+
+            for (link, target, _) in &creates {
+                let metadata = LinkMetadata::from_digest(target.clone());
+                self.write_link_reference(namespace, link, &metadata)
+                    .await?;
+            }
+
+            for (link, _) in &valid_deletes {
+                self.delete_link_reference(namespace, link).await?;
+            }
+
+            for (link, target) in &valid_deletes {
+                self.update_blob_index(namespace, target, BlobIndexOperation::Remove(link.clone()))
+                    .await?;
+            }
+
+            return Ok(());
+        }
     }
 }
 

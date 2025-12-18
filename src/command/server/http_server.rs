@@ -13,7 +13,7 @@ use hyper_util::rt::TokioIo;
 use opentelemetry::trace::TraceContextExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::pin;
-use tracing::{debug, error, info, instrument, Span};
+use tracing::{Span, debug, error, info, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::command::server::auth::PeerCertificate;
@@ -21,7 +21,7 @@ use crate::command::server::error::Error;
 use crate::command::server::request_ext::{HeaderExt, IntoAsyncRead};
 use crate::command::server::response_body::ResponseBody;
 use crate::command::server::route::Route;
-use crate::command::server::{router, ServerContext};
+use crate::command::server::{ServerContext, router};
 use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
 use crate::oci::Reference;
 

@@ -10,8 +10,9 @@ use uuid::Uuid;
 use crate::command::server::response_body::ResponseBody;
 use crate::oci::Digest;
 use crate::registry::blob_store::{BlobStore, BoxedReader};
+use crate::registry::metadata_store::MetadataStoreExt;
 use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::{blob_store, task_queue, Error, Registry, Repository};
+use crate::registry::{Error, Registry, Repository, blob_store, task_queue};
 
 pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
 
@@ -180,14 +181,12 @@ impl Registry {
 
     #[instrument]
     pub async fn delete_blob(&self, namespace: &str, digest: &Digest) -> Result<(), Error> {
-        let link = LinkKind::Layer(digest.clone());
-        if let Err(error) = self.metadata_store.delete_link(namespace, &link).await {
-            warn!("Failed to delete layer link: {error}");
-        }
+        let mut tx = self.metadata_store.begin_transaction(namespace);
+        tx.delete_link(&LinkKind::Layer(digest.clone()));
+        tx.delete_link(&LinkKind::Config(digest.clone()));
 
-        let link = LinkKind::Config(digest.clone());
-        if let Err(error) = self.metadata_store.delete_link(namespace, &link).await {
-            warn!("Failed to delete config link: {error}");
+        if let Err(error) = tx.commit().await {
+            warn!("Failed to delete blob links: {error}");
         }
 
         Ok(())
@@ -242,15 +241,16 @@ impl Registry {
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.get_repository_for_namespace(namespace)?;
 
-        if range.is_none() && self.enable_redirect {
-            if let Ok(Some(presigned_url)) = self.blob_store.get_blob_url(digest).await {
-                return Response::builder()
-                    .status(StatusCode::TEMPORARY_REDIRECT)
-                    .header(hyper::header::LOCATION, presigned_url)
-                    .header(DOCKER_CONTENT_DIGEST, digest.to_string())
-                    .body(ResponseBody::empty())
-                    .map_err(Into::into);
-            }
+        if range.is_none()
+            && self.enable_redirect
+            && let Ok(Some(presigned_url)) = self.blob_store.get_blob_url(digest).await
+        {
+            return Response::builder()
+                .status(StatusCode::TEMPORARY_REDIRECT)
+                .header(hyper::header::LOCATION, presigned_url)
+                .header(DOCKER_CONTENT_DIGEST, digest.to_string())
+                .body(ResponseBody::empty())
+                .map_err(Into::into);
         }
 
         let res = match self
@@ -384,27 +384,26 @@ mod tests {
 
             let layer_link = LinkKind::Layer(digest.clone());
             let config_link = LinkKind::Config(digest.clone());
-            registry
-                .metadata_store
-                .create_link(namespace, &layer_link, &digest)
-                .await
-                .unwrap();
-            registry
-                .metadata_store
-                .create_link(namespace, &config_link, &digest)
-                .await
-                .unwrap();
 
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &layer_link, false)
-                .await
-                .is_ok());
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &config_link, false)
-                .await
-                .is_ok());
+            let mut tx = registry.metadata_store.begin_transaction(namespace);
+            tx.create_link(&layer_link, &digest);
+            tx.create_link(&config_link, &digest);
+            tx.commit().await.unwrap();
+
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &layer_link, false)
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &config_link, false)
+                    .await
+                    .is_ok()
+            );
 
             let blob_index = registry
                 .metadata_store
@@ -418,16 +417,20 @@ mod tests {
 
             registry.delete_blob(namespace, &digest).await.unwrap();
 
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &layer_link, false)
-                .await
-                .is_err());
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &config_link, false)
-                .await
-                .is_err());
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &layer_link, false)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &config_link, false)
+                    .await
+                    .is_err()
+            );
         }
     }
 
@@ -492,32 +495,33 @@ mod tests {
             let layer_link = LinkKind::Layer(digest.clone());
             let config_link = LinkKind::Config(digest.clone());
             let latest_link = LinkKind::Tag("latest".to_string());
-            registry
-                .metadata_store
-                .create_link(namespace, &layer_link, &digest)
-                .await
-                .unwrap();
-            registry
-                .metadata_store
-                .create_link(namespace, &config_link, &digest)
-                .await
-                .unwrap();
 
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &layer_link, false)
-                .await
-                .is_ok());
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &config_link, false)
-                .await
-                .is_ok());
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &latest_link, false)
-                .await
-                .is_ok());
+            let mut tx = registry.metadata_store.begin_transaction(namespace);
+            tx.create_link(&layer_link, &digest);
+            tx.create_link(&config_link, &digest);
+            tx.commit().await.unwrap();
+
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &layer_link, false)
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &config_link, false)
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &latest_link, false)
+                    .await
+                    .is_ok()
+            );
 
             assert!(registry.blob_store.read_blob(&digest).await.is_ok());
 
@@ -528,27 +532,31 @@ mod tests {
 
             assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-            registry
-                .metadata_store
-                .delete_link(namespace, &latest_link)
-                .await
-                .unwrap();
+            let mut tx = registry.metadata_store.begin_transaction(namespace);
+            tx.delete_link(&latest_link);
+            tx.commit().await.unwrap();
 
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &layer_link, false)
-                .await
-                .is_err());
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &config_link, false)
-                .await
-                .is_err());
-            assert!(registry
-                .metadata_store
-                .read_link(namespace, &latest_link, false)
-                .await
-                .is_err());
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &layer_link, false)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &config_link, false)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                registry
+                    .metadata_store
+                    .read_link(namespace, &latest_link, false)
+                    .await
+                    .is_err()
+            );
 
             let blob_index = registry.metadata_store.read_blob_index(&digest).await;
             assert!(blob_index.is_err());

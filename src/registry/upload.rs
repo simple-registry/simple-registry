@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::command::server::response_body::ResponseBody;
 use crate::oci::Digest;
-use crate::registry::{blob_store, Error, Registry};
+use crate::registry::{Error, Registry, blob_store};
 
 pub const DOCKER_UPLOAD_UUID: &str = "Docker-Upload-UUID";
 pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
@@ -23,10 +23,10 @@ impl Registry {
         namespace: &str,
         digest: Option<Digest>,
     ) -> Result<StartUploadResponse, Error> {
-        if let Some(digest) = digest {
-            if self.blob_store.get_blob_size(&digest).await.is_ok() {
-                return Ok(StartUploadResponse::ExistingBlob(digest));
-            }
+        if let Some(digest) = digest
+            && self.blob_store.get_blob_size(&digest).await.is_ok()
+        {
+            return Ok(StartUploadResponse::ExistingBlob(digest));
         }
 
         let session_uuid = Uuid::new_v4().to_string();
@@ -271,7 +271,7 @@ mod tests {
     use super::*;
     use crate::command::server::request_ext::HeaderExt;
     use crate::registry::path_builder;
-    use crate::registry::tests::{backends, FSRegistryTestCase};
+    use crate::registry::tests::{FSRegistryTestCase, backends};
 
     #[tokio::test]
     async fn test_start_upload() {
@@ -394,19 +394,23 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(registry
-                .blob_store
-                .read_upload_summary(namespace, &session_id.to_string())
-                .await
-                .is_ok());
+            assert!(
+                registry
+                    .blob_store
+                    .read_upload_summary(namespace, &session_id.to_string())
+                    .await
+                    .is_ok()
+            );
 
             registry.delete_upload(namespace, session_id).await.unwrap();
 
-            assert!(registry
-                .blob_store
-                .read_upload_summary(namespace, &session_id.to_string())
-                .await
-                .is_err());
+            assert!(
+                registry
+                    .blob_store
+                    .read_upload_summary(namespace, &session_id.to_string())
+                    .await
+                    .is_err()
+            );
         }
     }
 
@@ -613,11 +617,13 @@ mod tests {
 
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-            assert!(registry
-                .blob_store
-                .read_upload_summary(namespace, &uuid.to_string())
-                .await
-                .is_err());
+            assert!(
+                registry
+                    .blob_store
+                    .read_upload_summary(namespace, &uuid.to_string())
+                    .await
+                    .is_err()
+            );
         }
     }
 

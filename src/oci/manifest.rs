@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::oci::{Descriptor, Error};
+use crate::oci::{Descriptor, Digest, Error};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -37,13 +37,25 @@ impl Manifest {
         types
     }
 
-    pub fn into_referrer_descriptor(self, artifact_type: Option<&String>) -> Option<Descriptor> {
-        if let Some(artifact_type) = artifact_type {
-            if !self.artifact_types().contains(artifact_type) {
-                return None;
-            }
+    pub fn to_descriptor(
+        &self,
+        artifact_type: Option<&String>,
+        digest: Digest,
+        size: u64,
+    ) -> Option<Descriptor> {
+        if let Some(artifact_type) = artifact_type
+            && !self.artifact_types().contains(artifact_type)
+        {
+            return None;
         }
-        self.into()
+
+        Some(Descriptor {
+            media_type: self.media_type.clone()?,
+            annotations: self.annotations.clone(),
+            artifact_type: self.artifact_type.clone(),
+            digest,
+            size,
+        })
     }
 }
 
@@ -64,23 +76,28 @@ impl Default for Manifest {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::oci::Digest;
 
     pub fn demo_manifest() -> Manifest {
         Manifest {
             media_type: Some("application/vnd.oci.image.manifest.v1+json".to_string()),
             config: Some(Descriptor {
                 media_type: "application/vnd.oci.image.config.v1+json".to_string(),
-                digest: "sha256:99c9d5e2bdc7ef0223f56c845a695ea0f8f11f5b55ea6f74e1f7df0d4f90026c"
-                    .to_string(),
+                digest: Digest::Sha256(
+                    "99c9d5e2bdc7ef0223f56c845a695ea0f8f11f5b55ea6f74e1f7df0d4f90026c".to_string(),
+                ),
                 size: 1234,
-                ..Descriptor::default()
+                annotations: HashMap::new(),
+                artifact_type: None,
             }),
             layers: vec![Descriptor {
                 media_type: "application/vnd.oci.image.layer.v1.tar".to_string(),
-                digest: "sha256:99c9d5e2bdc7ef0223f56c845a695ea0f8f11f5b55ea6f74e1f7df0d4f90026c"
-                    .to_string(),
+                digest: Digest::Sha256(
+                    "99c9d5e2bdc7ef0223f56c845a695ea0f8f11f5b55ea6f74e1f7df0d4f90026c".to_string(),
+                ),
                 size: 5678,
-                ..Descriptor::default()
+                annotations: HashMap::new(),
+                artifact_type: None,
             }],
             artifact_type: Some("oci.image.index.v1".to_string()),
             ..Manifest::default()
@@ -107,29 +124,5 @@ pub mod tests {
                 "application/vnd.oci.image.config.v1+json".to_string(),
             ]
         );
-    }
-
-    #[test]
-    fn test_into_referrer_descriptor() {
-        let manifest = demo_manifest();
-        let expected_descriptor = Descriptor {
-            media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
-            digest: String::new(),
-            size: 0,
-            annotations: HashMap::new(),
-            artifact_type: Some("oci.image.index.v1".to_string()),
-        };
-
-        let descriptor = manifest.into_referrer_descriptor(None);
-        assert_eq!(descriptor, Some(expected_descriptor.clone()));
-
-        let manifest = demo_manifest();
-        let descriptor = manifest.into_referrer_descriptor(Some(&"oci.image.index.v1".to_string()));
-        assert_eq!(descriptor, Some(expected_descriptor));
-
-        let manifest = demo_manifest();
-        let descriptor = manifest
-            .into_referrer_descriptor(Some(&"application/vnd.oci.image.layer.v1.tar".to_string()));
-        assert_eq!(descriptor, None);
     }
 }

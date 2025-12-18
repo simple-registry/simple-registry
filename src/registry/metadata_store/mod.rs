@@ -1,6 +1,7 @@
 mod error;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use error::Error;
@@ -21,7 +22,7 @@ pub use lock::redis::LockConfig;
 
 use crate::registry::metadata_store::link_kind::LinkKind;
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlobIndex {
     pub namespace: HashMap<String, HashSet<LinkKind>>,
 }
@@ -30,6 +31,54 @@ pub struct BlobIndex {
 pub enum BlobIndexOperation {
     Insert(LinkKind),
     Remove(LinkKind),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum LinkOperation {
+    Create { link: LinkKind, target: Digest },
+    Delete(LinkKind),
+}
+
+pub struct Transaction {
+    store: Arc<dyn MetadataStore + Send + Sync>,
+    namespace: String,
+    operations: Vec<LinkOperation>,
+}
+
+impl Transaction {
+    pub fn create_link(&mut self, link: &LinkKind, target: &Digest) {
+        self.operations.push(LinkOperation::Create {
+            link: link.clone(),
+            target: target.clone(),
+        });
+    }
+
+    pub fn delete_link(&mut self, link: &LinkKind) {
+        self.operations.push(LinkOperation::Delete(link.clone()));
+    }
+
+    pub async fn commit(self) -> Result<(), Error> {
+        if self.operations.is_empty() {
+            return Ok(());
+        }
+        self.store
+            .update_links(&self.namespace, &self.operations)
+            .await
+    }
+}
+
+pub trait MetadataStoreExt {
+    fn begin_transaction(&self, namespace: &str) -> Transaction;
+}
+
+impl MetadataStoreExt for Arc<dyn MetadataStore + Send + Sync> {
+    fn begin_transaction(&self, namespace: &str) -> Transaction {
+        Transaction {
+            store: self.clone(),
+            namespace: namespace.to_string(),
+            operations: Vec::new(),
+        }
+    }
 }
 
 #[async_trait]
@@ -70,13 +119,6 @@ pub trait MetadataStore: Send + Sync {
         operation: BlobIndexOperation,
     ) -> Result<(), Error>;
 
-    async fn create_link(
-        &self,
-        namespace: &str,
-        link: &LinkKind,
-        digest: &Digest,
-    ) -> Result<LinkMetadata, Error>;
-
     async fn read_link(
         &self,
         namespace: &str,
@@ -84,7 +126,11 @@ pub trait MetadataStore: Send + Sync {
         update_access_time: bool,
     ) -> Result<LinkMetadata, Error>;
 
-    async fn delete_link(&self, namespace: &str, link: &LinkKind) -> Result<(), Error>;
+    async fn update_links(
+        &self,
+        namespace: &str,
+        operations: &[LinkOperation],
+    ) -> Result<(), Error>;
 }
 
 #[cfg(test)]
@@ -94,19 +140,43 @@ mod tests {
 
     use chrono::{Duration, Utc};
 
-    use crate::oci::Descriptor;
+    use crate::oci::{Descriptor, Digest};
     use crate::registry::blob_store::BlobStore;
     use crate::registry::metadata_store::link_kind::LinkKind;
-    use crate::registry::metadata_store::MetadataStore;
+    use crate::registry::metadata_store::{MetadataStore, MetadataStoreExt};
     use crate::registry::tests::backends;
 
-    pub async fn test_datastore_list_namespaces(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore>) {
+    async fn create_link(
+        m: &Arc<dyn MetadataStore + Send + Sync>,
+        namespace: &str,
+        link: &LinkKind,
+        digest: &Digest,
+    ) {
+        let mut tx = m.begin_transaction(namespace);
+        tx.create_link(link, digest);
+        tx.commit().await.unwrap();
+    }
+
+    async fn delete_link(
+        m: &Arc<dyn MetadataStore + Send + Sync>,
+        namespace: &str,
+        link: &LinkKind,
+    ) {
+        let mut tx = m.begin_transaction(namespace);
+        tx.delete_link(link);
+        tx.commit().await.unwrap();
+    }
+
+    pub async fn test_datastore_list_namespaces(
+        b: Arc<dyn BlobStore>,
+        m: Arc<dyn MetadataStore + Send + Sync>,
+    ) {
         let namespaces = ["repo1", "repo2", "repo3/nested"];
         let digest = b.create_blob(b"test blob content").await.unwrap();
 
         for namespace in &namespaces {
             let tag_link = LinkKind::Tag("latest".to_string());
-            m.create_link(namespace, &tag_link, &digest).await.unwrap();
+            create_link(&m, namespace, &tag_link, &digest).await;
         }
 
         // Test listing all namespaces
@@ -142,14 +212,17 @@ mod tests {
         assert_eq!(all_namespaces, namespaces);
     }
 
-    pub async fn test_datastore_list_tags(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore>) {
+    pub async fn test_datastore_list_tags(
+        b: Arc<dyn BlobStore>,
+        m: Arc<dyn MetadataStore + Send + Sync>,
+    ) {
         let namespace = "test-repo";
         let digest = b.create_blob(b"test blob content").await.unwrap();
 
         let tags = ["latest", "v1.0", "v2.0"];
         for tag in tags {
             let tag_link = LinkKind::Tag(tag.to_string());
-            m.create_link(namespace, &tag_link, &digest).await.unwrap();
+            create_link(&m, namespace, &tag_link, &digest).await;
         }
 
         // Test listing all tags
@@ -185,21 +258,22 @@ mod tests {
         // Test tag deletion
         let delete_tag = "v1.0";
         let tag_link = LinkKind::Tag(delete_tag.to_string());
-        m.delete_link(namespace, &tag_link).await.unwrap();
+        delete_link(&m, namespace, &tag_link).await;
 
         let (tags_after_delete, _) = m.list_tags(namespace, 10, None).await.unwrap();
         assert_eq!(tags_after_delete.len(), tags.len() - 1);
         assert!(!tags_after_delete.contains(&delete_tag.to_string()));
     }
 
-    pub async fn test_datastore_list_referrers(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore>) {
+    pub async fn test_datastore_list_referrers(
+        b: Arc<dyn BlobStore>,
+        m: Arc<dyn MetadataStore + Send + Sync>,
+    ) {
         let namespace = "test-repo";
         let base_digest = b.create_blob(b"base manifest content").await.unwrap();
         let base_link = LinkKind::Digest(base_digest.clone());
 
-        m.create_link(namespace, &base_link, &base_digest)
-            .await
-            .unwrap();
+        create_link(&m, namespace, &base_link, &base_digest).await;
 
         // Create artifacts that reference the base manifest
         let referrer_content = format!(
@@ -214,7 +288,7 @@ mod tests {
                 "artifactType": "application/vnd.example.test-artifact",
                 "config": {{
                     "mediaType": "application/vnd.oci.image.config.v1+json",
-                    "digest": "sha256:0123456789abcdef0123456789abcdef",
+                    "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                     "size": 7023
                 }},
                 "layers": []
@@ -224,24 +298,20 @@ mod tests {
         let referrer_digest = b.create_blob(referrer_content.as_bytes()).await.unwrap();
         let link = LinkKind::Digest(referrer_digest.clone());
 
-        m.create_link(namespace, &link, &referrer_digest)
-            .await
-            .unwrap();
+        create_link(&m, namespace, &link, &referrer_digest).await;
 
         // Also add it to the referrers index
         let referrers_link = LinkKind::Referrer(base_digest.clone(), referrer_digest.clone());
 
-        m.create_link(namespace, &referrers_link, &referrer_digest)
-            .await
-            .unwrap();
+        create_link(&m, namespace, &referrers_link, &referrer_digest).await;
 
         // Test listing referrers
         let referrers = m.list_referrers(namespace, &base_digest, None).await;
 
         let expected = vec![Descriptor {
             media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
-            digest: referrer_digest.to_string(),
-            size: 722,
+            digest: referrer_digest,
+            size: 754,
             annotations: HashMap::new(),
             artifact_type: Some("application/vnd.example.test-artifact".to_string()),
         }];
@@ -273,7 +343,10 @@ mod tests {
         assert!(non_matching_referrers.is_empty());
     }
 
-    pub async fn test_datastore_list_revisions(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore>) {
+    pub async fn test_datastore_list_revisions(
+        b: Arc<dyn BlobStore>,
+        m: Arc<dyn MetadataStore + Send + Sync>,
+    ) {
         let namespace = "test-repo";
 
         let manifest_contents = [
@@ -288,9 +361,7 @@ mod tests {
             digests.push(digest.clone());
 
             let digest_link = LinkKind::Digest(digest.clone());
-            m.create_link(namespace, &digest_link, &digest)
-                .await
-                .unwrap();
+            create_link(&m, namespace, &digest_link, &digest).await;
         }
 
         // Test listing all revisions
@@ -324,7 +395,10 @@ mod tests {
         assert!(token3.is_none());
     }
 
-    pub async fn test_datastore_link_operations(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore>) {
+    pub async fn test_datastore_link_operations(
+        b: Arc<dyn BlobStore>,
+        m: Arc<dyn MetadataStore + Send + Sync>,
+    ) {
         let namespace = "test-namespace";
         let digest = b.create_blob(b"test blob content").await.unwrap();
 
@@ -332,7 +406,7 @@ mod tests {
         let tag = "latest";
         let tag_link = LinkKind::Tag(tag.to_string());
 
-        m.create_link(namespace, &tag_link, &digest).await.unwrap();
+        create_link(&m, namespace, &tag_link, &digest).await;
 
         let read_digest = m.read_link(namespace, &tag_link, false).await.unwrap();
         assert_eq!(read_digest.target, digest);
@@ -377,6 +451,40 @@ mod tests {
         for test_case in backends() {
             test_datastore_link_operations(test_case.blob_store(), test_case.metadata_store())
                 .await;
+        }
+    }
+
+    pub async fn test_update_links(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore + Send + Sync>) {
+        let namespace = "test-update-links";
+        let digest1 = b.create_blob(b"content1").await.unwrap();
+        let digest2 = b.create_blob(b"content2").await.unwrap();
+
+        let tag1 = LinkKind::Tag("v1".to_string());
+        let tag2 = LinkKind::Tag("v2".to_string());
+
+        let mut tx = m.begin_transaction(namespace);
+        tx.create_link(&tag1, &digest1);
+        tx.create_link(&tag2, &digest2);
+        tx.commit().await.unwrap();
+
+        let meta1 = m.read_link(namespace, &tag1, false).await.unwrap();
+        assert_eq!(meta1.target, digest1);
+        let meta2 = m.read_link(namespace, &tag2, false).await.unwrap();
+        assert_eq!(meta2.target, digest2);
+
+        let mut tx = m.begin_transaction(namespace);
+        tx.delete_link(&tag1);
+        tx.delete_link(&tag2);
+        tx.commit().await.unwrap();
+
+        assert!(m.read_link(namespace, &tag1, false).await.is_err());
+        assert!(m.read_link(namespace, &tag2, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_links_batched() {
+        for test_case in backends() {
+            test_update_links(test_case.blob_store(), test_case.metadata_store()).await;
         }
     }
 }

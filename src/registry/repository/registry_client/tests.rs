@@ -70,7 +70,10 @@ async fn test_get_blob_path() {
             .unwrap();
 
     let path = upstream.get_blob_path(repo_name, namespace, &digest);
-    assert_eq!(path, "https://example.com/v2/repo/blobs/sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+    assert_eq!(
+        path,
+        "https://example.com/v2/repo/blobs/sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+    );
 }
 
 #[tokio::test]

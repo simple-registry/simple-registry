@@ -99,6 +99,7 @@ pub mod test_utils {
     use crate::configuration::GlobalConfig;
     use crate::oci::Digest;
     use crate::registry::access_policy::AccessPolicyConfig;
+    use crate::registry::metadata_store::MetadataStoreExt;
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::retention_policy::RetentionPolicyConfig;
 
@@ -151,11 +152,9 @@ pub mod test_utils {
 
         // Create a tag to ensure the namespace exists
         let tag_link = LinkKind::Tag("latest".to_string());
-        registry
-            .metadata_store
-            .create_link(namespace, &tag_link, &digest)
-            .await
-            .unwrap();
+        let mut tx = registry.metadata_store.begin_transaction(namespace);
+        tx.create_link(&tag_link, &digest);
+        tx.commit().await.unwrap();
 
         // Verify the blob index is updated
         let blob_index = registry

@@ -12,8 +12,34 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::debug;
 
-use crate::registry::metadata_store::lock::LockBackend;
 use crate::registry::metadata_store::Error;
+use crate::registry::metadata_store::lock::LockBackend;
+
+const ACQUIRE_SCRIPT: &str = r"
+for i, key in ipairs(KEYS) do
+    if redis.call('EXISTS', key) == 1 then
+        return 0
+    end
+end
+for i, key in ipairs(KEYS) do
+    redis.call('SET', key, ARGV[1], 'EX', ARGV[2])
+end
+return 1
+";
+
+const RELEASE_SCRIPT: &str = r"
+for i, key in ipairs(KEYS) do
+    redis.call('DEL', key)
+end
+return 1
+";
+
+const REFRESH_SCRIPT: &str = r"
+for i, key in ipairs(KEYS) do
+    redis.call('EXPIRE', key, ARGV[1])
+end
+return 1
+";
 
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
 pub struct LockConfig {
@@ -71,20 +97,22 @@ impl RedisBackend {
     }
 }
 
-struct RedisLock {
+pub struct RedisGuard {
     refresh_handle: JoinHandle<()>,
     stop_notify: Arc<Notify>,
     client: Arc<Client>,
-    key: String,
+    keys: Vec<String>,
 }
 
-impl Drop for RedisLock {
+impl Drop for RedisGuard {
     fn drop(&mut self) {
         self.stop_notify.notify_one();
         self.refresh_handle.abort();
 
         if let Ok(mut conn) = self.client.get_connection() {
-            let _: redis::RedisResult<()> = redis::cmd("DEL").arg(&self.key).query(&mut conn);
+            let _: redis::RedisResult<i32> = redis::Script::new(RELEASE_SCRIPT)
+                .key(&self.keys)
+                .invoke(&mut conn);
         }
     }
 }
@@ -93,28 +121,37 @@ impl Drop for RedisLock {
 impl LockBackend for RedisBackend {
     type Guard = Box<dyn Send>;
 
-    async fn acquire(&self, key: &str) -> Result<Self::Guard, Error> {
-        let lock_key = format!("{}{}", self.key_prefix, key);
+    async fn acquire(&self, keys: &[String]) -> Result<Self::Guard, Error> {
+        if keys.is_empty() {
+            return Ok(Box::new(RedisGuard {
+                refresh_handle: tokio::spawn(async {}),
+                stop_notify: Arc::new(Notify::new()),
+                client: self.client.clone(),
+                keys: Vec::new(),
+            }));
+        }
+
+        let lock_keys: Vec<String> = keys
+            .iter()
+            .map(|k| format!("{}{}", self.key_prefix, k))
+            .collect();
         let mut retries = self.max_retries;
         let retry_delay = Duration::from_millis(self.retry_delay_ms);
 
         loop {
             let mut conn = self.client.get_multiplexed_async_connection().await?;
 
-            // Try to acquire lock with SET NX EX
-            let acquired: bool = redis::cmd("SET")
-                .arg(&lock_key)
+            let acquired: i32 = redis::Script::new(ACQUIRE_SCRIPT)
+                .key(&lock_keys)
                 .arg(1)
-                .arg("NX")
-                .arg("EX")
                 .arg(self.ttl)
-                .query_async(&mut conn)
+                .invoke_async(&mut conn)
                 .await?;
 
-            if acquired {
+            if acquired == 1 {
                 let stop_notify = Arc::new(Notify::new());
                 let client = self.client.clone();
-                let key = lock_key.clone();
+                let keys_for_refresh = lock_keys.clone();
                 let ttl = self.ttl;
                 let refresh_interval = Duration::from_secs((ttl / 2) as u64);
                 let stop_notify_clone = stop_notify.clone();
@@ -127,33 +164,30 @@ impl LockBackend for RedisBackend {
                     loop {
                         tokio::select! {
                             () = sleep(refresh_interval) => {
-                                let _: redis::RedisResult<()> = redis::cmd("EXPIRE")
-                                    .arg(&key)
+                                let _: redis::RedisResult<i32> = redis::Script::new(REFRESH_SCRIPT)
+                                    .key(&keys_for_refresh)
                                     .arg(ttl)
-                                    .query_async(&mut conn)
+                                    .invoke_async(&mut conn)
                                     .await;
                             }
                             () = stop_notify_clone.notified() => {
-                                // Stop signal received
                                 break;
                             }
                         }
                     }
                 });
 
-                let lock = Box::new(RedisLock {
+                return Ok(Box::new(RedisGuard {
                     refresh_handle,
                     stop_notify,
                     client: self.client.clone(),
-                    key: lock_key,
-                });
-
-                return Ok(lock as Box<dyn Send>);
+                    keys: lock_keys,
+                }));
             }
 
             if retries == 0 {
                 return Err(Error::Lock(format!(
-                    "Failed to acquire lock for key: {key}"
+                    "Failed to acquire locks for keys: {keys:?}"
                 )));
             }
 

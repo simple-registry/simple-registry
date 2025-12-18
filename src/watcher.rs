@@ -144,9 +144,9 @@ fn reload_tls_only(server: &Arc<server::Command>, config_path: &Path) {
         return;
     };
 
-    if let ServerConfig::Tls(tls_config) = config.server {
-        if server.notify_tls_config_change(&tls_config.tls).is_ok() {
-            info!("TLS configuration reloaded");
-        }
+    if let ServerConfig::Tls(tls_config) = config.server
+        && server.notify_tls_config_change(&tls_config.tls).is_ok()
+    {
+        info!("TLS configuration reloaded");
     }
 }

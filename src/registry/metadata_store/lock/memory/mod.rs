@@ -7,9 +7,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
-use crate::registry::metadata_store::{lock::LockBackend, Error};
+use crate::registry::metadata_store::{Error, lock::LockBackend};
+
+pub struct MemoryGuard {
+    _guards: Vec<OwnedMutexGuard<()>>,
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct MemoryBackend {
@@ -37,7 +41,7 @@ impl MemoryBackend {
 impl LockBackend for MemoryBackend {
     type Guard = Box<dyn Send>;
 
-    async fn acquire(&self, key: &str) -> Result<Self::Guard, Error> {
+    async fn acquire(&self, keys: &[String]) -> Result<Self::Guard, Error> {
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
 
         let mut locks = self.locks.lock().await;
@@ -45,24 +49,32 @@ impl LockBackend for MemoryBackend {
             locks.retain(|_, weak| weak.upgrade().is_some());
         }
 
-        let lock = if let Some(weak) = locks.get(key) {
-            if let Some(lock) = weak.upgrade() {
-                lock
+        let mut mutexes = Vec::with_capacity(keys.len());
+        for key in keys {
+            let mutex = if let Some(weak) = locks.get(key) {
+                if let Some(lock) = weak.upgrade() {
+                    lock
+                } else {
+                    locks.remove(key);
+                    let lock = Arc::new(Mutex::new(()));
+                    locks.insert(key.clone(), Arc::downgrade(&lock));
+                    lock
+                }
             } else {
-                locks.remove(key);
                 let lock = Arc::new(Mutex::new(()));
-                locks.insert(key.to_owned(), Arc::downgrade(&lock));
+                locks.insert(key.clone(), Arc::downgrade(&lock));
                 lock
-            }
-        } else {
-            let lock = Arc::new(Mutex::new(()));
-            locks.insert(key.to_owned(), Arc::downgrade(&lock));
-            lock
-        };
+            };
+            mutexes.push(mutex);
+        }
 
         drop(locks);
 
-        let guard = lock.lock_owned().await;
-        Ok(Box::new(guard) as Box<dyn Send>)
+        let mut guards = Vec::with_capacity(mutexes.len());
+        for mutex in mutexes {
+            guards.push(mutex.lock_owned().await);
+        }
+
+        Ok(Box::new(MemoryGuard { _guards: guards }))
     }
 }

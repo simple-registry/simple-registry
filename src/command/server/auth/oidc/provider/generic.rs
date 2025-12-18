@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use jsonwebtoken::{decode, decode_header, Validation};
-use reqwest::header::ACCEPT;
+use jsonwebtoken::{Validation, decode, decode_header};
 use reqwest::Client;
+use reqwest::header::ACCEPT;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use crate::cache::{Cache, CacheExt};
 use crate::command::server::auth::oidc::{Jwk, OidcProvider};
 use crate::command::server::error::Error;
-use crate::command::server::{sha256_hash, OidcClaims};
+use crate::command::server::{OidcClaims, sha256_hash};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProviderConfig {
@@ -127,8 +127,15 @@ pub async fn validate_oidc_token(
     validation.validate_exp = true;
     validation.validate_nbf = true;
 
-    debug!("Validation settings: issuer={:?}, audience={:?}, leeway={}, validate_exp={}, validate_nbf={}, algorithms={:?}",
-          validation.iss, validation.aud, validation.leeway, validation.validate_exp, validation.validate_nbf, validation.algorithms);
+    debug!(
+        "Validation settings: issuer={:?}, audience={:?}, leeway={}, validate_exp={}, validate_nbf={}, algorithms={:?}",
+        validation.iss,
+        validation.aud,
+        validation.leeway,
+        validation.validate_exp,
+        validation.validate_nbf,
+        validation.algorithms
+    );
 
     let token_data =
         decode::<HashMap<String, serde_json::Value>>(token, &decoding_key, &validation).map_err(
@@ -745,7 +752,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_oidc_token_success() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         let mock_server = MockServer::start().await;
         let (private_key, public_key) = create_rsa_keypair();
@@ -797,7 +804,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_oidc_token_invalid_signature() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         let mock_server = MockServer::start().await;
         let (_, public_key) = create_rsa_keypair();
@@ -852,7 +859,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_oidc_token_expired() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         let mock_server = MockServer::start().await;
         let (private_key, public_key) = create_rsa_keypair();
@@ -909,7 +916,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_oidc_token_wrong_issuer() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         let mock_server = MockServer::start().await;
         let (private_key, public_key) = create_rsa_keypair();
@@ -957,7 +964,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_oidc_token_wrong_audience() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         let mock_server = MockServer::start().await;
         let (private_key, public_key) = create_rsa_keypair();
@@ -1005,7 +1012,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_oidc_token_missing_kid() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         let mock_server = MockServer::start().await;
         let (private_key, public_key) = create_rsa_keypair();
@@ -1066,7 +1073,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_oidc_token_no_audience_validation() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
+        use jsonwebtoken::{EncodingKey, Header, encode};
 
         let mock_server = MockServer::start().await;
         let (private_key, public_key) = create_rsa_keypair();

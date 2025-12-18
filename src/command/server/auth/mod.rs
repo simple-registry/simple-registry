@@ -12,8 +12,8 @@ pub use basic_auth::BasicAuthValidator;
 use hyper::http::request::Parts;
 pub use mtls::{MtlsValidator, PeerCertificate};
 
-use crate::command::server::error::Error;
 use crate::command::server::ClientIdentity;
+use crate::command::server::error::Error;
 
 /// Result of authentication attempt
 #[derive(Debug)]

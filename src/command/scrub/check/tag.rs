@@ -3,9 +3,9 @@ use std::sync::Arc;
 use tracing::{debug, error};
 
 use crate::command::scrub::check::ensure_link;
-use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::Error;
+use crate::registry::metadata_store::MetadataStore;
+use crate::registry::metadata_store::link_kind::LinkKind;
 
 pub struct TagChecker {
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
@@ -67,6 +67,7 @@ impl TagChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::metadata_store::MetadataStoreExt;
     use crate::registry::test_utils;
     use crate::registry::tests::backends;
 
@@ -81,14 +82,9 @@ mod tests {
             let (blob_digest, _) =
                 test_utils::create_test_blob(registry, namespace, b"test manifest content").await;
 
-            metadata_store
-                .create_link(
-                    namespace,
-                    &LinkKind::Tag(tag_name.to_string()),
-                    &blob_digest,
-                )
-                .await
-                .unwrap();
+            let mut tx = metadata_store.begin_transaction(namespace);
+            tx.create_link(&LinkKind::Tag(tag_name.to_string()), &blob_digest);
+            tx.commit().await.unwrap();
 
             let scrubber = TagChecker::new(metadata_store.clone(), false);
 
@@ -116,19 +112,10 @@ mod tests {
             let (blob_digest, _) =
                 test_utils::create_test_blob(registry, namespace, b"test manifest").await;
 
-            metadata_store
-                .create_link(
-                    namespace,
-                    &LinkKind::Tag("v1.0.0".to_string()),
-                    &blob_digest,
-                )
-                .await
-                .unwrap();
-
-            metadata_store
-                .delete_link(namespace, &LinkKind::Digest(blob_digest.clone()))
-                .await
-                .ok();
+            let mut tx = metadata_store.begin_transaction(namespace);
+            tx.delete_link(&LinkKind::Digest(blob_digest.clone()));
+            tx.create_link(&LinkKind::Tag("v1.0.0".to_string()), &blob_digest);
+            tx.commit().await.unwrap();
 
             let scrubber = TagChecker::new(metadata_store.clone(), false);
 

@@ -1,4 +1,3 @@
-use futures_util::future;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
 use hyper::{Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -6,6 +5,7 @@ use tracing::{error, instrument, warn};
 
 use crate::command::server::response_body::ResponseBody;
 use crate::oci::{Digest, Manifest, Reference};
+use crate::registry::metadata_store::MetadataStoreExt;
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::{Error, Registry, Repository};
 
@@ -54,21 +54,15 @@ pub fn parse_manifest_digests(
         ));
     }
 
-    let subject = manifest
-        .subject
-        .map(|subject| Digest::try_from(subject.digest.as_str()))
-        .transpose()?;
+    let subject = manifest.subject.map(|subject| subject.digest);
 
-    let config = manifest
-        .config
-        .map(|config| Digest::try_from(config.digest.as_str()))
-        .transpose()?;
+    let config = manifest.config.map(|config| config.digest);
 
     let layers = manifest
         .layers
-        .iter()
-        .map(|layer| Digest::try_from(layer.digest.as_str()))
-        .collect::<Result<Vec<_>, _>>()?;
+        .into_iter()
+        .map(|layer| layer.digest)
+        .collect::<Vec<_>>();
 
     Ok(ParsedManifestDigests {
         subject,
@@ -243,56 +237,60 @@ impl Registry {
         content_type: Option<&String>,
         body: &[u8],
     ) -> Result<PutManifestResponse, Error> {
-        let manifest_digests = parse_manifest_digests(body, content_type)?;
+        let manifest: Manifest = serde_json::from_slice(body).unwrap_or_default();
+
+        if content_type.is_some()
+            && manifest.media_type.is_some()
+            && manifest.media_type.as_ref() != content_type
+        {
+            warn!(
+                "Manifest media type mismatch: {content_type:?} (expected) != {:?} (found)",
+                manifest.media_type
+            );
+            return Err(Error::ManifestInvalid(
+                "Expected manifest media type mismatch".to_string(),
+            ));
+        }
+
         let digest = self.blob_store.create_blob(body).await?;
 
-        let mut links: Vec<(LinkKind, Digest)> = Vec::new();
-
-        match reference {
-            Reference::Tag(tag) => {
-                links.push((LinkKind::Tag(tag.clone()), digest.clone()));
-                links.push((LinkKind::Digest(digest.clone()), digest.clone()));
-            }
-            Reference::Digest(provided_digest) => {
-                if provided_digest != &digest {
-                    warn!("Provided digest does not match computed digest: {provided_digest} != {digest}");
-                    return Err(Error::ManifestInvalid(
-                        "Provided digest does not match computed digest".to_string(),
-                    ));
-                }
-                links.push((LinkKind::Digest(digest.clone()), digest.clone()));
-            }
-        }
-
-        if let Some(subject) = &manifest_digests.subject {
-            links.push((
-                LinkKind::Referrer(subject.clone(), digest.clone()),
-                digest.clone(),
+        if let Reference::Digest(provided_digest) = reference
+            && provided_digest != &digest
+        {
+            warn!("Provided digest does not match computed digest: {provided_digest} != {digest}");
+            return Err(Error::ManifestInvalid(
+                "Provided digest does not match computed digest".to_string(),
             ));
         }
 
-        if let Some(config_digest) = &manifest_digests.config {
-            links.push((
-                LinkKind::Config(config_digest.clone()),
-                config_digest.clone(),
-            ));
+        let mut tx = self.metadata_store.begin_transaction(namespace);
+
+        tx.create_link(&LinkKind::Digest(digest.clone()), &digest);
+
+        if let Reference::Tag(tag) = reference {
+            tx.create_link(&LinkKind::Tag(tag.clone()), &digest);
         }
 
-        for layer_digest in &manifest_digests.layers {
-            links.push((LinkKind::Layer(layer_digest.clone()), layer_digest.clone()));
+        if let Some(subject) = &manifest.subject {
+            tx.create_link(
+                &LinkKind::Referrer(subject.digest.clone(), digest.clone()),
+                &digest,
+            );
         }
 
-        let link_futures = links.iter().map(|(link, link_digest)| {
-            self.metadata_store
-                .create_link(namespace, link, link_digest)
-        });
+        if let Some(config) = manifest.config {
+            tx.create_link(&LinkKind::Config(config.digest.clone()), &config.digest);
+        }
 
-        future::try_join_all(link_futures).await?;
+        for layer in manifest.layers {
+            tx.create_link(&LinkKind::Layer(layer.digest.clone()), &layer.digest);
+        }
 
-        Ok(PutManifestResponse {
-            digest,
-            subject: manifest_digests.subject,
-        })
+        tx.commit().await?;
+
+        let subject = manifest.subject.map(|s| s.digest.clone());
+
+        Ok(PutManifestResponse { digest, subject })
     }
 
     #[instrument]
@@ -301,81 +299,50 @@ impl Registry {
         namespace: &str,
         reference: &Reference,
     ) -> Result<(), Error> {
+        let mut tx = self.metadata_store.begin_transaction(namespace);
+
         match reference {
             Reference::Tag(tag) => {
-                let link = LinkKind::Tag(tag.clone());
-                self.metadata_store.delete_link(namespace, &link).await?;
+                tx.delete_link(&LinkKind::Tag(tag.clone()));
             }
             Reference::Digest(digest) => {
+                tx.delete_link(&LinkKind::Digest(digest.clone()));
+
+                // Find all tags pointing to this digest
                 let mut marker = None;
                 loop {
                     let (tags, next_marker) = self
                         .metadata_store
                         .list_tags(namespace, 100, marker)
                         .await?;
-
                     for tag in tags {
-                        let link_reference = LinkKind::Tag(tag);
-                        let link = match self
+                        let tag_link = LinkKind::Tag(tag.clone());
+                        if let Ok(metadata) = self
                             .metadata_store
-                            .read_link(namespace, &link_reference, self.update_pull_time)
+                            .read_link(namespace, &tag_link, false)
                             .await
+                            && &metadata.target == digest
                         {
-                            Ok(link) => link,
-                            Err(crate::registry::metadata_store::Error::ReferenceNotFound) => {
-                                // Tag doesn't exist, skip it
-                                continue;
-                            }
-                            Err(e) => return Err(e.into()),
-                        };
-
-                        if link.target == *digest {
-                            self.metadata_store
-                                .delete_link(namespace, &link_reference)
-                                .await?;
+                            tx.delete_link(&tag_link);
                         }
                     }
-
-                    // Try to read the manifest by digest to check for referrers
-                    let blob_link = LinkKind::Digest(digest.clone());
-                    let link = match self
-                        .metadata_store
-                        .read_link(namespace, &blob_link, self.update_pull_time)
-                        .await
-                    {
-                        Ok(link) => link,
-                        Err(crate::registry::metadata_store::Error::ReferenceNotFound) => {
-                            // Manifest doesn't exist, but still try to delete the link
-                            // (delete_link is idempotent and returns Ok if not found)
-                            self.metadata_store
-                                .delete_link(namespace, &blob_link)
-                                .await?;
-                            break;
-                        }
-                        Err(e) => return Err(e.into()),
-                    };
-
-                    let content = self.blob_store.read_blob(&link.target).await?;
-                    let manifest_digests = parse_manifest_digests(&content, None)?;
-
-                    if let Some(subject_digest) = manifest_digests.subject {
-                        let link = LinkKind::Referrer(subject_digest, link.target);
-                        self.metadata_store.delete_link(namespace, &link).await?;
-                    }
-
-                    self.metadata_store
-                        .delete_link(namespace, &blob_link)
-                        .await?;
-
                     if next_marker.is_none() {
                         break;
                     }
-
                     marker = next_marker;
+                }
+
+                // Find and delete referrer link if manifest has a subject
+                if let Ok(content) = self.blob_store.read_blob(digest).await
+                    && let Ok(manifest) = Manifest::from_slice(&content)
+                    && let Some(subject) = manifest.subject
+                {
+                    tx.delete_link(&LinkKind::Referrer(subject.digest, digest.clone()));
                 }
             }
         }
 
+        tx.commit().await?;
         Ok(())
     }
 
@@ -438,19 +405,19 @@ impl Registry {
             )
             .await?;
 
-        if self.enable_redirect {
-            if let Ok(Some(presigned_url)) = self.blob_store.get_blob_url(&manifest.digest).await {
-                let mut builder = Response::builder()
-                    .status(StatusCode::TEMPORARY_REDIRECT)
-                    .header(LOCATION, presigned_url)
-                    .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string());
+        if self.enable_redirect
+            && let Ok(Some(presigned_url)) = self.blob_store.get_blob_url(&manifest.digest).await
+        {
+            let mut builder = Response::builder()
+                .status(StatusCode::TEMPORARY_REDIRECT)
+                .header(LOCATION, presigned_url)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string());
 
-                if let Some(content_type) = manifest.media_type {
-                    builder = builder.header(CONTENT_TYPE, content_type);
-                }
-
-                return builder.body(ResponseBody::empty()).map_err(Into::into);
+            if let Some(content_type) = manifest.media_type {
+                builder = builder.header(CONTENT_TYPE, content_type);
             }
+
+            return builder.body(ResponseBody::empty()).map_err(Into::into);
         }
 
         let res = if let Some(content_type) = manifest.media_type {
@@ -542,7 +509,7 @@ mod tests {
 
     use super::*;
     use crate::command::server::request_ext::HeaderExt;
-    use crate::registry::tests::{backends, FSRegistryTestCase};
+    use crate::registry::tests::{FSRegistryTestCase, backends};
 
     fn create_test_manifest() -> (Vec<u8>, String) {
         let manifest = json!({
@@ -778,16 +745,18 @@ mod tests {
                 .unwrap();
 
             // Verify tag is deleted
-            assert!(registry
-                .get_manifest(
-                    registry.get_repository_for_namespace(namespace).unwrap(),
-                    slice::from_ref(&media_type),
-                    namespace,
-                    Reference::Tag(tag.to_string()),
-                    false,
-                )
-                .await
-                .is_err());
+            assert!(
+                registry
+                    .get_manifest(
+                        registry.get_repository_for_namespace(namespace).unwrap(),
+                        slice::from_ref(&media_type),
+                        namespace,
+                        Reference::Tag(tag.to_string()),
+                        false,
+                    )
+                    .await
+                    .is_err()
+            );
 
             // Test delete manifest by digest
             registry
@@ -796,16 +765,18 @@ mod tests {
                 .unwrap();
 
             // Verify digest is deleted
-            assert!(registry
-                .get_manifest(
-                    registry.get_repository_for_namespace(namespace).unwrap(),
-                    slice::from_ref(&media_type),
-                    namespace,
-                    Reference::Digest(response.digest),
-                    false,
-                )
-                .await
-                .is_err());
+            assert!(
+                registry
+                    .get_manifest(
+                        registry.get_repository_for_namespace(namespace).unwrap(),
+                        slice::from_ref(&media_type),
+                        namespace,
+                        Reference::Digest(response.digest),
+                        false,
+                    )
+                    .await
+                    .is_err()
+            );
         }
     }
 
@@ -1018,16 +989,18 @@ mod tests {
             assert_eq!(response.status(), StatusCode::ACCEPTED);
 
             // Verify manifest is deleted
-            assert!(registry
-                .get_manifest(
-                    registry.get_repository_for_namespace(namespace).unwrap(),
-                    slice::from_ref(&media_type),
-                    namespace,
-                    Reference::Tag(tag.to_string()),
-                    false,
-                )
-                .await
-                .is_err());
+            assert!(
+                registry
+                    .get_manifest(
+                        registry.get_repository_for_namespace(namespace).unwrap(),
+                        slice::from_ref(&media_type),
+                        namespace,
+                        Reference::Tag(tag.to_string()),
+                        false,
+                    )
+                    .await
+                    .is_err()
+            );
         }
     }
 

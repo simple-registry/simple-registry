@@ -6,10 +6,10 @@ use regex::Regex;
 use tracing::{debug, error, info, instrument};
 
 use crate::cache::Cache;
+use crate::command::server::ClientIdentity;
 use crate::command::server::auth::webhook::WebhookAuthorizer;
 use crate::command::server::error::Error;
 use crate::command::server::route::Route;
-use crate::command::server::ClientIdentity;
 use crate::configuration::Configuration;
 use crate::oci::Reference;
 use crate::registry::{AccessPolicy, Registry};
@@ -151,11 +151,10 @@ impl Authorizer {
                     reference: Reference::Tag(tag),
                     ..
                 } = route
+                    && !self.is_tag_mutable(auth_repo, tag)
                 {
-                    if !self.is_tag_mutable(auth_repo, tag) {
-                        let msg = format!("Tag '{tag}' is immutable and cannot be overwritten");
-                        return Err(Error::Conflict(msg));
-                    }
+                    let msg = format!("Tag '{tag}' is immutable and cannot be overwritten");
+                    return Err(Error::Conflict(msg));
                 }
 
                 let webhook_name = auth_repo

@@ -14,9 +14,9 @@ use tracing::{debug, info};
 pub use upload::UploadChecker;
 
 use crate::oci::Digest;
-use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::metadata_store::MetadataStore;
 use crate::registry::Error;
+use crate::registry::metadata_store::link_kind::LinkKind;
+use crate::registry::metadata_store::{MetadataStore, MetadataStoreExt};
 
 pub async fn ensure_link(
     metadata_store: &Arc<dyn MetadataStore + Send + Sync>,
@@ -45,15 +45,15 @@ async fn recreate_link(
     dry_run: bool,
 ) -> Result<(), Error> {
     if dry_run {
-        info!("DRY RUN: would recreate invalid link from namespace '{namespace}': {link}' -> '{target}'");
+        info!(
+            "DRY RUN: would recreate invalid link from namespace '{namespace}': {link}' -> '{target}'"
+        );
         return Ok(());
     }
 
     info!("Recreating invalid link from namespace '{namespace}': {link}' -> '{target}'");
-    if let Err(e) = metadata_store.delete_link(namespace, link).await {
-        debug!("Failed to delete invalid link '{link}': {e}");
-    }
-
-    metadata_store.create_link(namespace, link, target).await?;
+    let mut tx = metadata_store.begin_transaction(namespace);
+    tx.create_link(link, target);
+    tx.commit().await?;
     Ok(())
 }

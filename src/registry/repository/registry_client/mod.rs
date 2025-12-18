@@ -8,8 +8,8 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bearer_token::BearerToken;
 use futures_util::TryStreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, WWW_AUTHENTICATE};
@@ -23,8 +23,8 @@ use tracing::{info, warn};
 
 use crate::cache::Cache;
 use crate::oci::{Digest, Reference};
-use crate::registry::blob_store::BoxedReader;
 use crate::registry::Error;
+use crate::registry::blob_store::BoxedReader;
 
 pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
 

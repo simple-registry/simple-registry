@@ -7,10 +7,10 @@ use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use tracing::{debug, info};
 
+use crate::command::server::ServerContext;
 use crate::command::server::error::Error;
 use crate::command::server::listeners::{accept, build_listener};
 use crate::command::server::serve_request;
-use crate::command::server::ServerContext;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {

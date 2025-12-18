@@ -7,11 +7,11 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use hyper::header::{HeaderName, HeaderValue};
-use hyper::http::request::Parts;
-use hyper::http::HeaderMap;
 use hyper::Uri;
-use prometheus::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
+use hyper::header::{HeaderName, HeaderValue};
+use hyper::http::HeaderMap;
+use hyper::http::request::Parts;
+use prometheus::{HistogramVec, IntCounterVec, register_histogram_vec, register_int_counter_vec};
 use reqwest::header::AUTHORIZATION;
 use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client, Identity};
@@ -408,10 +408,10 @@ impl WebhookAuthorizer {
     ) -> Result<bool, Error> {
         let cache_key = build_cache_key(&self.name, route, identity);
 
-        if let Ok(cache_key) = &cache_key {
-            if let Ok(Some(cached)) = cache_retrieve(&self.cache, &self.name, cache_key).await {
-                return Ok(cached);
-            }
+        if let Ok(cache_key) = &cache_key
+            && let Ok(Some(cached)) = cache_retrieve(&self.cache, &self.name, cache_key).await
+        {
+            return Ok(cached);
         }
 
         let timer = WEBHOOK_DURATION

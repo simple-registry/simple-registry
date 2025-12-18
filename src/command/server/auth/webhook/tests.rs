@@ -9,13 +9,13 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::cache;
 use crate::command::server::auth::webhook::{
-    build_header_name, build_header_value, build_headers, load_certificate_bundle, load_file,
-    load_identity, set_forwarded_for_header, set_forwarded_headers, set_forwarded_host_header,
-    set_forwarded_method_header, set_forwarded_proto_header, set_forwarded_uri_header,
-    set_registry_action_header, set_registry_certificate_cn_header,
-    set_registry_certificate_o_header, set_registry_digest_header, set_registry_identity_id_header,
-    set_registry_namespace_header, set_registry_reference_header, set_registry_username_header,
-    Config, WebhookAuth, WebhookAuthorizer,
+    Config, WebhookAuth, WebhookAuthorizer, build_header_name, build_header_value, build_headers,
+    load_certificate_bundle, load_file, load_identity, set_forwarded_for_header,
+    set_forwarded_headers, set_forwarded_host_header, set_forwarded_method_header,
+    set_forwarded_proto_header, set_forwarded_uri_header, set_registry_action_header,
+    set_registry_certificate_cn_header, set_registry_certificate_o_header,
+    set_registry_digest_header, set_registry_identity_id_header, set_registry_namespace_header,
+    set_registry_reference_header, set_registry_username_header,
 };
 use crate::command::server::route::Route;
 use crate::command::server::{ClientIdentity, Error};

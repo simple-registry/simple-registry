@@ -5,7 +5,7 @@ use futures_util::future::join_all;
 use tracing::{debug, info};
 
 use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::metadata_store::{LinkMetadata, MetadataStore};
+use crate::registry::metadata_store::{LinkMetadata, MetadataStore, MetadataStoreExt};
 use crate::registry::repository::Repository;
 use crate::registry::{Error, ManifestImage, RetentionPolicy};
 
@@ -141,11 +141,33 @@ impl RetentionChecker {
         last_pushed: &[String],
         last_pulled: &[String],
     ) -> Result<(), Error> {
-        for tag in tags {
-            if !self.should_retain_tag(namespace, tag, last_pushed, last_pulled)? {
-                self.delete_tag(namespace, &tag.name).await?;
-            }
+        let tags_to_delete: Vec<&str> = tags
+            .iter()
+            .filter(|tag| {
+                !self
+                    .should_retain_tag(namespace, tag, last_pushed, last_pulled)
+                    .unwrap_or(true)
+            })
+            .map(|tag| tag.name.as_str())
+            .collect();
+
+        if tags_to_delete.is_empty() {
+            return Ok(());
         }
+
+        if self.dry_run {
+            for tag in &tags_to_delete {
+                info!("DRY RUN: would delete tag '{namespace}:{tag}' (policy)");
+            }
+            return Ok(());
+        }
+
+        let mut tx = self.metadata_store.begin_transaction(namespace);
+        for tag in &tags_to_delete {
+            info!("Deleting tag '{namespace}:{tag}' (policy)");
+            tx.delete_link(&LinkKind::Tag(tag.to_string()));
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -173,18 +195,6 @@ impl RetentionChecker {
         };
 
         self.evaluate_retention_policies(namespace, &tag.name, &manifest, last_pushed, last_pulled)
-    }
-
-    async fn delete_tag(&self, namespace: &str, tag: &str) -> Result<(), Error> {
-        if self.dry_run {
-            info!("DRY RUN: would delete tag '{namespace}:{tag}' (policy)");
-            return Ok(());
-        }
-
-        info!("Deleting tag '{namespace}:{tag}' (policy)");
-        let link = LinkKind::Tag(tag.to_string());
-        self.metadata_store.delete_link(namespace, &link).await?;
-        Ok(())
     }
 
     fn find_repository_for_namespace(&self, namespace: &str) -> Option<&Repository> {
@@ -222,16 +232,16 @@ impl RetentionChecker {
             }
         }
 
-        if let Some(repo) = repository {
-            if repo.retention_policy.has_rules() {
-                debug!("Evaluating repository retention policy for {namespace}:{tag}");
-                if repo
-                    .retention_policy
-                    .should_retain(manifest, last_pushed, last_pulled)?
-                {
-                    debug!("Repository retention policy says to retain {namespace}:{tag}");
-                    return Ok(true);
-                }
+        if let Some(repo) = repository
+            && repo.retention_policy.has_rules()
+        {
+            debug!("Evaluating repository retention policy for {namespace}:{tag}");
+            if repo
+                .retention_policy
+                .should_retain(manifest, last_pushed, last_pulled)?
+            {
+                debug!("Repository retention policy says to retain {namespace}:{tag}");
+                return Ok(true);
             }
         }
 
@@ -242,9 +252,9 @@ impl RetentionChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::RetentionPolicy;
     use crate::registry::test_utils;
     use crate::registry::tests::backends;
-    use crate::registry::RetentionPolicy;
 
     #[tokio::test]
     async fn test_enforce_retention_with_policy() {
@@ -256,14 +266,9 @@ mod tests {
             let (blob_digest, _) =
                 test_utils::create_test_blob(registry, namespace, b"test manifest").await;
 
-            metadata_store
-                .create_link(
-                    namespace,
-                    &LinkKind::Tag("v1.0.0".to_string()),
-                    &blob_digest,
-                )
-                .await
-                .unwrap();
+            let mut tx = metadata_store.begin_transaction(namespace);
+            tx.create_link(&LinkKind::Tag("v1.0.0".to_string()), &blob_digest);
+            tx.commit().await.unwrap();
 
             let retention_config = crate::registry::RetentionPolicyConfig {
                 rules: vec!["top(image.tag, last_pushed, 10)".to_string()],
@@ -302,14 +307,9 @@ mod tests {
             let (blob_digest, _) =
                 test_utils::create_test_blob(registry, namespace, b"test manifest").await;
 
-            metadata_store
-                .create_link(
-                    namespace,
-                    &LinkKind::Tag("any-tag".to_string()),
-                    &blob_digest,
-                )
-                .await
-                .unwrap();
+            let mut tx = metadata_store.begin_transaction(namespace);
+            tx.create_link(&LinkKind::Tag("any-tag".to_string()), &blob_digest);
+            tx.commit().await.unwrap();
 
             let repositories = test_utils::create_test_repositories();
             let scrubber = RetentionChecker::new(metadata_store.clone(), repositories, None, false);

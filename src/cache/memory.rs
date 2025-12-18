@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -60,10 +60,10 @@ impl Cache for Backend {
         }
 
         let store = self.store.read().await;
-        if let Some((value, expiry)) = store.get(key) {
-            if *expiry > Instant::now() {
-                return Ok(Some(value.clone()));
-            }
+        if let Some((value, expiry)) = store.get(key)
+            && *expiry > Instant::now()
+        {
+            return Ok(Some(value.clone()));
         }
 
         Ok(None)

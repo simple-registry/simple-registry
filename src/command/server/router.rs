@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
 use hyper::{Method, Uri};
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use super::route::Route;
@@ -94,14 +94,14 @@ fn try_parse_uploads<'a>(
     let suffixes = ["/blobs/uploads", "/blobs/uploads/"];
 
     for suffix in suffixes {
-        if let Some(namespace) = path.strip_suffix(suffix) {
-            if method == Method::POST {
-                let digest = params
-                    .map(parse_query::<DigestQuery>)
-                    .and_then(|r| r.to_digest());
+        if let Some(namespace) = path.strip_suffix(suffix)
+            && method == Method::POST
+        {
+            let digest = params
+                .map(parse_query::<DigestQuery>)
+                .and_then(|r| r.to_digest());
 
-                return Some(Route::StartUpload { namespace, digest });
-            }
+            return Some(Route::StartUpload { namespace, digest });
         }
     }
 
@@ -172,25 +172,25 @@ fn try_find_manifests<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> {
                 return Some(Route::GetManifest {
                     namespace,
                     reference,
-                })
+                });
             }
             Method::HEAD => {
                 return Some(Route::HeadManifest {
                     namespace,
                     reference,
-                })
+                });
             }
             Method::PUT => {
                 return Some(Route::PutManifest {
                     namespace,
                     reference,
-                })
+                });
             }
             Method::DELETE => {
                 return Some(Route::DeleteManifest {
                     namespace,
                     reference,
-                })
+                });
             }
             _ => {}
         }
@@ -227,16 +227,16 @@ fn try_find_referrers<'a>(
 }
 
 fn try_find_tags<'a>(method: &Method, path: &'a str, params: Option<&'a str>) -> Option<Route<'a>> {
-    if let Some(namespace) = path.strip_suffix("/tags/list") {
-        if *method == Method::GET {
-            let (n, last) = if let Some(p) = params.map(parse_query::<PaginationQuery>) {
-                (p.n, p.last)
-            } else {
-                (None, None)
-            };
+    if let Some(namespace) = path.strip_suffix("/tags/list")
+        && *method == Method::GET
+    {
+        let (n, last) = if let Some(p) = params.map(parse_query::<PaginationQuery>) {
+            (p.n, p.last)
+        } else {
+            (None, None)
+        };
 
-            return Some(Route::ListTags { namespace, n, last });
-        }
+        return Some(Route::ListTags { namespace, n, last });
     }
 
     None

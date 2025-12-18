@@ -3,10 +3,10 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use crate::oci::Digest;
+use crate::registry::Error;
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::{BlobIndexOperation, MetadataStore};
-use crate::registry::Error;
 
 pub struct BlobChecker {
     blob_store: Arc<dyn BlobStore + Send + Sync>,
@@ -60,12 +60,11 @@ impl BlobChecker {
                     .read_link(&namespace, &link, false)
                     .await
                     .is_err()
+                    && let Err(err) = self.remove_invalid_link(&namespace, blob, &link).await
                 {
-                    if let Err(err) = self.remove_invalid_link(&namespace, blob, &link).await {
-                        error!(
-                            "Failed to remove invalid link '{link}' from blob index '{namespace}/{blob}': {err}"
-                        );
-                    }
+                    error!(
+                        "Failed to remove invalid link '{link}' from blob index '{namespace}/{blob}': {err}"
+                    );
                 }
             }
         }
