@@ -275,94 +275,110 @@ impl MetadataStore for Backend {
             return Ok(());
         }
 
-        let mut lock_keys: Vec<String> = Vec::new();
-        let mut creates: Vec<(LinkKind, Digest, Option<Digest>)> = Vec::new();
-        let mut deletes: Vec<(LinkKind, Digest)> = Vec::new();
+        loop {
+            let mut lock_keys: Vec<String> = Vec::new();
+            let mut creates: Vec<(LinkKind, Digest, Option<Digest>)> = Vec::new();
+            let mut deletes: Vec<(LinkKind, Digest)> = Vec::new();
 
-        for op in operations {
-            match op {
-                LinkOperation::Create { link, target } => {
-                    lock_keys.push(link.to_string());
-                    lock_keys.push(format!("blob:{target}"));
-                    let old_target = self
-                        .read_link_reference(namespace, link)
-                        .await
-                        .ok()
-                        .map(|m| m.target);
-                    if let Some(ref old) = old_target {
-                        lock_keys.push(format!("blob:{old}"));
-                    }
-                    creates.push((link.clone(), target.clone(), old_target));
-                }
-                LinkOperation::Delete(link) => {
-                    if let Ok(metadata) = self.read_link_reference(namespace, link).await {
+            for op in operations {
+                match op {
+                    LinkOperation::Create { link, target } => {
                         lock_keys.push(link.to_string());
-                        lock_keys.push(format!("blob:{}", metadata.target));
-                        deletes.push((link.clone(), metadata.target));
+                        lock_keys.push(format!("blob:{target}"));
+                        let old_target = self
+                            .read_link_reference(namespace, link)
+                            .await
+                            .ok()
+                            .map(|m| m.target);
+                        if let Some(ref old) = old_target {
+                            lock_keys.push(format!("blob:{old}"));
+                        }
+                        creates.push((link.clone(), target.clone(), old_target));
+                    }
+                    LinkOperation::Delete(link) => {
+                        if let Ok(metadata) = self.read_link_reference(namespace, link).await {
+                            lock_keys.push(link.to_string());
+                            lock_keys.push(format!("blob:{}", metadata.target));
+                            deletes.push((link.clone(), metadata.target));
+                        }
                     }
                 }
             }
-        }
 
-        if creates.is_empty() && deletes.is_empty() {
-            return Ok(());
-        }
-
-        lock_keys.sort();
-        lock_keys.dedup();
-        let _guard = self.lock.acquire(&lock_keys).await?;
-
-        for (link, _, expected_old) in &creates {
-            let current = self
-                .read_link_reference(namespace, link)
-                .await
-                .ok()
-                .map(|m| m.target);
-            if current != *expected_old {
-                drop(_guard);
-                return Box::pin(self.update_links(namespace, operations)).await;
+            if creates.is_empty() && deletes.is_empty() {
+                return Ok(());
             }
-        }
 
-        for (link, target) in &deletes {
-            let current_target = match self.read_link_reference(namespace, link).await {
-                Ok(metadata) => metadata.target,
-                Err(Error::ReferenceNotFound) => continue,
-                Err(e) => return Err(e),
-            };
-            if &current_target != target {
-                drop(_guard);
-                return Box::pin(self.update_links(namespace, operations)).await;
+            lock_keys.sort();
+            lock_keys.dedup();
+            let _guard = self.lock.acquire(&lock_keys).await?;
+
+            let mut needs_retry = false;
+            for (link, _, expected_old) in &creates {
+                let current = self
+                    .read_link_reference(namespace, link)
+                    .await
+                    .ok()
+                    .map(|m| m.target);
+                if current != *expected_old {
+                    needs_retry = true;
+                    break;
+                }
             }
-        }
+            if needs_retry {
+                continue;
+            }
 
-        for (link, target, old_target) in &creates {
-            self.update_blob_index(namespace, target, BlobIndexOperation::Insert(link.clone()))
-                .await?;
-            if let Some(old) = old_target
-                && *old != *target
-            {
-                self.update_blob_index(namespace, old, BlobIndexOperation::Remove(link.clone()))
+            let mut valid_deletes = Vec::new();
+            for (link, target) in deletes {
+                match self.read_link_reference(namespace, &link).await {
+                    Ok(metadata) if metadata.target == target => {
+                        valid_deletes.push((link, target));
+                    }
+                    Ok(_) => {
+                        needs_retry = true;
+                        break;
+                    }
+                    Err(Error::ReferenceNotFound) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            if needs_retry {
+                continue;
+            }
+
+            for (link, target, old_target) in &creates {
+                self.update_blob_index(namespace, target, BlobIndexOperation::Insert(link.clone()))
+                    .await?;
+                if let Some(old) = old_target
+                    && *old != *target
+                {
+                    self.update_blob_index(
+                        namespace,
+                        old,
+                        BlobIndexOperation::Remove(link.clone()),
+                    )
+                    .await?;
+                }
+            }
+
+            for (link, target, _) in &creates {
+                let metadata = LinkMetadata::from_digest(target.clone());
+                self.write_link_reference(namespace, link, &metadata)
                     .await?;
             }
-        }
 
-        for (link, target, _) in &creates {
-            let metadata = LinkMetadata::from_digest(target.clone());
-            self.write_link_reference(namespace, link, &metadata)
-                .await?;
-        }
+            for (link, _) in &valid_deletes {
+                self.delete_link_reference(namespace, link).await?;
+            }
 
-        for (link, _) in &deletes {
-            self.delete_link_reference(namespace, link).await?;
-        }
+            for (link, target) in &valid_deletes {
+                self.update_blob_index(namespace, target, BlobIndexOperation::Remove(link.clone()))
+                    .await?;
+            }
 
-        for (link, target) in &deletes {
-            self.update_blob_index(namespace, target, BlobIndexOperation::Remove(link.clone()))
-                .await?;
+            return Ok(());
         }
-
-        Ok(())
     }
 }
 
