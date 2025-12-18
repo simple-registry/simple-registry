@@ -14,6 +14,8 @@ pub struct Manifest {
     #[serde(default)]
     pub layers: Vec<Descriptor>,
     #[serde(default)]
+    pub manifests: Vec<Descriptor>,
+    #[serde(default)]
     pub subject: Option<Descriptor>,
     #[serde(default)]
     pub annotations: HashMap<String, String>,
@@ -53,6 +55,7 @@ impl Manifest {
             media_type: self.media_type.clone()?,
             annotations: self.annotations.clone(),
             artifact_type: self.artifact_type.clone(),
+            platform: None,
             digest,
             size,
         })
@@ -66,6 +69,7 @@ impl Default for Manifest {
             media_type: None,
             config: None,
             layers: Vec::new(),
+            manifests: Vec::new(),
             subject: None,
             annotations: HashMap::new(),
             artifact_type: None,
@@ -89,6 +93,7 @@ pub mod tests {
                 size: 1234,
                 annotations: HashMap::new(),
                 artifact_type: None,
+                platform: None,
             }),
             layers: vec![Descriptor {
                 media_type: "application/vnd.oci.image.layer.v1.tar".to_string(),
@@ -98,6 +103,7 @@ pub mod tests {
                 size: 5678,
                 annotations: HashMap::new(),
                 artifact_type: None,
+                platform: None,
             }],
             artifact_type: Some("oci.image.index.v1".to_string()),
             ..Manifest::default()

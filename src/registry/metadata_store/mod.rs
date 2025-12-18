@@ -314,6 +314,7 @@ mod tests {
             size: 754,
             annotations: HashMap::new(),
             artifact_type: Some("application/vnd.example.test-artifact".to_string()),
+            platform: None,
         }];
 
         assert_eq!(Ok(expected), referrers);

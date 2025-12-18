@@ -33,6 +33,7 @@ pub struct ParsedManifestDigests {
     pub subject: Option<Digest>,
     pub config: Option<Digest>,
     pub layers: Vec<Digest>,
+    pub manifests: Vec<Digest>,
 }
 
 pub fn parse_manifest_digests(
@@ -64,10 +65,17 @@ pub fn parse_manifest_digests(
         .map(|layer| layer.digest)
         .collect::<Vec<_>>();
 
+    let manifests = manifest
+        .manifests
+        .into_iter()
+        .map(|m| m.digest)
+        .collect::<Vec<_>>();
+
     Ok(ParsedManifestDigests {
         subject,
         config,
         layers,
+        manifests,
     })
 }
 
@@ -286,6 +294,13 @@ impl Registry {
             tx.create_link(&LinkKind::Layer(layer.digest.clone()), &layer.digest);
         }
 
+        for child in manifest.manifests {
+            tx.create_link(
+                &LinkKind::Manifest(digest.clone(), child.digest.clone()),
+                &child.digest,
+            );
+        }
+
         tx.commit().await?;
 
         let subject = manifest.subject.map(|s| s.digest.clone());
@@ -332,12 +347,25 @@ impl Registry {
                     marker = next_marker;
                 }
 
-                // Find and delete referrer link if manifest has a subject
+                // Delete all links created during put_manifest
                 if let Ok(content) = self.blob_store.read_blob(digest).await
                     && let Ok(manifest) = Manifest::from_slice(&content)
-                    && let Some(subject) = manifest.subject
                 {
-                    tx.delete_link(&LinkKind::Referrer(subject.digest, digest.clone()));
+                    if let Some(subject) = manifest.subject {
+                        tx.delete_link(&LinkKind::Referrer(subject.digest, digest.clone()));
+                    }
+
+                    if let Some(config) = manifest.config {
+                        tx.delete_link(&LinkKind::Config(config.digest));
+                    }
+
+                    for layer in manifest.layers {
+                        tx.delete_link(&LinkKind::Layer(layer.digest));
+                    }
+
+                    for child in manifest.manifests {
+                        tx.delete_link(&LinkKind::Manifest(digest.clone(), child.digest));
+                    }
                 }
             }
         }
