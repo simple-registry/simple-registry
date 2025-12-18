@@ -408,10 +408,10 @@ impl WebhookAuthorizer {
     ) -> Result<bool, Error> {
         let cache_key = build_cache_key(&self.name, route, identity);
 
-        if let Ok(cache_key) = &cache_key {
-            if let Ok(Some(cached)) = cache_retrieve(&self.cache, &self.name, cache_key).await {
-                return Ok(cached);
-            }
+        if let Ok(cache_key) = &cache_key
+            && let Ok(Some(cached)) = cache_retrieve(&self.cache, &self.name, cache_key).await
+        {
+            return Ok(cached);
         }
 
         let timer = WEBHOOK_DURATION

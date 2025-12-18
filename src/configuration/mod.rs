@@ -142,21 +142,22 @@ impl Configuration {
 
         let webhook_names = self.auth.webhook.keys().collect::<HashSet<_>>();
 
-        if let Some(webhook_name) = &self.global.authorization_webhook {
-            if !webhook_names.contains(&webhook_name) {
-                let msg = format!("Webhook '{webhook_name}' not found (referenced globally)");
-                return Err(Error::InvalidFormat(msg));
-            }
+        if let Some(webhook_name) = &self.global.authorization_webhook
+            && !webhook_names.contains(&webhook_name)
+        {
+            let msg = format!("Webhook '{webhook_name}' not found (referenced globally)");
+            return Err(Error::InvalidFormat(msg));
         }
 
         for (repository, config) in &self.repository {
-            if let Some(webhook_name) = &config.authorization_webhook {
-                if !webhook_name.is_empty() && !webhook_names.contains(&webhook_name) {
-                    let msg = format!(
-                        "Webhook '{webhook_name}' not found (referenced in '{repository}' repository)"
-                    );
-                    return Err(Error::InvalidFormat(msg));
-                }
+            if let Some(webhook_name) = &config.authorization_webhook
+                && !webhook_name.is_empty()
+                && !webhook_names.contains(&webhook_name)
+            {
+                let msg = format!(
+                    "Webhook '{webhook_name}' not found (referenced in '{repository}' repository)"
+                );
+                return Err(Error::InvalidFormat(msg));
             }
         }
 

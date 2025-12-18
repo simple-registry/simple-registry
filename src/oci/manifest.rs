@@ -38,25 +38,21 @@ impl Manifest {
     }
 
     pub fn to_descriptor(
-        self,
-        artifact_type: &Option<String>,
+        &self,
+        artifact_type: Option<&String>,
         digest: Digest,
         size: u64,
     ) -> Option<Descriptor> {
         if let Some(artifact_type) = artifact_type
-            && !self.artifact_types().contains(&artifact_type)
+            && !self.artifact_types().contains(artifact_type)
         {
             return None;
         }
 
-        let Some(media_type) = self.media_type else {
-            return None;
-        };
-
         Some(Descriptor {
-            media_type,
-            annotations: self.annotations,
-            artifact_type: self.artifact_type,
+            media_type: self.media_type.clone()?,
+            annotations: self.annotations.clone(),
+            artifact_type: self.artifact_type.clone(),
             digest,
             size,
         })

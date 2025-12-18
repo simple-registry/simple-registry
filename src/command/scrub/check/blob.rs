@@ -60,12 +60,11 @@ impl BlobChecker {
                     .read_link(&namespace, &link, false)
                     .await
                     .is_err()
+                    && let Err(err) = self.remove_invalid_link(&namespace, blob, &link).await
                 {
-                    if let Err(err) = self.remove_invalid_link(&namespace, blob, &link).await {
-                        error!(
-                            "Failed to remove invalid link '{link}' from blob index '{namespace}/{blob}': {err}"
-                        );
-                    }
+                    error!(
+                        "Failed to remove invalid link '{link}' from blob index '{namespace}/{blob}': {err}"
+                    );
                 }
             }
         }

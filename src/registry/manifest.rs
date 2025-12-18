@@ -254,15 +254,13 @@ impl Registry {
 
         let digest = self.blob_store.create_blob(body).await?;
 
-        if let Reference::Digest(provided_digest) = reference {
-            if provided_digest != &digest {
-                warn!(
-                    "Provided digest does not match computed digest: {provided_digest} != {digest}"
-                );
-                return Err(Error::ManifestInvalid(
-                    "Provided digest does not match computed digest".to_string(),
-                ));
-            }
+        if let Reference::Digest(provided_digest) = reference
+            && provided_digest != &digest
+        {
+            warn!("Provided digest does not match computed digest: {provided_digest} != {digest}");
+            return Err(Error::ManifestInvalid(
+                "Provided digest does not match computed digest".to_string(),
+            ));
         }
 
         let mut tx = self.metadata_store.begin_transaction(namespace);
@@ -323,10 +321,9 @@ impl Registry {
                             .metadata_store
                             .read_link(namespace, &tag_link, false)
                             .await
+                            && &metadata.target == digest
                         {
-                            if &metadata.target == digest {
-                                tx.delete_link(&tag_link);
-                            }
+                            tx.delete_link(&tag_link);
                         }
                     }
                     if next_marker.is_none() {
@@ -336,12 +333,11 @@ impl Registry {
                 }
 
                 // Find and delete referrer link if manifest has a subject
-                if let Ok(content) = self.blob_store.read_blob(digest).await {
-                    if let Ok(manifest) = Manifest::from_slice(&content) {
-                        if let Some(subject) = manifest.subject {
-                            tx.delete_link(&LinkKind::Referrer(subject.digest, digest.clone()));
-                        }
-                    }
+                if let Ok(content) = self.blob_store.read_blob(digest).await
+                    && let Ok(manifest) = Manifest::from_slice(&content)
+                    && let Some(subject) = manifest.subject
+                {
+                    tx.delete_link(&LinkKind::Referrer(subject.digest, digest.clone()));
                 }
             }
         }
@@ -409,19 +405,19 @@ impl Registry {
             )
             .await?;
 
-        if self.enable_redirect {
-            if let Ok(Some(presigned_url)) = self.blob_store.get_blob_url(&manifest.digest).await {
-                let mut builder = Response::builder()
-                    .status(StatusCode::TEMPORARY_REDIRECT)
-                    .header(LOCATION, presigned_url)
-                    .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string());
+        if self.enable_redirect
+            && let Ok(Some(presigned_url)) = self.blob_store.get_blob_url(&manifest.digest).await
+        {
+            let mut builder = Response::builder()
+                .status(StatusCode::TEMPORARY_REDIRECT)
+                .header(LOCATION, presigned_url)
+                .header(DOCKER_CONTENT_DIGEST, manifest.digest.to_string());
 
-                if let Some(content_type) = manifest.media_type {
-                    builder = builder.header(CONTENT_TYPE, content_type);
-                }
-
-                return builder.body(ResponseBody::empty()).map_err(Into::into);
+            if let Some(content_type) = manifest.media_type {
+                builder = builder.header(CONTENT_TYPE, content_type);
             }
+
+            return builder.body(ResponseBody::empty()).map_err(Into::into);
         }
 
         let res = if let Some(content_type) = manifest.media_type {

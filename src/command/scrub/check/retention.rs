@@ -232,16 +232,16 @@ impl RetentionChecker {
             }
         }
 
-        if let Some(repo) = repository {
-            if repo.retention_policy.has_rules() {
-                debug!("Evaluating repository retention policy for {namespace}:{tag}");
-                if repo
-                    .retention_policy
-                    .should_retain(manifest, last_pushed, last_pulled)?
-                {
-                    debug!("Repository retention policy says to retain {namespace}:{tag}");
-                    return Ok(true);
-                }
+        if let Some(repo) = repository
+            && repo.retention_policy.has_rules()
+        {
+            debug!("Evaluating repository retention policy for {namespace}:{tag}");
+            if repo
+                .retention_policy
+                .should_retain(manifest, last_pushed, last_pulled)?
+            {
+                debug!("Repository retention policy says to retain {namespace}:{tag}");
+                return Ok(true);
             }
         }
 

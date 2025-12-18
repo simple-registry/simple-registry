@@ -236,9 +236,11 @@ impl MetadataStore for Backend {
                 let manifest_len = manifest.len();
 
                 let manifest = Manifest::from_slice(&manifest)?;
-                if let Some(descriptor) =
-                    manifest.to_descriptor(&artifact_type, manifest_digest, manifest_len as u64)
-                {
+                if let Some(descriptor) = manifest.to_descriptor(
+                    artifact_type.as_ref(),
+                    manifest_digest,
+                    manifest_len as u64,
+                ) {
                     referrers.push(descriptor);
                 }
             }
@@ -430,15 +432,11 @@ impl MetadataStore for Backend {
         for (link, target, old_target) in &creates {
             self.update_blob_index(namespace, target, BlobIndexOperation::Insert(link.clone()))
                 .await?;
-            if let Some(old) = old_target {
-                if *old != *target {
-                    self.update_blob_index(
-                        namespace,
-                        old,
-                        BlobIndexOperation::Remove(link.clone()),
-                    )
+            if let Some(old) = old_target
+                && *old != *target
+            {
+                self.update_blob_index(namespace, old, BlobIndexOperation::Remove(link.clone()))
                     .await?;
-                }
             }
         }
 

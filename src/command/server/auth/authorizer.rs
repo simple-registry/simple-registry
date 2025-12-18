@@ -151,11 +151,10 @@ impl Authorizer {
                     reference: Reference::Tag(tag),
                     ..
                 } = route
+                    && !self.is_tag_mutable(auth_repo, tag)
                 {
-                    if !self.is_tag_mutable(auth_repo, tag) {
-                        let msg = format!("Tag '{tag}' is immutable and cannot be overwritten");
-                        return Err(Error::Conflict(msg));
-                    }
+                    let msg = format!("Tag '{tag}' is immutable and cannot be overwritten");
+                    return Err(Error::Conflict(msg));
                 }
 
                 let webhook_name = auth_repo

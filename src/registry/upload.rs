@@ -23,10 +23,10 @@ impl Registry {
         namespace: &str,
         digest: Option<Digest>,
     ) -> Result<StartUploadResponse, Error> {
-        if let Some(digest) = digest {
-            if self.blob_store.get_blob_size(&digest).await.is_ok() {
-                return Ok(StartUploadResponse::ExistingBlob(digest));
-            }
+        if let Some(digest) = digest
+            && self.blob_store.get_blob_size(&digest).await.is_ok()
+        {
+            return Ok(StartUploadResponse::ExistingBlob(digest));
         }
 
         let session_uuid = Uuid::new_v4().to_string();
