@@ -117,6 +117,15 @@ pub fn link_container_path(link: &LinkKind, namespace: &str) -> String {
                 referrer.hash()
             )
         }
+        LinkKind::Manifest(index, child) => {
+            format!(
+                "{REPOS_ROOT}/{namespace}/_manifests/index/{}/{}/{}/{}",
+                index.algorithm(),
+                index.hash(),
+                child.algorithm(),
+                child.hash()
+            )
+        }
     }
 }
 
@@ -238,6 +247,18 @@ mod tests {
         assert_eq!(
             link_container_path(&referrer_link, "ns"),
             "v2/repositories/ns/_manifests/referrers/sha256/subject456/sha256/referrer789"
+        );
+
+        let index = Digest::Sha256("index123".to_string());
+        let child = Digest::Sha256("child456".to_string());
+        let manifest_link = LinkKind::Manifest(index, child);
+        assert_eq!(
+            link_path(&manifest_link, "ns"),
+            "v2/repositories/ns/_manifests/index/sha256/index123/sha256/child456/link"
+        );
+        assert_eq!(
+            link_container_path(&manifest_link, "ns"),
+            "v2/repositories/ns/_manifests/index/sha256/index123/sha256/child456"
         );
     }
 }

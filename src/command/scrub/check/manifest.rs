@@ -90,6 +90,17 @@ impl ManifestChecker {
             .await?;
         }
 
+        for child in &manifest.manifests {
+            ensure_link(
+                &self.metadata_store,
+                namespace,
+                &LinkKind::Manifest(revision.clone(), child.clone()),
+                child,
+                self.dry_run,
+            )
+            .await?;
+        }
+
         Ok(())
     }
 }

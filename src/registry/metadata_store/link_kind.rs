@@ -11,6 +11,7 @@ pub enum LinkKind {
     Layer(Digest),
     Config(Digest),
     Referrer(Digest, Digest),
+    Manifest(Digest, Digest),
 }
 
 impl Display for LinkKind {
@@ -21,6 +22,7 @@ impl Display for LinkKind {
             LinkKind::Layer(d) => write!(f, "layer:{d}"),
             LinkKind::Config(d) => write!(f, "config:{d}"),
             LinkKind::Referrer(l, r) => write!(f, "referrer:{l}-{r}"),
+            LinkKind::Manifest(index, child) => write!(f, "manifest:{index}-{child}"),
         }
     }
 }
