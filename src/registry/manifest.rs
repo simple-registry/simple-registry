@@ -347,13 +347,20 @@ impl Registry {
                     marker = next_marker;
                 }
 
-                // Find and delete referrer link if manifest has a subject
-                // Also delete child manifest links if this is an image index
+                // Delete all links created during put_manifest
                 if let Ok(content) = self.blob_store.read_blob(digest).await
                     && let Ok(manifest) = Manifest::from_slice(&content)
                 {
                     if let Some(subject) = manifest.subject {
                         tx.delete_link(&LinkKind::Referrer(subject.digest, digest.clone()));
+                    }
+
+                    if let Some(config) = manifest.config {
+                        tx.delete_link(&LinkKind::Config(config.digest));
+                    }
+
+                    for layer in manifest.layers {
+                        tx.delete_link(&LinkKind::Layer(layer.digest));
                     }
 
                     for child in manifest.manifests {

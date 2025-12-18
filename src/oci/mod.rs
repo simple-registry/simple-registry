@@ -6,7 +6,7 @@ mod error;
 mod manifest;
 mod reference;
 
-pub use descriptor::{Descriptor, Platform};
+pub use descriptor::Descriptor;
 pub use digest::Digest;
 pub use error::Error;
 pub use manifest::Manifest;
