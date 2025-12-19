@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use argh::FromArgs;
+use tracing::error;
 
 use super::ServerContext;
 use super::listeners::insecure::InsecureListener;
@@ -13,6 +14,7 @@ use crate::configuration::{Configuration, ServerConfig};
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::{Registry, Repository, blob_store, repository};
+use crate::watcher::ConfigNotifier;
 
 pub enum ServiceListener {
     Insecure(InsecureListener),
@@ -159,6 +161,20 @@ impl Command {
         }
 
         Ok(())
+    }
+}
+
+impl ConfigNotifier for Command {
+    fn notify_config_change(&self, config: &Configuration) {
+        if let Err(e) = self.notify_config_change(config) {
+            error!("Failed to apply configuration: {e}");
+        }
+    }
+
+    fn notify_tls_config_change(&self, tls: &ServerTlsConfig) {
+        if let Err(e) = self.notify_tls_config_change(tls) {
+            error!("Failed to reload TLS configuration: {e}");
+        }
     }
 }
 
