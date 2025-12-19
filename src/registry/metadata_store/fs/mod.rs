@@ -185,6 +185,12 @@ impl MetadataStore for Backend {
         Ok(pagination::paginate(&revisions, n, continuation_token))
     }
 
+    async fn count_manifests(&self, namespace: &str) -> Result<usize, Error> {
+        let path = path_builder::manifest_revisions_link_root_dir(namespace, "sha256");
+        let revisions = self.store.list_dir(&path).await?;
+        Ok(revisions.len())
+    }
+
     #[instrument(skip(self))]
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobIndex, Error> {
         let path = path_builder::blob_index_path(digest);

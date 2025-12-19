@@ -11,6 +11,7 @@ pub mod route;
 pub mod router;
 pub mod server_context;
 mod sha256_hash_string;
+mod ui;
 
 pub use client_identity::{ClientCertificate, ClientIdentity, OidcClaims};
 pub use command::{Command, Options};

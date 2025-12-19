@@ -21,6 +21,8 @@ pub struct Configuration {
     pub server: ServerConfig,
     #[serde(default)]
     pub global: GlobalConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
     #[serde(default, alias = "cache_store")]
     pub cache: cache::Config,
     #[serde(default, alias = "storage")]
@@ -61,6 +63,29 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub immutable_tags_exclusions: Vec<String>,
     pub authorization_webhook: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct UiConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "UiConfig::default_name")]
+    pub name: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        UiConfig {
+            enabled: false,
+            name: UiConfig::default_name(),
+        }
+    }
+}
+
+impl UiConfig {
+    fn default_name() -> String {
+        "simple-registry".to_string()
+    }
 }
 
 impl Default for GlobalConfig {
@@ -383,6 +408,48 @@ mod tests {
             config.global.authorization_webhook,
             Some("my-webhook".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_ui_enabled_config() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [ui]
+        enabled = true
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert!(config.ui.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_ui_enabled_default_false() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert!(!config.ui.enabled);
+        assert_eq!(config.ui.name, "simple-registry");
+    }
+
+    #[tokio::test]
+    async fn test_ui_custom_name() {
+        let config = r#"
+        [server]
+        bind_address = "0.0.0.0"
+
+        [ui]
+        enabled = true
+        name = "my-registry"
+        "#;
+
+        let config = Configuration::load_from_str(config).unwrap();
+        assert!(config.ui.enabled);
+        assert_eq!(config.ui.name, "my-registry");
     }
 
     #[tokio::test]

@@ -67,7 +67,15 @@ In addition to the standard distribution endpoints, Simple-Registry provides the
 - [OIDC Authentication documentation](doc/oidc-authentication.md)
 - [Webhook Authorization documentation](doc/configure-webhook-authorization.md)
 
+## Web UI
+
+Simple Registry includes an optional web interface for browsing and managing container images.
+
+- [Web UI documentation](doc/web-ui.md)
+
 ## References
 
 - [OCI Distribution Specification](https://github.com/opencontainers/distribution-spec/blob/main/spec.md)
+- [OCI Image Specification](https://github.com/opencontainers/image-spec)
+- [OCI Image Index](https://github.com/opencontainers/image-spec/blob/main/image-index.md)
 - [Docker Registry HTTP API V2](https://github.com/openshift/docker-distribution/blob/master/docs/spec/api.md)

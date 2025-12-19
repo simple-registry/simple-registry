@@ -14,6 +14,8 @@ pub struct ServerContext {
     authenticator: Arc<Authenticator>,
     authorizer: Arc<Authorizer>,
     pub registry: Registry,
+    pub enable_ui: bool,
+    pub ui_name: String,
 }
 
 impl ServerContext {
@@ -31,6 +33,8 @@ impl ServerContext {
             authenticator,
             authorizer,
             registry,
+            enable_ui: config.ui.enabled,
+            ui_name: config.ui.name.clone(),
         })
     }
 
@@ -118,8 +122,17 @@ pub mod tests {
         let metadata_store = config.resolve_metadata_config().to_backend().unwrap();
         let repositories = Arc::new(HashMap::new());
 
-        let registry =
-            Registry::new(blob_store, metadata_store, repositories, false, true, 10).unwrap();
+        let registry = Registry::new(
+            blob_store,
+            metadata_store,
+            repositories,
+            false,
+            true,
+            10,
+            false,
+            Vec::new(),
+        )
+        .unwrap();
 
         ServerContext::new(&config, registry).unwrap()
     }
@@ -165,6 +178,8 @@ pub mod tests {
             config.global.update_pull_time,
             config.global.enable_redirect,
             config.global.max_concurrent_cache_jobs,
+            config.global.immutable_tags,
+            config.global.immutable_tags_exclusions.clone(),
         )
         .unwrap()
     }
@@ -631,6 +646,8 @@ pub mod tests {
             config.global.update_pull_time,
             config.global.enable_redirect,
             config.global.max_concurrent_cache_jobs,
+            config.global.immutable_tags,
+            config.global.immutable_tags_exclusions.clone(),
         )
         .unwrap();
 

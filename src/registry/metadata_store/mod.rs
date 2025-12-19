@@ -110,6 +110,8 @@ pub trait MetadataStore: Send + Sync {
         continuation_token: Option<String>,
     ) -> Result<(Vec<Digest>, Option<String>), Error>;
 
+    async fn count_manifests(&self, namespace: &str) -> Result<usize, Error>;
+
     async fn read_blob_index(&self, digest: &Digest) -> Result<BlobIndex, Error>;
 
     async fn update_blob_index(
