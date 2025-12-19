@@ -11,14 +11,15 @@ WORKDIR /buildroot
 
 RUN dpkg --add-architecture ${TARGETARCH} && \
     apt-get update && \
-    apt-get install -y "musl-tools:$TARGETARCH" "crossbuild-essential-$TARGETARCH"
+    apt-get install -y "musl-tools:$TARGETARCH" "crossbuild-essential-$TARGETARCH" nodejs npm
 
 RUN if [ "$TARGETARCH" = "amd64" ] ; then export TOOLCHAIN="x86_64-unknown-linux-musl"; fi; \
     if [ "$TARGETARCH" = "arm64" ] ; then export TOOLCHAIN="aarch64-unknown-linux-musl"; fi; \
     rustup target add "$TOOLCHAIN"
 
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
+COPY ui ./ui
 
 # ring requires those variables for cross-compilation
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-Clink-self-contained=yes -Clinker=rust-lld"
