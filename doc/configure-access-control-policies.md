@@ -88,8 +88,11 @@ The following variables are available in the CEL expressions:
 ### Actions
 
 The `request.action` variable can have the following values:
+
 - `healthz`: Health check endpoint
 - `metrics`: Metrics endpoint
+ 
+**Standard OCI Distribution API:**
 - `get-api-version`: Get the API version
 - `start-upload`, `update-upload`, `complete-upload`, `get-upload`: Upload operations
 - `cancel-upload`: Delete a pending upload
@@ -101,6 +104,16 @@ The `request.action` variable can have the following values:
 - `get-referrers`: Get the referrers of a manifest
 - `list-catalog`: List the catalog
 - `list-tags`: List the tags
+
+**Web UI Extension Endpoints:**
+- `ui-asset`: Serve UI static assets (JS, CSS, images)
+- `ui-config`: Serve UI configuration
+- `list-repositories`: List all repositories
+- `list-namespaces`: List namespaces in a repository
+- `list-revisions`: List manifests in a namespace
+- `list-uploads`: List pending uploads in a namespace
+
+**Other:**
 - `unknown`: Unknown/invalid request
 
 ## OIDC Authentication Examples
@@ -181,6 +194,34 @@ rules = [
   "identity.oidc != null && request.action.startsWith('get-')"
 ]
 ```
+
+### Web UI Access Control
+
+The Web UI is subject to the same access control policies as other API requests. You can control access to UI-specific actions:
+
+```toml
+[global.access_policy]
+default_allow = false
+rules = [
+  # Allow anyone to access UI assets (required for the UI to load)
+  "request.action == 'ui-asset' || request.action == 'ui-config'",
+
+  # Allow authenticated users to browse repositories
+  "identity.username != '' && request.action.startsWith('list-')",
+
+  # Restrict manifest deletion to admins
+  "identity.username == 'admin' && request.action == 'delete-manifest'"
+]
+```
+
+UI operations and their required permissions:
+- **Browse repositories**: `list-repositories`
+- **Browse namespaces**: `list-namespaces`
+- **Browse manifests**: `list-revisions`, `list-uploads`
+- **View manifest details**: `get-manifest`
+- **Download blobs/files**: `get-blob`
+- **Delete tags/manifests**: `delete-manifest`
+- **Cancel uploads**: `cancel-upload`
 
 ## Policy Evaluation and Error Handling
 
