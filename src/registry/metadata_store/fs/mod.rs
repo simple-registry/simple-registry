@@ -167,6 +167,17 @@ impl MetadataStore for Backend {
         Ok(referrers)
     }
 
+    async fn has_referrers(&self, namespace: &str, subject: &Digest) -> Result<bool, Error> {
+        let path = format!(
+            "{}/sha256",
+            path_builder::manifest_referrers_dir(namespace, subject)
+        );
+        match self.store.list_dir(&path).await {
+            Ok(entries) => Ok(!entries.is_empty()),
+            Err(_) => Ok(false),
+        }
+    }
+
     async fn list_revisions(
         &self,
         namespace: &str,

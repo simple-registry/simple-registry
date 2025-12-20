@@ -137,6 +137,7 @@ impl Command {
                 build_global_retention_policy(&config.global.retention_policy)?;
 
             Some(RetentionChecker::new(
+                blob_store.clone(),
                 metadata_store.clone(),
                 repositories.clone(),
                 global_retention_policy.clone(),

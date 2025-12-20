@@ -9,6 +9,18 @@ You can configure Retention Policies following a set of rules expressed as [CEL 
 > Currently, this policy is enforced by the `scrub` command, which can be run as a recurrent task (e.g. a systemd timer,
 > a Kubernetes `CronJob`, etc.)
 
+## What Gets Evaluated
+
+Retention policies evaluate both:
+- **Tagged manifests**: Manifests with at least one tag pointing to them
+- **Orphan manifests**: Manifests without any tags (e.g., old revisions after a tag was moved)
+
+### Protected Manifests
+
+Some manifests are automatically protected and will never be deleted by retention policies:
+- **Index children**: Manifests referenced by an image index (multi-arch manifest)
+- **Referrer subjects**: Manifests that have referrers pointing to them (e.g., signatures, SBOMs)
+
 ## Policy Levels
 
 Retention policies can be configured at two levels:
@@ -72,7 +84,7 @@ In the example above, a manifest is kept if at least one of the following condit
 
 ### Variables
 
-- `image.tag`: The tag of the image, when evaluating a Tag (can be unspecified)
+- `image.tag`: The tag of the image (`null` for orphan manifests)
 - `image.pushed_at`: The time the manifest was pushed at
 - `image.last_pulled_at`: The time the manifest was last pulled (can be unspecified)
 - `last_pushed`: A list of the last pushed tags ordered by reverse push time (most recent first)
@@ -85,4 +97,17 @@ In addition to those variables, some helper functions are available:
 - `minutes(m)`: Returns the number of seconds in `m` minutes.
 - `top(s, collection, k)`: Check if `s` is among the top `k` elements of `collection`.
 - `size(collection)`: Returns the number of elements in `collection`.
+
+### Example: Cleaning Up Orphan Manifests
+
+To delete orphan manifests (manifests without tags) while keeping all tagged manifests:
+
+```toml
+[global.retention_policy]
+rules = [
+  'image.tag != null',
+]
+```
+
+This policy keeps any manifest that has a tag. Orphan manifests (where `image.tag` is `null`) will be deleted.
 
