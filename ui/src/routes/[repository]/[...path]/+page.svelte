@@ -2,8 +2,8 @@
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import { getRegistryName } from '$lib/config.svelte';
-	import { fetchManifest, fetchRevisions, deleteManifest, downloadBlob as apiDownloadBlob, type ParentRef, type Manifest, type ReferrerInfo } from '$lib/api';
-	import { formatSize, displayNamespace as displayNs, isOrasArtifact, getFileName, getTagConfirm, repoUrl, namespaceUrl, manifestUrl, tagConfirmKey, getAttestationType } from '$lib/utils';
+	import { fetchRevisions, fetchUploads, fetchManifest, deleteManifest as apiDeleteManifest, cancelUpload as apiCancelUpload, downloadBlob as apiDownloadBlob, type UploadEntry, type ParentRef, type Manifest, type ReferrerInfo } from '$lib/api';
+	import { formatSize, formatTimeAgo, displayNamespace as displayNs, buildTree, getTagConfirm, repoUrl, namespaceUrl, manifestUrl, digestConfirmKey, tagConfirmKey, uploadConfirmKey, getAttestationType, isOrasArtifact, getFileName, type TreeNode } from '$lib/utils';
 	import LoadingState from '$lib/components/LoadingState.svelte';
 	import ErrorState from '$lib/components/ErrorState.svelte';
 	import Breadcrumb from '$lib/components/Breadcrumb.svelte';
@@ -15,29 +15,30 @@
 	import AnnotationToggle from '$lib/components/AnnotationToggle.svelte';
 	import AnnotationList from '$lib/components/AnnotationList.svelte';
 	import DigestLink from '$lib/components/DigestLink.svelte';
-	import type { PageData } from './$types';
+	import type { PathParams } from './+page';
 
-	let { data }: { data: PageData } = $props();
+	let { data }: { data: PathParams } = $props();
 
-	async function downloadBlob(blobDigest: string, filename: string | null) {
-		const err = await apiDownloadBlob(data.namespace, blobDigest, filename);
-		if (err) {
-			error = err;
-		}
-	}
+	const isManifestView = $derived(data.reference !== null);
+	const fullNamespace = $derived(`${data.repository}/${data.namespace}`);
 
-	type LayersViewMode = 'auto' | 'files' | 'layers';
+	let tree: TreeNode[] = $state([]);
+	let uploads: UploadEntry[] = $state([]);
 
 	let manifest: Manifest | null = $state(null);
 	let digest: string | null = $state(null);
 	let tags: string[] = $state([]);
 	let referencedBy: ParentRef[] = $state([]);
 	let childReferrers: Map<string, ReferrerInfo[]> = $state(new Map());
+
 	let loading = $state(true);
 	let error: string | null = $state(null);
 	let deleteConfirm: string | null = $state(null);
 	let deleting = $state(false);
+	let expanded: Set<string> = $state(new Set());
 	let expandedAnnotations: Set<string> = $state(new Set());
+
+	type LayersViewMode = 'auto' | 'files' | 'layers';
 	let layersViewMode: LayersViewMode = $state('auto');
 
 	const showFilesView = $derived(
@@ -45,6 +46,17 @@
 			? (manifest ? isOrasArtifact(manifest) : false)
 			: layersViewMode === 'files'
 	);
+
+	function toggleExpand(digest: string, event: MouseEvent) {
+		event.stopPropagation();
+		const newExpanded = new Set(expanded);
+		if (newExpanded.has(digest)) {
+			newExpanded.delete(digest);
+		} else {
+			newExpanded.add(digest);
+		}
+		expanded = newExpanded;
+	}
 
 	function toggleAnnotations(key: string) {
 		if (expandedAnnotations.has(key)) {
@@ -55,9 +67,41 @@
 		expandedAnnotations = new Set(expandedAnnotations);
 	}
 
+	function hasChildren(node: TreeNode): boolean {
+		return node.children.length > 0 || node.attestations.length > 0;
+	}
+
+	function hasReferrers(referrers: { digest: string }[] | undefined): boolean {
+		return (referrers?.length ?? 0) > 0;
+	}
+
 	$effect(() => {
-		loadManifest(data.namespace, data.reference);
+		if (data.reference !== null) {
+			loadManifest(fullNamespace, data.reference);
+		} else {
+			loadNamespace(fullNamespace);
+		}
 	});
+
+	async function loadNamespace(namespace: string) {
+		loading = true;
+		error = null;
+		const [revisionsResult, uploadsResult] = await Promise.all([
+			fetchRevisions(namespace),
+			fetchUploads(namespace)
+		]);
+		if (revisionsResult.error) {
+			error = revisionsResult.error;
+		} else if (revisionsResult.data) {
+			tree = buildTree(revisionsResult.data.manifests ?? []);
+		}
+		if (uploadsResult.data) {
+			uploads = uploadsResult.data.uploads ?? [];
+		} else {
+			uploads = [];
+		}
+		loading = false;
+	}
 
 	async function loadManifest(namespace: string, reference: string) {
 		loading = true;
@@ -96,15 +140,36 @@
 		loading = false;
 	}
 
-	async function deleteTag(tag: string) {
+	async function deleteManifestByRef(reference: string) {
 		deleting = true;
 		error = null;
-		const err = await deleteManifest(data.namespace, tag);
+		const err = await apiDeleteManifest(fullNamespace, reference);
 		if (err) {
 			error = err;
 		} else {
 			deleteConfirm = null;
-			await loadManifest(data.namespace, data.reference);
+			if (data.reference !== null) {
+				await loadManifest(fullNamespace, data.reference);
+			} else {
+				await loadNamespace(fullNamespace);
+			}
+		}
+		deleting = false;
+	}
+
+	async function deleteTag(tag: string) {
+		deleting = true;
+		error = null;
+		const err = await apiDeleteManifest(fullNamespace, tag);
+		if (err) {
+			error = err;
+		} else {
+			deleteConfirm = null;
+			if (data.reference !== null) {
+				await loadManifest(fullNamespace, data.reference);
+			} else {
+				await loadNamespace(fullNamespace);
+			}
 		}
 		deleting = false;
 	}
@@ -113,12 +178,32 @@
 		if (!digest) return;
 		deleting = true;
 		error = null;
-		const err = await deleteManifest(data.namespace, digest);
+		const err = await apiDeleteManifest(fullNamespace, digest);
 		if (err) {
 			error = err;
 			deleting = false;
 		} else {
 			window.location.href = namespaceUrl(data.repository, data.namespace);
+		}
+	}
+
+	async function cancelUpload(uuid: string) {
+		deleting = true;
+		error = null;
+		const err = await apiCancelUpload(fullNamespace, uuid);
+		if (err) {
+			error = err;
+		} else {
+			deleteConfirm = null;
+			await loadNamespace(fullNamespace);
+		}
+		deleting = false;
+	}
+
+	async function downloadBlob(blobDigest: string, filename: string | null) {
+		const err = await apiDownloadBlob(fullNamespace, blobDigest, filename);
+		if (err) {
+			error = err;
 		}
 	}
 
@@ -130,31 +215,47 @@
 		}
 		goto(manifestUrl(data.repository, data.namespace, targetDigest));
 	}
-
 </script>
 
 <svelte:head>
-	<title>{data.reference} // {displayNs(data.namespace, data.repository)} // {data.repository} // {getRegistryName()}</title>
+	{#if isManifestView}
+		<title>{data.reference} // {displayNs(data.namespace, data.repository)} // {data.repository} // {getRegistryName()}</title>
+	{:else}
+		<title>{displayNs(data.namespace, data.repository)} // {data.repository} // {getRegistryName()}</title>
+	{/if}
 </svelte:head>
 
-<Breadcrumb items={[
-	{ label: 'repositories', href: `${base}/` },
-	{ label: data.repository, href: repoUrl(data.repository) },
-	{ label: displayNs(data.namespace, data.repository), href: namespaceUrl(data.repository, data.namespace) },
-	{ label: data.reference }
-]} />
+{#if isManifestView}
+	<Breadcrumb items={[
+		{ label: 'repositories', href: `${base}/` },
+		{ label: data.repository, href: repoUrl(data.repository) },
+		{ label: displayNs(data.namespace, data.repository), href: namespaceUrl(data.repository, data.namespace) },
+		{ label: data.reference ?? '' }
+	]} />
+{:else}
+	<Breadcrumb items={[
+		{ label: 'repositories', href: `${base}/` },
+		{ label: data.repository, href: repoUrl(data.repository) },
+		{ label: displayNs(data.namespace, data.repository) }
+	]} />
+{/if}
 
 {#if loading}
-	<LoadingState message="loading manifest" />
+	<LoadingState message={isManifestView ? 'loading manifest' : 'loading'} />
 {:else if error}
 	<ErrorState message={error} />
-{:else if manifest}
+{:else if isManifestView && manifest}
 	<Card title="manifest">
 		<table>
 			<tbody>
 				<tr>
 					<td class="label">digest</td>
-					<td><code>{digest}</code></td>
+					<td>
+						<DigestLink
+							digest={digest ?? ''}
+							href={digest ? manifestUrl(data.repository, data.namespace, digest) : undefined}
+						/>
+					</td>
 				</tr>
 				<tr>
 					<td class="label">tags</td>
@@ -165,6 +266,7 @@
 							disabled={deleting}
 							ondelete={deleteTag}
 							onconfirmchange={(tag) => deleteConfirm = tag ? tagConfirmKey(tag) : null}
+							getHref={(tag) => manifestUrl(data.repository, data.namespace, tag)}
 						/>
 					</td>
 				</tr>
@@ -423,4 +525,152 @@
 			</table>
 		</Card>
 	{/if}
+{:else}
+	{#if uploads.length > 0}
+		<Card title="uploads in progress" count={uploads.length} variant="warning">
+			<table>
+				<thead>
+					<tr>
+						<th>uuid</th>
+						<th>size</th>
+						<th>started</th>
+						<th class="col-medium">actions</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each uploads as upload}
+						<tr>
+							<td><code class="uuid">{upload.uuid}</code></td>
+							<td>{formatSize(upload.size)}</td>
+							<td>{formatTimeAgo(upload.started_at)}</td>
+							<td>
+								<DeleteButton
+									label="cancel"
+									isConfirming={deleteConfirm === uploadConfirmKey(upload.uuid)}
+									disabled={deleting}
+									onconfirm={() => cancelUpload(upload.uuid)}
+									oncancel={() => deleteConfirm = null}
+									onrequestconfirm={() => deleteConfirm = uploadConfirmKey(upload.uuid)}
+								/>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</Card>
+	{/if}
+
+	<table>
+		<thead>
+			<tr>
+				<th>digest</th>
+				<th>tags / platform</th>
+				<th class="col-wide">actions</th>
+			</tr>
+		</thead>
+		<tbody>
+			{#if tree.length === 0}
+				<tr>
+					<td colspan="3" class="empty">no manifests found</td>
+				</tr>
+			{:else}
+			{#each tree as node}
+				{@const nodeHasChildren = hasChildren(node)}
+				{@const nodeExpanded = expanded.has(node.manifest.digest)}
+				<tr class="root-row clickable" onclick={(e) => handleRowClick(e, node.manifest.digest)}>
+					<td class="has-children" class:expanded={nodeExpanded}>
+						{#if nodeHasChildren}<button class="tree-toggle" onclick={(e) => toggleExpand(node.manifest.digest, e)}><span class="toggle-icon">{nodeExpanded ? '−' : '+'}</span></button>{:else}<span class="tree-toggle leaf"></span>{/if}<code>{node.manifest.digest}</code>
+					</td>
+					<td>
+						<TagList
+							tags={node.manifest.tags}
+							deleteConfirm={getTagConfirm(deleteConfirm)}
+							disabled={deleting}
+							ondelete={deleteTag}
+							onconfirmchange={(tag) => deleteConfirm = tag ? tagConfirmKey(tag) : null}
+							getHref={(tag) => manifestUrl(data.repository, data.namespace, tag)}
+						/>
+					</td>
+					<td>
+						<DeleteButton
+							isConfirming={deleteConfirm === digestConfirmKey(node.manifest.digest)}
+							disabled={deleting}
+							onconfirm={() => deleteManifestByRef(node.manifest.digest)}
+							oncancel={() => deleteConfirm = null}
+							onrequestconfirm={() => deleteConfirm = digestConfirmKey(node.manifest.digest)}
+						/>
+					</td>
+				</tr>
+				{#if nodeExpanded}
+				{#each node.children as child, idx}
+					{@const childManifestReferrers = child.manifest.referrers ?? []}
+					{@const hasChildReferrers = hasReferrers(childManifestReferrers)}
+					{@const childExpanded = expanded.has(child.manifest.digest)}
+					{@const isLast = idx === node.children.length - 1 && node.attestations.length === 0}
+					<tr class="child-row clickable" onclick={(e) => handleRowClick(e, child.manifest.digest)}>
+						<td class="tree-branch" class:has-next={!isLast} class:has-attestations={hasChildReferrers && childExpanded}>
+							{#if hasChildReferrers}<button class="tree-toggle" onclick={(e) => toggleExpand(child.manifest.digest, e)}><span class="toggle-icon">{childExpanded ? '−' : '+'}</span></button>{#if childExpanded}<span class="branch-line"></span>{/if}{:else}<span class="tree-toggle leaf"></span>{/if}<code>{child.manifest.digest}</code>
+						</td>
+						<td>
+							<PlatformBadge platform={child.platform} />
+						</td>
+						<td>
+							<DeleteButton
+								isConfirming={deleteConfirm === digestConfirmKey(child.manifest.digest)}
+								disabled={deleting}
+								onconfirm={() => deleteManifestByRef(child.manifest.digest)}
+								oncancel={() => deleteConfirm = null}
+								onrequestconfirm={() => deleteConfirm = digestConfirmKey(child.manifest.digest)}
+							/>
+						</td>
+					</tr>
+					{#if childExpanded}
+					{#each childManifestReferrers as referrer, ridx}
+						{@const isLastRef = ridx === childManifestReferrers.length - 1}
+						<tr class="child-row clickable" onclick={(e) => handleRowClick(e, referrer.digest)}>
+							<td class="nested-tree-branch" class:has-next={!isLastRef}>
+								{#if !isLast}<span class="parent-line"></span>{/if}<span class="tree-toggle leaf"></span><code>{referrer.digest}</code>
+							</td>
+							<td>
+								<AttestationBadge type={getAttestationType(referrer)} />
+							</td>
+							<td>
+								<DeleteButton
+									isConfirming={deleteConfirm === digestConfirmKey(referrer.digest)}
+									disabled={deleting}
+									onconfirm={() => deleteManifestByRef(referrer.digest)}
+									oncancel={() => deleteConfirm = null}
+									onrequestconfirm={() => deleteConfirm = digestConfirmKey(referrer.digest)}
+								/>
+							</td>
+						</tr>
+					{/each}
+					{/if}
+				{/each}
+				{/if}
+				{#if nodeExpanded}
+				{#each node.attestations as att, idx}
+					<tr class="child-row clickable" onclick={(e) => handleRowClick(e, att.digest)}>
+						<td class="tree-branch" class:has-next={idx !== node.attestations.length - 1}>
+							<span class="tree-toggle leaf"></span><code>{att.digest}</code>
+						</td>
+						<td>
+							<AttestationBadge type={att.type} />
+						</td>
+						<td>
+							<DeleteButton
+								isConfirming={deleteConfirm === digestConfirmKey(att.digest)}
+								disabled={deleting}
+								onconfirm={() => deleteManifestByRef(att.digest)}
+								oncancel={() => deleteConfirm = null}
+								onrequestconfirm={() => deleteConfirm = digestConfirmKey(att.digest)}
+							/>
+						</td>
+					</tr>
+				{/each}
+				{/if}
+			{/each}
+			{/if}
+		</tbody>
+	</table>
 {/if}

@@ -18,7 +18,6 @@ use crate::oci::{Digest, Reference};
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum Route<'a> {
-    RootRedirect,
     #[serde(rename = "ui-asset")]
     UiAsset {
         #[serde(skip)]
@@ -179,7 +178,6 @@ impl<'a> Route<'a> {
 
     pub fn action_name(&self) -> &'static str {
         match self {
-            Route::RootRedirect => "root-redirect",
             Route::UiAsset { .. } => "ui-asset",
             Route::UiConfig => "ui-config",
             Route::ApiVersion => "get-api-version",

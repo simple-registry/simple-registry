@@ -58,15 +58,16 @@ export function getAttestationType(referrer: ReferrerInfo): AttestationType {
 }
 
 export function repoUrl(name: string): string {
-	return `${base}/${encodeURIComponent(name)}`;
+	return `${base}/${name}`;
 }
 
 export function namespaceUrl(repo: string, namespace: string): string {
-	return `${base}/${encodeURIComponent(repo)}/${encodeURIComponent(namespace)}`;
+	return `${base}/${repo}/${namespace}`;
 }
 
 export function manifestUrl(repo: string, namespace: string, reference: string): string {
-	return `${base}/${encodeURIComponent(repo)}/${encodeURIComponent(namespace)}/${encodeURIComponent(reference)}`;
+	const separator = reference.startsWith('sha256:') || reference.startsWith('sha512:') ? '@' : ':';
+	return `${base}/${repo}/${namespace}${separator}${reference}`;
 }
 
 export function digestConfirmKey(digest: string): string {

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{CONTENT_RANGE, CONTENT_TYPE, LOCATION, RANGE, WWW_AUTHENTICATE};
+use hyper::header::{CONTENT_RANGE, CONTENT_TYPE, RANGE, WWW_AUTHENTICATE};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -154,11 +154,11 @@ async fn router(
                 Err(Error::BadRequest(msg))
             }
         }
-        Route::RootRedirect if context.enable_ui => handle_root_redirect(),
         Route::UiAsset { path } if context.enable_ui => ui::serve_asset(path),
         Route::UiConfig if context.enable_ui => handle_ui_config(&context),
-        Route::RootRedirect | Route::UiAsset { .. } | Route::UiConfig => {
-            Err(Error::NotFound("UI is disabled".to_string()))
+        Route::UiAsset { .. } | Route::UiConfig => {
+            let msg = format!("unknown route: {} {}", parts.method, parts.uri);
+            Err(Error::NotFound(msg))
         }
         Route::ApiVersion => Ok(context.registry.handle_get_api_version().await?),
         Route::StartUpload { namespace, digest } => Ok(context
@@ -292,14 +292,6 @@ async fn router(
         Route::Healthz => handle_healthz(),
         Route::Metrics => handle_metrics(),
     }
-}
-
-fn handle_root_redirect() -> Result<Response<ResponseBody>, Error> {
-    Response::builder()
-        .status(StatusCode::FOUND)
-        .header(LOCATION, "/_ui/")
-        .body(ResponseBody::Fixed(Full::new(Bytes::new())))
-        .map_err(|e| Error::Internal(format!("Failed to build redirect response: {e}")))
 }
 
 fn handle_ui_config(context: &ServerContext) -> Result<Response<ResponseBody>, Error> {

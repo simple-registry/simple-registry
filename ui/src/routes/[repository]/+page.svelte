@@ -90,7 +90,7 @@
 				</tr>
 			{:else}
 				{#each namespaces as namespace}
-					<tr class="clickable" onclick={() => goto(namespaceUrl(data.repository, namespace.name))}>
+					<tr class="clickable" onclick={() => goto(namespaceUrl(data.repository, displayNamespace(namespace.name, data.repository)))}>
 						<td>{displayNamespace(namespace.name, data.repository)}</td>
 						<td>{namespace.manifest_count > 0 ? namespace.manifest_count : '-'}</td>
 						<td>{namespace.upload_count > 0 ? namespace.upload_count : '-'}</td>
