@@ -1,8 +1,9 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import { getRegistryName } from '$lib/config.svelte';
-	import { fetchManifest, fetchRevisions, deleteManifest, downloadBlob as apiDownloadBlob, type ParentRef, type Manifest } from '$lib/api';
-	import { formatSize, displayNamespace as displayNs, isOrasArtifact, getFileName, getTagConfirm, repoUrl, namespaceUrl, manifestUrl, tagConfirmKey } from '$lib/utils';
+	import { fetchManifest, fetchRevisions, deleteManifest, downloadBlob as apiDownloadBlob, type ParentRef, type Manifest, type ReferrerInfo } from '$lib/api';
+	import { formatSize, displayNamespace as displayNs, isOrasArtifact, getFileName, getTagConfirm, repoUrl, namespaceUrl, manifestUrl, tagConfirmKey, getAttestationType } from '$lib/utils';
 	import LoadingState from '$lib/components/LoadingState.svelte';
 	import ErrorState from '$lib/components/ErrorState.svelte';
 	import Breadcrumb from '$lib/components/Breadcrumb.svelte';
@@ -10,6 +11,7 @@
 	import DeleteButton from '$lib/components/DeleteButton.svelte';
 	import TagList from '$lib/components/TagList.svelte';
 	import PlatformBadge from '$lib/components/PlatformBadge.svelte';
+	import AttestationBadge from '$lib/components/AttestationBadge.svelte';
 	import AnnotationToggle from '$lib/components/AnnotationToggle.svelte';
 	import AnnotationList from '$lib/components/AnnotationList.svelte';
 	import DigestLink from '$lib/components/DigestLink.svelte';
@@ -30,6 +32,7 @@
 	let digest: string | null = $state(null);
 	let tags: string[] = $state([]);
 	let referencedBy: ParentRef[] = $state([]);
+	let childReferrers: Map<string, ReferrerInfo[]> = $state(new Map());
 	let loading = $state(true);
 	let error: string | null = $state(null);
 	let deleteConfirm: string | null = $state(null);
@@ -61,6 +64,7 @@
 		error = null;
 		tags = [];
 		referencedBy = [];
+		childReferrers = new Map();
 
 		const result = await fetchManifest(namespace, reference);
 		if (result.error) {
@@ -80,6 +84,13 @@
 					tags = entry.tags;
 					referencedBy = entry.parents ?? [];
 				}
+				const newChildReferrers = new Map<string, ReferrerInfo[]>();
+				for (const m of revisionsResult.data.manifests) {
+					if (m.referrers && m.referrers.length > 0) {
+						newChildReferrers.set(m.digest, m.referrers);
+					}
+				}
+				childReferrers = newChildReferrers;
 			}
 		}
 		loading = false;
@@ -109,6 +120,15 @@
 		} else {
 			window.location.href = namespaceUrl(data.repository, data.namespace);
 		}
+	}
+
+	function handleRowClick(event: MouseEvent, targetDigest: string) {
+		const target = event.target as HTMLElement;
+		if (target.tagName === 'BUTTON' || target.closest('button') ||
+			target.tagName === 'A' || target.closest('a')) {
+			return;
+		}
+		goto(manifestUrl(data.repository, data.namespace, targetDigest));
 	}
 
 </script>
@@ -310,7 +330,9 @@
 	{/if}
 
 	{#if manifest.manifests && manifest.manifests.length > 0}
-		<Card title="manifests" count={manifest.manifests.length}>
+		{@const platformManifests = manifest.manifests.filter(m => !m.annotations?.['vnd.docker.reference.digest'])}
+		{#if platformManifests.length > 0}
+		<Card title="manifests" count={platformManifests.length}>
 			<table>
 				<thead>
 					<tr>
@@ -321,9 +343,12 @@
 					</tr>
 				</thead>
 				<tbody>
-					{#each manifest.manifests as m}
-						<tr>
-							<td>
+					{#each platformManifests as m}
+						{@const refs = childReferrers.get(m.digest) ?? []}
+						{@const hasRefs = refs.length > 0}
+						<tr class="child-row clickable" onclick={(e) => handleRowClick(e, m.digest)}>
+							<td class="has-children" class:expanded={hasRefs}>
+								<span class="tree-toggle leaf"></span>
 								<DigestLink
 									digest={m.digest}
 									href={manifestUrl(data.repository, data.namespace, m.digest)}
@@ -345,10 +370,26 @@
 								</td>
 							</tr>
 						{/if}
+						{#each refs as ref, ridx}
+							{@const isLastRef = ridx === refs.length - 1}
+							<tr class="child-row clickable" onclick={(e) => handleRowClick(e, ref.digest)}>
+								<td class="tree-branch" class:has-next={!isLastRef}>
+									<span class="tree-toggle leaf"></span>
+									<DigestLink
+										digest={ref.digest}
+										href={manifestUrl(data.repository, data.namespace, ref.digest)}
+									/>
+								</td>
+								<td><AttestationBadge type={getAttestationType(ref)} /></td>
+								<td></td>
+								<td></td>
+							</tr>
+						{/each}
 					{/each}
 				</tbody>
 			</table>
 		</Card>
+		{/if}
 	{/if}
 
 	{#if referencedBy.length > 0}
@@ -363,7 +404,7 @@
 				</thead>
 				<tbody>
 					{#each referencedBy as parent}
-						<tr>
+						<tr class="clickable" onclick={(e) => handleRowClick(e, parent.digest)}>
 							<td>
 								<DigestLink
 									digest={parent.digest}

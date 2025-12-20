@@ -2,8 +2,8 @@
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import { getRegistryName } from '$lib/config.svelte';
-	import { fetchRevisions, fetchUploads, deleteManifest as apiDeleteManifest, cancelUpload as apiCancelUpload, type ManifestEntry, type UploadEntry } from '$lib/api';
-	import { formatSize, formatTimeAgo, displayNamespace as displayNs, buildTree, getTagConfirm, repoUrl, manifestUrl, digestConfirmKey, tagConfirmKey, uploadConfirmKey, type TreeNode } from '$lib/utils';
+	import { fetchRevisions, fetchUploads, deleteManifest as apiDeleteManifest, cancelUpload as apiCancelUpload, type UploadEntry } from '$lib/api';
+	import { formatSize, formatTimeAgo, displayNamespace as displayNs, buildTree, getTagConfirm, repoUrl, manifestUrl, digestConfirmKey, tagConfirmKey, uploadConfirmKey, getAttestationType, type TreeNode } from '$lib/utils';
 	import LoadingState from '$lib/components/LoadingState.svelte';
 	import ErrorState from '$lib/components/ErrorState.svelte';
 	import Breadcrumb from '$lib/components/Breadcrumb.svelte';
@@ -11,17 +11,37 @@
 	import DeleteButton from '$lib/components/DeleteButton.svelte';
 	import TagList from '$lib/components/TagList.svelte';
 	import PlatformBadge from '$lib/components/PlatformBadge.svelte';
+	import AttestationBadge from '$lib/components/AttestationBadge.svelte';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
 
-	let manifests: ManifestEntry[] = $state([]);
 	let tree: TreeNode[] = $state([]);
 	let uploads: UploadEntry[] = $state([]);
 	let loading = $state(true);
 	let error: string | null = $state(null);
 	let deleteConfirm: string | null = $state(null);
 	let deleting = $state(false);
+	let expanded: Set<string> = $state(new Set());
+
+	function toggleExpand(digest: string, event: MouseEvent) {
+		event.stopPropagation();
+		const newExpanded = new Set(expanded);
+		if (newExpanded.has(digest)) {
+			newExpanded.delete(digest);
+		} else {
+			newExpanded.add(digest);
+		}
+		expanded = newExpanded;
+	}
+
+	function hasChildren(node: TreeNode): boolean {
+		return node.children.length > 0 || node.attestations.length > 0;
+	}
+
+	function hasReferrers(referrers: { digest: string }[] | undefined): boolean {
+		return (referrers?.length ?? 0) > 0;
+	}
 
 	$effect(() => {
 		loadData(data.namespace);
@@ -37,8 +57,7 @@
 		if (revisionsResult.error) {
 			error = revisionsResult.error;
 		} else if (revisionsResult.data) {
-			manifests = revisionsResult.data.manifests ?? [];
-			tree = buildTree(manifests);
+			tree = buildTree(revisionsResult.data.manifests ?? []);
 		}
 		if (uploadsResult.data) {
 			uploads = uploadsResult.data.uploads ?? [];
@@ -160,9 +179,11 @@
 				</tr>
 			{:else}
 			{#each tree as node}
+				{@const nodeHasChildren = hasChildren(node)}
+				{@const nodeExpanded = expanded.has(node.manifest.digest)}
 				<tr class="root-row clickable" onclick={(e) => handleRowClick(e, node.manifest.digest)}>
-					<td class:has-children={node.children.length > 0}>
-						{#if node.children.length > 0}<span class="index-icon" title="Multi-platform index"></span>{/if}<code>{node.manifest.digest}</code>
+					<td class="has-children" class:expanded={nodeExpanded}>
+						{#if nodeHasChildren}<button class="tree-toggle" onclick={(e) => toggleExpand(node.manifest.digest, e)}><span class="toggle-icon">{nodeExpanded ? '−' : '+'}</span></button>{:else}<span class="tree-toggle leaf"></span>{/if}<code>{node.manifest.digest}</code>
 					</td>
 					<td>
 						<TagList
@@ -183,10 +204,15 @@
 						/>
 					</td>
 				</tr>
+				{#if nodeExpanded}
 				{#each node.children as child, idx}
+					{@const childReferrers = child.manifest.referrers ?? []}
+					{@const hasChildReferrers = hasReferrers(childReferrers)}
+					{@const childExpanded = expanded.has(child.manifest.digest)}
+					{@const isLast = idx === node.children.length - 1 && node.attestations.length === 0}
 					<tr class="child-row clickable" onclick={(e) => handleRowClick(e, child.manifest.digest)}>
-						<td class="tree-branch" class:has-next={idx !== node.children.length - 1}>
-							<code>{child.manifest.digest}</code>
+						<td class="tree-branch" class:has-next={!isLast} class:has-attestations={hasChildReferrers && childExpanded}>
+							{#if hasChildReferrers}<button class="tree-toggle" onclick={(e) => toggleExpand(child.manifest.digest, e)}><span class="toggle-icon">{childExpanded ? '−' : '+'}</span></button>{#if childExpanded}<span class="branch-line"></span>{/if}{:else}<span class="tree-toggle leaf"></span>{/if}<code>{child.manifest.digest}</code>
 						</td>
 						<td>
 							<PlatformBadge platform={child.platform} />
@@ -201,7 +227,51 @@
 							/>
 						</td>
 					</tr>
+					{#if childExpanded}
+					{#each childReferrers as referrer, ridx}
+						{@const isLastRef = ridx === childReferrers.length - 1}
+						<tr class="child-row clickable" onclick={(e) => handleRowClick(e, referrer.digest)}>
+							<td class="nested-tree-branch" class:has-next={!isLastRef}>
+								{#if !isLast}<span class="parent-line"></span>{/if}<span class="tree-toggle leaf"></span><code>{referrer.digest}</code>
+							</td>
+							<td>
+								<AttestationBadge type={getAttestationType(referrer)} />
+							</td>
+							<td>
+								<DeleteButton
+									isConfirming={deleteConfirm === digestConfirmKey(referrer.digest)}
+									disabled={deleting}
+									onconfirm={() => deleteManifest(referrer.digest)}
+									oncancel={() => deleteConfirm = null}
+									onrequestconfirm={() => deleteConfirm = digestConfirmKey(referrer.digest)}
+								/>
+							</td>
+						</tr>
+					{/each}
+					{/if}
 				{/each}
+				{/if}
+				{#if nodeExpanded}
+				{#each node.attestations as att, idx}
+					<tr class="child-row clickable" onclick={(e) => handleRowClick(e, att.digest)}>
+						<td class="tree-branch" class:has-next={idx !== node.attestations.length - 1}>
+							<span class="tree-toggle leaf"></span><code>{att.digest}</code>
+						</td>
+						<td>
+							<AttestationBadge type={att.type} />
+						</td>
+						<td>
+							<DeleteButton
+								isConfirming={deleteConfirm === digestConfirmKey(att.digest)}
+								disabled={deleting}
+								onconfirm={() => deleteManifest(att.digest)}
+								oncancel={() => deleteConfirm = null}
+								onrequestconfirm={() => deleteConfirm = digestConfirmKey(att.digest)}
+							/>
+						</td>
+					</tr>
+				{/each}
+				{/if}
 			{/each}
 			{/if}
 		</tbody>
