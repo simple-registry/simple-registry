@@ -416,7 +416,7 @@ mod tests {
             tx.commit().await.unwrap();
 
             let retention_config = crate::registry::RetentionPolicyConfig {
-                rules: vec!["top(image.tag, last_pushed, 10)".to_string()],
+                rules: vec!["top_pushed(10)".to_string()],
             };
 
             let retention_policy = Arc::new(RetentionPolicy::new(&retention_config).unwrap());

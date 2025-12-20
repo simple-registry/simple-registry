@@ -12,8 +12,6 @@
 //!
 //! CEL expressions have access to:
 //! - `image`: Manifest information (`tag`, `pushed_at`, `last_pulled_at`)
-//! - `last_pushed`: List of tags ordered by push time (most recent first)
-//! - `last_pulled`: List of tags ordered by pull time (most recent first)
 //!
 //! # Helper Functions
 //!
@@ -21,10 +19,8 @@
 //! - `days(n)`: Convert days to seconds
 //! - `hours(n)`: Convert hours to seconds
 //! - `minutes(n)`: Convert minutes to seconds
-//! - `top(tag, list, n)`: Check if tag is in top N of list
-//! - `size(list)`: Get size of a list
-
-use std::sync::Arc;
+//! - `top_pushed(n)`: Check if tag is in top N most recently pushed
+//! - `top_pulled(n)`: Check if tag is in top N most recently pulled
 
 use cel_interpreter::{Context, Program, Value};
 use chrono::Utc;
@@ -121,32 +117,181 @@ impl RetentionPolicy {
         context
             .add_variable("image", manifest)
             .map_err(|e| Error::Initialization(e.to_string()))?;
-        context
-            .add_variable("last_pushed", last_pushed)
-            .map_err(|e| Error::Initialization(e.to_string()))?;
-        context
-            .add_variable("last_pulled", last_pulled)
-            .map_err(|e| Error::Initialization(e.to_string()))?;
 
         context.add_function("now", || Utc::now().timestamp());
         context.add_function("days", |d: i64| d * 86400);
         context.add_function("hours", |h: i64| h * 3600);
         context.add_function("minutes", |m: i64| m * 60);
 
-        context.add_function(
-            "top",
-            |tag: Arc<String>, tags: Arc<Vec<Value>>, count: i64| {
-                let limit = usize::try_from(count.max(0)).unwrap_or(usize::MAX);
-                tags.iter()
-                    .take(limit)
-                    .any(|v| matches!(v, Value::String(s) if s.as_str() == tag.as_str()))
-            },
-        );
+        let tag_for_pushed = manifest.tag.clone();
+        let pushed_list: Vec<String> = last_pushed.to_vec();
+        context.add_function("top_pushed", move |count: i64| {
+            let Some(ref tag) = tag_for_pushed else {
+                return false;
+            };
+            let limit = usize::try_from(count.max(0)).unwrap_or(usize::MAX);
+            pushed_list.iter().take(limit).any(|t| t == tag)
+        });
 
-        context.add_function("size", |collection: Arc<Vec<Value>>| {
-            i64::try_from(collection.len()).unwrap_or(i64::MAX)
+        let tag_for_pulled = manifest.tag.clone();
+        let pulled_list: Vec<String> = last_pulled.to_vec();
+        context.add_function("top_pulled", move |count: i64| {
+            let Some(ref tag) = tag_for_pulled else {
+                return false;
+            };
+            let limit = usize::try_from(count.max(0)).unwrap_or(usize::MAX);
+            pulled_list.iter().take(limit).any(|t| t == tag)
         });
 
         Ok(context)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_top_pushed_in_top_n() {
+        let policy = RetentionPolicy::new(&RetentionPolicyConfig {
+            rules: vec!["top_pushed(3)".to_string()],
+        })
+        .unwrap();
+
+        let manifest = ManifestImage {
+            tag: Some("v2".to_string()),
+            ..Default::default()
+        };
+        let last_pushed = vec!["v3".to_string(), "v2".to_string(), "v1".to_string()];
+
+        assert!(policy.should_retain(&manifest, &last_pushed, &[]).unwrap());
+    }
+
+    #[test]
+    fn test_top_pushed_not_in_top_n() {
+        let policy = RetentionPolicy::new(&RetentionPolicyConfig {
+            rules: vec!["top_pushed(2)".to_string()],
+        })
+        .unwrap();
+
+        let manifest = ManifestImage {
+            tag: Some("v1".to_string()),
+            ..Default::default()
+        };
+        let last_pushed = vec!["v3".to_string(), "v2".to_string(), "v1".to_string()];
+
+        assert!(!policy.should_retain(&manifest, &last_pushed, &[]).unwrap());
+    }
+
+    #[test]
+    fn test_top_pushed_orphan_manifest() {
+        let policy = RetentionPolicy::new(&RetentionPolicyConfig {
+            rules: vec!["top_pushed(10)".to_string()],
+        })
+        .unwrap();
+
+        let manifest = ManifestImage {
+            tag: None,
+            ..Default::default()
+        };
+        let last_pushed = vec!["v1".to_string()];
+
+        assert!(!policy.should_retain(&manifest, &last_pushed, &[]).unwrap());
+    }
+
+    #[test]
+    fn test_top_pulled_in_top_n() {
+        let policy = RetentionPolicy::new(&RetentionPolicyConfig {
+            rules: vec!["top_pulled(2)".to_string()],
+        })
+        .unwrap();
+
+        let manifest = ManifestImage {
+            tag: Some("v1".to_string()),
+            ..Default::default()
+        };
+        let last_pulled = vec!["v1".to_string(), "v2".to_string()];
+
+        assert!(policy.should_retain(&manifest, &[], &last_pulled).unwrap());
+    }
+
+    #[test]
+    fn test_top_pulled_not_in_top_n() {
+        let policy = RetentionPolicy::new(&RetentionPolicyConfig {
+            rules: vec!["top_pulled(1)".to_string()],
+        })
+        .unwrap();
+
+        let manifest = ManifestImage {
+            tag: Some("v2".to_string()),
+            ..Default::default()
+        };
+        let last_pulled = vec!["v1".to_string(), "v2".to_string()];
+
+        assert!(!policy.should_retain(&manifest, &[], &last_pulled).unwrap());
+    }
+
+    #[test]
+    fn test_pushed_at_recent() {
+        let policy = RetentionPolicy::new(&RetentionPolicyConfig {
+            rules: vec!["image.pushed_at > now() - days(1)".to_string()],
+        })
+        .unwrap();
+
+        let manifest = ManifestImage {
+            tag: Some("v1".to_string()),
+            pushed_at: Utc::now().timestamp(),
+            ..Default::default()
+        };
+
+        assert!(policy.should_retain(&manifest, &[], &[]).unwrap());
+    }
+
+    #[test]
+    fn test_pushed_at_old() {
+        let policy = RetentionPolicy::new(&RetentionPolicyConfig {
+            rules: vec!["image.pushed_at > now() - days(1)".to_string()],
+        })
+        .unwrap();
+
+        let manifest = ManifestImage {
+            tag: Some("v1".to_string()),
+            pushed_at: Utc::now().timestamp() - 2 * 86400,
+            ..Default::default()
+        };
+
+        assert!(!policy.should_retain(&manifest, &[], &[]).unwrap());
+    }
+
+    #[test]
+    fn test_last_pulled_at_recent() {
+        let policy = RetentionPolicy::new(&RetentionPolicyConfig {
+            rules: vec!["image.last_pulled_at > now() - hours(1)".to_string()],
+        })
+        .unwrap();
+
+        let manifest = ManifestImage {
+            tag: Some("v1".to_string()),
+            last_pulled_at: Utc::now().timestamp(),
+            ..Default::default()
+        };
+
+        assert!(policy.should_retain(&manifest, &[], &[]).unwrap());
+    }
+
+    #[test]
+    fn test_last_pulled_at_old() {
+        let policy = RetentionPolicy::new(&RetentionPolicyConfig {
+            rules: vec!["image.last_pulled_at > now() - hours(1)".to_string()],
+        })
+        .unwrap();
+
+        let manifest = ManifestImage {
+            tag: Some("v1".to_string()),
+            last_pulled_at: Utc::now().timestamp() - 2 * 3600,
+            ..Default::default()
+        };
+
+        assert!(!policy.should_retain(&manifest, &[], &[]).unwrap());
     }
 }
