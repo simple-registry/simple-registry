@@ -107,14 +107,19 @@ Toggle between dark and light themes using the button in the header. The prefere
 
 ## URL Structure
 
-URLs are shareable and follow this pattern:
+URLs are shareable and follow Docker's reference format:
 
 ```
 /                                     # Repository list
 /{repository}                         # Namespace list
 /{repository}/{namespace}             # Manifest list
-/{repository}/{namespace}/{reference} # Manifest details (tag or digest)
+/{repository}/{namespace}:{tag}       # Manifest details by tag
+/{repository}/{namespace}@{digest}    # Manifest details by digest
 ```
+
+Examples:
+- `/ghcr.io/library/nginx:latest` - nginx image with tag "latest"
+- `/ghcr.io/library/nginx@sha256:abc123...` - nginx image by digest
 
 ## Configuration
 

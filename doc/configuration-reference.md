@@ -380,7 +380,7 @@ The registry includes an optional web interface for browsing repositories, names
 - `enabled` (bool): Enable the web UI (default: false)
 - `name` (string): Custom registry name displayed in the UI header and page titles (default: "simple-registry")
 
-When enabled, the UI is accessible at `/_ui/` and the root path `/` redirects to the UI.
+When enabled, the UI is served from the root path `/`. All non-API paths (those not starting with `/v2/`) serve the UI.
 
 Example:
 
@@ -394,8 +394,11 @@ name = "My Container Registry"
 
 | Route | Description |
 |-------|-------------|
-| `/` | Redirects to `/_ui/` when UI is enabled |
-| `/_ui/` | Web interface home page |
+| `/` | Web interface home page (repository list) |
+| `/{repository}` | Namespace list for a repository |
+| `/{repository}/{namespace}` | Manifest list for a namespace |
+| `/{repository}/{namespace}:{tag}` | Manifest details by tag |
+| `/{repository}/{namespace}@{digest}` | Manifest details by digest |
 | `/_ui/config` | Returns UI configuration as JSON |
 
 ### Extension API Endpoints
