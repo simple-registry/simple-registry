@@ -103,6 +103,8 @@ pub trait MetadataStore: Send + Sync {
         artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, Error>;
 
+    async fn has_referrers(&self, namespace: &str, subject: &Digest) -> Result<bool, Error>;
+
     async fn list_revisions(
         &self,
         namespace: &str,

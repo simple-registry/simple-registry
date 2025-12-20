@@ -254,6 +254,14 @@ impl MetadataStore for Backend {
         Ok(referrers)
     }
 
+    async fn has_referrers(&self, namespace: &str, subject: &Digest) -> Result<bool, Error> {
+        let referrers_dir = path_builder::manifest_referrers_dir(namespace, subject);
+
+        let (objects, _) = self.store.list_objects(&referrers_dir, 1, None).await?;
+
+        Ok(!objects.is_empty())
+    }
+
     async fn list_revisions(
         &self,
         namespace: &str,

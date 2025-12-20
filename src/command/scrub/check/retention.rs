@@ -4,8 +4,11 @@ use std::sync::Arc;
 use futures_util::future::join_all;
 use tracing::{debug, info};
 
+use crate::oci::Digest;
+use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::{LinkMetadata, MetadataStore, MetadataStoreExt};
+use crate::registry::parse_manifest_digests;
 use crate::registry::repository::Repository;
 use crate::registry::{Error, ManifestImage, RetentionPolicy};
 
@@ -15,6 +18,7 @@ struct TagWithMetadata {
 }
 
 pub struct RetentionChecker {
+    blob_store: Arc<dyn BlobStore + Send + Sync>,
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
     repositories: Arc<HashMap<String, Repository>>,
     global_retention_policy: Option<Arc<RetentionPolicy>>,
@@ -23,12 +27,14 @@ pub struct RetentionChecker {
 
 impl RetentionChecker {
     pub fn new(
+        blob_store: Arc<dyn BlobStore + Send + Sync>,
         metadata_store: Arc<dyn MetadataStore + Send + Sync>,
         repositories: Arc<HashMap<String, Repository>>,
         global_retention_policy: Option<Arc<RetentionPolicy>>,
         dry_run: bool,
     ) -> Self {
         Self {
+            blob_store,
             metadata_store,
             repositories,
             global_retention_policy,
@@ -44,6 +50,9 @@ impl RetentionChecker {
         let (last_pushed, last_pulled) = Self::build_sorted_rankings(&tag_metadata);
 
         self.delete_eligible_tags(namespace, &tag_metadata, &last_pushed, &last_pulled)
+            .await?;
+
+        self.delete_orphan_manifests(namespace, &last_pushed, &last_pulled)
             .await
     }
 
@@ -247,6 +256,137 @@ impl RetentionChecker {
 
         Ok(false)
     }
+
+    async fn delete_orphan_manifests(
+        &self,
+        namespace: &str,
+        last_pushed: &[String],
+        last_pulled: &[String],
+    ) -> Result<(), Error> {
+        let mut marker = None;
+        loop {
+            let (revisions, next_marker) = self
+                .metadata_store
+                .list_revisions(namespace, 100, marker)
+                .await?;
+
+            for digest in &revisions {
+                if self.is_protected(namespace, digest).await? {
+                    debug!("Skipping protected manifest '{namespace}@{digest}'");
+                    continue;
+                }
+
+                if self.has_tags(namespace, digest).await? {
+                    continue;
+                }
+
+                let Ok(metadata) = self
+                    .metadata_store
+                    .read_link(namespace, &LinkKind::Digest(digest.clone()), false)
+                    .await
+                else {
+                    continue;
+                };
+
+                let manifest = ManifestImage {
+                    tag: None,
+                    pushed_at: metadata
+                        .created_at
+                        .map(|t| t.timestamp())
+                        .unwrap_or_default(),
+                    last_pulled_at: metadata
+                        .accessed_at
+                        .map(|t| t.timestamp())
+                        .unwrap_or_default(),
+                };
+
+                let label = format!("{namespace}@{digest}");
+                if !self.evaluate_retention_policies(
+                    namespace,
+                    &label,
+                    &manifest,
+                    last_pushed,
+                    last_pulled,
+                )? {
+                    self.delete_manifest(namespace, digest).await?;
+                }
+            }
+
+            if next_marker.is_none() {
+                break;
+            }
+            marker = next_marker;
+        }
+        Ok(())
+    }
+
+    async fn is_protected(&self, namespace: &str, digest: &Digest) -> Result<bool, Error> {
+        // Index child manifests are protected
+        if let Ok(blob_index) = self.metadata_store.read_blob_index(digest).await
+            && let Some(refs) = blob_index.namespace.get(namespace)
+        {
+            for link in refs {
+                if matches!(link, LinkKind::Manifest(_, _)) {
+                    return Ok(true);
+                }
+            }
+        }
+
+        // Referrer subjects are protected
+        if self.metadata_store.has_referrers(namespace, digest).await? {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    async fn has_tags(&self, namespace: &str, digest: &Digest) -> Result<bool, Error> {
+        if let Ok(blob_index) = self.metadata_store.read_blob_index(digest).await
+            && let Some(refs) = blob_index.namespace.get(namespace)
+        {
+            for link in refs {
+                if matches!(link, LinkKind::Tag(_)) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    async fn delete_manifest(&self, namespace: &str, digest: &Digest) -> Result<(), Error> {
+        if self.dry_run {
+            info!("DRY RUN: would delete orphan manifest '{namespace}@{digest}' (policy)");
+            return Ok(());
+        }
+
+        info!("Deleting orphan manifest '{namespace}@{digest}' (policy)");
+
+        let content = self.blob_store.read_blob(digest).await?;
+        let manifest = parse_manifest_digests(&content, None)?;
+
+        let mut tx = self.metadata_store.begin_transaction(namespace);
+
+        if let Some(config) = &manifest.config {
+            tx.delete_link(&LinkKind::Config(config.clone()));
+        }
+
+        for layer in &manifest.layers {
+            tx.delete_link(&LinkKind::Layer(layer.clone()));
+        }
+
+        for child in &manifest.manifests {
+            tx.delete_link(&LinkKind::Manifest(digest.clone(), child.clone()));
+        }
+
+        if let Some(subject) = &manifest.subject {
+            tx.delete_link(&LinkKind::Referrer(subject.clone(), digest.clone()));
+        }
+
+        tx.delete_link(&LinkKind::Digest(digest.clone()));
+
+        tx.commit().await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -256,11 +396,16 @@ mod tests {
     use crate::registry::test_utils;
     use crate::registry::tests::backends;
 
+    const TEST_MANIFEST: &[u8] = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":0},"layers":[]}"#;
+
+    const TEST_INDEX: &[u8] = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:1fc08b525237c75b560cf0b8ab766fc363d4e5ff1537f4f3ae28a49ade78938b","size":0}]}"#;
+
     #[tokio::test]
     async fn test_enforce_retention_with_policy() {
         for test_case in backends() {
             let namespace = "test-repo/app";
             let registry = test_case.registry();
+            let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
 
             let (blob_digest, _) =
@@ -271,13 +416,14 @@ mod tests {
             tx.commit().await.unwrap();
 
             let retention_config = crate::registry::RetentionPolicyConfig {
-                rules: vec!["top(image.tag, last_pushed, 10)".to_string()],
+                rules: vec!["top_pushed(10)".to_string()],
             };
 
             let retention_policy = Arc::new(RetentionPolicy::new(&retention_config).unwrap());
 
             let repositories = test_utils::create_test_repositories();
             let scrubber = RetentionChecker::new(
+                blob_store,
                 metadata_store.clone(),
                 repositories,
                 Some(retention_policy),
@@ -302,6 +448,7 @@ mod tests {
         for test_case in backends() {
             let namespace = "test-repo/app";
             let registry = test_case.registry();
+            let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
 
             let (blob_digest, _) =
@@ -312,7 +459,13 @@ mod tests {
             tx.commit().await.unwrap();
 
             let repositories = test_utils::create_test_repositories();
-            let scrubber = RetentionChecker::new(metadata_store.clone(), repositories, None, false);
+            let scrubber = RetentionChecker::new(
+                blob_store,
+                metadata_store.clone(),
+                repositories,
+                None,
+                false,
+            );
 
             scrubber.check_namespace(namespace).await.unwrap();
 
@@ -323,6 +476,154 @@ mod tests {
             assert!(
                 tag_link.is_ok(),
                 "enforce_retention without policy should keep all tags"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_orphan_manifest_deleted_with_policy() {
+        for test_case in backends() {
+            let namespace = "test-repo/app";
+            let blob_store = test_case.blob_store();
+            let metadata_store = test_case.metadata_store();
+
+            let digest = blob_store.create_blob(TEST_MANIFEST).await.unwrap();
+
+            let mut tx = metadata_store.begin_transaction(namespace);
+            tx.create_link(&LinkKind::Digest(digest.clone()), &digest);
+            tx.commit().await.unwrap();
+
+            let policy = Arc::new(
+                RetentionPolicy::new(&crate::registry::RetentionPolicyConfig {
+                    rules: vec!["image.tag != null".to_string()],
+                })
+                .unwrap(),
+            );
+
+            RetentionChecker::new(
+                blob_store,
+                metadata_store.clone(),
+                test_utils::create_test_repositories(),
+                Some(policy),
+                false,
+            )
+            .check_namespace(namespace)
+            .await
+            .unwrap();
+
+            assert!(
+                metadata_store
+                    .read_link(namespace, &LinkKind::Digest(digest), false)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_orphan_manifest_kept_without_policy() {
+        for test_case in backends() {
+            let namespace = "test-repo/app";
+            let blob_store = test_case.blob_store();
+            let metadata_store = test_case.metadata_store();
+
+            let digest = blob_store.create_blob(TEST_MANIFEST).await.unwrap();
+
+            let mut tx = metadata_store.begin_transaction(namespace);
+            tx.create_link(&LinkKind::Digest(digest.clone()), &digest);
+            tx.commit().await.unwrap();
+
+            RetentionChecker::new(
+                blob_store,
+                metadata_store.clone(),
+                test_utils::create_test_repositories(),
+                None,
+                false,
+            )
+            .check_namespace(namespace)
+            .await
+            .unwrap();
+
+            assert!(
+                metadata_store
+                    .read_link(namespace, &LinkKind::Digest(digest), false)
+                    .await
+                    .is_ok()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_index_child_manifest_protected() {
+        for test_case in backends() {
+            let namespace = "test-repo/app";
+            let blob_store = test_case.blob_store();
+            let metadata_store = test_case.metadata_store();
+
+            let child_digest = blob_store.create_blob(TEST_MANIFEST).await.unwrap();
+            let index_digest = blob_store.create_blob(TEST_INDEX).await.unwrap();
+
+            let mut tx = metadata_store.begin_transaction(namespace);
+            tx.create_link(&LinkKind::Digest(child_digest.clone()), &child_digest);
+            tx.create_link(&LinkKind::Digest(index_digest.clone()), &index_digest);
+            tx.create_link(&LinkKind::Tag("latest".to_string()), &index_digest);
+            tx.create_link(
+                &LinkKind::Manifest(index_digest.clone(), child_digest.clone()),
+                &child_digest,
+            );
+            tx.commit().await.unwrap();
+
+            let policy = Arc::new(
+                RetentionPolicy::new(&crate::registry::RetentionPolicyConfig {
+                    rules: vec!["image.tag != null".to_string()],
+                })
+                .unwrap(),
+            );
+
+            RetentionChecker::new(
+                blob_store.clone(),
+                metadata_store.clone(),
+                test_utils::create_test_repositories(),
+                Some(policy.clone()),
+                false,
+            )
+            .check_namespace(namespace)
+            .await
+            .unwrap();
+
+            assert!(
+                metadata_store
+                    .read_link(namespace, &LinkKind::Digest(child_digest.clone()), false)
+                    .await
+                    .is_ok()
+            );
+
+            // Remove the index manifest - child is no longer protected
+            let mut tx = metadata_store.begin_transaction(namespace);
+            tx.delete_link(&LinkKind::Tag("latest".to_string()));
+            tx.delete_link(&LinkKind::Manifest(
+                index_digest.clone(),
+                child_digest.clone(),
+            ));
+            tx.delete_link(&LinkKind::Digest(index_digest));
+            tx.commit().await.unwrap();
+
+            RetentionChecker::new(
+                blob_store,
+                metadata_store.clone(),
+                test_utils::create_test_repositories(),
+                Some(policy),
+                false,
+            )
+            .check_namespace(namespace)
+            .await
+            .unwrap();
+
+            assert!(
+                metadata_store
+                    .read_link(namespace, &LinkKind::Digest(child_digest), false)
+                    .await
+                    .is_err()
             );
         }
     }

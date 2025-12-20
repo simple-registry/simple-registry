@@ -9,6 +9,20 @@ You can configure Retention Policies following a set of rules expressed as [CEL 
 > Currently, this policy is enforced by the `scrub` command, which can be run as a recurrent task (e.g. a systemd timer,
 > a Kubernetes `CronJob`, etc.)
 
+## What Gets Evaluated
+
+Retention policies evaluate manifests that are **not protected** (see table). For each manifest, `image.tag` is set to the tag name if tagged, or `null` if untagged.
+
+### Manifest Categories
+
+| Category          | `image.tag` | Evaluated?         | Description                                                 |
+|-------------------|-------------|--------------------|-------------------------------------------------------------|
+| Tagged manifest   | `"v1.0"`    | Yes                | Has at least one tag pointing to it                         |
+| Orphan manifest   | `null`      | Yes                | Previously tagged, but the tag was moved or deleted         |
+| Index child       | `null`      | **No** (protected) | Platform-specific manifest referenced by a multi-arch index |
+| Referrer subject  | varies      | **No** (protected) | Has signatures, SBOMs, or other referrers attached          |
+| Referrer manifest | `null`      | Yes                | The signature/SBOM itself (references a subject)            |
+
 ## Policy Levels
 
 Retention policies can be configured at two levels:
@@ -21,12 +35,11 @@ Retention policies can be configured at two levels:
 When the scrub operation runs, policies are evaluated in the following order:
 
 1. Global retention policy is evaluated first (if defined)
-2. Repository-specific retention policy is evaluated second (if the repository exists)
+2. Repository-specific retention policy is evaluated second (if defined)
 
 A manifest is retained if **either** policy indicates it should be kept. This allows:
 - Global policies to set organization-wide minimum retention requirements
 - Repository-specific policies to extend retention beyond the global baseline
-- If no policies are defined, manifests are kept indefinitely (safe default)
 
 ## Global Policy Configuration
 
@@ -46,43 +59,46 @@ rules = [
 
 ## Repository Policy Configuration
 
-To configure Retention Policies for a specific repository, add a `retention_policy` section to the repository configuration.
-
-This section contains a `rules` field.
-The `rules` field is a list of rules that are evaluated to determine if the manifest should be _kept_ or not.
-If at least one of the rule matches, the manifest is kept, otherwise it is removed.
-
 ```toml
 [repository."my-registry".retention_policy]
 rules = [
   'image.tag == "latest"',
   'image.pushed_at > now() - days(15)',
   'image.last_pulled_at > now() - days(15)',
-  'top(image.tag, last_pulled, 10)',
-  'top(image.tag, last_pushed, 10)',
+  'top_pulled(10)',
+  'top_pushed(10)',
 ]
 ```
 
-In the example above, a manifest is kept if at least one of the following conditions is met:
+A manifest is kept if at least one rule matches:
 - tag is `latest`
 - pushed less than 15 days ago
 - pulled less than 15 days ago
-- tag is among the top 10 last pulled
-- tag is among the top 10 last pushed
+- among the 10 most recently pulled tags
+- among the 10 most recently pushed tags
 
 ### Variables
 
-- `image.tag`: The tag of the image, when evaluating a Tag (can be unspecified)
-- `image.pushed_at`: The time the manifest was pushed at
-- `image.last_pulled_at`: The time the manifest was last pulled (can be unspecified)
-- `last_pushed`: A list of the last pushed tags ordered by reverse push time (most recent first)
-- `last_pulled`: A list of the last pulled tags ordered by reverse pull time (most recent first)
+- `image.tag`: The tag of the manifest, or `null` if untagged (see table above)
+- `image.pushed_at`: The time the manifest was pushed (seconds since epoch)
+- `image.last_pulled_at`: The time the manifest was last pulled (seconds since epoch, or `0` if never pulled)
 
-In addition to those variables, some helper functions are available:
+### Functions
+
 - `now()`: Returns the current time in seconds since epoch (1st of January 1970).
 - `days(d)`: Returns the number of seconds in `d` days.
 - `hours(h)`: Returns the number of seconds in `h` hours.
 - `minutes(m)`: Returns the number of seconds in `m` minutes.
-- `top(s, collection, k)`: Check if `s` is among the top `k` elements of `collection`.
-- `size(collection)`: Returns the number of elements in `collection`.
+- `top_pushed(k)`: Check if the tag is among the `k` most recently pushed.
+- `top_pulled(k)`: Check if the tag is among the `k` most recently pulled.
 
+## Example: Cleaning Up Untagged Manifests
+
+```toml
+[global.retention_policy]
+rules = [
+  'image.tag != null',
+]
+```
+
+This keeps all tagged manifests. Untagged manifests (orphans and referrers) will be deleted.
