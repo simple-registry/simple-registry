@@ -221,11 +221,27 @@ jobs:
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
+      - name: Extract binary from image
+        run: |
+          platform=${{ matrix.platform }}
+          arch=${platform#linux/}
+          docker create --platform ${{ matrix.platform }} --name extract ${{ env.GHCR_REPO }}@${{ steps.build.outputs.digest }}
+          docker cp extract:/simple-registry simple-registry-${arch}
+          docker rm extract
+
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ env.PLATFORM_PAIR }}
+          path: simple-registry-*
           if-no-files-found: error
           retention-days: 1
 
@@ -286,13 +302,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/binaries
+          pattern: binary-*
+          merge-multiple: true
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          files: /tmp/binaries/*
           body: |
             ## Container Image
 
             ```
             docker pull ${{ env.GHCR_REPO }}:${{ github.ref_name }}
             ```
+
+            ## Standalone Binaries
+
+            | Platform    | Binary                  |
+            |-------------|-------------------------|
+            | Linux amd64 | `simple-registry-amd64` |
+            | Linux arm64 | `simple-registry-arm64` |
