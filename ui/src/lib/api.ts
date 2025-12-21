@@ -39,6 +39,8 @@ export interface ManifestEntry {
 	tags: string[];
 	parents?: ParentRef[];
 	referrers?: ReferrerInfo[];
+	pushed_at?: string;
+	last_pulled_at?: string;
 }
 
 export interface UploadEntry {
