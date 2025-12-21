@@ -222,7 +222,11 @@ impl Authorizer {
     }
 
     pub fn is_tag_immutable(&self, namespace: &str, tag: &str) -> bool {
-        if let Some(auth_repo) = self.repositories.get(namespace) {
+        let auth_repo = self.repositories.iter().find(|(name, _)| {
+            namespace == name.as_str() || namespace.starts_with(&format!("{name}/"))
+        });
+
+        if let Some((_, auth_repo)) = auth_repo {
             !self.is_tag_mutable(auth_repo, tag)
         } else {
             self.global_immutable_tags
@@ -579,6 +583,41 @@ mod tests {
         assert!(!authorizer.is_tag_immutable("myrepo", "test-123"));
         assert!(authorizer.is_tag_immutable("myrepo", "latest"));
         assert!(authorizer.is_tag_immutable("myrepo", "v1.0.0"));
+    }
+
+    #[test]
+    fn test_is_tag_immutable_with_sub_namespace() {
+        let toml = r#"
+            [blob_store.fs]
+            root_dir = "/tmp/test"
+
+            [metadata_store.fs]
+            root_dir = "/tmp/test"
+
+            [cache.memory]
+
+            [server]
+            bind_address = "0.0.0.0"
+            port = 8000
+
+            [global]
+            update_pull_time = false
+            max_concurrent_cache_jobs = 10
+            immutable_tags = false
+
+            [repository."docker-io"]
+            immutable_tags = true
+            immutable_tags_exclusions = ["^latest$"]
+        "#;
+
+        let config: Configuration = toml::from_str(toml).unwrap();
+        let cache = cache::Config::Memory.to_backend().unwrap();
+        let authorizer = Authorizer::new(&config, &cache).unwrap();
+
+        assert!(authorizer.is_tag_immutable("docker-io", "v1.0.0"));
+        assert!(authorizer.is_tag_immutable("docker-io/library/nginx", "v1.0.0"));
+        assert!(!authorizer.is_tag_immutable("docker-io/library/nginx", "latest"));
+        assert!(!authorizer.is_tag_immutable("other/namespace", "v1.0.0"));
     }
 
     #[test]
