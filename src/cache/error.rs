@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn test_from_redis_error() {
-        let error = RedisError::from((redis::ErrorKind::IoError, "IO error occurred"));
+        let error = RedisError::from((redis::ErrorKind::Io, "IO error occurred"));
         let error: Error = error.into();
         assert_eq!(error, Error::Backend("Backend error".to_string()));
     }
