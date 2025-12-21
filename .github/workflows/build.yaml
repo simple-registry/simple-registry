@@ -153,7 +153,7 @@ jobs:
           source ./conformance/conformance-variables
           ./conformance.test
 
-          time ./zb -c 5 -r conformance -n 100 http://localhost:8000 || true
+          time ./zb -c 5 -r conformance -n 100 http://localhost:8000
           docker logs conformance-fs-backend
           docker stop conformance-fs-backend
 
@@ -212,7 +212,7 @@ jobs:
           source ./conformance/conformance-variables
           ./conformance.test
 
-          time ./zb -c 5 -r conformance -n 100 http://localhost:8000 || true
+          time ./zb -c 5 -r conformance -n 100 http://localhost:8000
           docker logs conformance-s3-backend
           docker stop conformance-s3-backend
           docker logs minio-server
