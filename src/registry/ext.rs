@@ -156,6 +156,10 @@ impl Registry {
             parents: Vec<ParentRef>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             referrers: Vec<ReferrerInfo>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pushed_at: Option<DateTime<Utc>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            last_pulled_at: Option<DateTime<Utc>>,
         }
 
         #[derive(Serialize, Debug)]
@@ -249,11 +253,20 @@ impl Registry {
                 }
             }
 
+            let (pushed_at, last_pulled_at) = self
+                .metadata_store
+                .read_link(namespace, &LinkKind::Digest(digest.clone()), false)
+                .await
+                .map(|m| (m.created_at, m.accessed_at))
+                .unwrap_or((None, None));
+
             manifests.push(ManifestEntry {
                 digest: digest.to_string(),
                 tags,
                 parents,
                 referrers,
+                pushed_at,
+                last_pulled_at,
             });
         }
 

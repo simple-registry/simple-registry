@@ -565,13 +565,15 @@
 			<tr>
 				<th>digest</th>
 				<th>tags / platform</th>
-				<th class="col-wide">actions</th>
+				<th>pushed</th>
+				<th>pulled</th>
+				<th class="col-narrow">actions</th>
 			</tr>
 		</thead>
 		<tbody>
 			{#if tree.length === 0}
 				<tr>
-					<td colspan="3" class="empty">no manifests found</td>
+					<td colspan="5" class="empty">no manifests found</td>
 				</tr>
 			{:else}
 			{#each tree as node}
@@ -591,6 +593,8 @@
 							getHref={(tag) => manifestUrl(data.repository, data.namespace, tag)}
 						/>
 					</td>
+					<td>{node.manifest.pushed_at ? formatTimeAgo(node.manifest.pushed_at) : '-'}</td>
+					<td>{node.manifest.last_pulled_at ? formatTimeAgo(node.manifest.last_pulled_at) : '-'}</td>
 					<td>
 						<DeleteButton
 							isConfirming={deleteConfirm === digestConfirmKey(node.manifest.digest)}
@@ -614,6 +618,8 @@
 						<td>
 							<PlatformBadge platform={child.platform} />
 						</td>
+						<td>{child.manifest.pushed_at ? formatTimeAgo(child.manifest.pushed_at) : '-'}</td>
+						<td>{child.manifest.last_pulled_at ? formatTimeAgo(child.manifest.last_pulled_at) : '-'}</td>
 						<td>
 							<DeleteButton
 								isConfirming={deleteConfirm === digestConfirmKey(child.manifest.digest)}
@@ -634,6 +640,8 @@
 							<td>
 								<AttestationBadge type={getAttestationType(referrer)} />
 							</td>
+							<td></td>
+							<td></td>
 							<td>
 								<DeleteButton
 									isConfirming={deleteConfirm === digestConfirmKey(referrer.digest)}
@@ -657,6 +665,8 @@
 						<td>
 							<AttestationBadge type={att.type} />
 						</td>
+						<td></td>
+						<td></td>
 						<td>
 							<DeleteButton
 								isConfirming={deleteConfirm === digestConfirmKey(att.digest)}
