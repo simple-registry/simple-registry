@@ -18,7 +18,7 @@ const ACCESS_DENIED: &str = "Access denied";
 
 /// Centralized authorization component that handles all access control decisions
 pub struct Authorizer {
-    global_access_policy: Option<AccessPolicy>,
+    global_access_policy: AccessPolicy,
     global_authorization_webhook: Option<String>,
     global_immutable_tags: bool,
     global_immutable_tags_exclusions: Vec<Regex>,
@@ -28,7 +28,7 @@ pub struct Authorizer {
 
 /// Repository-specific authorization configuration
 struct AuthorizerRepository {
-    access_policy: AccessPolicy,
+    access_policy: Option<AccessPolicy>,
     authorization_webhook: Option<String>,
     immutable_tags: bool,
     immutable_tags_exclusions: Vec<Regex>,
@@ -36,15 +36,10 @@ struct AuthorizerRepository {
 
 impl Authorizer {
     pub fn new(config: &Configuration, cache: &Arc<dyn Cache>) -> Result<Self, Error> {
-        let global_access_policy = if config.global.access_policy.rules.is_empty() {
-            None
-        } else {
-            Some(
-                AccessPolicy::new(&config.global.access_policy).map_err(|e| {
-                    Error::Initialization(format!("Failed to create global access policy: {e}"))
-                })?,
-            )
-        };
+        let global_access_policy =
+            AccessPolicy::new(&config.global.access_policy).map_err(|e| {
+                Error::Initialization(format!("Failed to create global access policy: {e}"))
+            })?;
 
         let mut webhooks = HashMap::new();
         for (name, webhook_config) in &config.auth.webhook {
@@ -59,11 +54,17 @@ impl Authorizer {
 
         let mut repositories = HashMap::new();
         for (name, repo_config) in &config.repository {
-            let access_policy = AccessPolicy::new(&repo_config.access_policy).map_err(|e| {
-                Error::Initialization(format!(
-                    "Failed to create access policy for repository '{name}': {e}"
-                ))
-            })?;
+            let access_policy = if repo_config.access_policy.rules.is_empty()
+                && !repo_config.access_policy.default_allow
+            {
+                None
+            } else {
+                Some(AccessPolicy::new(&repo_config.access_policy).map_err(|e| {
+                    Error::Initialization(format!(
+                        "Failed to create access policy for repository '{name}': {e}"
+                    ))
+                })?)
+            };
 
             let immutable_tags_exclusions = repo_config
                 .immutable_tags_exclusions
@@ -117,12 +118,10 @@ impl Authorizer {
         request: &Parts,
         registry: &Registry,
     ) -> Result<(), Error> {
-        if let Some(global_policy) = &self.global_access_policy {
-            debug!("Evaluating global access policy");
-            if global_policy.evaluate(route, identity) != Ok(true) {
-                log_denial("global policy", identity);
-                return Err(Error::Unauthorized(ACCESS_DENIED.to_string()));
-            }
+        debug!("Evaluating global access policy");
+        if self.global_access_policy.evaluate(route, identity) != Ok(true) {
+            log_denial("global policy", identity);
+            return Err(Error::Unauthorized(ACCESS_DENIED.to_string()));
         }
 
         if let Some(namespace) = route.get_namespace() {
@@ -139,7 +138,9 @@ impl Authorizer {
                     ))
                 })?;
 
-                if auth_repo.access_policy.evaluate(route, identity) != Ok(true) {
+                if let Some(ref access_policy) = auth_repo.access_policy
+                    && access_policy.evaluate(route, identity) != Ok(true)
+                {
                     log_denial(
                         &format!("repository '{}' policy", repository.name),
                         identity,
@@ -183,9 +184,6 @@ impl Authorizer {
                             .to_string();
                     return Err(Error::Unauthorized(msg));
                 }
-            } else if self.global_access_policy.is_none() {
-                log_denial("no repository access policy", identity);
-                return Err(Error::Unauthorized(ACCESS_DENIED.to_string()));
             }
         } else if let Some(webhook_name) = &self.global_authorization_webhook {
             debug!("Evaluating global webhook authorization: {}", webhook_name);
@@ -275,7 +273,6 @@ mod tests {
 
         assert!(authorizer.is_ok());
         let authorizer = authorizer.unwrap();
-        assert!(authorizer.global_access_policy.is_none());
         assert!(authorizer.global_authorization_webhook.is_none());
         assert!(!authorizer.global_immutable_tags);
         assert!(authorizer.global_immutable_tags_exclusions.is_empty());
@@ -313,8 +310,6 @@ mod tests {
         let authorizer = Authorizer::new(&config, &cache);
 
         assert!(authorizer.is_ok());
-        let authorizer = authorizer.unwrap();
-        assert!(authorizer.global_access_policy.is_some());
     }
 
     #[test]
