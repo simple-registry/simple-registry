@@ -88,10 +88,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Build conformance tool
         run: |
           git clone https://github.com/opencontainers/distribution-spec.git distribution-spec
-
           cd distribution-spec/conformance && \
             go test -c && \
             mv conformance.test ../.. && \
@@ -105,8 +105,36 @@ jobs:
       - name: Build the container
         run: |
           docker build -t ${CONFORMANCE_IMAGE_NAME} -f Dockerfile --build-arg RELEASE_MODE=release .
+          docker save ${CONFORMANCE_IMAGE_NAME} -o conformance-image.tar
 
-      - name: Run the conformance test & zot benchmark (filesystem backend)
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-tools
+          path: |
+            conformance.test
+            zb
+            conformance-image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  conformance-fs:
+    runs-on: ubuntu-latest
+    needs: build-conformance
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: conformance-tools
+
+      - name: Load container image
+        run: |
+          docker load -i conformance-image.tar
+          chmod +x conformance.test zb
+
+      - name: Run conformance test & zot benchmark (filesystem backend)
         run: |
           docker run --rm -d \
             -v ./conformance/config-fs.toml:/config.toml \
@@ -129,7 +157,23 @@ jobs:
           docker logs conformance-fs-backend
           docker stop conformance-fs-backend
 
-      - name: Run the conformance test & zot benchmark (s3 backend)
+  conformance-s3:
+    runs-on: ubuntu-latest
+    needs: build-conformance
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: conformance-tools
+
+      - name: Load container image
+        run: |
+          docker load -i conformance-image.tar
+          chmod +x conformance.test zb
+
+      - name: Run conformance test & zot benchmark (s3 backend)
         run: |
           mkdir -p ./conformance/minio-data/registry
           docker run --rm -d \
@@ -141,8 +185,7 @@ jobs:
             --name minio-server \
             quay.io/minio/minio \
             minio server /data
-  
-          # Ensure minio service is running
+
           while ! nc -z localhost 9000; do
             echo "Waiting for minio to start..."
             sleep 1;
@@ -154,7 +197,7 @@ jobs:
             --name conformance-s3-backend \
             ${CONFORMANCE_IMAGE_NAME} \
             server
-          
+
           for i in {1..10}; do
             if nc -z -w 3 127.0.0.1 8000; then
               break
@@ -297,7 +340,8 @@ jobs:
       - merge
       - rust-checks
       - rust-test
-      - build-conformance
+      - conformance-fs
+      - conformance-s3
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
