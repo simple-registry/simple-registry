@@ -28,10 +28,17 @@ export interface ParentRef {
 	platform?: Platform;
 }
 
+export interface ReferrerInfo {
+	digest: string;
+	artifactType?: string;
+	annotations?: Record<string, string>;
+}
+
 export interface ManifestEntry {
 	digest: string;
 	tags: string[];
 	parents?: ParentRef[];
+	referrers?: ReferrerInfo[];
 }
 
 export interface UploadEntry {

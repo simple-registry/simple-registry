@@ -239,7 +239,7 @@ button {
 	transition: all 0.15s;
 }
 
-button:hover {
+button:hover:not(.tree-toggle) {
 	background: var(--color-primary);
 	color: var(--color-bg);
 }
@@ -379,6 +379,80 @@ a:hover {
 	font-family: var(--font-mono);
 }
 
+.attestation {
+	display: inline-block;
+	padding: 0.1rem 0.4rem;
+	border-radius: 3px;
+	font-size: 0.85em;
+	font-family: var(--font-mono);
+}
+
+.attestation-slsa {
+	background: #9333ea;
+	color: white;
+}
+
+.attestation-sbom {
+	background: #0ea5e9;
+	color: white;
+}
+
+.attestation-signature {
+	background: var(--color-success);
+	color: var(--color-bg);
+}
+
+.attestation-artifact {
+	background: var(--color-text-muted);
+	color: var(--color-bg);
+}
+
+.tree-branch.has-attestations .branch-line {
+	position: absolute;
+	left: calc(1.75rem - 0.5px);
+	top: 50%;
+	bottom: 0;
+	border-left: 1px solid var(--color-text-muted);
+}
+
+.nested-tree-branch {
+	position: relative;
+	padding-left: 3.5rem;
+}
+
+.nested-tree-branch .parent-line {
+	position: absolute;
+	left: calc(0.75rem - 0.5px);
+	top: 0;
+	bottom: 0;
+	border-left: 1px solid var(--color-text-muted);
+}
+
+.nested-tree-branch::before {
+	content: '';
+	position: absolute;
+	left: calc(1.75rem - 0.5px);
+	top: 0;
+	bottom: 50%;
+	border-left: 1px solid var(--color-text-muted);
+	border-bottom: 1px solid var(--color-text-muted);
+	width: 1rem;
+}
+
+.nested-tree-branch.has-next::before {
+	bottom: 0;
+	border-bottom: none;
+}
+
+.nested-tree-branch.has-next::after {
+	content: '';
+	position: absolute;
+	left: calc(1.75rem - 0.5px);
+	top: 50%;
+	width: 1rem;
+	border-bottom: 1px solid var(--color-text-muted);
+}
+
 .untagged {
 	color: var(--color-text-muted);
 	font-style: italic;
@@ -460,10 +534,10 @@ a:hover {
 	padding-left: 1.5rem;
 }
 
-.has-children::after {
+.has-children.expanded::after {
 	content: '';
 	position: absolute;
-	left: calc(0.5rem - 0.5px);
+	left: calc(0.75rem - 0.5px);
 	top: 50%;
 	bottom: 0;
 	border-left: 1px solid var(--color-text-muted);
@@ -471,18 +545,18 @@ a:hover {
 
 .tree-branch {
 	position: relative;
-	padding-left: 1.5rem;
+	padding-left: 2.5rem;
 }
 
 .tree-branch::before {
 	content: '';
 	position: absolute;
-	left: calc(0.5rem - 0.5px);
+	left: calc(0.75rem - 0.5px);
 	top: 0;
 	bottom: 50%;
 	border-left: 1px solid var(--color-text-muted);
 	border-bottom: 1px solid var(--color-text-muted);
-	width: 0.5rem;
+	width: 1rem;
 }
 
 .tree-branch.has-next::before {
@@ -493,24 +567,107 @@ a:hover {
 .tree-branch.has-next::after {
 	content: '';
 	position: absolute;
-	left: calc(0.5rem - 0.5px);
+	left: calc(0.75rem - 0.5px);
 	top: 50%;
-	width: 0.5rem;
+	width: 1rem;
 	border-bottom: 1px solid var(--color-text-muted);
+}
+
+.tree-toggle {
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	border: none;
+	background: transparent;
+	color: var(--color-text-muted);
+	font-size: 10px;
+	line-height: 1;
+	cursor: pointer;
+	padding: 0;
+	font-family: var(--font-mono);
+	z-index: 1;
+	box-sizing: border-box;
+}
+
+.tree-toggle::before {
+	content: '';
+	position: absolute;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 12px;
+	height: 12px;
+	border: 1px solid var(--color-text-muted);
+	background: var(--color-surface);
+	box-sizing: border-box;
+	z-index: -1;
+}
+
+.tree-toggle.leaf::before {
+	width: 5px;
+	height: 5px;
+	border: none;
+	background: var(--color-text-muted);
+}
+
+.toggle-icon {
+	position: absolute;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 12px;
+	text-align: center;
+}
+
+.has-children .toggle-icon {
+	left: calc(0.75rem - 6px);
+}
+
+.tree-branch .toggle-icon {
+	left: calc(1.75rem - 6px);
+}
+
+.nested-tree-branch .toggle-icon {
+	left: calc(2.75rem - 6px);
+}
+
+.has-children .tree-toggle {
+	width: 1.5rem;
+}
+
+.has-children .tree-toggle::before {
+	left: calc(0.75rem - 6px);
+}
+
+.has-children .tree-toggle.leaf::before {
+	left: calc(0.75rem - 2.5px);
+}
+
+.tree-branch .tree-toggle {
+	width: 2.5rem;
+}
+
+.tree-branch .tree-toggle::before {
+	left: calc(1.75rem - 6px);
+}
+
+.tree-branch .tree-toggle.leaf::before {
+	left: calc(1.75rem - 2.5px);
+}
+
+.nested-tree-branch .tree-toggle {
+	width: 3.5rem;
+}
+
+.nested-tree-branch .tree-toggle::before {
+	left: calc(2.75rem - 6px);
+}
+
+.nested-tree-branch .tree-toggle.leaf::before {
+	left: calc(2.75rem - 2.5px);
 }
 
 .child-row {
 	background: var(--color-surface);
-}
-
-.index-icon {
-	position: absolute;
-	left: calc(0.5rem - 2.5px);
-	top: 50%;
-	transform: translateY(-50%);
-	width: 5px;
-	height: 5px;
-	background: var(--color-text-muted);
 }
 
 .uuid {

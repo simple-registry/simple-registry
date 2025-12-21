@@ -1,21 +1,73 @@
 import { base } from '$app/paths';
-import type { ManifestEntry, Platform, Manifest, Descriptor } from './api';
+import type { ManifestEntry, Platform, Manifest, Descriptor, ReferrerInfo } from './api';
+
+export type AttestationType = 'slsa' | 'sbom' | 'signature' | 'artifact';
 
 export interface TreeNode {
 	manifest: ManifestEntry;
 	children: { manifest: ManifestEntry; platform?: Platform }[];
+	attestations: { digest: string; type: AttestationType; artifactType?: string }[];
+}
+
+const SLSA_ARTIFACT_TYPES = new Set([
+	'application/vnd.in-toto+json',
+]);
+
+const SBOM_ARTIFACT_TYPES = new Set([
+	'text/spdx',
+	'text/spdx+xml',
+	'text/spdx+json',
+	'application/spdx+json',
+	'application/vnd.cyclonedx',
+	'application/vnd.cyclonedx+xml',
+	'application/vnd.cyclonedx+json',
+	'application/vnd.syft+json',
+	'application/vnd.goharbor.harbor.sbom.v1',
+]);
+
+const SIGNATURE_ARTIFACT_TYPES = new Set([
+	'application/vnd.cncf.notary.signature',
+	'application/vnd.dev.cosign.artifact.sig.v1+json',
+	'application/vnd.dev.cosign.simplesigning.v1+json',
+	'application/vnd.dsse.envelope.v1+json',
+	'application/vnd.dev.sigstore.bundle.v0.3+json',
+]);
+
+const SLSA_PREDICATE_TYPES = new Set([
+	'https://slsa.dev/provenance/v0.2',
+	'https://slsa.dev/provenance/v1',
+]);
+
+const SBOM_PREDICATE_TYPES = new Set([
+	'https://spdx.dev/Document',
+	'https://cyclonedx.org/bom',
+]);
+
+export function getAttestationType(referrer: ReferrerInfo): AttestationType {
+	const artifactType = referrer.artifactType ?? '';
+	const predicateType = referrer.annotations?.['in-toto.io/predicate-type'] ?? '';
+
+	if (SLSA_ARTIFACT_TYPES.has(artifactType)) return 'slsa';
+	if (SBOM_ARTIFACT_TYPES.has(artifactType)) return 'sbom';
+	if (SIGNATURE_ARTIFACT_TYPES.has(artifactType)) return 'signature';
+
+	if (SLSA_PREDICATE_TYPES.has(predicateType)) return 'slsa';
+	if (SBOM_PREDICATE_TYPES.has(predicateType)) return 'sbom';
+
+	return 'artifact';
 }
 
 export function repoUrl(name: string): string {
-	return `${base}/${encodeURIComponent(name)}`;
+	return `${base}/${name}`;
 }
 
 export function namespaceUrl(repo: string, namespace: string): string {
-	return `${base}/${encodeURIComponent(repo)}/${encodeURIComponent(namespace)}`;
+	return `${base}/${repo}/${namespace}`;
 }
 
 export function manifestUrl(repo: string, namespace: string, reference: string): string {
-	return `${base}/${encodeURIComponent(repo)}/${encodeURIComponent(namespace)}/${encodeURIComponent(reference)}`;
+	const separator = reference.startsWith('sha256:') || reference.startsWith('sha512:') ? '@' : ':';
+	return `${base}/${repo}/${namespace}${separator}${reference}`;
 }
 
 export function digestConfirmKey(digest: string): string {
@@ -90,7 +142,9 @@ export function displayNamespace(namespace: string, repository: string): string 
 
 export function buildTree(manifests: ManifestEntry[]): TreeNode[] {
 	const childDigests = new Set<string>();
+	const referrerDigests = new Set<string>();
 	const parentToChildren = new Map<string, { manifest: ManifestEntry; platform?: Platform }[]>();
+	const manifestToAttestations = new Map<string, { digest: string; type: AttestationType; artifactType?: string }[]>();
 
 	for (const m of manifests) {
 		if (m.parents && m.parents.length > 0) {
@@ -101,18 +155,32 @@ export function buildTree(manifests: ManifestEntry[]): TreeNode[] {
 				parentToChildren.set(parent.digest, children);
 			}
 		}
+
+		if (m.referrers && m.referrers.length > 0) {
+			const attestations: { digest: string; type: AttestationType; artifactType?: string }[] = [];
+			for (const referrer of m.referrers) {
+				referrerDigests.add(referrer.digest);
+				attestations.push({
+					digest: referrer.digest,
+					type: getAttestationType(referrer),
+					artifactType: referrer.artifactType,
+				});
+			}
+			manifestToAttestations.set(m.digest, attestations);
+		}
 	}
 
 	const roots: TreeNode[] = [];
 	for (const m of manifests) {
-		if (!childDigests.has(m.digest)) {
+		if (!childDigests.has(m.digest) && !referrerDigests.has(m.digest)) {
 			const children = parentToChildren.get(m.digest) ?? [];
 			children.sort((a, b) => {
 				const pa = formatPlatform(a.platform);
 				const pb = formatPlatform(b.platform);
 				return pa.localeCompare(pb);
 			});
-			roots.push({ manifest: m, children });
+			const attestations = manifestToAttestations.get(m.digest) ?? [];
+			roots.push({ manifest: m, children, attestations });
 		}
 	}
 

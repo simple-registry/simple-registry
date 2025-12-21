@@ -17,9 +17,9 @@ pub fn parse<'a>(method: &Method, uri: &'a Uri) -> Route<'a> {
     let params = uri.query();
 
     match path {
-        "/" if method == Method::GET => return Route::RootRedirect,
         "/healthz" if method == Method::GET => return Route::Healthz,
         "/metrics" if method == Method::GET => return Route::Metrics,
+        "/_ui/config" if method == Method::GET => return Route::UiConfig,
         "/v2" | "/v2/" if method == Method::GET => return Route::ApiVersion,
         "/v2/_catalog" if method == Method::GET => {
             let (n, last) = if let Some(p) = params.map(parse_query::<PaginationQuery>) {
@@ -33,46 +33,40 @@ pub fn parse<'a>(method: &Method, uri: &'a Uri) -> Route<'a> {
         _ => {}
     }
 
-    if path == "/_ui/config" && method == Method::GET {
-        return Route::UiConfig;
-    }
+    if let Some(api_path) = path.strip_prefix("/v2/") {
+        if let Some(route) = try_parse_extension(method, api_path) {
+            return route;
+        }
 
-    if let Some(ui_path) = path.strip_prefix("/_ui")
-        && (method == Method::GET || method == Method::HEAD)
-    {
-        return Route::UiAsset { path: ui_path };
-    }
+        if let Some(route) = try_parse_uploads(method, api_path, params) {
+            return route;
+        }
 
-    let Some(path) = path.strip_prefix("/v2/") else {
+        if let Some(route) = try_parse_upload(method, api_path, params) {
+            return route;
+        }
+
+        if let Some(route) = try_find_blobs(method, api_path) {
+            return route;
+        }
+
+        if let Some(route) = try_find_manifests(method, api_path) {
+            return route;
+        }
+
+        if let Some(route) = try_find_referrers(method, api_path, params) {
+            return route;
+        }
+
+        if let Some(route) = try_find_tags(method, api_path, params) {
+            return route;
+        }
+
         return Route::Unknown;
-    };
-
-    if let Some(route) = try_parse_extension(method, path) {
-        return route;
     }
 
-    if let Some(route) = try_parse_uploads(method, path, params) {
-        return route;
-    }
-
-    if let Some(route) = try_parse_upload(method, path, params) {
-        return route;
-    }
-
-    if let Some(route) = try_find_blobs(method, path) {
-        return route;
-    }
-
-    if let Some(route) = try_find_manifests(method, path) {
-        return route;
-    }
-
-    if let Some(route) = try_find_referrers(method, path, params) {
-        return route;
-    }
-
-    if let Some(route) = try_find_tags(method, path, params) {
-        return route;
+    if method == Method::GET || method == Method::HEAD {
+        return Route::UiAsset { path };
     }
 
     Route::Unknown
@@ -698,8 +692,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_unknown_route() {
+    fn test_parse_unknown_route_becomes_ui_asset() {
         let method = Method::GET;
+        let uri: Uri = "/unknown/path".parse().unwrap();
+        let route = parse(&method, &uri);
+        if let Route::UiAsset { path } = route {
+            assert_eq!(path, "/unknown/path");
+        } else {
+            panic!("Expected UiAsset route for unknown GET path");
+        }
+    }
+
+    #[test]
+    fn test_parse_unknown_post_route() {
+        let method = Method::POST;
         let uri: Uri = "/unknown/path".parse().unwrap();
         let route = parse(&method, &uri);
         assert!(matches!(route, Route::Unknown));
@@ -938,17 +944,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_root_redirect() {
-        let method = Method::GET;
-        let uri: Uri = "/".parse().unwrap();
-        let route = parse(&method, &uri);
-        assert!(matches!(route, Route::RootRedirect));
-    }
-
-    #[test]
     fn test_parse_ui_asset_root() {
         let method = Method::GET;
-        let uri: Uri = "/_ui/".parse().unwrap();
+        let uri: Uri = "/".parse().unwrap();
         let route = parse(&method, &uri);
         if let Route::UiAsset { path } = route {
             assert_eq!(path, "/");
@@ -960,7 +958,7 @@ mod tests {
     #[test]
     fn test_parse_ui_asset_with_path() {
         let method = Method::GET;
-        let uri: Uri = "/_ui/index.html".parse().unwrap();
+        let uri: Uri = "/index.html".parse().unwrap();
         let route = parse(&method, &uri);
         if let Route::UiAsset { path } = route {
             assert_eq!(path, "/index.html");
@@ -972,7 +970,7 @@ mod tests {
     #[test]
     fn test_parse_ui_asset_head_method() {
         let method = Method::HEAD;
-        let uri: Uri = "/_ui/style.css".parse().unwrap();
+        let uri: Uri = "/style.css".parse().unwrap();
         let route = parse(&method, &uri);
         if let Route::UiAsset { path } = route {
             assert_eq!(path, "/style.css");
@@ -984,7 +982,7 @@ mod tests {
     #[test]
     fn test_parse_ui_asset_post_not_allowed() {
         let method = Method::POST;
-        let uri: Uri = "/_ui/index.html".parse().unwrap();
+        let uri: Uri = "/index.html".parse().unwrap();
         let route = parse(&method, &uri);
         assert!(matches!(route, Route::Unknown));
     }

@@ -107,6 +107,7 @@ impl Registry {
     }
 
     #[instrument(skip(self))]
+    #[allow(clippy::too_many_lines)]
     pub async fn handle_list_revisions(
         &self,
         namespace: &str,
@@ -137,12 +138,24 @@ impl Registry {
             platform: Option<Platform>,
         }
 
+        #[derive(Serialize, Debug, Clone)]
+        #[serde(rename_all = "camelCase")]
+        struct ReferrerInfo {
+            digest: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            artifact_type: Option<String>,
+            #[serde(skip_serializing_if = "HashMap::is_empty")]
+            annotations: HashMap<String, String>,
+        }
+
         #[derive(Serialize, Debug)]
         struct ManifestEntry {
             digest: String,
             tags: Vec<String>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             parents: Vec<ParentRef>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            referrers: Vec<ReferrerInfo>,
         }
 
         #[derive(Serialize, Debug)]
@@ -155,47 +168,94 @@ impl Registry {
         let digest_to_tags = self.build_digest_to_tags_map(namespace).await?;
 
         let mut child_to_parents: HashMap<Digest, Vec<(Digest, Option<Platform>)>> = HashMap::new();
+        let mut docker_referrers: HashMap<Digest, Vec<ReferrerInfo>> = HashMap::new();
+
         for digest in &all_revisions {
             if let Ok(blob_data) = self.blob_store.read_blob(digest).await
                 && let Ok(manifest) = Manifest::from_slice(&blob_data)
             {
                 for child_descriptor in &manifest.manifests {
-                    let platform = child_descriptor.platform.clone().map(Platform::from);
-                    child_to_parents
-                        .entry(child_descriptor.digest.clone())
-                        .or_default()
-                        .push((digest.clone(), platform));
+                    if let Some(subject_digest_str) = child_descriptor
+                        .annotations
+                        .get("vnd.docker.reference.digest")
+                    {
+                        if let Ok(subject_digest) = subject_digest_str.parse::<Digest>() {
+                            let mut annotations = child_descriptor.annotations.clone();
+                            if let Ok(child_blob) =
+                                self.blob_store.read_blob(&child_descriptor.digest).await
+                                && let Ok(child_manifest) = Manifest::from_slice(&child_blob)
+                            {
+                                for layer in &child_manifest.layers {
+                                    if let Some(predicate_type) =
+                                        layer.annotations.get("in-toto.io/predicate-type")
+                                    {
+                                        annotations.insert(
+                                            "in-toto.io/predicate-type".to_string(),
+                                            predicate_type.clone(),
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                            docker_referrers.entry(subject_digest).or_default().push(
+                                ReferrerInfo {
+                                    digest: child_descriptor.digest.to_string(),
+                                    artifact_type: child_descriptor.artifact_type.clone(),
+                                    annotations,
+                                },
+                            );
+                        }
+                    } else {
+                        let platform = child_descriptor.platform.clone().map(Platform::from);
+                        child_to_parents
+                            .entry(child_descriptor.digest.clone())
+                            .or_default()
+                            .push((digest.clone(), platform));
+                    }
                 }
             }
         }
 
-        let manifests: Vec<ManifestEntry> = all_revisions
-            .into_iter()
-            .map(|digest| {
-                let tags = digest_to_tags.get(&digest).cloned().unwrap_or_default();
-                let parents = child_to_parents
-                    .get(&digest)
-                    .map(|parents| {
-                        parents
-                            .iter()
-                            .map(|(parent_digest, platform)| ParentRef {
-                                digest: parent_digest.to_string(),
-                                tags: digest_to_tags
-                                    .get(parent_digest)
-                                    .cloned()
-                                    .unwrap_or_default(),
-                                platform: platform.clone(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                ManifestEntry {
-                    digest: digest.to_string(),
-                    tags,
-                    parents,
+        let mut manifests: Vec<ManifestEntry> = Vec::with_capacity(all_revisions.len());
+        for digest in all_revisions {
+            let tags = digest_to_tags.get(&digest).cloned().unwrap_or_default();
+            let parents = child_to_parents
+                .get(&digest)
+                .map(|parents| {
+                    parents
+                        .iter()
+                        .map(|(parent_digest, platform)| ParentRef {
+                            digest: parent_digest.to_string(),
+                            tags: digest_to_tags
+                                .get(parent_digest)
+                                .cloned()
+                                .unwrap_or_default(),
+                            platform: platform.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let mut referrers: Vec<ReferrerInfo> =
+                docker_referrers.remove(&digest).unwrap_or_default();
+
+            if let Ok(oci_referrers) = self.get_referrers(namespace, &digest, None).await {
+                for descriptor in oci_referrers {
+                    referrers.push(ReferrerInfo {
+                        digest: descriptor.digest.to_string(),
+                        artifact_type: descriptor.artifact_type,
+                        annotations: descriptor.annotations,
+                    });
                 }
-            })
-            .collect();
+            }
+
+            manifests.push(ManifestEntry {
+                digest: digest.to_string(),
+                tags,
+                parents,
+                referrers,
+            });
+        }
 
         let response = RevisionsResponse {
             name: namespace,

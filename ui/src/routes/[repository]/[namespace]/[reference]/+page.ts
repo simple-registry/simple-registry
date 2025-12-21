@@ -1,9 +1,0 @@
-import type { PageLoad } from './$types';
-
-export const load: PageLoad = ({ params }) => {
-	return {
-		repository: params.repository,
-		namespace: params.namespace,
-		reference: params.reference
-	};
-};
