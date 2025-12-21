@@ -193,8 +193,9 @@ impl Registry {
                 if digest == manifest.digest {
                     return Ok(manifest);
                 }
+            } else {
+                return Ok(manifest);
             }
-            return Ok(manifest);
         }
 
         // pull from upstream
