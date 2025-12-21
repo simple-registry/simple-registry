@@ -2,12 +2,11 @@ use std::sync::LazyLock;
 use std::sync::atomic::AtomicU64;
 
 use prometheus::{
-    Encoder, Histogram, IntCounter, IntCounterVec, IntGauge, Registry as PrometheusRegistry,
-    TextEncoder,
+    Encoder, HistogramVec, IntCounterVec, IntGauge, Registry as PrometheusRegistry, TextEncoder,
 };
 use prometheus::{
-    register_histogram_with_registry, register_int_counter_vec_with_registry,
-    register_int_counter_with_registry, register_int_gauge_with_registry,
+    register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
+    register_int_gauge_with_registry,
 };
 use tracing::error;
 
@@ -30,8 +29,8 @@ pub static METRICS_PROVIDER: LazyLock<MetricsProvider> =
 
 pub struct MetricsProvider {
     registry: PrometheusRegistry,
-    pub metric_http_request_total: IntCounter,
-    pub metric_http_request_duration: Histogram,
+    pub metric_http_request_total: IntCounterVec,
+    pub metric_http_request_duration: HistogramVec,
     pub metric_http_request_in_flight: IntGauge,
 }
 
@@ -39,9 +38,10 @@ impl MetricsProvider {
     pub fn new() -> Result<Self, Error> {
         let registry = PrometheusRegistry::new();
 
-        let metric_http_request_total = register_int_counter_with_registry!(
+        let metric_http_request_total = register_int_counter_vec_with_registry!(
             "http_requests_total",
             "Total number of HTTP requests made.",
+            &["method", "route", "status"],
             &registry
         )
         .map_err(|error| {
@@ -49,9 +49,10 @@ impl MetricsProvider {
             Error::Initialization(String::from("Unable to create http_requests_total metric"))
         })?;
 
-        let metric_http_request_duration = register_histogram_with_registry!(
+        let metric_http_request_duration = register_histogram_vec_with_registry!(
             "http_request_duration_ms",
             "The HTTP request latencies in milliseconds.",
+            &["method", "route"],
             &registry
         )
         .map_err(|error| {

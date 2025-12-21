@@ -90,6 +90,7 @@ async fn handle_request(
     let start_time = Instant::now();
     let method = request.method().to_owned();
     let path = request.uri().path().to_owned();
+    let route_action = router::parse(request.method(), request.uri()).action_name();
 
     let trace_id = {
         let context = Span::current().context();
@@ -111,9 +112,13 @@ async fn handle_request(
     let elapsed = start_time.elapsed().as_millis() as f64;
     let status = response.status();
 
-    METRICS_PROVIDER.metric_http_request_total.inc();
+    METRICS_PROVIDER
+        .metric_http_request_total
+        .with_label_values(&[method.as_str(), route_action, status.as_str()])
+        .inc();
     METRICS_PROVIDER
         .metric_http_request_duration
+        .with_label_values(&[method.as_str(), route_action])
         .observe(elapsed);
 
     let log = if let Some(trace_id) = trace_id {
