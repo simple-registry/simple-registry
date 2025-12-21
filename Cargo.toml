@@ -54,6 +54,7 @@ tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1.18", features = ["v4", "serde"] }
 x509-parser = "0.18"
+zeroize = { version = "1.8", features = ["derive"] }
 
 [dev-dependencies]
 wiremock = "0.6"

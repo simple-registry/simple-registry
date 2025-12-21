@@ -25,6 +25,7 @@ use crate::cache::Cache;
 use crate::oci::{Digest, Reference};
 use crate::registry::Error;
 use crate::registry::blob_store::BoxedReader;
+use crate::secret::Secret;
 
 pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
 
@@ -49,7 +50,7 @@ pub struct RegistryClientConfig {
     pub client_certificate: Option<String>,
     pub client_private_key: Option<String>,
     pub username: Option<String>,
-    pub password: Option<String>,
+    pub password: Option<Secret<String>>,
 }
 
 impl RegistryClientConfig {
@@ -101,8 +102,8 @@ impl RegistryClient {
             .build()
             .map_err(|e| Error::Initialization(format!("Failed to build HTTP client: {e}")))?;
 
-        let basic_auth = match (config.username.clone(), config.password.clone()) {
-            (Some(username), Some(password)) => Some((username, password)),
+        let basic_auth = match (&config.username, &config.password) {
+            (Some(username), Some(password)) => Some((username.clone(), password.expose().clone())),
             (Some(_), None) | (None, Some(_)) => {
                 warn!("Username and password must be both provided");
                 None

@@ -4,6 +4,7 @@ use argh::FromArgs;
 use argon2::password_hash::SaltString;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
+use zeroize::Zeroizing;
 
 #[derive(FromArgs, PartialEq, Debug)]
 #[allow(clippy::struct_excessive_bools)]
@@ -18,7 +19,7 @@ pub struct Command {}
 
 impl Command {
     pub fn run() -> Result<(), error::Error> {
-        let password = rpassword::prompt_password("Input Password: ")?;
+        let password = Zeroizing::new(rpassword::prompt_password("Input Password: ")?);
         let hash = generate_password(&password)?;
         println!("{hash}");
         Ok(())

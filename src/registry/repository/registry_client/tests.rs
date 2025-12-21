@@ -4,6 +4,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::*;
 use crate::cache;
 use crate::oci::{Digest, Reference};
+use crate::secret::Secret;
 
 #[test]
 fn test_get_upstream_namespace() {
@@ -34,7 +35,7 @@ async fn test_get_manifest_path() {
         client_certificate: None,
         client_private_key: None,
         username: Some("username".to_string()),
-        password: Some("password".to_string()),
+        password: Some(Secret::new("password".to_string())),
     };
 
     let cache = cache::Config::Memory.to_backend().unwrap();
@@ -102,7 +103,7 @@ async fn test_new_with_password_only() {
         client_certificate: None,
         client_private_key: None,
         username: None,
-        password: Some("pass".to_string()),
+        password: Some(Secret::new("pass".to_string())),
     };
 
     let cache = cache::Config::Memory.to_backend().unwrap();
@@ -119,7 +120,7 @@ async fn test_new_with_both_credentials() {
         client_certificate: None,
         client_private_key: None,
         username: Some("user".to_string()),
-        password: Some("pass".to_string()),
+        password: Some(Secret::new("pass".to_string())),
     };
 
     let cache = cache::Config::Memory.to_backend().unwrap();
@@ -404,7 +405,7 @@ async fn test_basic_authentication() {
         client_certificate: None,
         client_private_key: None,
         username: Some("user".to_string()),
-        password: Some("pass".to_string()),
+        password: Some(Secret::new("pass".to_string())),
     };
 
     let cache = cache::Config::Memory.to_backend().unwrap();
