@@ -23,6 +23,7 @@ mod configuration;
 mod metrics_provider;
 mod oci;
 mod registry;
+mod secret;
 mod watcher;
 
 // TODO: to be moved

@@ -22,6 +22,7 @@ use crate::cache::{Cache, CacheExt};
 use crate::command::server::client_identity::ClientIdentity;
 use crate::command::server::error::Error;
 use crate::command::server::route::Route;
+use crate::secret::Secret;
 
 static WEBHOOK_REQUESTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
@@ -64,8 +65,11 @@ pub struct Config {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookAuth {
-    BasicAuth { username: String, password: String },
-    BearerToken(String),
+    BasicAuth {
+        username: String,
+        password: Secret<String>,
+    },
+    BearerToken(Secret<String>),
 }
 
 impl Config {
@@ -425,9 +429,9 @@ impl WebhookAuthorizer {
         }
 
         if let Some(WebhookAuth::BearerToken(token)) = &self.config.auth {
-            request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+            request = request.header(AUTHORIZATION, format!("Bearer {}", token.expose()));
         } else if let Some(WebhookAuth::BasicAuth { username, password }) = &self.config.auth {
-            request = request.basic_auth(username, Some(password));
+            request = request.basic_auth(username, Some(password.expose()));
         }
 
         let response = request.send().await;

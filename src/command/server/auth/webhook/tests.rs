@@ -20,6 +20,7 @@ use crate::command::server::auth::webhook::{
 use crate::command::server::route::Route;
 use crate::command::server::{ClientIdentity, Error};
 use crate::oci::{Digest, Reference};
+use crate::secret::Secret;
 
 static TEST_BUNDLE: &str = r"-----BEGIN CERTIFICATE-----
 MIIDgjCCAmqgAwIBAgIUFCYlDkKrxnJCnCtYXKvA9BaXnfowDQYJKoZIhvcNAQEL
@@ -133,7 +134,7 @@ fn test_config_deserialize() {
     assert_eq!(config.url, "https://example.com");
     assert_eq!(config.timeout_ms, 1000);
     assert!(
-        matches!(config.auth, Some(WebhookAuth::BasicAuth { username, password }) if username == "user" && password == "pass")
+        matches!(config.auth, Some(WebhookAuth::BasicAuth { username, password }) if username == "user" && password.expose() == "pass")
     );
     assert!(config.client_certificate_bundle.is_none());
     assert!(config.client_private_key.is_none());
@@ -152,7 +153,9 @@ fn test_config_deserialize() {
     assert!(config.validate().is_ok());
     assert_eq!(config.url, "https://example.com");
     assert_eq!(config.timeout_ms, 1000);
-    assert!(matches!(config.auth, Some(WebhookAuth::BearerToken(token)) if token == "hello-token"));
+    assert!(
+        matches!(config.auth, Some(WebhookAuth::BearerToken(token)) if token.expose() == "hello-token")
+    );
     assert!(config.client_certificate_bundle.is_none());
     assert!(config.client_private_key.is_none());
     assert!(config.server_ca_bundle.is_none());
@@ -165,7 +168,7 @@ fn test_config_validate() {
     let valid_config = Config {
         url: "https://example.com".to_string(),
         timeout_ms: 1000,
-        auth: Some(WebhookAuth::BearerToken("token".to_string())),
+        auth: Some(WebhookAuth::BearerToken(Secret::new("token".to_string()))),
         client_certificate_bundle: Some("/valid/path/to/cert.pem".into()),
         client_private_key: Some("/valid/path/to/key.pem".into()),
         server_ca_bundle: Some("/valid/path/to/ca.pem".into()),
@@ -583,7 +586,7 @@ fn build_test_config(
     Config {
         url,
         timeout_ms: 1000,
-        auth: Some(WebhookAuth::BearerToken("token".to_string())),
+        auth: Some(WebhookAuth::BearerToken(Secret::new("token".to_string()))),
         client_certificate_bundle,
         client_private_key,
         server_ca_bundle,
@@ -726,7 +729,9 @@ async fn test_authorize_with_bearer_token() {
         .await;
 
     let mut config = build_test_config(mock_server.uri(), None, None, None);
-    config.auth = Some(WebhookAuth::BearerToken("test-token".to_string()));
+    config.auth = Some(WebhookAuth::BearerToken(Secret::new(
+        "test-token".to_string(),
+    )));
 
     let cache = cache::Config::Memory.to_backend().unwrap();
     let webhook = WebhookAuthorizer::new("test".to_string(), config, cache).unwrap();
@@ -756,7 +761,7 @@ async fn test_authorize_with_basic_auth() {
     let mut config = build_test_config(mock_server.uri(), None, None, None);
     config.auth = Some(WebhookAuth::BasicAuth {
         username: "testuser".to_string(),
-        password: "testpass".to_string(),
+        password: Secret::new("testpass".to_string()),
     });
 
     let cache = cache::Config::Memory.to_backend().unwrap();
