@@ -30,7 +30,7 @@ update_pull_time = false
 #]
 
 [blob_store.fs]
-root_dir = "./data-simple-registry"
+root_dir = "./data-angos"
 
 #[blob_store.s3]
 #access_key_id = "<key-id>"

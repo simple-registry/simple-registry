@@ -6,7 +6,7 @@ title: "Mirror Docker Hub"
 
 # Mirror Docker Hub
 
-Set up Simple-Registry as a pull-through cache for Docker Hub to reduce bandwidth, improve performance, and protect against rate limits.
+Set up Angos as a pull-through cache for Docker Hub to reduce bandwidth, improve performance, and protect against rate limits.
 
 ## What You'll Learn
 
@@ -18,7 +18,7 @@ By the end of this tutorial, you will:
 ## Prerequisites
 
 - Completed the [Quickstart](quickstart.md) tutorial
-- Simple-Registry binary available
+- Angos binary available
 - Optional: Docker Hub credentials (for higher rate limits)
 
 ## Step 1: Configure the Pull-Through Cache
@@ -74,7 +74,7 @@ This means:
 ## Step 4: Start the Registry
 
 ```bash
-./simple-registry -c config.toml server
+./angos -c config.toml server
 ```
 
 ## Step 5: Pull Through the Cache
@@ -153,7 +153,7 @@ url = "https://ghcr.io"
 ```mermaid
 sequenceDiagram
     participant Client as Docker Client
-    participant Registry as Simple-Registry
+    participant Registry as Angos
     participant Disk as Local Cache
     participant Hub as Docker Hub
 

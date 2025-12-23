@@ -6,7 +6,7 @@ title: "Authentication"
 
 # Authentication and Authorization
 
-Simple-Registry implements a layered security model with multiple authentication methods and flexible authorization policies.
+Angos implements a layered security model with multiple authentication methods and flexible authorization policies.
 
 ## Authentication vs Authorization
 

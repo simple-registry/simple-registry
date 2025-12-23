@@ -2,7 +2,7 @@ interface UiConfig {
 	name: string;
 }
 
-let config: UiConfig = $state({ name: 'simple-registry' });
+let config: UiConfig = $state({ name: 'angos' });
 let loaded = $state(false);
 
 export async function loadConfig(): Promise<void> {

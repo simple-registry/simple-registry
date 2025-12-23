@@ -13,7 +13,7 @@ impl Registry {
         let res = Response::builder()
             .status(StatusCode::OK)
             .header(DOCKER_DISTRIBUTION_API_VERSION, "registry/2.0")
-            .header(X_POWERED_BY, "Simple-Registry")
+            .header(X_POWERED_BY, "Angos")
             .body(ResponseBody::empty())?;
 
         Ok(res)
@@ -38,10 +38,7 @@ mod tests {
                 parts.get_header(DOCKER_DISTRIBUTION_API_VERSION),
                 Some("registry/2.0".to_string())
             );
-            assert_eq!(
-                parts.get_header(X_POWERED_BY),
-                Some("Simple-Registry".to_string())
-            );
+            assert_eq!(parts.get_header(X_POWERED_BY), Some("Angos".to_string()));
         }
     }
 }

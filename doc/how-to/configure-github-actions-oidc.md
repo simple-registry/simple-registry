@@ -6,11 +6,11 @@ title: "GitHub Actions OIDC"
 
 # Configure GitHub Actions OIDC
 
-Set up Simple-Registry to accept GitHub Actions OIDC tokens for passwordless authentication from CI/CD pipelines.
+Set up Angos to accept GitHub Actions OIDC tokens for passwordless authentication from CI/CD pipelines.
 
 ## Prerequisites
 
-- Simple-Registry running with network access from GitHub Actions
+- Angos running with network access from GitHub Actions
 - GitHub repository with Actions enabled
 
 ## Configure the Registry
@@ -42,7 +42,7 @@ rules = [
 ### Step 3: Restart the Registry
 
 ```bash
-./simple-registry -c config.toml server
+./angos -c config.toml server
 ```
 
 ---
@@ -262,7 +262,7 @@ jobs:
 Check the registry logs for authentication details:
 
 ```bash
-RUST_LOG=simple_registry::registry::server::auth=debug ./simple-registry server
+RUST_LOG=angos::command::server::auth=debug ./angos server
 ```
 
 You should see:

@@ -6,7 +6,7 @@ title: "Web UI"
 
 # Web UI Reference
 
-Reference for the Simple-Registry web interface.
+Reference for the Angos web interface.
 
 ---
 
@@ -21,7 +21,7 @@ name = "My Registry"
 | Option    | Type   | Default             | Description                           |
 |-----------|--------|---------------------|---------------------------------------|
 | `enabled` | bool   | `false`             | Enable the web interface              |
-| `name`    | string | `"simple-registry"` | Registry name displayed in the header |
+| `name`    | string | `"angos"` | Registry name displayed in the header |
 
 ---
 

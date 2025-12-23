@@ -1,8 +1,8 @@
-# Simple-Registry
+# Angos
 
 A fully OCI-compliant and Docker-compatible container registry.
 
-**[Documentation](doc//)** | **[Quick Start](doc/tutorials/quickstart.md)**
+**[Documentation](doc/)** | **[Quick Start](doc/tutorials/quickstart.md)**
 
 ## Key Features
 
@@ -43,7 +43,7 @@ default_allow = true
 EOF
 
 # Run the registry
-./simple-registry -c config.toml server
+./angos -c config.toml server
 
 # Push an image
 docker tag alpine:latest localhost:5000/test/alpine:latest
@@ -79,7 +79,7 @@ See the [Quickstart Tutorial](doc/tutorials/quickstart.md) for a complete walkth
 - [API Endpoints Reference](doc/reference/api-endpoints.md)
 - [Metrics Reference](doc/reference/metrics.md)
 
-### Understanding Simple-Registry
+### Understanding Angos
 
 - [Architecture Overview](doc/explanation/architecture.md)
 - [Storage Backends](doc/explanation/storage-backends.md)
@@ -90,7 +90,7 @@ See the [Quickstart Tutorial](doc/tutorials/quickstart.md) for a complete walkth
 ## Usage
 
 ```
-Usage: simple-registry [-c <config>] <command> [<args>]
+Usage: angos [-c <config>] <command> [<args>]
 
 An OCI-compliant and docker-compatible registry service
 

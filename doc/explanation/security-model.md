@@ -6,7 +6,7 @@ title: "Security Model"
 
 # Security Model
 
-Simple-Registry implements defense-in-depth security with multiple layers of protection.
+Angos implements defense-in-depth security with multiple layers of protection.
 
 ## Security Layers
 
@@ -92,7 +92,7 @@ Between registry and upstream registries:
 
 ## Fail-Closed Design
 
-Simple-Registry defaults to deny:
+Angos defaults to deny:
 
 | Scenario | Behavior |
 |----------|----------|
@@ -141,7 +141,7 @@ Argon2id with strong parameters:
 - Salt per-password
 
 ```bash
-./simple-registry argon
+./angos argon
 # Generates: $argon2id$v=19$m=19456,t=2,p=1$...
 ```
 
@@ -350,6 +350,6 @@ Detect anomalies:
 ## Vulnerability Reporting
 
 Report security issues to:
-https://github.com/simple-registry/simple-registry/security
+https://github.com/project-angos/angos/security
 
 Do not open public issues for security vulnerabilities.

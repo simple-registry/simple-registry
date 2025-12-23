@@ -6,7 +6,7 @@ title: "Troubleshooting"
 
 # Troubleshoot Common Issues
 
-Solutions for frequently encountered problems with Simple-Registry.
+Solutions for frequently encountered problems with Angos.
 
 ## Debug Logging
 
@@ -14,20 +14,20 @@ Enable detailed logging to diagnose issues:
 
 ```bash
 # General debug
-RUST_LOG=debug ./simple-registry server
+RUST_LOG=debug ./angos server
 
 # Specific modules
-RUST_LOG=info,simple_registry::registry::server::auth=debug ./simple-registry server
+RUST_LOG=info,angos::command::server::auth=debug ./angos server
 
 # Multiple modules
-RUST_LOG=info,simple_registry::configuration=debug,simple_registry::registry::cache=debug ./simple-registry server
+RUST_LOG=info,angos::configuration=debug,angos::cache=debug ./angos server
 ```
 
 Useful modules:
-- `simple_registry::configuration` - Config loading/watching
-- `simple_registry::registry::server::auth` - Authentication
-- `simple_registry::registry::cache` - Pull-through cache
-- `simple_registry::registry::repository::access_policy` - Policy evaluation
+- `angos::configuration` - Config loading/watching
+- `angos::command::server::auth` - Authentication
+- `angos::cache` - Pull-through cache
+- `angos::registry::access_policy` - Policy evaluation
 
 ---
 
@@ -62,7 +62,7 @@ Useful modules:
 **Solutions**:
 1. Enable policy debug logging:
    ```bash
-   RUST_LOG=simple_registry::registry::repository::access_policy=debug
+   RUST_LOG=angos::registry::access_policy=debug
    ```
 
 2. Check rules match your identity and action
@@ -193,7 +193,7 @@ Useful modules:
 **Solutions**:
 1. Enable cache debug logging:
    ```bash
-   RUST_LOG=simple_registry::registry::cache=debug
+   RUST_LOG=angos::cache=debug
    ```
 
 2. Check immutable tags for optimization:
@@ -274,7 +274,7 @@ sudo chown -R $(id -u):$(id -g) /data/registry
 **Solutions**:
 1. Check config is valid:
    ```bash
-   ./simple-registry -c config.toml server  # Will error on invalid
+   ./angos -c config.toml server  # Will error on invalid
    ```
 
 2. Some settings require restart:
@@ -356,4 +356,4 @@ rules = [
 1. **Check logs**: Enable debug logging for the relevant module
 2. **Verify config**: Test with minimal configuration
 3. **Test isolation**: Isolate the failing component
-4. **Report issues**: https://github.com/simple-registry/simple-registry/issues
+4. **Report issues**: https://github.com/project-angos/angos/issues

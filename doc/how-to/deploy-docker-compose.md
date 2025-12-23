@@ -6,7 +6,7 @@ title: "Deploy with Docker Compose"
 
 # Deploy with Docker Compose
 
-Deploy Simple-Registry using Docker Compose with persistent storage and TLS.
+Deploy Angos using Docker Compose with persistent storage and TLS.
 
 ## Prerequisites
 
@@ -47,7 +47,7 @@ version: '3.8'
 
 services:
   registry:
-    image: ghcr.io/simple-registry/simple-registry:latest
+    image: ghcr.io/project-angos/angos:latest
     ports:
       - "5000:5000"
     volumes:
@@ -118,7 +118,7 @@ version: '3.8'
 
 services:
   registry:
-    image: ghcr.io/simple-registry/simple-registry:latest
+    image: ghcr.io/project-angos/angos:latest
     ports:
       - "443:5000"
     volumes:
@@ -188,7 +188,7 @@ version: '3.8'
 
 services:
   registry:
-    image: ghcr.io/simple-registry/simple-registry:latest
+    image: ghcr.io/project-angos/angos:latest
     ports:
       - "5000:5000"
     volumes:
@@ -243,7 +243,7 @@ services:
   # ... registry service ...
 
   maintenance:
-    image: ghcr.io/simple-registry/simple-registry:latest
+    image: ghcr.io/project-angos/angos:latest
     volumes:
       - ./config:/config:ro
       - ./data:/data
@@ -253,7 +253,7 @@ services:
 
   # Better use a systemd.timer approach
   maintenance-cron:
-    image: ghcr.io/simple-registry/simple-registry:latest
+    image: ghcr.io/project-angos/angos:latest
     volumes:
       - ./config:/config:ro
       - ./data:/data
@@ -261,7 +261,7 @@ services:
     command: |
       -c 'while true; do
         sleep 86400
-        /simple-registry -c /config/config.toml scrub -t -m -b -r
+        /angos -c /config/config.toml scrub -t -m -b -r
       done'
     restart: unless-stopped
 ```

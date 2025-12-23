@@ -18,14 +18,14 @@ By the end of this tutorial, you will:
 ## Prerequisites
 
 - Completed the [Quickstart](quickstart.md) tutorial
-- Simple-Registry binary available
+- Angos binary available
 
 ## Step 1: Generate a Password Hash
 
-Simple-Registry uses Argon2 for secure password hashing. Generate a hash for your user:
+Angos uses Argon2 for secure password hashing. Generate a hash for your user:
 
 ```bash
-./simple-registry argon
+./angos argon
 ```
 
 When prompted, enter a password. The tool outputs an Argon2 hash:
@@ -115,7 +115,7 @@ sudo systemctl restart docker
 ## Step 5: Start the Registry
 
 ```bash
-./simple-registry -c config.toml server
+./angos -c config.toml server
 ```
 
 ## Step 6: Test Anonymous Access (Should Fail)

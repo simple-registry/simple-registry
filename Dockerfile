@@ -30,10 +30,10 @@ RUN if [ "$RELEASE_MODE" = "debug" ] ; then export BUILD_FLAG=""; fi; \
     if [ "$TARGETARCH" = "amd64" ] ; then export TOOLCHAIN="x86_64-unknown-linux-musl"; fi; \
     if [ "$TARGETARCH" = "arm64" ] ; then export TOOLCHAIN="aarch64-unknown-linux-musl"; fi; \
     cargo build --target=$TOOLCHAIN $BUILD_FLAG; \
-    mv "target/$TOOLCHAIN/$RELEASE_MODE/simple-registry" target/simple-registry
+    mv "target/$TOOLCHAIN/$RELEASE_MODE/angos" target/angos
 
 FROM --platform=$TARGETPLATFORM scratch AS final
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /buildroot/target/simple-registry /simple-registry
+COPY --from=build /buildroot/target/angos /angos
 EXPOSE 8000
-ENTRYPOINT ["/simple-registry"]
+ENTRYPOINT ["/angos"]

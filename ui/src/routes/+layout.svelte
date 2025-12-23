@@ -6,7 +6,7 @@
 	import { loadConfig, getRegistryName } from '$lib/config.svelte';
 
 	let { children } = $props();
-	let registryName = $state('simple-registry');
+	let registryName = $state('angos');
 
 	onMount(async () => {
 		await loadConfig();

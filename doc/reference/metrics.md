@@ -6,7 +6,7 @@ title: "Metrics"
 
 # Metrics Reference
 
-Simple-Registry exposes Prometheus metrics at the `/metrics` endpoint.
+Angos exposes Prometheus metrics at the `/metrics` endpoint.
 
 ---
 
@@ -188,7 +188,7 @@ rate(webhook_authorization_duration_seconds_bucket{le="1"}[5m])
 
 ```yaml
 scrape_configs:
-  - job_name: 'simple-registry'
+  - job_name: 'angos'
     static_configs:
       - targets: ['registry:5000']
     metrics_path: /metrics
@@ -248,7 +248,7 @@ sum(rate(webhook_authorization_requests_total[5m]))
 
 ```yaml
 groups:
-  - name: simple-registry
+  - name: angos
     rules:
       - alert: HighErrorRate
         expr: |
@@ -258,7 +258,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "High error rate on Simple-Registry"
+          summary: "High error rate on Angos"
 
       - alert: HighLatency
         expr: |
@@ -267,7 +267,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "High latency on Simple-Registry"
+          summary: "High latency on Angos"
 
       - alert: AuthFailures
         expr: |

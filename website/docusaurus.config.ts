@@ -3,15 +3,15 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
-  title: 'Simple-Registry',
+  title: 'Angos',
   tagline: 'A lightweight, OCI-compliant container registry',
   favicon: 'img/logo.svg',
 
-  url: 'https://simple-registry.github.io',
-  baseUrl: '/simple-registry/',
+  url: 'https://angos.github.io',
+  baseUrl: '/angos/',
 
-  organizationName: 'simple-registry',
-  projectName: 'simple-registry',
+  organizationName: 'angos',
+  projectName: 'angos',
 
   onBrokenLinks: 'throw',
 
@@ -33,7 +33,7 @@ const config: Config = {
         docs: {
           path: '../doc',
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/simple-registry/simple-registry/tree/main/',
+          editUrl: 'https://github.com/project-angos/angos/tree/main/',
         },
         pages: {},
         blog: false,
@@ -47,9 +47,9 @@ const config: Config = {
   themeConfig: {
     image: 'img/social-card.png',
     navbar: {
-      title: 'SIMPLE-REGISTRY',
+      title: 'ANGOS',
       logo: {
-        alt: 'Simple-Registry Logo',
+        alt: 'Angos Logo',
         src: 'img/logo.svg',
       },
       items: [
@@ -111,7 +111,7 @@ const config: Config = {
           ],
         },
         {
-          href: 'https://github.com/simple-registry/simple-registry',
+          href: 'https://github.com/project-angos/angos',
           label: 'GitHub',
           position: 'right',
         },
@@ -148,13 +148,13 @@ const config: Config = {
         {
           title: 'Community',
           items: [
-            {label: 'GitHub', href: 'https://github.com/simple-registry/simple-registry'},
-            {label: 'Issues', href: 'https://github.com/simple-registry/simple-registry/issues'},
-            {label: 'Releases', href: 'https://github.com/simple-registry/simple-registry/releases'},
+            {label: 'GitHub', href: 'https://github.com/project-angos/angos'},
+            {label: 'Issues', href: 'https://github.com/project-angos/angos/issues'},
+            {label: 'Releases', href: 'https://github.com/project-angos/angos/releases'},
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Simple-Registry.`,
+      copyright: `Copyright © ${new Date().getFullYear()} Angos.`,
     },
     prism: {
       theme: prismThemes.github,

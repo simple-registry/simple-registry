@@ -1,6 +1,6 @@
 [package]
-name = "simple-registry"
-version = "0.1.0"
+name = "angos"
+version = "1.0.0-snapshot"
 edition = "2024"
 
 [profile.release]

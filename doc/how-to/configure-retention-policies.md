@@ -10,7 +10,7 @@ Set up automated cleanup of old container images using CEL-based retention polic
 
 ## Prerequisites
 
-- Simple-Registry running
+- Angos running
 - `update_pull_time = true` if using pull-based retention
 
 ## How Retention Works
@@ -198,17 +198,17 @@ Retention policies are enforced by the `scrub` command with the `-r` flag:
 
 ```bash
 # Preview what would be deleted
-./simple-registry -c config.toml scrub --retention --dry-run
+./angos -c config.toml scrub --retention --dry-run
 
 # Enforce retention policies
-./simple-registry -c config.toml scrub --retention
+./angos -c config.toml scrub --retention
 ```
 
 ### Scheduled Enforcement
 
 **Cron:**
 ```bash
-0 3 * * * /usr/bin/simple-registry -c /etc/registry/config.toml scrub --retention
+0 3 * * * /usr/bin/angos -c /etc/registry/config.toml scrub --retention
 ```
 
 **Kubernetes CronJob:**
@@ -225,7 +225,7 @@ spec:
         spec:
           containers:
             - name: scrub
-              image: ghcr.io/simple-registry/simple-registry:latest
+              image: ghcr.io/project-angos/angos:latest
               args: ["-c", "/config/config.toml", "scrub", "--retention"]
           restartPolicy: OnFailure
 ```
@@ -237,7 +237,7 @@ spec:
 ### Check What Would Be Deleted
 
 ```bash
-RUST_LOG=info ./simple-registry scrub --retention --dry-run
+RUST_LOG=info ./angos scrub --retention --dry-run
 ```
 
 ### List Current Manifests
@@ -260,7 +260,7 @@ curl http://localhost:5000/v2/_ext/myrepo/myimage/_revisions | jq
 - Pull times are only tracked after enabling
 
 **Rules not matching:**
-- Use debug logging: `RUST_LOG=simple_registry::command::scrub=debug`
+- Use debug logging: `RUST_LOG=angos::command::scrub=debug`
 - Check that `image.tag` is null for untagged manifests
 
 ## Reference

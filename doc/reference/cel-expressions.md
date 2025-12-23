@@ -6,7 +6,7 @@ title: "CEL Expressions"
 
 # CEL Expressions Reference
 
-Simple-Registry uses [CEL (Common Expression Language)](https://cel.dev/) for access control policies and retention policies. This reference documents all available variables and functions.
+Angos uses [CEL (Common Expression Language)](https://cel.dev/) for access control policies and retention policies. This reference documents all available variables and functions.
 
 ---
 

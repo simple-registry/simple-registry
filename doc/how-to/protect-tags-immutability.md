@@ -10,7 +10,7 @@ Configure immutable tags to prevent overwrites and ensure deployment reproducibi
 
 ## Prerequisites
 
-- Simple-Registry running
+- Angos running
 
 ## Why Immutable Tags?
 

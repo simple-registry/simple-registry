@@ -6,7 +6,7 @@ title: "API Endpoints"
 
 # API Endpoints Reference
 
-Simple-Registry implements the [OCI Distribution Specification v1.1](https://github.com/opencontainers/distribution-spec/releases/tag/v1.1.0) plus extension endpoints.
+Angos implements the [OCI Distribution Specification v1.1](https://github.com/opencontainers/distribution-spec/releases/tag/v1.1.0) plus extension endpoints.
 
 ---
 

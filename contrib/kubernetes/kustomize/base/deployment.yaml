@@ -2,23 +2,23 @@
 kind: Deployment
 apiVersion: apps/v1
 metadata:
-  name: simple-registry
-  namespace: simple-registry
+  name: angos
+  namespace: angos
   labels:
-    app: simple-registry
+    app: angos
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: simple-registry
+      app: angos
   template:
     metadata:
       labels:
-        app: simple-registry
+        app: angos
     spec:
       containers:
-      - name: simple-registry
-        image: ghcr.io/simple-registry/simple-registry:main
+      - name: angos
+        image: ghcr.io/project-angos/angos:main
         args:
         - server
         env:
@@ -46,10 +46,10 @@ spec:
           limits:
             memory: "500Mi"
         volumeMounts:
-        - name: simple-registry-config
+        - name: angos-config
           mountPath: /config.toml
           subPath: config.toml
       volumes:
-      - name: simple-registry-config
+      - name: angos-config
         secret:
-          secretName: simple-registry-config
+          secretName: angos-config

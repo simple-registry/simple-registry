@@ -10,7 +10,7 @@ Configure CEL-based access control policies for fine-grained authorization.
 
 ## Prerequisites
 
-- Simple-Registry running
+- Angos running
 - Optional: Authentication configured (basic auth, mTLS, or OIDC)
 
 ## Basic Concepts
@@ -254,8 +254,8 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:5000/v2/
 ### Debug Logging
 
 ```bash
-RUST_LOG=simple_registry::registry::repository::access_policy=debug \
-  ./simple-registry server
+RUST_LOG=angos::registry::access_policy=debug \
+  ./angos server
 ```
 
 ---

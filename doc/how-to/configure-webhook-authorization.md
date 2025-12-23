@@ -10,7 +10,7 @@ Delegate access control decisions to an external HTTP service for maximum flexib
 
 ## Prerequisites
 
-- Simple-Registry running
+- Angos running
 - External authorization service accessible via HTTP/HTTPS
 
 ## How Webhooks Work
@@ -314,8 +314,8 @@ histogram_quantile(0.95, rate(webhook_authorization_duration_seconds_bucket[5m])
 
 **Debug logging:**
 ```bash
-RUST_LOG=simple_registry::registry::server::auth::webhook=debug \
-  ./simple-registry server
+RUST_LOG=angos::command::server::auth::webhook=debug \
+  ./angos server
 ```
 
 ## Reference
