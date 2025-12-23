@@ -8,7 +8,7 @@ resources:
 - ingressroutetcp.yaml
 
 patches:
-  - target: { kind: Deployment, labelSelector: app=simple-registry }
+  - target: { kind: Deployment, labelSelector: app=angos }
     patch: |-
       - op: add
         path: /spec/template/spec/volumes/-
@@ -28,7 +28,7 @@ patches:
                     items:
                       - key: tls.crt
                         path: client-ca-certificate.pem
-  - target: { kind: Deployment, labelSelector: app=simple-registry }
+  - target: { kind: Deployment, labelSelector: app=angos }
     patch: |-
       - op: add
         path: /spec/template/spec/containers/0/volumeMounts/-

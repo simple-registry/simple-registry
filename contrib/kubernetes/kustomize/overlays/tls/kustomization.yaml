@@ -8,7 +8,7 @@ resources:
 - ingress.yaml
 
 patches:
-  - target: { kind: Deployment, labelSelector: app=simple-registry }
+  - target: { kind: Deployment, labelSelector: app=angos }
     patch: |-
       - op: add
         path: /spec/template/spec/volumes/-
@@ -23,7 +23,7 @@ patches:
                         path: server-certificate.pem
                       - key: tls.key
                         path: server-private-key.pem
-  - target: { kind: Deployment, labelSelector: app=simple-registry }
+  - target: { kind: Deployment, labelSelector: app=angos }
     patch: |-
       - op: add
         path: /spec/template/spec/containers/0/volumeMounts/-

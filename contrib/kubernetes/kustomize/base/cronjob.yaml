@@ -3,7 +3,7 @@ kind: CronJob
 apiVersion: batch/v1
 metadata:
   name: scrub
-  namespace: simple-registry
+  namespace: angos
 spec:
   schedule: "*/5 * * * *"
   concurrencyPolicy: Forbid
@@ -14,7 +14,7 @@ spec:
           restartPolicy: Never
           containers:
           - name: cronjob
-            image: ghcr.io/simple-registry/simple-registry:main
+            image: ghcr.io/project-angos/angos:main
             args:
             - scrub
             env:
@@ -27,10 +27,10 @@ spec:
               limits:
                 memory: "16Mi"
             volumeMounts:
-              - name: simple-registry-config
+              - name: angos-config
                 mountPath: /config.toml
                 subPath: config.toml
           volumes:
-            - name: simple-registry-config
+            - name: angos-config
               secret:
-                secretName: simple-registry-config
+                secretName: angos-config

@@ -205,7 +205,7 @@ jobs:
             sleep 1
           done
           if [ $i -eq 10 ]; then
-            echo "simple-registry did not start within 10 seconds"
+            echo "angos did not start within 10 seconds"
             exit 1
           fi
 
@@ -269,7 +269,7 @@ jobs:
           platform=${{ matrix.platform }}
           arch=${platform#linux/}
           docker create --platform ${{ matrix.platform }} --name extract ${{ env.GHCR_REPO }}@${{ steps.build.outputs.digest }}
-          docker cp extract:/simple-registry simple-registry-${arch}
+          docker cp extract:/angos angos-${arch}
           docker rm extract
 
       - name: Upload digest
@@ -284,7 +284,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ env.PLATFORM_PAIR }}
-          path: simple-registry-*
+          path: angos-*
           if-no-files-found: error
           retention-days: 1
 
@@ -369,5 +369,5 @@ jobs:
 
             | Platform    | Binary                  |
             |-------------|-------------------------|
-            | Linux amd64 | `simple-registry-amd64` |
-            | Linux arm64 | `simple-registry-arm64` |
+            | Linux amd64 | `angos-amd64` |
+            | Linux arm64 | `angos-arm64` |

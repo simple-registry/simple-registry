@@ -10,7 +10,7 @@ function HomepageHeader() {
     <header className={styles.heroBanner}>
       <div className="container">
         <div className={styles.heroContent}>
-          <h1 className={styles.heroTitle}>SIMPLE-REGISTRY</h1>
+          <h1 className={styles.heroTitle}>Angos</h1>
           <p className={styles.heroSubtitle}>{siteConfig.tagline}</p>
           <div className={styles.buttons}>
             <Link className={styles.button} to="/docs/tutorials/quickstart">
@@ -86,8 +86,8 @@ function HomepageQuickStart() {
           <pre>
             <code>
 {`# Download
-curl -LO https://github.com/simple-registry/simple-registry/releases/latest/download/simple-registry-linux-amd64
-chmod +x simple-registry-linux-amd64
+curl -LO https://github.com/project-angos/angos/releases/latest/download/angos-linux-amd64
+chmod +x angos-linux-amd64
 
 # Configure
 cat > config.toml << EOF
@@ -105,7 +105,7 @@ default_allow = true
 EOF
 
 # Run
-./simple-registry-linux-amd64 -c config.toml server`}
+./angos-linux-amd64 -c config.toml server`}
             </code>
           </pre>
         </div>

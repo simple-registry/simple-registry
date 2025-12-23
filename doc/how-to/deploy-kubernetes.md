@@ -6,7 +6,7 @@ title: "Deploy on Kubernetes"
 
 # Deploy on Kubernetes
 
-Deploy Simple-Registry on Kubernetes using Kustomize or raw manifests.
+Deploy Angos on Kubernetes using Kustomize or raw manifests.
 
 ## Prerequisites
 
@@ -22,8 +22,8 @@ Deploy Simple-Registry on Kubernetes using Kustomize or raw manifests.
 ### Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/simple-registry/simple-registry.git
-cd simple-registry
+git clone https://github.com/project-angos/angos.git
+cd angos
 ```
 
 ### Step 2: Choose a TLS termination approach
@@ -115,7 +115,7 @@ spec:
     spec:
       containers:
         - name: registry
-          image: ghcr.io/simple-registry/simple-registry:latest
+          image: ghcr.io/project-angos/angos:latest
           args: ["-c", "/config/config.toml", "server"]
           ports:
             - containerPort: 5000
@@ -297,7 +297,7 @@ spec:
               mountPath: /config
       containers:
         - name: registry
-          image: ghcr.io/simple-registry/simple-registry:latest
+          image: ghcr.io/project-angos/angos:latest
           args: ["-c", "/config/config.toml", "server"]
           ports:
             - containerPort: 5000
@@ -391,7 +391,7 @@ spec:
         spec:
           containers:
             - name: scrub
-              image: ghcr.io/simple-registry/simple-registry:latest
+              image: ghcr.io/project-angos/angos:latest
               args: ["-c", "/config/config.toml", "scrub", "-t", "-m", "-b", "-r"]
               volumeMounts:
                 - name: config

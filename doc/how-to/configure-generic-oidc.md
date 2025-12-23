@@ -6,11 +6,11 @@ title: "Generic OIDC"
 
 # Configure Generic OIDC
 
-Set up Simple-Registry to accept tokens from any OIDC-compliant identity provider (Google, Okta, Auth0, Keycloak, etc.).
+Set up Angos to accept tokens from any OIDC-compliant identity provider (Google, Okta, Auth0, Keycloak, etc.).
 
 ## Prerequisites
 
-- Simple-Registry running
+- Angos running
 - OIDC provider configured with:
   - Client ID (for audience validation)
   - OIDC discovery endpoint or JWKS URI
@@ -216,7 +216,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 Enable debug logging to see token validation:
 
 ```bash
-RUST_LOG=simple_registry::registry::server::auth=debug ./simple-registry server
+RUST_LOG=angos::command::server::auth=debug ./angos server
 ```
 
 You should see:

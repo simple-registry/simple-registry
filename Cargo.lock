@@ -27,6 +27,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "angos"
+version = "1.0.0-snapshot"
+dependencies = [
+ "arc-swap",
+ "argh",
+ "argon2",
+ "async-trait",
+ "aws-sdk-s3",
+ "base64",
+ "bytes",
+ "bytesize",
+ "cel-interpreter",
+ "chrono",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "humantime",
+ "hyper 1.8.1",
+ "hyper-util",
+ "jsonwebtoken",
+ "mime_guess",
+ "notify",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "parking_lot",
+ "prometheus",
+ "redis",
+ "regex",
+ "reqwest",
+ "rpassword",
+ "rust-embed",
+ "rustls 0.23.35",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2 0.11.0-rc.3",
+ "tempfile",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+ "x509-parser",
+ "zeroize",
+]
+
+[[package]]
 name = "antlr4rust"
 version = "0.3.0-rc2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2849,59 +2902,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "rand_core 0.6.4",
-]
-
-[[package]]
-name = "simple-registry"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "argh",
- "argon2",
- "async-trait",
- "aws-sdk-s3",
- "base64",
- "bytes",
- "bytesize",
- "cel-interpreter",
- "chrono",
- "futures-util",
- "hex",
- "http-body-util",
- "humantime",
- "hyper 1.8.1",
- "hyper-util",
- "jsonwebtoken",
- "mime_guess",
- "notify",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "parking_lot",
- "prometheus",
- "redis",
- "regex",
- "reqwest",
- "rpassword",
- "rust-embed",
- "rustls 0.23.35",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha2 0.11.0-rc.3",
- "tempfile",
- "tokio",
- "tokio-rustls 0.26.4",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "uuid",
- "wiremock",
- "x509-parser",
- "zeroize",
 ]
 
 [[package]]

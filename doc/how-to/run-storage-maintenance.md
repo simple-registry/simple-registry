@@ -10,12 +10,12 @@ Verify storage integrity and enforce retention policies using the `scrub` comman
 
 ## Prerequisites
 
-- Simple-Registry installed
+- Angos installed
 - Access to the same configuration and storage as the running registry
 
 ## Online vs Offline Operations
 
-Simple-Registry performs garbage collection **online** during normal operation - unreferenced blobs are automatically cleaned up without downtime.
+Angos performs garbage collection **online** during normal operation - unreferenced blobs are automatically cleaned up without downtime.
 
 The `scrub` command is for **offline maintenance** tasks:
 - Checking and repairing data corruption
@@ -45,7 +45,7 @@ The `scrub` command performs various maintenance operations. Each check must be 
 See what would be deleted without making changes:
 
 ```bash
-./simple-registry -c config.toml scrub -d -t -m -b -r
+./angos -c config.toml scrub -d -t -m -b -r
 ```
 
 ### Run Full Cleanup
@@ -53,7 +53,7 @@ See what would be deleted without making changes:
 Run all checks (tags, manifests, blobs, and retention policies):
 
 ```bash
-./simple-registry -c config.toml scrub -t -m -b -r
+./angos -c config.toml scrub -t -m -b -r
 ```
 
 ### Selective Cleanup
@@ -62,19 +62,19 @@ Run only specific checks:
 
 ```bash
 # Enforce only retention policies
-./simple-registry -c config.toml scrub --retention
+./angos -c config.toml scrub --retention
 
 # Clean up orphaned blobs only
-./simple-registry -c config.toml scrub --blobs
+./angos -c config.toml scrub --blobs
 
 # Remove incomplete uploads older than 1 hour
-./simple-registry -c config.toml scrub --uploads 1h
+./angos -c config.toml scrub --uploads 1h
 ```
 
 ### With Logging
 
 ```bash
-RUST_LOG=info ./simple-registry -c config.toml scrub -t -m -b -r
+RUST_LOG=info ./angos -c config.toml scrub -t -m -b -r
 ```
 
 ---
@@ -85,10 +85,10 @@ RUST_LOG=info ./simple-registry -c config.toml scrub -t -m -b -r
 
 ```bash
 # Daily at 3 AM - full cleanup
-0 3 * * * /usr/bin/simple-registry -c /etc/registry/config.toml scrub -t -m -b -r >> /var/log/registry-scrub.log 2>&1
+0 3 * * * /usr/bin/angos -c /etc/registry/config.toml scrub -t -m -b -r >> /var/log/registry-scrub.log 2>&1
 
 # Weekly on Sunday at 2 AM
-0 2 * * 0 /usr/bin/simple-registry -c /etc/registry/config.toml scrub -t -m -b -r
+0 2 * * 0 /usr/bin/angos -c /etc/registry/config.toml scrub -t -m -b -r
 ```
 
 ### Systemd Timer
@@ -101,7 +101,7 @@ Description=Registry Storage Maintenance
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/simple-registry -c /etc/registry/config.toml scrub -t -m -b -r
+ExecStart=/usr/bin/angos -c /etc/registry/config.toml scrub -t -m -b -r
 Environment=RUST_LOG=info
 ```
 
@@ -144,7 +144,7 @@ spec:
         spec:
           containers:
             - name: scrub
-              image: ghcr.io/simple-registry/simple-registry:latest
+              image: ghcr.io/project-angos/angos:latest
               args: ["-c", "/config/config.toml", "scrub", "-t", "-m", "-b", "-r"]
               env:
                 - name: RUST_LOG
@@ -170,7 +170,7 @@ spec:
 ```yaml
 services:
   scrub:
-    image: ghcr.io/simple-registry/simple-registry:latest
+    image: ghcr.io/project-angos/angos:latest
     command: ["-c", "/config/config.toml", "scrub", "-t", "-m", "-b", "-r"]
     volumes:
       - ./config:/config:ro
@@ -251,7 +251,7 @@ curl http://localhost:5000/v2/_ext/_repositories | jq
 - Verify manifests aren't protected
 - Use dry-run with debug logging:
   ```bash
-  RUST_LOG=debug ./simple-registry scrub --dry-run
+  RUST_LOG=debug ./angos scrub --dry-run
   ```
 
 ### Storage Not Reduced

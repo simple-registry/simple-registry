@@ -6,12 +6,12 @@ title: "Quickstart"
 
 # Quickstart: Your First Container Registry
 
-Get Simple-Registry running and push your first container image in under 5 minutes.
+Get Angos running and push your first container image in under 5 minutes.
 
 ## What You'll Learn
 
 By the end of this tutorial, you will:
-- Run a Simple-Registry server
+- Run a Angos server
 - Push a container image to your registry
 - Pull the image back
 
@@ -20,24 +20,24 @@ By the end of this tutorial, you will:
 - Docker installed and running
 - A terminal
 
-## Step 1: Download Simple-Registry
+## Step 1: Download Angos
 
-Download the latest release for your platform from the [releases page](https://github.com/simple-registry/simple-registry/releases):
+Download the latest release for your platform from the [releases page](https://github.com/project-angos/angos/releases):
 
 ```bash
 # Example for Linux x86_64
-curl -LO https://github.com/simple-registry/simple-registry/releases/latest/download/simple-registry-linux-amd64
-chmod +x simple-registry-linux-amd64
-mv simple-registry-linux-amd64 simple-registry
+curl -LO https://github.com/project-angos/angos/releases/latest/download/angos-linux-amd64
+chmod +x angos-linux-amd64
+mv angos-linux-amd64 angos
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/simple-registry/simple-registry.git
-cd simple-registry
+git clone https://github.com/project-angos/angos.git
+cd angos
 cargo build --release
-cp target/release/simple-registry .
+cp target/release/angos .
 ```
 
 ## Step 2: Create a Minimal Configuration
@@ -67,7 +67,7 @@ This configures the registry to:
 ## Step 3: Start the Registry
 
 ```bash
-./simple-registry -c config.toml server
+./angos -c config.toml server
 ```
 
 You should see output indicating the server is running:

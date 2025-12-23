@@ -10,7 +10,7 @@ Set up the built-in web interface for browsing and managing container images.
 
 ## Prerequisites
 
-- Simple-Registry running
+- Angos running
 
 ## Basic Setup
 
@@ -34,7 +34,7 @@ name = "My Container Registry"
 ### Restart the Registry
 
 ```bash
-./simple-registry -c config.toml server
+./angos -c config.toml server
 ```
 
 ### Access the UI

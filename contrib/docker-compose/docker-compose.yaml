@@ -3,8 +3,8 @@ services:
     image: valkey/valkey:8.0.2
     ports:
       - "6379:6379"
-  simple-registry:
-    image: ghcr.io/simple-registry/simple-registry:main
+  angos:
+    image: ghcr.io/project-angos/angos:main
     ports:
       - "8000:8000"
     volumes:

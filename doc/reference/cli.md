@@ -6,12 +6,12 @@ title: "CLI"
 
 # CLI Reference
 
-Simple-Registry command-line interface.
+Angos command-line interface.
 
 ## Synopsis
 
 ```
-simple-registry [-c <config>] <command> [<args>]
+angos [-c <config>] <command> [<args>]
 ```
 
 ## Global Options
@@ -30,8 +30,8 @@ simple-registry [-c <config>] <command> [<args>]
 Run the registry HTTP server.
 
 ```bash
-simple-registry server
-simple-registry -c /etc/registry/config.toml server
+angos server
+angos -c /etc/registry/config.toml server
 ```
 
 The server starts listening on the configured `bind_address` and `port`. It handles:
@@ -44,19 +44,19 @@ The server starts listening on the configured `bind_address` and `port`. It hand
 
 | Variable   | Description                                                       |
 |------------|-------------------------------------------------------------------|
-| `RUST_LOG` | Log level filter (e.g., `info`, `debug`, `simple_registry=debug`) |
+| `RUST_LOG` | Log level filter (e.g., `info`, `debug`, `angos=debug`) |
 
 **Examples:**
 
 ```bash
 # Run with info logging
-RUST_LOG=info simple-registry server
+RUST_LOG=info angos server
 
 # Run with debug logging for specific module
-RUST_LOG=simple_registry::registry=debug simple-registry server
+RUST_LOG=angos::registry=debug angos server
 
 # Run with custom config
-simple-registry -c production.toml server
+angos -c production.toml server
 ```
 
 ---
@@ -66,7 +66,7 @@ simple-registry -c production.toml server
 Check storage for inconsistencies and perform maintenance tasks.
 
 ```bash
-simple-registry scrub [options]
+angos scrub [options]
 ```
 
 The scrub command performs storage maintenance and integrity checks. You must specify which checks to run using the flags below. Note that garbage collection happens online during normal server operation.
@@ -86,25 +86,25 @@ The scrub command performs storage maintenance and integrity checks. You must sp
 
 ```bash
 # Preview all maintenance operations
-simple-registry scrub -d -t -m -b -r
+angos scrub -d -t -m -b -r
 
 # Run full storage integrity check
-simple-registry scrub -t -m -b -r
+angos scrub -t -m -b -r
 
 # Enforce only retention policies
-simple-registry scrub --retention
+angos scrub --retention
 
 # Check blob storage integrity
-simple-registry scrub --blobs
+angos scrub --blobs
 
 # Remove incomplete uploads older than 1 hour
-simple-registry scrub --uploads 1h
+angos scrub --uploads 1h
 
 # Preview retention policy enforcement
-simple-registry scrub --retention --dry-run
+angos scrub --retention --dry-run
 
 # Run with verbose logging
-RUST_LOG=info simple-registry scrub -t -m -b -r
+RUST_LOG=info angos scrub -t -m -b -r
 ```
 
 **Scheduling:**
@@ -113,7 +113,7 @@ Run scrub as a scheduled task for regular maintenance:
 
 ```bash
 # Cron example (daily at 3 AM) - full maintenance
-0 3 * * * /usr/bin/simple-registry -c /etc/registry/config.toml scrub -t -m -b -r
+0 3 * * * /usr/bin/angos -c /etc/registry/config.toml scrub -t -m -b -r
 ```
 
 ```yaml
@@ -130,7 +130,7 @@ spec:
         spec:
           containers:
           - name: scrub
-            image: ghcr.io/simple-registry/simple-registry:latest
+            image: ghcr.io/project-angos/angos:latest
             args: ["-c", "/config/config.toml", "scrub", "-t", "-m", "-b", "-r"]
           restartPolicy: OnFailure
 ```
@@ -142,7 +142,7 @@ spec:
 Generate Argon2 password hashes for basic authentication.
 
 ```bash
-simple-registry argon
+angos argon
 ```
 
 Interactive command that prompts for a password and outputs the Argon2 hash. Use this hash in the `auth.identity.<name>.password` configuration.
@@ -150,7 +150,7 @@ Interactive command that prompts for a password and outputs the Argon2 hash. Use
 **Example:**
 
 ```bash
-$ simple-registry argon
+$ angos argon
 Input Password: ********
 $argon2id$v=19$m=19456,t=2,p=1$randomsalt$hashvalue
 ```
@@ -176,7 +176,7 @@ password = "$argon2id$v=19$m=19456,t=2,p=1$randomsalt$hashvalue"
 
 ## Logging
 
-Simple-Registry uses the `RUST_LOG` environment variable for log configuration.
+Angos uses the `RUST_LOG` environment variable for log configuration.
 
 **Log Levels:**
 - `error` - Errors only

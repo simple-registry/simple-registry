@@ -6,16 +6,16 @@ title: "Configure mTLS"
 
 # Configure mTLS
 
-Set up mutual TLS for client certificate authentication between container runtimes and Simple-Registry.
+Set up mutual TLS for client certificate authentication between container runtimes and Angos.
 
 ## Prerequisites
 
-- Simple-Registry instance that terminates TLS itself (not behind a TLS-terminating proxy)
+- Angos instance that terminates TLS itself (not behind a TLS-terminating proxy)
 - Server certificate and private key
 - Client CA certificate (from your internal PKI)
 - Client certificate and private key
 
-## Configure Simple-Registry
+## Configure Angos
 
 ### Step 1: Prepare Certificates
 
@@ -46,7 +46,7 @@ client_ca_bundle = "/tls/client-ca-bundle.pem"
 ### Step 3: Restart the Registry
 
 ```bash
-./simple-registry -c config.toml server
+./angos -c config.toml server
 ```
 
 ---
@@ -240,7 +240,7 @@ rules = [
 
 **Debug logging:**
 ```bash
-RUST_LOG=simple_registry::registry::server::auth=debug ./simple-registry server
+RUST_LOG=angos::command::server::auth=debug ./angos server
 ```
 
 ## Next Steps

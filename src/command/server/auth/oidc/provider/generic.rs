@@ -442,7 +442,7 @@ mod tests {
 
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&["https://token.actions.githubusercontent.com"]);
-        validation.set_audience(&["https://github.com/simple-registry"]);
+        validation.set_audience(&["https://github.com/angos"]);
         validation.leeway = 60;
         validation.validate_exp = true;
         validation.validate_nbf = true;

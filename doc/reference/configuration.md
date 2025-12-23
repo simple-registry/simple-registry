@@ -6,7 +6,7 @@ title: "Configuration"
 
 # Configuration Reference
 
-Simple-Registry is configured via a TOML file (default: `config.toml`). The configuration is automatically reloaded when the file changes.
+Angos is configured via a TOML file (default: `config.toml`). The configuration is automatically reloaded when the file changes.
 
 ## Hot Reloading
 
@@ -238,10 +238,10 @@ Same as `global.retention_policy`.
 
 ## Web UI (`ui`)
 
-| Option    | Type   | Default             | Description                |
-|-----------|--------|---------------------|----------------------------|
-| `enabled` | bool   | `false`             | Enable web interface       |
-| `name`    | string | `"simple-registry"` | Registry name in UI header |
+| Option    | Type   | Default   | Description                |
+|-----------|--------|-----------|----------------------------|
+| `enabled` | bool   | `false`   | Enable web interface       |
+| `name`    | string | `"angos"` | Registry name in UI header |
 
 ---
 

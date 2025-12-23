@@ -54,7 +54,7 @@ fn set_tracing(config: Option<ObservabilityConfig>) -> Result<(), configuration:
             .with_sampler(Sampler::TraceIdRatioBased(tracing_config.sampling_rate))
             .build();
 
-        let tracer = tracer_provider.tracer("simple-registry");
+        let tracer = tracer_provider.tracer("angos");
         global::set_tracer_provider(tracer_provider);
         let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 

@@ -6,14 +6,14 @@ title: "Pull-Through Caching"
 
 # Pull-Through Caching
 
-Simple-Registry can act as a caching proxy for upstream container registries, reducing bandwidth, improving performance, and protecting against rate limits.
+Angos can act as a caching proxy for upstream container registries, reducing bandwidth, improving performance, and protecting against rate limits.
 
 ## How It Works
 
 ```mermaid
 sequenceDiagram
     participant Client as Container Runtime
-    participant Registry as Simple-Registry
+    participant Registry as Angos
     participant Cache as Local Cache
     participant Upstream as Upstream Registry
 
@@ -170,12 +170,12 @@ sequenceDiagram
 
 ## Streaming Architecture
 
-For blob cache misses, Simple-Registry streams data to the client while caching in the background:
+For blob cache misses, Angos streams data to the client while caching in the background:
 
 ```mermaid
 sequenceDiagram
     participant Upstream as Upstream Registry
-    participant Registry as Simple-Registry
+    participant Registry as Angos
     participant Client
     participant Storage
 

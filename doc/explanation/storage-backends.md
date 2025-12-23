@@ -6,7 +6,7 @@ title: "Storage Backends"
 
 # Storage Backends
 
-Simple-Registry supports two storage backends: filesystem and S3-compatible object storage.
+Angos supports two storage backends: filesystem and S3-compatible object storage.
 This document explains when to use each and their trade-offs.
 
 ## Overview
@@ -58,7 +58,7 @@ sequenceDiagram
 
 ## Blob Store vs Metadata Store
 
-Simple-Registry separates storage into two logical stores:
+Angos separates storage into two logical stores:
 
 | Store              | Contents               | Size       | Access Pattern          |
 |--------------------|------------------------|------------|-------------------------|

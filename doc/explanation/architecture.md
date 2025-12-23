@@ -6,7 +6,7 @@ title: "Architecture"
 
 # Architecture Overview
 
-Simple-Registry is an OCI-compliant container registry designed for resource efficiency, security, and operational simplicity.
+Angos is an OCI-compliant container registry designed for resource efficiency, security, and operational simplicity.
 
 ## System Design
 

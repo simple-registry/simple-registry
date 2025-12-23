@@ -2,11 +2,11 @@
 kind: Service
 apiVersion: v1
 metadata:
-  name: simple-registry
-  namespace: simple-registry
+  name: angos
+  namespace: angos
 spec:
   selector:
-    app: simple-registry
+    app: angos
   ports:
   - protocol: TCP
     port: 8000

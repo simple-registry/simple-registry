@@ -1,10 +1,10 @@
-# Simple-Registry Documentation
+# Angos Documentation
 
-Welcome to the Simple-Registry documentation. Simple-Registry is a fully OCI-compliant and Docker-compatible container registry designed for resource efficiency, security, and operational simplicity.
+Welcome to the Angos documentation. Angos is a fully OCI-compliant and Docker-compatible container registry designed for resource efficiency, security, and operational simplicity.
 
 ## Getting Started
 
-New to Simple-Registry? Start with these tutorials:
+New to Angos? Start with these tutorials:
 
 - [Quickstart](tutorials/quickstart.md) - Get a registry running in 5 minutes
 - [Your First Private Registry](tutorials/your-first-private-registry.md) - Add authentication and access control
@@ -45,7 +45,7 @@ Detailed technical reference:
 - [Web UI Reference](reference/ui.md) - Web interface
 - [Metrics Reference](reference/metrics.md) - Prometheus metrics
 
-## Understanding Simple-Registry
+## Understanding Angos
 
 Conceptual explanations and architecture:
 
@@ -70,4 +70,4 @@ Conceptual explanations and architecture:
 ## Getting Help
 
 - [Troubleshoot Common Issues](how-to/troubleshoot-common-issues.md)
-- [GitHub Issues](https://github.com/simple-registry/simple-registry/issues)
+- [GitHub Issues](https://github.com/project-angos/angos/issues)

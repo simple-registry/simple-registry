@@ -84,7 +84,7 @@ impl Default for UiConfig {
 
 impl UiConfig {
     fn default_name() -> String {
-        "simple-registry".to_string()
+        "angos".to_string()
     }
 }
 
@@ -433,7 +433,7 @@ mod tests {
 
         let config = Configuration::load_from_str(config).unwrap();
         assert!(!config.ui.enabled);
-        assert_eq!(config.ui.name, "simple-registry");
+        assert_eq!(config.ui.name, "angos");
     }
 
     #[tokio::test]
@@ -575,7 +575,7 @@ mod tests {
 
         [cache.redis]
         url = "redis://localhost:6379"
-        key_prefix = "simple-registry:"
+        key_prefix = "angos:"
         "#;
 
         let config = Configuration::load_from_str(config).unwrap();
@@ -595,7 +595,7 @@ mod tests {
 
         [cache_store.redis]
         url = "redis://localhost:6379"
-        key_prefix = "simple-registry:"
+        key_prefix = "angos:"
         "#;
 
         let config = Configuration::load_from_str(config).unwrap();
