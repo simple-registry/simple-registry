@@ -8,3 +8,7 @@ tls.d/*.csr
 
 /conformance.test
 /conformance/*-data
+
+/website/node_modules
+/website/build
+/website/.docusaurus

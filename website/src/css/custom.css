@@ -1,0 +1,296 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+:root {
+  /* Primary colors - matching UI */
+  --ifm-color-primary: #00896e;
+  --ifm-color-primary-dark: #007a62;
+  --ifm-color-primary-darker: #00735c;
+  --ifm-color-primary-darkest: #005f4c;
+  --ifm-color-primary-light: #00987a;
+  --ifm-color-primary-lighter: #009f80;
+  --ifm-color-primary-lightest: #00b594;
+
+  /* Secondary color */
+  --ifm-color-secondary: #0969da;
+
+  /* Font */
+  --ifm-font-family-base: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  --ifm-font-family-monospace: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  --ifm-code-font-size: 90%;
+
+  /* Sizing */
+  --ifm-font-size-base: 14px;
+  --ifm-line-height-base: 1.5;
+
+  /* Light theme surfaces */
+  --ifm-background-color: #ffffff;
+  --ifm-background-surface-color: #f6f8fa;
+  --ifm-navbar-background-color: #f6f8fa;
+  --ifm-footer-background-color: #1f2328;
+
+  /* Borders */
+  --ifm-toc-border-color: #d0d7de;
+  --ifm-hr-border-color: #d0d7de;
+
+  /* Code blocks */
+  --ifm-code-background: #f6f8fa;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 137, 110, 0.1);
+}
+
+[data-theme='dark'] {
+  /* Primary colors - matching UI dark theme */
+  --ifm-color-primary: #00d4aa;
+  --ifm-color-primary-dark: #00bf99;
+  --ifm-color-primary-darker: #00b491;
+  --ifm-color-primary-darkest: #009577;
+  --ifm-color-primary-light: #00e9bb;
+  --ifm-color-primary-lighter: #00f4c3;
+  --ifm-color-primary-lightest: #14ffce;
+
+  /* Secondary color */
+  --ifm-color-secondary: #58a6ff;
+
+  /* Dark theme surfaces - matching UI */
+  --ifm-background-color: #0a0e14;
+  --ifm-background-surface-color: #0d1117;
+  --ifm-navbar-background-color: #0d1117;
+  --ifm-footer-background-color: #0d1117;
+  --ifm-card-background-color: #161b22;
+
+  /* Text colors */
+  --ifm-font-color-base: #c9d1d9;
+  --ifm-font-color-secondary: #6e7681;
+
+  /* Borders */
+  --ifm-toc-border-color: #21262d;
+  --ifm-hr-border-color: #21262d;
+
+  /* Code blocks */
+  --ifm-code-background: #161b22;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 212, 170, 0.15);
+}
+
+/* Navbar styling */
+.navbar {
+  border-bottom: 1px solid var(--ifm-toc-border-color);
+  box-shadow: none;
+}
+
+.navbar__title {
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  font-size: 14px;
+}
+
+.navbar__link {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* Sidebar styling */
+.theme-doc-sidebar-container {
+  border-right: 1px solid var(--ifm-toc-border-color) !important;
+}
+
+.menu__link {
+  font-size: 13px;
+  border-radius: 0;
+}
+
+/* Only style actual page links as active, not category headers */
+.menu__link--active:not(.menu__link--sublist) {
+  background: #005f4c !important;
+  color: #ffffff !important;
+  font-weight: 500;
+}
+
+.menu__link--active:not(.menu__link--sublist):hover {
+  background: #004d3d !important;
+  color: #ffffff !important;
+}
+
+[data-theme='dark'] .menu__link--active:not(.menu__link--sublist) {
+  background: var(--ifm-color-primary) !important;
+  color: #0a0e14 !important;
+  font-weight: 500;
+}
+
+[data-theme='dark'] .menu__link--active:not(.menu__link--sublist):hover {
+  background: var(--ifm-color-primary-dark) !important;
+  color: #0a0e14 !important;
+}
+
+/* Category headers should not get active background */
+.menu__list-item-collapsible > .menu__link--active {
+  background: transparent !important;
+  color: var(--ifm-font-color-base) !important;
+}
+
+.menu__list-item-collapsible:hover {
+  background: transparent;
+}
+
+/* Category labels */
+.theme-doc-sidebar-item-category > .menu__list-item-collapsible > .menu__link {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ifm-font-color-secondary) !important;
+  background: transparent !important;
+}
+
+/* Code blocks */
+.prism-code {
+  font-size: 12px;
+}
+
+pre {
+  border: 1px solid var(--ifm-toc-border-color);
+}
+
+code {
+  border: none;
+  padding: 0.1rem 0.3rem;
+}
+
+/* Tables */
+table {
+  font-size: 12px;
+  border: 1px solid var(--ifm-toc-border-color);
+}
+
+th {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+}
+
+tr:nth-child(2n) {
+  background: var(--ifm-background-surface-color);
+}
+
+/* Headings */
+h1 {
+  font-size: 1.75rem;
+  font-weight: 600;
+}
+
+h2 {
+  font-size: 1.25rem;
+  font-weight: 500;
+  border-bottom: 1px solid var(--ifm-toc-border-color);
+  padding-bottom: 0.5rem;
+}
+
+h3 {
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+/* Links */
+a {
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: none;
+  opacity: 0.9;
+}
+
+/* Admonitions */
+.alert {
+  border-radius: 0;
+  border-left-width: 3px;
+  font-size: 13px;
+}
+
+/* TOC styling */
+.table-of-contents {
+  font-size: 12px;
+}
+
+.table-of-contents__link {
+  font-size: 12px;
+}
+
+/* Pagination */
+.pagination-nav__link {
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: 0;
+}
+
+.pagination-nav__label {
+  font-size: 13px;
+}
+
+/* Footer */
+.footer {
+  border-top: 1px solid var(--ifm-toc-border-color);
+  font-size: 12px;
+}
+
+.footer__title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+/* Mermaid diagrams */
+.docusaurus-mermaid-container {
+  background: var(--ifm-background-surface-color);
+  border: 1px solid var(--ifm-toc-border-color);
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+/* Search */
+.DocSearch-Button {
+  border-radius: 0;
+}
+
+/* Scrollbar styling for dark theme */
+[data-theme='dark'] ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-track {
+  background: var(--ifm-background-color);
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-thumb {
+  background: #21262d;
+  border-radius: 0;
+}
+
+[data-theme='dark'] ::-webkit-scrollbar-thumb:hover {
+  background: #30363d;
+}
+
+/* Images */
+img {
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: 4px;
+}
+
+/* Badges */
+.badge {
+  border-radius: 3px;
+  font-size: 0.75em;
+  font-weight: 500;
+  padding: 0.1rem 0.35rem;
+}
+
+/* Inline code in headings */
+h1 code, h2 code, h3 code, h4 code {
+  font-size: inherit;
+}
+
+/* Mobile responsiveness */
+@media (max-width: 996px) {
+  .navbar__title {
+    font-size: 12px;
+  }
+}
