@@ -11,7 +11,12 @@ WORKDIR /buildroot
 
 RUN dpkg --add-architecture ${TARGETARCH} && \
     apt-get update && \
-    apt-get install -y "musl-tools:$TARGETARCH" "crossbuild-essential-$TARGETARCH" nodejs npm
+    apt-get install -y "musl-tools:$TARGETARCH" "crossbuild-essential-$TARGETARCH" ca-certificates curl gnupg && \
+    mkdir -p /etc/apt/keyrings && \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list && \
+    apt-get update && \
+    apt-get install -y nodejs
 
 RUN if [ "$TARGETARCH" = "amd64" ] ; then export TOOLCHAIN="x86_64-unknown-linux-musl"; fi; \
     if [ "$TARGETARCH" = "arm64" ] ; then export TOOLCHAIN="aarch64-unknown-linux-musl"; fi; \
