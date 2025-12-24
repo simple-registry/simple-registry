@@ -1,6 +1,46 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
-  ]
+  "extends": ["config:recommended"],
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Group all Rust dependencies",
+      "matchManagers": ["cargo"],
+      "groupName": "rust dependencies"
+    },
+    {
+      "description": "Group Docusaurus dependencies",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["website/package.json"],
+      "matchPackagePatterns": ["^@docusaurus/"],
+      "groupName": "docusaurus"
+    },
+    {
+      "description": "Group React dependencies for website",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["website/package.json"],
+      "matchPackageNames": ["react", "react-dom", "@mdx-js/react"],
+      "groupName": "website react"
+    },
+    {
+      "description": "Group Svelte/SvelteKit dependencies",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["ui/package.json"],
+      "matchPackagePatterns": ["^@sveltejs/", "^svelte"],
+      "groupName": "svelte"
+    },
+    {
+      "description": "Group Vite dependencies for UI",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["ui/package.json"],
+      "matchPackageNames": ["vite", "typescript"],
+      "groupName": "ui build tools"
+    }
+  ],
+  "lockFileMaintenance": {
+    "enabled": true
+  },
+  "vulnerabilityAlerts": {
+    "labels": ["security"]
+  }
 }
