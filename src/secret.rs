@@ -43,7 +43,7 @@ mod tests {
     #[test]
     fn test_secret_debug_redacts_value() {
         let secret = Secret::new("my-password".to_string());
-        let debug_output = format!("{:?}", secret);
+        let debug_output = format!("{secret:?}");
         assert_eq!(debug_output, "[REDACTED]");
         assert!(!debug_output.contains("my-password"));
     }

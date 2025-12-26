@@ -174,7 +174,7 @@ impl RetentionChecker {
         let mut tx = self.metadata_store.begin_transaction(namespace);
         for tag in &tags_to_delete {
             info!("Deleting tag '{namespace}:{tag}' (policy)");
-            tx.delete_link(&LinkKind::Tag(tag.to_string()));
+            tx.delete_link(&LinkKind::Tag((*tag).to_string()));
         }
         tx.commit().await?;
         Ok(())
