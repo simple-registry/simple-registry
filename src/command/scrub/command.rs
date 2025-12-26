@@ -8,7 +8,8 @@ use tracing::{error, info};
 use crate::cache;
 use crate::cache::Cache;
 use crate::command::scrub::check::{
-    BlobChecker, ManifestChecker, MultipartChecker, RetentionChecker, TagChecker, UploadChecker,
+    BlobChecker, ManifestChecker, MultipartChecker, ReferencedByChecker, RetentionChecker,
+    TagChecker, UploadChecker,
 };
 use crate::command::scrub::error::Error;
 use crate::configuration::Configuration;
@@ -45,6 +46,9 @@ pub struct Options {
     #[argh(switch, short = 'r')]
     /// enforce retention policies
     pub retention: bool,
+    #[argh(switch, short = 'x')]
+    /// fix `referenced_by` field for existing links
+    pub referenced_by: bool,
 }
 
 pub struct Command {
@@ -55,6 +59,7 @@ pub struct Command {
     revisions: Option<ManifestChecker>,
     blob_checker: Option<BlobChecker>,
     multipart_checker: Option<MultipartChecker>,
+    referenced_by_checker: Option<ReferencedByChecker>,
 }
 
 fn build_blob_store(config: &blob_store::BlobStorageConfig) -> Result<Arc<dyn BlobStore>, Error> {
@@ -187,7 +192,7 @@ impl Command {
 
         let blob_checker = if options.blobs {
             Some(BlobChecker::new(
-                blob_store,
+                blob_store.clone(),
                 metadata_store.clone(),
                 options.dry_run,
             ))
@@ -207,6 +212,16 @@ impl Command {
             None
         };
 
+        let referenced_by_checker = if options.referenced_by {
+            Some(ReferencedByChecker::new(
+                blob_store,
+                metadata_store.clone(),
+                options.dry_run,
+            ))
+        } else {
+            None
+        };
+
         if options.dry_run {
             info!("Dry-run mode: no changes will be made to the storage");
         }
@@ -219,6 +234,7 @@ impl Command {
             revisions,
             blob_checker,
             multipart_checker,
+            referenced_by_checker,
         })
     }
 
@@ -255,6 +271,10 @@ impl Command {
 
                 if let Some(revisions_checker) = &self.revisions {
                     let _ = revisions_checker.check_namespace(&namespace).await;
+                }
+
+                if let Some(referenced_by_checker) = &self.referenced_by_checker {
+                    let _ = referenced_by_checker.check_namespace(&namespace).await;
                 }
             }
 
@@ -362,6 +382,7 @@ mod tests {
             manifests: true,
             blobs: true,
             retention: true,
+            referenced_by: false,
         };
 
         let command = Command::new(&options, &config);
@@ -374,6 +395,7 @@ mod tests {
         assert!(cmd.blob_checker.is_some());
         assert!(cmd.retention_enforcer.is_some());
         assert!(cmd.multipart_checker.is_none());
+        assert!(cmd.referenced_by_checker.is_none());
     }
 
     #[tokio::test]
@@ -416,6 +438,7 @@ mod tests {
             manifests: false,
             blobs: false,
             retention: false,
+            referenced_by: false,
         };
 
         let command = Command::new(&options, &config).unwrap();
