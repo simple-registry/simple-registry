@@ -288,17 +288,26 @@ impl Registry {
         }
 
         if let Some(config) = manifest.config {
-            tx.create_link(&LinkKind::Config(config.digest.clone()), &config.digest);
+            tx.create_link_with_referrer(
+                &LinkKind::Config(config.digest.clone()),
+                &config.digest,
+                &digest,
+            );
         }
 
         for layer in manifest.layers {
-            tx.create_link(&LinkKind::Layer(layer.digest.clone()), &layer.digest);
+            tx.create_link_with_referrer(
+                &LinkKind::Layer(layer.digest.clone()),
+                &layer.digest,
+                &digest,
+            );
         }
 
         for child in manifest.manifests {
-            tx.create_link(
+            tx.create_link_with_referrer(
                 &LinkKind::Manifest(digest.clone(), child.digest.clone()),
                 &child.digest,
+                &digest,
             );
         }
 
@@ -357,15 +366,18 @@ impl Registry {
                     }
 
                     if let Some(config) = manifest.config {
-                        tx.delete_link(&LinkKind::Config(config.digest));
+                        tx.delete_link_with_referrer(&LinkKind::Config(config.digest), digest);
                     }
 
                     for layer in manifest.layers {
-                        tx.delete_link(&LinkKind::Layer(layer.digest));
+                        tx.delete_link_with_referrer(&LinkKind::Layer(layer.digest), digest);
                     }
 
                     for child in manifest.manifests {
-                        tx.delete_link(&LinkKind::Manifest(digest.clone(), child.digest));
+                        tx.delete_link_with_referrer(
+                            &LinkKind::Manifest(digest.clone(), child.digest),
+                            digest,
+                        );
                     }
                 }
             }

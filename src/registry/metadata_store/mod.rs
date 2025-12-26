@@ -35,8 +35,15 @@ pub enum BlobIndexOperation {
 
 #[derive(Debug, Clone)]
 pub(crate) enum LinkOperation {
-    Create { link: LinkKind, target: Digest },
-    Delete(LinkKind),
+    Create {
+        link: LinkKind,
+        target: Digest,
+        referrer: Option<Digest>,
+    },
+    Delete {
+        link: LinkKind,
+        referrer: Option<Digest>,
+    },
 }
 
 pub struct Transaction {
@@ -50,11 +57,35 @@ impl Transaction {
         self.operations.push(LinkOperation::Create {
             link: link.clone(),
             target: target.clone(),
+            referrer: None,
+        });
+    }
+
+    pub fn create_link_with_referrer(
+        &mut self,
+        link: &LinkKind,
+        target: &Digest,
+        referrer: &Digest,
+    ) {
+        self.operations.push(LinkOperation::Create {
+            link: link.clone(),
+            target: target.clone(),
+            referrer: Some(referrer.clone()),
         });
     }
 
     pub fn delete_link(&mut self, link: &LinkKind) {
-        self.operations.push(LinkOperation::Delete(link.clone()));
+        self.operations.push(LinkOperation::Delete {
+            link: link.clone(),
+            referrer: None,
+        });
+    }
+
+    pub fn delete_link_with_referrer(&mut self, link: &LinkKind, referrer: &Digest) {
+        self.operations.push(LinkOperation::Delete {
+            link: link.clone(),
+            referrer: Some(referrer.clone()),
+        });
     }
 
     pub async fn commit(self) -> Result<(), Error> {
