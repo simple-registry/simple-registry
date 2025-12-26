@@ -1,8 +1,14 @@
+<div align="center">
+
 # Angos
+
+<img src="website/static/img/logo.svg" alt="Angos Logo" width="120" height="120">
 
 A fully OCI-compliant and Docker-compatible container registry.
 
-**[Documentation](doc/)** | **[Quick Start](doc/tutorials/quickstart.md)**
+**[Website](https://project-angos.github.io/angos/)** | **[Documentation](doc/)** | **[Quick Start](doc/tutorials/quickstart.md)**
+
+</div>
 
 ## Key Features
 
