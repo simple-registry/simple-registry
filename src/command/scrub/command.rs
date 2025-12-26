@@ -8,7 +8,7 @@ use tracing::{error, info};
 use crate::cache;
 use crate::cache::Cache;
 use crate::command::scrub::check::{
-    BlobChecker, ManifestChecker, RetentionChecker, TagChecker, UploadChecker,
+    BlobChecker, ManifestChecker, MultipartChecker, RetentionChecker, TagChecker, UploadChecker,
 };
 use crate::command::scrub::error::Error;
 use crate::configuration::Configuration;
@@ -30,6 +30,9 @@ pub struct Options {
     #[argh(option, short = 'u')]
     /// check for obsolete uploads with specified timeout
     pub uploads: Option<humantime::Duration>,
+    #[argh(option, short = 'p')]
+    /// cleanup orphan S3 multipart uploads older than specified timeout
+    pub multipart: Option<humantime::Duration>,
     #[argh(switch, short = 't')]
     /// check for invalid tag digests
     pub tags: bool,
@@ -51,6 +54,7 @@ pub struct Command {
     tags_checker: Option<TagChecker>,
     revisions: Option<ManifestChecker>,
     blob_checker: Option<BlobChecker>,
+    multipart_checker: Option<MultipartChecker>,
 }
 
 fn build_blob_store(config: &blob_store::BlobStorageConfig) -> Result<Arc<dyn BlobStore>, Error> {
@@ -191,6 +195,18 @@ impl Command {
             None
         };
 
+        let multipart_checker = if let Some(multipart_timeout) = options.multipart {
+            let multipart_timeout =
+                Duration::from_std(multipart_timeout.into()).expect("Upload timeout must be valid");
+
+            config
+                .blob_store
+                .to_multipart_cleanup()
+                .map(|cleanup| MultipartChecker::new(cleanup, multipart_timeout, options.dry_run))
+        } else {
+            None
+        };
+
         if options.dry_run {
             info!("Dry-run mode: no changes will be made to the storage");
         }
@@ -202,12 +218,14 @@ impl Command {
             tags_checker,
             revisions,
             blob_checker,
+            multipart_checker,
         })
     }
 
     pub async fn run(&self) -> Result<(), Error> {
         self.scrub_metadata().await?;
         self.scrub_blobs().await?;
+        self.scrub_multipart_uploads().await?;
 
         Ok(())
     }
@@ -253,6 +271,16 @@ impl Command {
     async fn scrub_blobs(&self) -> Result<(), Error> {
         if let Some(checker) = &self.blob_checker {
             let _ = checker.check_all().await;
+        }
+        Ok(())
+    }
+
+    async fn scrub_multipart_uploads(&self) -> Result<(), Error> {
+        if let Some(checker) = &self.multipart_checker {
+            checker
+                .check_all()
+                .await
+                .map_err(|e| Error::Execution(format!("Multipart cleanup failed: {e}")))?;
         }
         Ok(())
     }
@@ -329,6 +357,7 @@ mod tests {
             uploads: Some(humantime::Duration::from(std::time::Duration::from_secs(
                 3600,
             ))),
+            multipart: None,
             tags: true,
             manifests: true,
             blobs: true,
@@ -344,6 +373,7 @@ mod tests {
         assert!(cmd.revisions.is_some());
         assert!(cmd.blob_checker.is_some());
         assert!(cmd.retention_enforcer.is_some());
+        assert!(cmd.multipart_checker.is_none());
     }
 
     #[tokio::test]
@@ -381,6 +411,7 @@ mod tests {
         let options = Options {
             dry_run: true,
             uploads: None,
+            multipart: None,
             tags: false,
             manifests: false,
             blobs: false,

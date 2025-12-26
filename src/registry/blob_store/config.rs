@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
+use tracing::warn;
 
-use crate::registry::blob_store::{BlobStore, Error, fs, s3};
+use crate::registry::blob_store::{BlobStore, Error, MultipartCleanup, fs, s3};
 use crate::registry::data_store;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -25,6 +26,19 @@ impl BlobStorageConfig {
         match self {
             BlobStorageConfig::FS(config) => Ok(Arc::new(fs::Backend::new(config))),
             BlobStorageConfig::S3(config) => Ok(Arc::new(s3::Backend::new(config)?)),
+        }
+    }
+
+    pub fn to_multipart_cleanup(&self) -> Option<Arc<dyn MultipartCleanup + Send + Sync>> {
+        match self {
+            BlobStorageConfig::FS(_) => None,
+            BlobStorageConfig::S3(config) => match s3::Backend::new(config) {
+                Ok(backend) => Some(Arc::new(backend) as _),
+                Err(e) => {
+                    warn!("Failed to create S3 backend for multipart cleanup: {e}");
+                    None
+                }
+            },
         }
     }
 }

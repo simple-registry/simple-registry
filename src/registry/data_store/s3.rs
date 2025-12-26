@@ -9,6 +9,7 @@ use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::{Client as S3Client, Config as S3Config};
 use bytes::Bytes;
 use bytesize::ByteSize;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::registry::data_store::Error;
@@ -491,11 +492,26 @@ impl Backend {
     pub async fn list_multipart_uploads(
         &self,
         prefix: Option<&str>,
-    ) -> Result<Vec<(String, String)>, IoError> {
+        key_marker: Option<&str>,
+        upload_id_marker: Option<&str>,
+    ) -> Result<
+        (
+            Vec<(String, String, DateTime<Utc>)>,
+            Option<String>,
+            Option<String>,
+        ),
+        IoError,
+    > {
         let mut req = self.s3_client.list_multipart_uploads().bucket(&self.bucket);
 
         if let Some(prefix) = prefix {
             req = req.prefix(self.full_key(prefix));
+        }
+        if let Some(marker) = key_marker {
+            req = req.key_marker(marker);
+        }
+        if let Some(marker) = upload_id_marker {
+            req = req.upload_id_marker(marker);
         }
 
         let response = req
@@ -505,26 +521,54 @@ impl Backend {
 
         let mut uploads = Vec::new();
         for upload in response.uploads.unwrap_or_default() {
-            if let (Some(key), Some(upload_id)) = (upload.key, upload.upload_id) {
+            if let (Some(key), Some(upload_id), Some(initiated)) =
+                (upload.key, upload.upload_id, upload.initiated)
+            {
                 let relative_key = if let Some(stripped) = key.strip_prefix(&self.key_prefix) {
                     stripped.trim_start_matches('/')
                 } else {
                     &key
                 };
-                uploads.push((relative_key.to_string(), upload_id));
+                let initiated =
+                    DateTime::from_timestamp(initiated.secs(), initiated.subsec_nanos())
+                        .unwrap_or_else(Utc::now);
+                uploads.push((relative_key.to_string(), upload_id, initiated));
             }
         }
 
-        Ok(uploads)
+        let (next_key_marker, next_upload_id_marker) = if response.is_truncated.unwrap_or(false) {
+            (response.next_key_marker, response.next_upload_id_marker)
+        } else {
+            (None, None)
+        };
+
+        Ok((uploads, next_key_marker, next_upload_id_marker))
     }
 
     pub async fn search_multipart_upload_id(&self, path: &str) -> Result<Option<String>, IoError> {
-        let uploads = self.list_multipart_uploads(Some(path)).await?;
+        let mut key_marker: Option<String> = None;
+        let mut upload_id_marker: Option<String> = None;
 
-        for (upload_key, upload_id) in uploads {
-            if upload_key == path {
-                return Ok(Some(upload_id));
+        loop {
+            let (uploads, next_key, next_upload_id) = self
+                .list_multipart_uploads(
+                    Some(path),
+                    key_marker.as_deref(),
+                    upload_id_marker.as_deref(),
+                )
+                .await?;
+
+            for (upload_key, upload_id, _initiated) in uploads {
+                if upload_key == path {
+                    return Ok(Some(upload_id));
+                }
             }
+
+            if next_key.is_none() {
+                break;
+            }
+            key_marker = next_key;
+            upload_id_marker = next_upload_id;
         }
 
         Ok(None)

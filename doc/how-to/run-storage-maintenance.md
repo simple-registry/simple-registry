@@ -27,14 +27,15 @@ The `scrub` command is for **offline maintenance** tasks:
 
 The `scrub` command performs various maintenance operations. Each check must be explicitly enabled:
 
-| Flag                       | Description                                           |
-|----------------------------|-------------------------------------------------------|
-| `-t, --tags`               | Check and fix invalid tag references                  |
-| `-m, --manifests`          | Check and fix manifest inconsistencies                |
-| `-b, --blobs`              | Check for orphaned or corrupted blobs                 |
-| `-r, --retention`          | Enforce retention policies (delete expired manifests) |
-| `-u, --uploads <duration>` | Remove incomplete uploads older than duration         |
-| `-d, --dry-run`            | Preview changes without applying them                 |
+| Flag                          | Description                                             |
+|-------------------------------|---------------------------------------------------------|
+| `-t, --tags`                  | Check and fix invalid tag references                    |
+| `-m, --manifests`             | Check and fix manifest inconsistencies                  |
+| `-b, --blobs`                 | Check for orphaned or corrupted blobs                   |
+| `-r, --retention`             | Enforce retention policies (delete expired manifests)   |
+| `-u, --uploads <duration>`    | Remove incomplete uploads older than duration           |
+| `-p, --multipart <duration>`  | Cleanup orphan S3 multipart uploads older than duration |
+| `-d, --dry-run`               | Preview changes without applying them                   |
 
 ---
 
@@ -69,6 +70,9 @@ Run only specific checks:
 
 # Remove incomplete uploads older than 1 hour
 ./angos -c config.toml scrub --uploads 1h
+
+# Cleanup orphan S3 multipart uploads older than 24 hours
+./angos -c config.toml scrub --multipart 24h
 ```
 
 ### With Logging
@@ -271,6 +275,14 @@ For multi-replica deployments:
 - Verify S3 credentials have delete permissions
 - Check network connectivity
 - Review S3 operation timeout settings
+
+### Orphan S3 Multipart Uploads
+
+S3 multipart uploads that were started but never completed can accumulate and consume storage. The `--multipart` flag cleans up orphan multipart uploads that:
+- Are older than the specified duration
+- Have no corresponding upload container in the registry metadata
+
+This is S3-specific and has no effect on filesystem storage backends.
 
 ---
 
