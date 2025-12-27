@@ -4,21 +4,17 @@ use argh::FromArgs;
 use chrono::Duration;
 use tracing::{error, info};
 
-use crate::{
-    cache,
-    cache::Cache,
-    command::scrub::{
-        check::{
-            BlobChecker, LinkReferencesChecker, ManifestChecker, MultipartChecker,
-            RetentionChecker, TagChecker, UploadChecker,
-        },
-        error::Error,
-    },
-    configuration::Configuration,
-    registry::{
-        Repository, RetentionPolicy, RetentionPolicyConfig, blob_store, blob_store::BlobStore,
-        metadata_store::MetadataStore, repository,
-    },
+use crate::cache;
+use crate::cache::Cache;
+use crate::command::scrub::check::{
+    BlobChecker, LinkReferencesChecker, ManifestChecker, MultipartChecker, RetentionChecker,
+    TagChecker, UploadChecker,
+};
+use crate::command::scrub::error::Error;
+use crate::configuration::Configuration;
+use crate::registry::{
+    Repository, RetentionPolicy, RetentionPolicyConfig, blob_store, blob_store::BlobStore,
+    metadata_store::MetadataStore, repository,
 };
 
 #[derive(FromArgs, PartialEq, Debug)]
