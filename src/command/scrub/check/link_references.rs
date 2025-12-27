@@ -2,19 +2,23 @@ use std::sync::Arc;
 
 use tracing::{debug, error, info};
 
-use crate::oci::Digest;
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::metadata_store::{self, MetadataStore, MetadataStoreExt};
-use crate::registry::{Error, parse_manifest_digests};
+use crate::{
+    oci::Digest,
+    registry::{
+        Error,
+        blob_store::BlobStore,
+        metadata_store::{self, MetadataStore, MetadataStoreExt, link_kind::LinkKind},
+        parse_manifest_digests,
+    },
+};
 
-pub struct ReferencedByChecker {
+pub struct LinkReferencesChecker {
     blob_store: Arc<dyn BlobStore + Send + Sync>,
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
     dry_run: bool,
 }
 
-impl ReferencedByChecker {
+impl LinkReferencesChecker {
     pub fn new(
         blob_store: Arc<dyn BlobStore + Send + Sync>,
         metadata_store: Arc<dyn MetadataStore + Send + Sync>,
@@ -125,12 +129,10 @@ impl ReferencedByChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::metadata_store::MetadataStoreExt;
-    use crate::registry::test_utils;
-    use crate::registry::tests::backends;
+    use crate::registry::{metadata_store::MetadataStoreExt, test_utils, tests::backends};
 
     #[tokio::test]
-    async fn test_referenced_by_checker_fixes_missing_references() {
+    async fn test_link_references_checker_fixes_missing_references() {
         for test_case in backends() {
             let namespace = "test-repo/app";
             let registry = test_case.registry();
@@ -183,7 +185,7 @@ mod tests {
             );
 
             let checker =
-                ReferencedByChecker::new(blob_store.clone(), metadata_store.clone(), false);
+                LinkReferencesChecker::new(blob_store.clone(), metadata_store.clone(), false);
             checker.check_namespace(namespace).await.unwrap();
 
             let config_link_after = metadata_store

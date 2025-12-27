@@ -1,7 +1,7 @@
 mod blob;
+mod link_references;
 mod manifest;
 mod multipart;
-mod referenced_by;
 mod retention;
 mod tag;
 mod upload;
@@ -9,18 +9,21 @@ mod upload;
 use std::sync::Arc;
 
 pub use blob::BlobChecker;
+pub use link_references::LinkReferencesChecker;
 pub use manifest::ManifestChecker;
 pub use multipart::MultipartChecker;
-pub use referenced_by::ReferencedByChecker;
 pub use retention::RetentionChecker;
 pub use tag::TagChecker;
 use tracing::{debug, info};
 pub use upload::UploadChecker;
 
-use crate::oci::Digest;
-use crate::registry::Error;
-use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::metadata_store::{MetadataStore, MetadataStoreExt};
+use crate::{
+    oci::Digest,
+    registry::{
+        Error,
+        metadata_store::{MetadataStore, MetadataStoreExt, link_kind::LinkKind},
+    },
+};
 
 pub async fn ensure_link(
     metadata_store: &Arc<dyn MetadataStore + Send + Sync>,

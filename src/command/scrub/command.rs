@@ -1,21 +1,25 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use argh::FromArgs;
 use chrono::Duration;
 use tracing::{error, info};
 
-use crate::cache;
-use crate::cache::Cache;
-use crate::command::scrub::check::{
-    BlobChecker, ManifestChecker, MultipartChecker, ReferencedByChecker, RetentionChecker,
-    TagChecker, UploadChecker,
+use crate::{
+    cache,
+    cache::Cache,
+    command::scrub::{
+        check::{
+            BlobChecker, LinkReferencesChecker, ManifestChecker, MultipartChecker,
+            RetentionChecker, TagChecker, UploadChecker,
+        },
+        error::Error,
+    },
+    configuration::Configuration,
+    registry::{
+        Repository, RetentionPolicy, RetentionPolicyConfig, blob_store, blob_store::BlobStore,
+        metadata_store::MetadataStore, repository,
+    },
 };
-use crate::command::scrub::error::Error;
-use crate::configuration::Configuration;
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
-use crate::registry::{Repository, RetentionPolicy, RetentionPolicyConfig, blob_store, repository};
 
 #[derive(FromArgs, PartialEq, Debug)]
 #[allow(clippy::struct_excessive_bools)]
@@ -59,7 +63,7 @@ pub struct Command {
     revisions: Option<ManifestChecker>,
     blob_checker: Option<BlobChecker>,
     multipart_checker: Option<MultipartChecker>,
-    referenced_by_checker: Option<ReferencedByChecker>,
+    link_references_checker: Option<LinkReferencesChecker>,
 }
 
 fn build_blob_store(config: &blob_store::BlobStorageConfig) -> Result<Arc<dyn BlobStore>, Error> {
@@ -212,8 +216,8 @@ impl Command {
             None
         };
 
-        let referenced_by_checker = if options.links {
-            Some(ReferencedByChecker::new(
+        let link_references_checker = if options.links {
+            Some(LinkReferencesChecker::new(
                 blob_store,
                 metadata_store.clone(),
                 options.dry_run,
@@ -234,7 +238,7 @@ impl Command {
             revisions,
             blob_checker,
             multipart_checker,
-            referenced_by_checker,
+            link_references_checker,
         })
     }
 
@@ -273,8 +277,8 @@ impl Command {
                     let _ = revisions_checker.check_namespace(&namespace).await;
                 }
 
-                if let Some(referenced_by_checker) = &self.referenced_by_checker {
-                    let _ = referenced_by_checker.check_namespace(&namespace).await;
+                if let Some(link_references_checker) = &self.link_references_checker {
+                    let _ = link_references_checker.check_namespace(&namespace).await;
                 }
             }
 
@@ -395,7 +399,7 @@ mod tests {
         assert!(cmd.blob_checker.is_some());
         assert!(cmd.retention_enforcer.is_some());
         assert!(cmd.multipart_checker.is_none());
-        assert!(cmd.referenced_by_checker.is_none());
+        assert!(cmd.link_references_checker.is_none());
     }
 
     #[tokio::test]
