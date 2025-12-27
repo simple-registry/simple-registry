@@ -35,7 +35,7 @@ The `scrub` command performs various maintenance operations. Each check must be 
 | `-r, --retention`             | Enforce retention policies (delete expired manifests)   |
 | `-u, --uploads <duration>`    | Remove incomplete uploads older than duration           |
 | `-p, --multipart <duration>`  | Cleanup orphan S3 multipart uploads older than duration |
-| `-x, --referenced-by`         | Fix referenced_by field for existing links              |
+| `-l, --links`                 | Fix links format inconsistencies                        |
 | `-d, --dry-run`               | Preview changes without applying them                   |
 
 ---
@@ -285,19 +285,19 @@ S3 multipart uploads that were started but never completed can accumulate and co
 
 This is S3-specific and has no effect on filesystem storage backends.
 
-### Fix Referenced-By Field
+### Fix Links Format
 
-The `--referenced-by` flag repairs the reference tracking metadata for shared blobs. Use this when:
+The `--links` flag repairs link format inconsistencies. Use this when:
 - Upgrading from an older version that didn't track references
 - Repairing corrupted metadata after a storage issue
 - Migrating data from another registry
 
 ```bash
 # Preview what would be fixed
-./angos -c config.toml scrub -x -d
+./angos -c config.toml scrub -l -d
 
-# Fix referenced_by for all links
-./angos -c config.toml scrub -x
+# Fix links format for all links
+./angos -c config.toml scrub -l
 ```
 
 This is idempotent and safe to run multiple times.

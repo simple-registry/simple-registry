@@ -46,9 +46,9 @@ pub struct Options {
     #[argh(switch, short = 'r')]
     /// enforce retention policies
     pub retention: bool,
-    #[argh(switch, short = 'x')]
-    /// fix `referenced_by` field for existing links
-    pub referenced_by: bool,
+    #[argh(switch, short = 'l')]
+    /// fix links format inconsistencies
+    pub links: bool,
 }
 
 pub struct Command {
@@ -212,7 +212,7 @@ impl Command {
             None
         };
 
-        let referenced_by_checker = if options.referenced_by {
+        let referenced_by_checker = if options.links {
             Some(ReferencedByChecker::new(
                 blob_store,
                 metadata_store.clone(),
@@ -382,7 +382,7 @@ mod tests {
             manifests: true,
             blobs: true,
             retention: true,
-            referenced_by: false,
+            links: false,
         };
 
         let command = Command::new(&options, &config);
@@ -438,7 +438,7 @@ mod tests {
             manifests: false,
             blobs: false,
             retention: false,
-            referenced_by: false,
+            links: false,
         };
 
         let command = Command::new(&options, &config).unwrap();

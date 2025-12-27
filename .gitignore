@@ -12,3 +12,10 @@ tls.d/*.csr
 /website/node_modules
 /website/build
 /website/.docusaurus
+
+/*.blob
+/*.xml
+/*.html
+/test*
+/zb*
+.DS_Store
