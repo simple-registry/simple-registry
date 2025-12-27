@@ -276,4 +276,12 @@ impl BlobStore for Backend {
     async fn get_blob_url(&self, _digest: &Digest) -> Result<Option<String>, Error> {
         Ok(None)
     }
+
+    #[instrument(skip(self))]
+    async fn delete_blob(&self, digest: &Digest) -> Result<(), Error> {
+        let path = path_builder::blob_container_dir(digest);
+        self.store.delete_dir(&path).await?;
+        let _ = self.store.delete_empty_parent_dirs(&path).await;
+        Ok(())
+    }
 }

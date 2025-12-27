@@ -6,7 +6,7 @@ pub mod s3;
 mod sha256_ext;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 pub use config::BlobStorageConfig;
 pub use error::Error;
 use tokio::io::AsyncRead;
@@ -68,6 +68,17 @@ pub trait BlobStore: Send + Sync {
     ) -> Result<BoxedReader, Error>;
 
     async fn get_blob_url(&self, digest: &Digest) -> Result<Option<String>, Error>;
+
+    async fn delete_blob(&self, digest: &Digest) -> Result<(), Error>;
+}
+
+#[async_trait]
+pub trait MultipartCleanup: Send + Sync {
+    async fn cleanup_orphan_multipart_uploads(
+        &self,
+        timeout: Duration,
+        dry_run: bool,
+    ) -> Result<usize, Error>;
 }
 
 #[cfg(test)]

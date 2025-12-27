@@ -294,12 +294,16 @@ impl MetadataStore for Backend {
 
         loop {
             let mut lock_keys: Vec<String> = Vec::new();
-            let mut creates: Vec<(LinkKind, Digest, Option<Digest>)> = Vec::new();
-            let mut deletes: Vec<(LinkKind, Digest)> = Vec::new();
+            let mut creates: Vec<(LinkKind, Digest, Option<Digest>, Option<Digest>)> = Vec::new();
+            let mut deletes: Vec<(LinkKind, Digest, Option<Digest>)> = Vec::new();
 
             for op in operations {
                 match op {
-                    LinkOperation::Create { link, target } => {
+                    LinkOperation::Create {
+                        link,
+                        target,
+                        referrer,
+                    } => {
                         lock_keys.push(link.to_string());
                         lock_keys.push(format!("blob:{target}"));
                         let old_target = self
@@ -310,13 +314,13 @@ impl MetadataStore for Backend {
                         if let Some(ref old) = old_target {
                             lock_keys.push(format!("blob:{old}"));
                         }
-                        creates.push((link.clone(), target.clone(), old_target));
+                        creates.push((link.clone(), target.clone(), old_target, referrer.clone()));
                     }
-                    LinkOperation::Delete(link) => {
+                    LinkOperation::Delete { link, referrer } => {
                         if let Ok(metadata) = self.read_link_reference(namespace, link).await {
                             lock_keys.push(link.to_string());
                             lock_keys.push(format!("blob:{}", metadata.target));
-                            deletes.push((link.clone(), metadata.target));
+                            deletes.push((link.clone(), metadata.target, referrer.clone()));
                         }
                     }
                 }
@@ -331,7 +335,7 @@ impl MetadataStore for Backend {
             let _guard = self.lock.acquire(&lock_keys).await?;
 
             let mut needs_retry = false;
-            for (link, _, expected_old) in &creates {
+            for (link, _, expected_old, _) in &creates {
                 let current = self
                     .read_link_reference(namespace, link)
                     .await
@@ -347,10 +351,10 @@ impl MetadataStore for Backend {
             }
 
             let mut valid_deletes = Vec::new();
-            for (link, target) in deletes {
+            for (link, target, referrer) in deletes {
                 match self.read_link_reference(namespace, &link).await {
                     Ok(metadata) if metadata.target == target => {
-                        valid_deletes.push((link, target));
+                        valid_deletes.push((link, target, referrer));
                     }
                     Ok(_) => {
                         needs_retry = true;
@@ -364,39 +368,97 @@ impl MetadataStore for Backend {
                 continue;
             }
 
-            for (link, target, old_target) in &creates {
-                self.update_blob_index(namespace, target, BlobIndexOperation::Insert(link.clone()))
-                    .await?;
-                if let Some(old) = old_target
-                    && *old != *target
-                {
+            for (link, target, old_target, referrer) in &creates {
+                let is_tracked = is_tracked_link(link);
+
+                if is_tracked && referrer.is_some() {
+                    let mut metadata = self
+                        .read_link_reference(namespace, link)
+                        .await
+                        .unwrap_or_else(|_| LinkMetadata::from_digest(target.clone()));
+
+                    if let Some(manifest_digest) = referrer {
+                        metadata.add_referrer(manifest_digest.clone());
+                    }
+
+                    if old_target.is_none() {
+                        self.update_blob_index(
+                            namespace,
+                            target,
+                            BlobIndexOperation::Insert(link.clone()),
+                        )
+                        .await?;
+                    }
+
+                    self.write_link_reference(namespace, link, &metadata)
+                        .await?;
+                } else {
                     self.update_blob_index(
                         namespace,
-                        old,
+                        target,
+                        BlobIndexOperation::Insert(link.clone()),
+                    )
+                    .await?;
+                    if let Some(old) = old_target
+                        && *old != *target
+                    {
+                        self.update_blob_index(
+                            namespace,
+                            old,
+                            BlobIndexOperation::Remove(link.clone()),
+                        )
+                        .await?;
+                    }
+
+                    let metadata = LinkMetadata::from_digest(target.clone());
+                    self.write_link_reference(namespace, link, &metadata)
+                        .await?;
+                }
+            }
+
+            for (link, target, referrer) in &valid_deletes {
+                let is_tracked = is_tracked_link(link);
+
+                if is_tracked && referrer.is_some() {
+                    if let Ok(mut metadata) = self.read_link_reference(namespace, link).await {
+                        if let Some(manifest_digest) = referrer {
+                            metadata.remove_referrer(manifest_digest);
+                        }
+
+                        if metadata.has_references() {
+                            self.write_link_reference(namespace, link, &metadata)
+                                .await?;
+                        } else {
+                            self.delete_link_reference(namespace, link).await?;
+                            self.update_blob_index(
+                                namespace,
+                                target,
+                                BlobIndexOperation::Remove(link.clone()),
+                            )
+                            .await?;
+                        }
+                    }
+                } else {
+                    self.delete_link_reference(namespace, link).await?;
+                    self.update_blob_index(
+                        namespace,
+                        target,
                         BlobIndexOperation::Remove(link.clone()),
                     )
                     .await?;
                 }
             }
 
-            for (link, target, _) in &creates {
-                let metadata = LinkMetadata::from_digest(target.clone());
-                self.write_link_reference(namespace, link, &metadata)
-                    .await?;
-            }
-
-            for (link, _) in &valid_deletes {
-                self.delete_link_reference(namespace, link).await?;
-            }
-
-            for (link, target) in &valid_deletes {
-                self.update_blob_index(namespace, target, BlobIndexOperation::Remove(link.clone()))
-                    .await?;
-            }
-
             return Ok(());
         }
     }
+}
+
+fn is_tracked_link(link: &LinkKind) -> bool {
+    matches!(
+        link,
+        LinkKind::Layer(_) | LinkKind::Config(_) | LinkKind::Manifest(_, _)
+    )
 }
 
 impl Backend {

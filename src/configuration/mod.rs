@@ -106,7 +106,7 @@ impl Default for GlobalConfig {
 
 impl GlobalConfig {
     fn default_max_concurrent_requests() -> usize {
-        4
+        64
     }
 
     fn default_max_concurrent_cache_jobs() -> usize {
@@ -234,7 +234,7 @@ mod tests {
 
         let config = Configuration::load_from_str(config).unwrap();
 
-        assert_eq!(config.global.max_concurrent_requests, 4);
+        assert_eq!(config.global.max_concurrent_requests, 64);
         assert_eq!(config.global.max_concurrent_cache_jobs, 4);
         assert!(!config.global.update_pull_time);
 
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn test_global_config_default() {
         let config = GlobalConfig::default();
-        assert_eq!(config.max_concurrent_requests, 4);
+        assert_eq!(config.max_concurrent_requests, 64);
         assert_eq!(config.max_concurrent_cache_jobs, 4);
         assert!(!config.update_pull_time);
         assert!(!config.immutable_tags);

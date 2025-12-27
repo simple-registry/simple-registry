@@ -47,7 +47,7 @@ When omitted, the server runs without TLS (insecure).
 
 | Option                      | Type     | Default  | Description                                 |
 |-----------------------------|----------|----------|---------------------------------------------|
-| `max_concurrent_requests`   | usize    | `4`      | Maximum concurrent requests                 |
+| `max_concurrent_requests`   | usize    | `64`     | Tokio worker threads (see Performance Tuning) |
 | `max_concurrent_cache_jobs` | usize    | `4`      | Maximum concurrent cache jobs               |
 | `update_pull_time`          | bool     | `false`  | Track pull times for retention policies     |
 | `enable_redirect`           | bool     | `true`   | Allow HTTP 307 redirects for blob downloads |
@@ -245,6 +245,18 @@ Same as `global.retention_policy`.
 
 ---
 
+## Performance Tuning
+
+### max_concurrent_requests
+
+Controls the number of Tokio worker threads handling HTTP requests. Default: `64`.
+
+Registry operations are likely I/O-bound (network transfers, storage I/O), so more threads than CPU cores typically improves throughput.
+
+**Rule of thumb:** Start with 8-16x your CPU core count and adjust based on monitoring.
+
+---
+
 ## Example Configuration
 
 ```toml
@@ -257,7 +269,6 @@ server_certificate_bundle = "/tls/server.crt"
 server_private_key = "/tls/server.key"
 
 [global]
-max_concurrent_requests = 8
 update_pull_time = true
 immutable_tags = true
 immutable_tags_exclusions = ["^latest$"]

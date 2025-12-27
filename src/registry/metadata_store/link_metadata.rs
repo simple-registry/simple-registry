@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +11,8 @@ pub struct LinkMetadata {
     pub target: Digest,
     pub created_at: Option<DateTime<Utc>>,
     pub accessed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub referenced_by: HashSet<Digest>,
 }
 
 impl LinkMetadata {
@@ -17,7 +21,20 @@ impl LinkMetadata {
             target,
             created_at: Some(Utc::now()),
             accessed_at: None,
+            referenced_by: HashSet::new(),
         }
+    }
+
+    pub fn add_referrer(&mut self, digest: Digest) {
+        self.referenced_by.insert(digest);
+    }
+
+    pub fn remove_referrer(&mut self, digest: &Digest) {
+        self.referenced_by.remove(digest);
+    }
+
+    pub fn has_references(&self) -> bool {
+        !self.referenced_by.is_empty()
     }
 
     pub fn from_bytes(s: Vec<u8>) -> Result<Self, Error> {
@@ -35,6 +52,7 @@ impl LinkMetadata {
                 target,
                 created_at: Some(Utc::now()),
                 accessed_at: None,
+                referenced_by: HashSet::new(),
             })
         }
     }

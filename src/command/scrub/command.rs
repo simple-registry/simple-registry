@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use argh::FromArgs;
 use chrono::Duration;
@@ -8,13 +7,15 @@ use tracing::{error, info};
 use crate::cache;
 use crate::cache::Cache;
 use crate::command::scrub::check::{
-    BlobChecker, ManifestChecker, RetentionChecker, TagChecker, UploadChecker,
+    BlobChecker, LinkReferencesChecker, ManifestChecker, MultipartChecker, RetentionChecker,
+    TagChecker, UploadChecker,
 };
 use crate::command::scrub::error::Error;
 use crate::configuration::Configuration;
-use crate::registry::blob_store::BlobStore;
-use crate::registry::metadata_store::MetadataStore;
-use crate::registry::{Repository, RetentionPolicy, RetentionPolicyConfig, blob_store, repository};
+use crate::registry::{
+    Repository, RetentionPolicy, RetentionPolicyConfig, blob_store, blob_store::BlobStore,
+    metadata_store::MetadataStore, repository,
+};
 
 #[derive(FromArgs, PartialEq, Debug)]
 #[allow(clippy::struct_excessive_bools)]
@@ -30,6 +31,9 @@ pub struct Options {
     #[argh(option, short = 'u')]
     /// check for obsolete uploads with specified timeout
     pub uploads: Option<humantime::Duration>,
+    #[argh(option, short = 'p')]
+    /// cleanup orphan S3 multipart uploads older than specified timeout
+    pub multipart: Option<humantime::Duration>,
     #[argh(switch, short = 't')]
     /// check for invalid tag digests
     pub tags: bool,
@@ -42,6 +46,9 @@ pub struct Options {
     #[argh(switch, short = 'r')]
     /// enforce retention policies
     pub retention: bool,
+    #[argh(switch, short = 'l')]
+    /// fix links format inconsistencies
+    pub links: bool,
 }
 
 pub struct Command {
@@ -51,6 +58,8 @@ pub struct Command {
     tags_checker: Option<TagChecker>,
     revisions: Option<ManifestChecker>,
     blob_checker: Option<BlobChecker>,
+    multipart_checker: Option<MultipartChecker>,
+    link_references_checker: Option<LinkReferencesChecker>,
 }
 
 fn build_blob_store(config: &blob_store::BlobStorageConfig) -> Result<Arc<dyn BlobStore>, Error> {
@@ -183,6 +192,28 @@ impl Command {
 
         let blob_checker = if options.blobs {
             Some(BlobChecker::new(
+                blob_store.clone(),
+                metadata_store.clone(),
+                options.dry_run,
+            ))
+        } else {
+            None
+        };
+
+        let multipart_checker = if let Some(multipart_timeout) = options.multipart {
+            let multipart_timeout =
+                Duration::from_std(multipart_timeout.into()).expect("Upload timeout must be valid");
+
+            config
+                .blob_store
+                .to_multipart_cleanup()
+                .map(|cleanup| MultipartChecker::new(cleanup, multipart_timeout, options.dry_run))
+        } else {
+            None
+        };
+
+        let link_references_checker = if options.links {
+            Some(LinkReferencesChecker::new(
                 blob_store,
                 metadata_store.clone(),
                 options.dry_run,
@@ -202,12 +233,15 @@ impl Command {
             tags_checker,
             revisions,
             blob_checker,
+            multipart_checker,
+            link_references_checker,
         })
     }
 
     pub async fn run(&self) -> Result<(), Error> {
         self.scrub_metadata().await?;
         self.scrub_blobs().await?;
+        self.scrub_multipart_uploads().await?;
 
         Ok(())
     }
@@ -238,6 +272,10 @@ impl Command {
                 if let Some(revisions_checker) = &self.revisions {
                     let _ = revisions_checker.check_namespace(&namespace).await;
                 }
+
+                if let Some(link_references_checker) = &self.link_references_checker {
+                    let _ = link_references_checker.check_namespace(&namespace).await;
+                }
             }
 
             if next_marker.is_none() {
@@ -253,6 +291,16 @@ impl Command {
     async fn scrub_blobs(&self) -> Result<(), Error> {
         if let Some(checker) = &self.blob_checker {
             let _ = checker.check_all().await;
+        }
+        Ok(())
+    }
+
+    async fn scrub_multipart_uploads(&self) -> Result<(), Error> {
+        if let Some(checker) = &self.multipart_checker {
+            checker
+                .check_all()
+                .await
+                .map_err(|e| Error::Execution(format!("Multipart cleanup failed: {e}")))?;
         }
         Ok(())
     }
@@ -329,10 +377,12 @@ mod tests {
             uploads: Some(humantime::Duration::from(std::time::Duration::from_secs(
                 3600,
             ))),
+            multipart: None,
             tags: true,
             manifests: true,
             blobs: true,
             retention: true,
+            links: false,
         };
 
         let command = Command::new(&options, &config);
@@ -344,6 +394,8 @@ mod tests {
         assert!(cmd.revisions.is_some());
         assert!(cmd.blob_checker.is_some());
         assert!(cmd.retention_enforcer.is_some());
+        assert!(cmd.multipart_checker.is_none());
+        assert!(cmd.link_references_checker.is_none());
     }
 
     #[tokio::test]
@@ -381,10 +433,12 @@ mod tests {
         let options = Options {
             dry_run: true,
             uploads: None,
+            multipart: None,
             tags: false,
             manifests: false,
             blobs: false,
             retention: false,
+            links: false,
         };
 
         let command = Command::new(&options, &config).unwrap();

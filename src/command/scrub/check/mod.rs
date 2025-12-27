@@ -1,5 +1,7 @@
 mod blob;
+mod link_references;
 mod manifest;
+mod multipart;
 mod retention;
 mod tag;
 mod upload;
@@ -7,7 +9,9 @@ mod upload;
 use std::sync::Arc;
 
 pub use blob::BlobChecker;
+pub use link_references::LinkReferencesChecker;
 pub use manifest::ManifestChecker;
+pub use multipart::MultipartChecker;
 pub use retention::RetentionChecker;
 pub use tag::TagChecker;
 use tracing::{debug, info};
