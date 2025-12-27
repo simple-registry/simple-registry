@@ -431,6 +431,13 @@ impl BlobStore for Backend {
             .await?;
         Ok(Some(url))
     }
+
+    #[instrument(skip(self))]
+    async fn delete_blob(&self, digest: &Digest) -> Result<(), Error> {
+        let path = path_builder::blob_container_dir(digest);
+        self.store.delete_prefix(&path).await?;
+        Ok(())
+    }
 }
 
 fn parse_upload_key(key: &str) -> Option<(String, String)> {

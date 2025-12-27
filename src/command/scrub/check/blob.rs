@@ -6,7 +6,7 @@ use crate::oci::Digest;
 use crate::registry::Error;
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::link_kind::LinkKind;
-use crate::registry::metadata_store::{BlobIndexOperation, MetadataStore};
+use crate::registry::metadata_store::{self, BlobIndexOperation, MetadataStore};
 
 pub struct BlobChecker {
     blob_store: Arc<dyn BlobStore + Send + Sync>,
@@ -51,7 +51,18 @@ impl BlobChecker {
 
     async fn check_blob(&self, blob: &Digest) -> Result<(), Error> {
         debug!("Checking blob index for blob '{blob}'");
-        let blob_index = self.metadata_store.read_blob_index(blob).await?;
+
+        let blob_index = match self.metadata_store.read_blob_index(blob).await {
+            Ok(index) => index,
+            Err(metadata_store::Error::ReferenceNotFound) => {
+                return self.delete_orphan_blob(blob).await;
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        if blob_index.namespace.is_empty() {
+            return self.delete_orphan_blob(blob).await;
+        }
 
         for (namespace, references) in blob_index.namespace {
             for link in references {
@@ -69,6 +80,17 @@ impl BlobChecker {
             }
         }
 
+        Ok(())
+    }
+
+    async fn delete_orphan_blob(&self, blob: &Digest) -> Result<(), Error> {
+        if self.dry_run {
+            info!("DRY RUN: would delete orphan blob '{blob}'");
+            return Ok(());
+        }
+
+        info!("Deleting orphan blob '{blob}'");
+        self.blob_store.delete_blob(blob).await?;
         Ok(())
     }
 
@@ -150,6 +172,52 @@ mod tests {
             assert!(
                 final_refs < initial_refs,
                 "Invalid blob index entry should be removed. Before: {initial_refs}, After: {final_refs}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_deletes_orphan_blobs_without_index() {
+        for test_case in backends() {
+            let blob_store = test_case.blob_store();
+            let metadata_store = test_case.metadata_store();
+
+            let orphan_content = b"orphan blob content";
+            let orphan_digest = blob_store.create_blob(orphan_content).await.unwrap();
+
+            let blob_exists_before = blob_store.read_blob(&orphan_digest).await.is_ok();
+            assert!(blob_exists_before, "Orphan blob should exist before scrub");
+
+            let scrubber = BlobChecker::new(blob_store.clone(), metadata_store.clone(), false);
+            scrubber.check_all().await.unwrap();
+
+            let blob_exists_after = blob_store.read_blob(&orphan_digest).await.is_ok();
+            assert!(
+                !blob_exists_after,
+                "Orphan blob without index should be deleted after scrub"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_dry_run_preserves_orphan_blobs() {
+        for test_case in backends() {
+            let blob_store = test_case.blob_store();
+            let metadata_store = test_case.metadata_store();
+
+            let orphan_content = b"orphan blob content for dry run";
+            let orphan_digest = blob_store.create_blob(orphan_content).await.unwrap();
+
+            let blob_exists_before = blob_store.read_blob(&orphan_digest).await.is_ok();
+            assert!(blob_exists_before, "Orphan blob should exist before scrub");
+
+            let scrubber = BlobChecker::new(blob_store.clone(), metadata_store.clone(), true);
+            scrubber.check_all().await.unwrap();
+
+            let blob_exists_after = blob_store.read_blob(&orphan_digest).await.is_ok();
+            assert!(
+                blob_exists_after,
+                "Orphan blob should be preserved in dry-run mode"
             );
         }
     }

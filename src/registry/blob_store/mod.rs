@@ -68,6 +68,8 @@ pub trait BlobStore: Send + Sync {
     ) -> Result<BoxedReader, Error>;
 
     async fn get_blob_url(&self, digest: &Digest) -> Result<Option<String>, Error>;
+
+    async fn delete_blob(&self, digest: &Digest) -> Result<(), Error>;
 }
 
 #[async_trait]
