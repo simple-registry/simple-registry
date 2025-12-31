@@ -7,8 +7,8 @@ const config: Config = {
   tagline: 'A lightweight, OCI-compliant container registry',
   favicon: 'img/logo.svg',
 
-  url: 'https://angos.github.io',
-  baseUrl: '/angos/',
+  url: 'https://angos.dev',
+  baseUrl: '/',
 
   organizationName: 'angos',
   projectName: 'angos',
