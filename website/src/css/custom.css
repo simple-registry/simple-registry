@@ -90,7 +90,7 @@
 /* ===== NAVBAR ===== */
 .navbar {
   background: var(--ifm-background-color);
-  border-bottom: none;
+  border-bottom: 1px solid var(--ifm-toc-border-color);
   box-shadow: none;
   padding: 0.5rem 1rem;
   height: var(--ifm-navbar-height);
