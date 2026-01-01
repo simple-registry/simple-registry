@@ -3,7 +3,7 @@
 		message?: string;
 	}
 
-	let { message = 'loading' }: Props = $props();
+	let { message = 'Loading' }: Props = $props();
 </script>
 
 <div class="loading">{message}</div>

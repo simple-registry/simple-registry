@@ -20,13 +20,13 @@
 	}: Props = $props();
 </script>
 
-<div class="actions">
-	{#if isConfirming}
-		<button class="danger" onclick={onconfirm} {disabled}>
+{#if isConfirming}
+	<div class="delete-confirm">
+		<button class="cancel" onclick={oncancel}>cancel</button>
+		<button class="confirm" onclick={onconfirm} {disabled}>
 			{disabled ? '...' : confirmLabel}
 		</button>
-		<button onclick={oncancel}>cancel</button>
-	{:else}
-		<button class="danger" onclick={onrequestconfirm}>{label}</button>
-	{/if}
-</div>
+	</div>
+{:else}
+	<button class="danger" onclick={onrequestconfirm}>{label}</button>
+{/if}
