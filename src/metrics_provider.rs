@@ -24,8 +24,10 @@ pub static AUTH_ATTEMPTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("Failed to register auth_attempts metric")
 });
 
-pub static METRICS_PROVIDER: LazyLock<MetricsProvider> =
-    LazyLock::new(|| MetricsProvider::new().expect("Unable to create metrics provider: {error}"));
+pub static METRICS_PROVIDER: LazyLock<MetricsProvider> = LazyLock::new(|| {
+    MetricsProvider::new()
+        .unwrap_or_else(|error| panic!("Unable to create metrics provider: {error}"))
+});
 
 pub struct MetricsProvider {
     registry: PrometheusRegistry,
