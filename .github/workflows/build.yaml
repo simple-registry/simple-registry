@@ -218,7 +218,58 @@ jobs:
           docker logs minio-server
           docker stop minio-server
 
-  build:
+  build-binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: x86_64-apple-darwin
+            binary_name: angos-darwin-amd64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            binary_name: angos-darwin-arm64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary_name: angos-linux-amd64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            binary_name: angos-linux-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl tools (Linux)
+        if: contains(matrix.target, 'linux')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Rust toolchain
+        run: |
+          rustup target add ${{ matrix.target }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build release binary
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-Clink-self-contained=yes -Clinker=rust-lld"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-Clink-self-contained=yes -Clinker=rust-lld"
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: mv target/${{ matrix.target }}/release/angos ${{ matrix.binary_name }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.binary_name }}
+          path: ${{ matrix.binary_name }}
+          if-no-files-found: error
+          retention-days: 1
+
+  build-container:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -264,14 +315,6 @@ jobs:
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
-      - name: Extract binary from image
-        run: |
-          platform=${{ matrix.platform }}
-          arch=${platform#linux/}
-          docker create --platform ${{ matrix.platform }} --name extract ${{ env.GHCR_REPO }}@${{ steps.build.outputs.digest }}
-          docker cp extract:/angos angos-${arch}
-          docker rm extract
-
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
@@ -280,18 +323,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: binary-${{ env.PLATFORM_PAIR }}
-          path: angos-*
-          if-no-files-found: error
-          retention-days: 1
-
   merge:
     runs-on: ubuntu-latest
     needs:
-      - build
+      - build-container
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -338,6 +373,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - merge
+      - build-binary
       - rust-checks
       - rust-test
       - conformance-fs
@@ -367,7 +403,9 @@ jobs:
 
             ## Standalone Binaries
 
-            | Platform    | Binary                  |
-            |-------------|-------------------------|
-            | Linux amd64 | `angos-amd64` |
-            | Linux arm64 | `angos-arm64` |
+            | Platform             | Binary                 |
+            |----------------------|------------------------|
+            | macOS amd64 (Intel)  | `angos-darwin-amd64`   |
+            | macOS arm64 (Apple)  | `angos-darwin-arm64`   |
+            | Linux amd64          | `angos-linux-amd64`    |
+            | Linux arm64          | `angos-linux-arm64`    |
