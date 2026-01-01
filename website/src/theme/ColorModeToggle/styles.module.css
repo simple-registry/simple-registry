@@ -1,0 +1,39 @@
+.themeSwitcher {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.themeSwitcher button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ifm-background-color);
+  color: var(--ifm-font-color-secondary);
+  border: none;
+  padding: 0.5rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border-right: 1px solid var(--ifm-toc-border-color);
+}
+
+.themeSwitcher button:last-child {
+  border-right: none;
+}
+
+.themeSwitcher button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.themeSwitcher button:hover {
+  color: var(--ifm-font-color-base);
+  background: var(--ifm-background-surface-color);
+}
+
+.themeSwitcher button.active {
+  color: var(--ifm-color-primary);
+  background: color-mix(in srgb, var(--ifm-color-primary) 10%, transparent);
+}

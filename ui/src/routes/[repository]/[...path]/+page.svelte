@@ -219,37 +219,37 @@
 
 <svelte:head>
 	{#if isManifestView}
-		<title>{data.reference} // {displayNs(data.namespace, data.repository)} // {data.repository} // {getRegistryName()}</title>
+		<title>{getRegistryName()} &gt; {data.repository} &gt; {displayNs(data.namespace, data.repository)} &gt; {data.reference}</title>
 	{:else}
-		<title>{displayNs(data.namespace, data.repository)} // {data.repository} // {getRegistryName()}</title>
+		<title>{getRegistryName()} &gt; {data.repository} &gt; {displayNs(data.namespace, data.repository)}</title>
 	{/if}
 </svelte:head>
 
 {#if isManifestView}
 	<Breadcrumb items={[
-		{ label: 'repositories', href: `${base}/` },
+		{ label: 'Repositories', href: `${base}/` },
 		{ label: data.repository, href: repoUrl(data.repository) },
 		{ label: displayNs(data.namespace, data.repository), href: namespaceUrl(data.repository, data.namespace) },
 		{ label: data.reference ?? '' }
 	]} />
 {:else}
 	<Breadcrumb items={[
-		{ label: 'repositories', href: `${base}/` },
+		{ label: 'Repositories', href: `${base}/` },
 		{ label: data.repository, href: repoUrl(data.repository) },
 		{ label: displayNs(data.namespace, data.repository) }
 	]} />
 {/if}
 
 {#if loading}
-	<LoadingState message={isManifestView ? 'loading manifest' : 'loading'} />
+	<LoadingState message={isManifestView ? 'Loading manifest' : 'Loading'} />
 {:else if error}
 	<ErrorState message={error} />
 {:else if isManifestView && manifest}
-	<Card title="manifest">
+	<Card title="Manifest">
 		<table>
 			<tbody>
 				<tr>
-					<td class="label">digest</td>
+					<td class="label">Digest</td>
 					<td>
 						<DigestLink
 							digest={digest ?? ''}
@@ -258,7 +258,7 @@
 					</td>
 				</tr>
 				<tr>
-					<td class="label">tags</td>
+					<td class="label">Tags</td>
 					<td>
 						<TagList
 							{tags}
@@ -271,7 +271,7 @@
 					</td>
 				</tr>
 				<tr>
-					<td class="label">media_type</td>
+					<td class="label">Media type</td>
 					<td>
 						{manifest.mediaType ?? 'unknown'}
 						{#if manifest.annotations}
@@ -284,13 +284,13 @@
 				{/if}
 				{#if manifest.artifactType}
 					<tr>
-						<td class="label">artifact_type</td>
+						<td class="label">Artifact type</td>
 						<td>{manifest.artifactType}</td>
 					</tr>
 				{/if}
 				{#if manifest.subject}
 					<tr>
-						<td class="label">subject</td>
+						<td class="label">Subject</td>
 						<td>
 							<DigestLink
 								digest={manifest.subject.digest}
@@ -301,7 +301,7 @@
 					</tr>
 				{/if}
 				<tr>
-					<td class="label">actions</td>
+					<td class="label">Actions</td>
 					<td>
 						<DeleteButton
 							isConfirming={deleteConfirm === 'digest'}
@@ -317,11 +317,11 @@
 	</Card>
 
 	{#if manifest.config}
-		<Card title="config">
+		<Card title="Config">
 			<table>
 				<tbody>
 					<tr>
-						<td class="label">digest</td>
+						<td class="label">Digest</td>
 						<td>
 							<DigestLink
 								digest={manifest.config.digest}
@@ -332,11 +332,11 @@
 						</td>
 					</tr>
 					<tr>
-						<td class="label">media_type</td>
+						<td class="label">Media type</td>
 						<td>{manifest.config.mediaType}</td>
 					</tr>
 					<tr>
-						<td class="label">size</td>
+						<td class="label">Size</td>
 						<td>{formatSize(manifest.config.size)}</td>
 					</tr>
 					{#if manifest.config.annotations && expandedAnnotations.has('config')}
@@ -356,13 +356,13 @@
 			</div>
 		{/snippet}
 		{#if showFilesView}
-			<Card title="files" count={manifest.layers.length} headerActions={viewToggle}>
+			<Card title="Files" count={manifest.layers.length} headerActions={viewToggle}>
 				<table>
 					<thead>
 						<tr>
-							<th>name</th>
-							<th>type</th>
-							<th class="col-narrow">size</th>
+							<th>Name</th>
+							<th>Type</th>
+							<th class="col-narrow">Size</th>
 							<th class="col-narrow"></th>
 						</tr>
 					</thead>
@@ -373,14 +373,14 @@
 								<td>{layer.mediaType}</td>
 								<td>{formatSize(layer.size)}</td>
 								<td>
-									<button class="download-link" onclick={() => downloadBlob(layer.digest, getFileName(layer))}>download</button>
+									<button class="download-link" onclick={() => downloadBlob(layer.digest, getFileName(layer))}>Download</button>
 								</td>
 							</tr>
 						{/each}
 					</tbody>
 					<tfoot>
 						<tr>
-							<td colspan="2" class="total-label">total</td>
+							<td colspan="2" class="total-label">Total</td>
 							<td>{formatSize(manifest.layers.reduce((sum, l) => sum + l.size, 0))}</td>
 							<td></td>
 						</tr>
@@ -388,13 +388,13 @@
 				</table>
 			</Card>
 		{:else}
-			<Card title="layers" count={manifest.layers.length} headerActions={viewToggle}>
+			<Card title="Layers" count={manifest.layers.length} headerActions={viewToggle}>
 				<table>
 					<thead>
 						<tr>
-							<th>digest</th>
-							<th>media_type</th>
-							<th class="col-narrow">size</th>
+							<th>Digest</th>
+							<th>Media type</th>
+							<th class="col-narrow">Size</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -422,7 +422,7 @@
 					</tbody>
 					<tfoot>
 						<tr>
-							<td colspan="2" class="total-label">total</td>
+							<td colspan="2" class="total-label">Total</td>
 							<td>{formatSize(manifest.layers.reduce((sum, l) => sum + l.size, 0))}</td>
 						</tr>
 					</tfoot>
@@ -434,14 +434,14 @@
 	{#if manifest.manifests && manifest.manifests.length > 0}
 		{@const platformManifests = manifest.manifests.filter(m => !m.annotations?.['vnd.docker.reference.digest'])}
 		{#if platformManifests.length > 0}
-		<Card title="manifests" count={platformManifests.length}>
+		<Card title="Manifests" count={platformManifests.length}>
 			<table>
 				<thead>
 					<tr>
-						<th>digest</th>
-						<th>platform</th>
-						<th>media_type</th>
-						<th class="col-narrow">size</th>
+						<th>Digest</th>
+						<th>Platform</th>
+						<th>Media type</th>
+						<th class="col-narrow">Size</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -495,13 +495,13 @@
 	{/if}
 
 	{#if referencedBy.length > 0}
-		<Card title="referenced by" count={referencedBy.length}>
+		<Card title="Referenced by" count={referencedBy.length}>
 			<table>
 				<thead>
 					<tr>
-						<th>digest</th>
-						<th>tags</th>
-						<th>platform</th>
+						<th>Digest</th>
+						<th>Tags</th>
+						<th>Platform</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -527,14 +527,14 @@
 	{/if}
 {:else}
 	{#if uploads.length > 0}
-		<Card title="uploads in progress" count={uploads.length} variant="warning">
+		<Card title="Uploads in progress" count={uploads.length} variant="warning">
 			<table>
 				<thead>
 					<tr>
-						<th>uuid</th>
-						<th>size</th>
-						<th>started</th>
-						<th class="col-medium">actions</th>
+						<th>UUID</th>
+						<th>Size</th>
+						<th>Started</th>
+						<th class="col-medium">Actions</th>
 					</tr>
 				</thead>
 				<tbody>
@@ -563,17 +563,17 @@
 	<table>
 		<thead>
 			<tr>
-				<th>digest</th>
-				<th>tags / platform</th>
-				<th>pushed</th>
-				<th>pulled</th>
-				<th class="col-narrow">actions</th>
+				<th>Digest</th>
+				<th>Tags / Platform</th>
+				<th>Pushed</th>
+				<th>Pulled</th>
+				<th class="col-actions">Actions</th>
 			</tr>
 		</thead>
 		<tbody>
 			{#if tree.length === 0}
 				<tr>
-					<td colspan="5" class="empty">no manifests found</td>
+					<td colspan="5" class="empty">No manifests found</td>
 				</tr>
 			{:else}
 			{#each tree as node}

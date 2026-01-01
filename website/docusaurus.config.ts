@@ -1,6 +1,7 @@
 import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
+import remarkThemedImages from './src/plugins/remark-themed-images.mjs';
 
 const config: Config = {
   title: 'Angos',
@@ -14,6 +15,17 @@ const config: Config = {
   projectName: 'angos',
 
   onBrokenLinks: 'throw',
+
+  headTags: [
+    {
+      tagName: 'link',
+      attributes: {
+        rel: 'icon',
+        type: 'image/png',
+        href: '/favicon-32x32.png',
+      },
+    },
+  ],
 
   i18n: {
     defaultLocale: 'en',
@@ -33,7 +45,8 @@ const config: Config = {
         docs: {
           path: '../doc',
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/project-angos/angos/tree/main/',
+          editUrl: 'https://github.com/project-angos/angos/tree/main/doc/',
+          remarkPlugins: [remarkThemedImages],
         },
         pages: {},
         blog: false,
@@ -47,73 +60,47 @@ const config: Config = {
   themeConfig: {
     image: 'img/social-card.png',
     navbar: {
-      title: 'ANGOS',
+      title: 'Angos',
       logo: {
         alt: 'Angos Logo',
         src: 'img/logo.svg',
       },
       items: [
         {
-          type: 'dropdown',
+          to: '/',
+          label: 'Home',
+          position: 'right',
+          activeBaseRegex: '^/$',
+        },
+        {
+          to: '/docs/tutorials/quickstart',
           label: 'Learn',
-          position: 'left',
-          items: [
-            {to: '/docs/tutorials/quickstart', label: 'Quickstart'},
-            {to: '/docs/tutorials/your-first-private-registry', label: 'Private Registry'},
-            {to: '/docs/tutorials/mirror-docker-hub', label: 'Mirror Docker Hub'},
-          ],
+          position: 'right',
+          activeBasePath: '/docs/tutorials',
         },
         {
-          type: 'dropdown',
+          to: '/docs/how-to/deploy-docker-compose',
           label: 'Guides',
-          position: 'left',
-          items: [
-            {to: '/docs/how-to/deploy-docker-compose', label: 'Deploy with Docker Compose'},
-            {to: '/docs/how-to/deploy-kubernetes', label: 'Deploy on Kubernetes'},
-            {type: 'html', value: '<hr style="margin: 0.5rem 0; border-color: var(--ifm-toc-border-color);">'},
-            {to: '/docs/how-to/configure-mtls', label: 'Configure mTLS'},
-            {to: '/docs/how-to/configure-github-actions-oidc', label: 'GitHub Actions OIDC'},
-            {to: '/docs/how-to/configure-generic-oidc', label: 'Generic OIDC'},
-            {type: 'html', value: '<hr style="margin: 0.5rem 0; border-color: var(--ifm-toc-border-color);">'},
-            {to: '/docs/how-to/set-up-access-control', label: 'Access Control'},
-            {to: '/docs/how-to/configure-retention-policies', label: 'Retention Policies'},
-            {to: '/docs/how-to/protect-tags-immutability', label: 'Immutable Tags'},
-            {to: '/docs/how-to/configure-webhook-authorization', label: 'Webhook Authorization'},
-            {type: 'html', value: '<hr style="margin: 0.5rem 0; border-color: var(--ifm-toc-border-color);">'},
-            {to: '/docs/how-to/run-storage-maintenance', label: 'Storage Maintenance'},
-            {to: '/docs/how-to/enable-web-ui', label: 'Enable Web UI'},
-            {to: '/docs/how-to/troubleshoot-common-issues', label: 'Troubleshooting'},
-          ],
+          position: 'right',
+          activeBasePath: '/docs/how-to',
         },
         {
-          type: 'dropdown',
+          to: '/docs/reference/configuration',
           label: 'Reference',
-          position: 'left',
-          items: [
-            {to: '/docs/reference/configuration', label: 'Configuration'},
-            {to: '/docs/reference/cli', label: 'CLI'},
-            {to: '/docs/reference/cel-expressions', label: 'CEL Expressions'},
-            {to: '/docs/reference/api-endpoints', label: 'API Endpoints'},
-            {to: '/docs/reference/ui', label: 'Web UI'},
-            {to: '/docs/reference/metrics', label: 'Metrics'},
-          ],
+          position: 'right',
+          activeBasePath: '/docs/reference',
         },
         {
-          type: 'dropdown',
+          to: '/docs/explanation/architecture',
           label: 'Concepts',
-          position: 'left',
-          items: [
-            {to: '/docs/explanation/architecture', label: 'Architecture'},
-            {to: '/docs/explanation/storage-backends', label: 'Storage Backends'},
-            {to: '/docs/explanation/authentication-authorization', label: 'Authentication'},
-            {to: '/docs/explanation/pull-through-caching', label: 'Pull-Through Caching'},
-            {to: '/docs/explanation/security-model', label: 'Security Model'},
-          ],
+          position: 'right',
+          activeBasePath: '/docs/explanation',
         },
         {
           href: 'https://github.com/project-angos/angos',
-          label: 'GitHub',
           position: 'right',
+          className: 'header-github-link',
+          'aria-label': 'GitHub repository',
         },
       ],
     },
@@ -154,7 +141,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Angos.`,
+      copyright: `Copyright © ${new Date().getFullYear()} Angos Maintainers.`,
     },
     prism: {
       theme: prismThemes.github,
@@ -165,7 +152,7 @@ const config: Config = {
       theme: {light: 'neutral', dark: 'dark'},
     },
     colorMode: {
-      defaultMode: 'dark',
+      defaultMode: 'light',
       disableSwitch: false,
       respectPrefersColorScheme: true,
     },

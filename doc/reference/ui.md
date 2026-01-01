@@ -129,7 +129,11 @@ rules = [
 
 ### Repository List
 
-![Repository List](../images/ui-repositories.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../images/ui-repositories-dark.png" />
+  <source media="(prefers-color-scheme: light)" srcset="../images/ui-repositories-light.png" />
+  <img alt="Repository List" src="../images/ui-repositories-light.png" />
+</picture>
 
 Displays all configured repositories with:
 - Repository name
@@ -140,7 +144,11 @@ Displays all configured repositories with:
 
 ### Namespace List
 
-![Namespace List](../images/ui-namespaces.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../images/ui-namespaces-dark.png" />
+  <source media="(prefers-color-scheme: light)" srcset="../images/ui-namespaces-light.png" />
+  <img alt="Namespace List" src="../images/ui-namespaces-light.png" />
+</picture>
 
 Displays images within a repository:
 - Image name (namespace)
@@ -150,7 +158,11 @@ Displays images within a repository:
 
 ### Manifest List
 
-![Manifest List](../images/ui-manifests.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../images/ui-manifests-dark.png" />
+  <source media="(prefers-color-scheme: light)" srcset="../images/ui-manifests-light.png" />
+  <img alt="Manifest List" src="../images/ui-manifests-light.png" />
+</picture>
 
 Tree view of all manifests:
 - Multi-platform indexes with expandable children
@@ -163,7 +175,11 @@ Tree view of all manifests:
 
 ### Manifest Details
 
-![Manifest Details](../images/ui-manifest-details.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../images/ui-manifest-details-dark.png" />
+  <source media="(prefers-color-scheme: light)" srcset="../images/ui-manifest-details-light.png" />
+  <img alt="Manifest Details" src="../images/ui-manifest-details-light.png" />
+</picture>
 
 Complete manifest information:
 - **Header**: Digest, media type, size
@@ -176,7 +192,11 @@ Complete manifest information:
 
 ### Uploads
 
-![Uploads](../images/ui-uploads.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../images/ui-uploads-dark.png" />
+  <source media="(prefers-color-scheme: light)" srcset="../images/ui-uploads-light.png" />
+  <img alt="Uploads" src="../images/ui-uploads-light.png" />
+</picture>
 
 Shows in-progress blob uploads:
 - Upload UUID
@@ -208,7 +228,7 @@ Click on digests to copy the full value.
 
 Toggle between light and dark themes using the header button. Preference is saved in browser local storage.
 
-![Dark Theme](../images/ui-dark-theme.png)
+![Dark and Light Theme](../images/ui-dark-light.png)
 
 ### Annotations Expansion
 
@@ -223,7 +243,11 @@ Click `[+]` to expand annotation values. Well-known annotation keys are displaye
 
 ## ORAS Artifacts
 
-![ORAS Files](../images/ui-oras-files.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../images/ui-oras-files-dark.png" />
+  <source media="(prefers-color-scheme: light)" srcset="../images/ui-oras-files-light.png" />
+  <img alt="ORAS Files" src="../images/ui-oras-files-light.png" />
+</picture>
 
 For OCI artifacts (non-container content), the UI displays:
 - Filename (from annotations or media type)

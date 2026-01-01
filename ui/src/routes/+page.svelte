@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { base } from '$app/paths';
 	import { getRegistryName } from '$lib/config.svelte';
 	import { fetchRepositories, type RepositoryInfo } from '$lib/api';
 	import { repoUrl } from '$lib/utils';
@@ -24,28 +25,28 @@
 </script>
 
 <svelte:head>
-	<title>repositories // {getRegistryName()}</title>
+	<title>{getRegistryName()} &gt; Repositories</title>
 </svelte:head>
 
-<Breadcrumb items={[{ label: 'repositories' }]} />
+<Breadcrumb items={[{ label: 'Repositories', href: `${base}/` }]} />
 
 {#if loading}
-	<LoadingState message="loading repositories" />
+	<LoadingState message="Loading repositories" />
 {:else if error}
 	<ErrorState message={error} />
 {:else}
 	<table>
 		<thead>
 			<tr>
-				<th>name</th>
-				<th>features</th>
-				<th class="col-medium">namespaces</th>
+				<th>Name</th>
+				<th>Features</th>
+				<th class="col-medium">Namespaces</th>
 			</tr>
 		</thead>
 		<tbody>
 			{#if repositories.length === 0}
 				<tr>
-					<td colspan="3" class="empty">no repositories found</td>
+					<td colspan="3" class="empty">No repositories found</td>
 				</tr>
 			{:else}
 				{#each repositories as repo}
@@ -53,10 +54,10 @@
 						<td>{repo.name}</td>
 						<td>
 							{#if repo.pull_through_cache}
-								<span class="badge pull-through">cache</span>
+								<span class="badge pull-through">Cache</span>
 							{/if}
 							{#if repo.immutable_tags}
-								<span class="badge immutable">immutable</span>
+								<span class="badge immutable">Immutable</span>
 							{/if}
 							{#if !repo.pull_through_cache && !repo.immutable_tags}
 								<span class="no-features">-</span>

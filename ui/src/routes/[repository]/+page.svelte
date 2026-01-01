@@ -41,16 +41,16 @@
 </script>
 
 <svelte:head>
-	<title>{data.repository} // {getRegistryName()}</title>
+	<title>{getRegistryName()} &gt; {data.repository}</title>
 </svelte:head>
 
 <Breadcrumb items={[
-	{ label: 'repositories', href: `${base}/` },
+	{ label: 'Repositories', href: `${base}/` },
 	{ label: data.repository }
 ]} />
 
 {#if loading}
-	<LoadingState message="loading namespaces" />
+	<LoadingState message="Loading namespaces" />
 {:else if error}
 	<ErrorState message={error} />
 {:else}
@@ -58,17 +58,17 @@
 		<div class="config-panel">
 			{#if pullThroughCache}
 				<div class="config-item">
-					<span class="config-label">upstream</span>
+					<span class="config-label">Upstream</span>
 					<span class="config-value">{upstreamUrls.join(', ')}</span>
 				</div>
 			{/if}
 			{#if immutableTags}
 				<div class="config-item">
-					<span class="config-label">immutable tags</span>
+					<span class="config-label">Immutable tags</span>
 					{#if immutableTagsExclusions.length > 0}
 						<span class="config-value">except: {immutableTagsExclusions.join(', ')}</span>
 					{:else}
-						<span class="config-value enabled">enabled</span>
+						<span class="config-value enabled">Enabled</span>
 					{/if}
 				</div>
 			{/if}
@@ -78,15 +78,15 @@
 	<table>
 		<thead>
 			<tr>
-				<th>namespace</th>
-				<th class="col-medium">manifests</th>
-				<th class="col-medium">uploads</th>
+				<th>Namespace</th>
+				<th class="col-medium">Manifests</th>
+				<th class="col-medium">Uploads</th>
 			</tr>
 		</thead>
 		<tbody>
 			{#if namespaces.length === 0}
 				<tr>
-					<td colspan="3" class="empty">no namespaces found</td>
+					<td colspan="3" class="empty">No namespaces found</td>
 				</tr>
 			{:else}
 				{#each namespaces as namespace}

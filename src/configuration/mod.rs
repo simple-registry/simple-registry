@@ -84,7 +84,7 @@ impl Default for UiConfig {
 
 impl UiConfig {
     fn default_name() -> String {
-        "angos".to_string()
+        "Angos".to_string()
     }
 }
 
@@ -433,7 +433,7 @@ mod tests {
 
         let config = Configuration::load_from_str(config).unwrap();
         assert!(!config.ui.enabled);
-        assert_eq!(config.ui.name, "angos");
+        assert_eq!(config.ui.name, "Angos");
     }
 
     #[tokio::test]
