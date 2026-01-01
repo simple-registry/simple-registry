@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Stacked layers left-aligned, growing from top to bottom -->
+  <rect x="10" y="18" width="50" height="10" rx="3" fill="#0891b2"/>
+  <rect x="10" y="36" width="60" height="10" rx="3" fill="#0891b2" opacity="0.7"/>
+  <rect x="10" y="54" width="70" height="10" rx="3" fill="#0891b2" opacity="0.5"/>
+  <rect x="10" y="72" width="80" height="10" rx="3" fill="#0891b2" opacity="0.3"/>
+</svg>

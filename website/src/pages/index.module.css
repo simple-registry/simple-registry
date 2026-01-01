@@ -27,20 +27,11 @@
   text-align: center;
 }
 
-.heroLogoWrapper {
-  width: 90px;
-  height: 90px;
-  margin: 1rem auto;
-  border-radius: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 2px solid color-mix(in srgb, var(--ifm-color-primary) 30%, transparent);
-}
-
 .heroLogo {
-  width: 60px;
-  height: 60px;
+  display: block;
+  width: 120px;
+  height: 120px;
+  margin: 1rem auto;
 }
 
 .heroBadge {

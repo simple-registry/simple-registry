@@ -12,9 +12,7 @@ function HomepageHeader() {
       <div className="container">
         <div className={styles.heroContent}>
           <div className={styles.heroBadge}>Open Source Container Registry</div>
-          <div className={styles.heroLogoWrapper}>
-            <img src="/img/logo.svg" alt="Angos Logo" className={styles.heroLogo} />
-          </div>
+          <img src="/docs/images/angos-hero.svg" alt="Angos Logo" className={styles.heroLogo} />
           <h1 className={styles.heroTitle}>{siteConfig.title}</h1>
           <p className={styles.heroSubtitle}>{siteConfig.tagline}</p>
           <div className={styles.buttons}>

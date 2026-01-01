@@ -2,7 +2,7 @@
 
 # Angos
 
-<img src="website/static/img/logo.svg" alt="Angos Logo" width="120" height="120">
+<img src="doc/images/angos-hero.svg" alt="Angos Logo" width="120" height="120">
 
 A fully OCI-compliant and Docker-compatible container registry.
 

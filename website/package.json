@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "docusaurus": "docusaurus",
-    "copy-images": "mkdir -p static/docs/images && cp ../doc/images/*.png static/docs/images/",
+    "copy-images": "mkdir -p static/docs/images && cp ../doc/images/*.png ../doc/images/*.svg static/docs/images/",
     "start": "npm run copy-images && docusaurus start",
     "build": "npm run copy-images && docusaurus build",
     "swizzle": "docusaurus swizzle",
