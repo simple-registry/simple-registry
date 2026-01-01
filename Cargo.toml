@@ -1,6 +1,6 @@
 [package]
 name = "angos"
-version = "1.0.0-snapshot"
+version = "1.0.0"
 edition = "2024"
 
 [profile.release]
