@@ -17,7 +17,7 @@ use crate::oci::Digest;
 use crate::registry::blob_store::hashing_reader::HashingReader;
 use crate::registry::blob_store::sha256_ext::Sha256Ext;
 use crate::registry::blob_store::{BlobStore, BoxedReader, Error, MultipartCleanup};
-use crate::registry::{data_store, path_builder};
+use crate::registry::{data_store, pagination, path_builder};
 
 #[derive(Clone)]
 pub struct Backend {
@@ -121,41 +121,24 @@ impl BlobStore for Backend {
                     continue;
                 }
 
-                // Extract digest from path like "ab/abcd1234.../data"
-                if key.ends_with("/data") {
-                    let key_without_data = &key[..key.len() - 5];
-                    if let Some(slash_pos) = key_without_data.rfind('/') {
-                        let digest = &key_without_data[slash_pos + 1..];
-                        all_blobs.push(Digest::Sha256(digest.to_string()));
-                    }
+                let key_without_data = &key[..key.len() - 5];
+                if let Some(slash_pos) = key_without_data.rfind('/') {
+                    let digest = &key_without_data[slash_pos + 1..];
+                    all_blobs.push(Digest::Sha256(digest.to_string()));
                 }
             }
 
-            if let Some(token) = next_token {
-                list_continuation_token = Some(token);
-            } else {
+            list_continuation_token = next_token;
+            if list_continuation_token.is_none() {
                 break;
             }
         }
 
-        let start_idx = match &continuation_token {
-            Some(token) => all_blobs
-                .iter()
-                .position(|digest| digest.to_string() > *token)
-                .unwrap_or(all_blobs.len()),
-            None => 0,
-        };
-
-        let end_idx = (start_idx + n as usize).min(all_blobs.len());
-        let result_blobs = all_blobs[start_idx..end_idx].to_vec();
-
-        let next_token = if end_idx < all_blobs.len() {
-            result_blobs.last().map(ToString::to_string)
-        } else {
-            None
-        };
-
-        Ok((result_blobs, next_token))
+        Ok(pagination::paginate_sorted(
+            &all_blobs,
+            n,
+            continuation_token.as_deref(),
+        ))
     }
 
     #[instrument(skip(self))]

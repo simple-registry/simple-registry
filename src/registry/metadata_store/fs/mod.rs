@@ -117,7 +117,7 @@ impl MetadataStore for Backend {
         let mut repositories = self.collect_repositories(base_path).await;
         repositories.dedup();
 
-        Ok(pagination::paginate(&repositories, n, last))
+        Ok(pagination::paginate(&repositories, n, last.as_deref()))
     }
 
     #[instrument(skip(self))]
@@ -132,7 +132,7 @@ impl MetadataStore for Backend {
         let mut tags = self.store.list_dir(&path).await?;
         tags.sort();
 
-        Ok(pagination::paginate(&tags, n, last))
+        Ok(pagination::paginate(&tags, n, last.as_deref()))
     }
 
     #[instrument(skip(self))]
@@ -193,7 +193,11 @@ impl MetadataStore for Backend {
             revisions.push(Digest::Sha256(revision));
         }
 
-        Ok(pagination::paginate(&revisions, n, continuation_token))
+        Ok(pagination::paginate(
+            &revisions,
+            n,
+            continuation_token.as_deref(),
+        ))
     }
 
     async fn count_manifests(&self, namespace: &str) -> Result<usize, Error> {
