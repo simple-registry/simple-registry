@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::pin;
 use tracing::{Span, debug, error, info, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use uuid::Uuid;
 
 use crate::command::server::auth::PeerCertificate;
 use crate::command::server::error::Error;
@@ -23,7 +24,7 @@ use crate::command::server::response_body::ResponseBody;
 use crate::command::server::route::Route;
 use crate::command::server::{ServerContext, router, ui};
 use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
-use crate::oci::Reference;
+use crate::oci::{Digest, Reference};
 
 pub async fn serve_request<S>(
     stream: TokioIo<S>,
@@ -136,167 +137,335 @@ async fn handle_request(
     Ok(response)
 }
 
-#[allow(clippy::too_many_lines)]
 #[instrument(skip(context, req))]
 async fn router(
     context: Arc<ServerContext>,
     req: Request<Incoming>,
 ) -> Result<Response<ResponseBody>, Error> {
     let (parts, incoming) = req.into_parts();
-
     let route = router::parse(&parts.method, &parts.uri);
+
+    authenticate_and_authorize(&context, &route, &parts).await?;
+    dispatch_route(&context, route, &parts, incoming).await
+}
+
+#[instrument(skip(context, parts))]
+async fn authenticate_and_authorize(
+    context: &ServerContext,
+    route: &Route<'_>,
+    parts: &hyper::http::request::Parts,
+) -> Result<(), Error> {
     let remote_address = parts.extensions.get::<std::net::SocketAddr>().copied();
-    let identity = context.authenticate_request(&parts, remote_address).await?;
-    context.authorize_request(&route, &identity, &parts).await?;
+    let identity = context.authenticate_request(parts, remote_address).await?;
+    context.authorize_request(route, &identity, parts).await
+}
 
+#[instrument(skip(context, parts, incoming))]
+async fn dispatch_route<'a>(
+    context: &'a ServerContext,
+    route: Route<'a>,
+    parts: &'a hyper::http::request::Parts,
+    incoming: Incoming,
+) -> Result<Response<ResponseBody>, Error> {
     match route {
-        Route::Unknown => {
-            if [Method::GET, Method::HEAD].contains(&parts.method) {
-                let msg = format!("unknown route: {} {}", parts.method, parts.uri);
-                Err(Error::NotFound(msg))
-            } else {
-                let msg = format!("unsupported route: {} {}", parts.method, parts.uri);
-                Err(Error::BadRequest(msg))
-            }
-        }
         Route::UiAsset { path } if context.enable_ui => ui::serve_asset(path),
-        Route::UiConfig if context.enable_ui => handle_ui_config(&context),
-        Route::UiAsset { .. } | Route::UiConfig => {
-            let msg = format!("unknown route: {} {}", parts.method, parts.uri);
-            Err(Error::NotFound(msg))
-        }
+        Route::UiConfig if context.enable_ui => handle_ui_config(context),
+        Route::Unknown | Route::UiAsset { .. } | Route::UiConfig => handle_unknown_route(parts),
         Route::ApiVersion => Ok(context.registry.handle_get_api_version().await?),
-        Route::StartUpload { namespace, digest } => Ok(context
-            .registry
-            .handle_start_upload(namespace, digest)
-            .await?),
-        Route::GetUpload { namespace, uuid } => {
-            Ok(context.registry.handle_get_upload(namespace, uuid).await?)
+        Route::StartUpload { namespace, digest } => {
+            handle_start_upload(context, namespace, digest).await
         }
+        Route::GetUpload { namespace, uuid } => handle_get_upload(context, namespace, uuid).await,
         Route::PatchUpload { namespace, uuid } => {
-            let start_offset = parts.range(CONTENT_RANGE)?.map(|(start, _)| start);
-            let body_stream = incoming.into_async_read();
-
-            Ok(context
-                .registry
-                .handle_patch_upload(namespace, uuid, start_offset, body_stream)
-                .await?)
+            handle_patch_upload(context, parts, incoming, namespace, uuid).await
         }
         Route::PutUpload {
             namespace,
             uuid,
             digest,
-        } => {
-            let body_stream = incoming.into_async_read();
-
-            Ok(context
-                .registry
-                .handle_put_upload(namespace, uuid, &digest, body_stream)
-                .await?)
+        } => handle_put_upload(context, incoming, namespace, uuid, digest).await,
+        Route::DeleteUpload { namespace, uuid } => {
+            handle_delete_upload(context, namespace, uuid).await
         }
-        Route::DeleteUpload { namespace, uuid } => Ok(context
-            .registry
-            .handle_delete_upload(namespace, uuid)
-            .await?),
         Route::GetBlob { namespace, digest } => {
-            let mime_types = parts.accepted_content_types();
-            let range = parts.range(RANGE)?;
-
-            Ok(context
-                .registry
-                .handle_get_blob(namespace, &digest, &mime_types, range)
-                .await?)
+            handle_get_blob(context, parts, namespace, digest).await
         }
         Route::HeadBlob { namespace, digest } => {
-            let mime_types = parts.accepted_content_types();
-
-            Ok(context
-                .registry
-                .handle_head_blob(namespace, &digest, &mime_types)
-                .await?)
+            handle_head_blob(context, parts, namespace, digest).await
         }
-        Route::DeleteBlob { namespace, digest } => Ok(context
-            .registry
-            .handle_delete_blob(namespace, &digest)
-            .await?),
+        Route::DeleteBlob { namespace, digest } => {
+            handle_delete_blob(context, namespace, digest).await
+        }
         Route::GetManifest {
             namespace,
             reference,
-        } => {
-            let mime_types = parts.accepted_content_types();
-            let is_tag_immutable = match &reference {
-                Reference::Tag(tag) => context.is_tag_immutable(namespace, tag.as_str()),
-                Reference::Digest(_) => false,
-            };
-
-            Ok(context
-                .registry
-                .handle_get_manifest(namespace, reference, &mime_types, is_tag_immutable)
-                .await?)
-        }
+        } => handle_get_manifest(context, parts, namespace, reference).await,
         Route::HeadManifest {
             namespace,
             reference,
-        } => {
-            let mime_types = parts.accepted_content_types();
-            let is_tag_immutable = match &reference {
-                Reference::Tag(tag) => context.is_tag_immutable(namespace, tag.as_str()),
-                Reference::Digest(_) => false,
-            };
-
-            Ok(context
-                .registry
-                .handle_head_manifest(namespace, reference, &mime_types, is_tag_immutable)
-                .await?)
-        }
+        } => handle_head_manifest(context, parts, namespace, reference).await,
         Route::PutManifest {
             namespace,
             reference,
-        } => {
-            let mime_type = parts.get_header(CONTENT_TYPE).ok_or(Error::BadRequest(
-                "No Content-Type header provided".to_string(),
-            ))?;
-
-            let body_stream = incoming.into_async_read();
-
-            Ok(context
-                .registry
-                .handle_put_manifest(namespace, reference, mime_type, body_stream)
-                .await?)
-        }
+        } => handle_put_manifest(context, parts, incoming, namespace, reference).await,
         Route::DeleteManifest {
             namespace,
             reference,
-        } => Ok(context
-            .registry
-            .handle_delete_manifest(namespace, reference)
-            .await?),
+        } => handle_delete_manifest(context, namespace, reference).await,
         Route::GetReferrer {
             namespace,
             digest,
             artifact_type,
-        } => Ok(context
-            .registry
-            .handle_get_referrers(namespace, &digest, artifact_type)
-            .await?),
-        Route::ListCatalog { n, last } => Ok(context.registry.handle_list_catalog(n, last).await?),
-        Route::ListTags { namespace, n, last } => Ok(context
-            .registry
-            .handle_list_tags(namespace, n, last)
-            .await?),
-        Route::ListRevisions { namespace } => {
-            Ok(context.registry.handle_list_revisions(namespace).await?)
+        } => handle_get_referrer(context, namespace, digest, artifact_type).await,
+        Route::ListCatalog { n, last } => handle_list_catalog(context, n, last).await,
+        Route::ListTags { namespace, n, last } => {
+            handle_list_tags(context, namespace, n, last).await
         }
-        Route::ListUploads { namespace } => {
-            Ok(context.registry.handle_list_uploads(namespace).await?)
-        }
-        Route::ListRepositories => Ok(context.registry.handle_list_repositories().await?),
-        Route::ListNamespaces { repository } => {
-            Ok(context.registry.handle_list_namespaces(repository).await?)
-        }
+        Route::ListRevisions { namespace } => handle_list_revisions(context, namespace).await,
+        Route::ListUploads { namespace } => handle_list_uploads(context, namespace).await,
+        Route::ListRepositories => handle_list_repositories(context).await,
+        Route::ListNamespaces { repository } => handle_list_namespaces(context, repository).await,
         Route::Healthz => handle_healthz(),
         Route::Metrics => handle_metrics(),
     }
+}
+
+fn handle_unknown_route(
+    parts: &hyper::http::request::Parts,
+) -> Result<Response<ResponseBody>, Error> {
+    if [Method::GET, Method::HEAD].contains(&parts.method) {
+        let msg = format!("unknown route: {} {}", parts.method, parts.uri);
+        Err(Error::NotFound(msg))
+    } else {
+        let msg = format!("unsupported route: {} {}", parts.method, parts.uri);
+        Err(Error::BadRequest(msg))
+    }
+}
+
+async fn handle_start_upload(
+    context: &ServerContext,
+    namespace: &str,
+    digest: Option<Digest>,
+) -> Result<Response<ResponseBody>, Error> {
+    Ok(context
+        .registry
+        .handle_start_upload(namespace, digest)
+        .await?)
+}
+
+async fn handle_get_upload(
+    context: &ServerContext,
+    namespace: &str,
+    uuid: Uuid,
+) -> Result<Response<ResponseBody>, Error> {
+    Ok(context.registry.handle_get_upload(namespace, uuid).await?)
+}
+
+async fn handle_patch_upload(
+    context: &ServerContext,
+    parts: &hyper::http::request::Parts,
+    incoming: Incoming,
+    namespace: &str,
+    uuid: Uuid,
+) -> Result<Response<ResponseBody>, Error> {
+    let start_offset = parts.range(CONTENT_RANGE)?.map(|(start, _)| start);
+    let body_stream = incoming.into_async_read();
+
+    Ok(context
+        .registry
+        .handle_patch_upload(namespace, uuid, start_offset, body_stream)
+        .await?)
+}
+
+async fn handle_put_upload(
+    context: &ServerContext,
+    incoming: Incoming,
+    namespace: &str,
+    uuid: Uuid,
+    digest: Digest,
+) -> Result<Response<ResponseBody>, Error> {
+    let body_stream = incoming.into_async_read();
+
+    Ok(context
+        .registry
+        .handle_put_upload(namespace, uuid, &digest, body_stream)
+        .await?)
+}
+
+async fn handle_delete_upload(
+    context: &ServerContext,
+    namespace: &str,
+    uuid: Uuid,
+) -> Result<Response<ResponseBody>, Error> {
+    Ok(context
+        .registry
+        .handle_delete_upload(namespace, uuid)
+        .await?)
+}
+
+async fn handle_get_blob(
+    context: &ServerContext,
+    parts: &hyper::http::request::Parts,
+    namespace: &str,
+    digest: Digest,
+) -> Result<Response<ResponseBody>, Error> {
+    let mime_types = parts.accepted_content_types();
+    let range = parts.range(RANGE)?;
+
+    Ok(context
+        .registry
+        .handle_get_blob(namespace, &digest, &mime_types, range)
+        .await?)
+}
+
+async fn handle_head_blob(
+    context: &ServerContext,
+    parts: &hyper::http::request::Parts,
+    namespace: &str,
+    digest: Digest,
+) -> Result<Response<ResponseBody>, Error> {
+    let mime_types = parts.accepted_content_types();
+
+    Ok(context
+        .registry
+        .handle_head_blob(namespace, &digest, &mime_types)
+        .await?)
+}
+
+async fn handle_delete_blob(
+    context: &ServerContext,
+    namespace: &str,
+    digest: Digest,
+) -> Result<Response<ResponseBody>, Error> {
+    Ok(context
+        .registry
+        .handle_delete_blob(namespace, &digest)
+        .await?)
+}
+
+async fn handle_get_manifest(
+    context: &ServerContext,
+    parts: &hyper::http::request::Parts,
+    namespace: &str,
+    reference: Reference,
+) -> Result<Response<ResponseBody>, Error> {
+    let mime_types = parts.accepted_content_types();
+    let is_tag_immutable = match &reference {
+        Reference::Tag(tag) => context.is_tag_immutable(namespace, tag.as_str()),
+        Reference::Digest(_) => false,
+    };
+
+    Ok(context
+        .registry
+        .handle_get_manifest(namespace, reference, &mime_types, is_tag_immutable)
+        .await?)
+}
+
+async fn handle_head_manifest(
+    context: &ServerContext,
+    parts: &hyper::http::request::Parts,
+    namespace: &str,
+    reference: Reference,
+) -> Result<Response<ResponseBody>, Error> {
+    let mime_types = parts.accepted_content_types();
+    let is_tag_immutable = match &reference {
+        Reference::Tag(tag) => context.is_tag_immutable(namespace, tag.as_str()),
+        Reference::Digest(_) => false,
+    };
+
+    Ok(context
+        .registry
+        .handle_head_manifest(namespace, reference, &mime_types, is_tag_immutable)
+        .await?)
+}
+
+async fn handle_put_manifest(
+    context: &ServerContext,
+    parts: &hyper::http::request::Parts,
+    incoming: Incoming,
+    namespace: &str,
+    reference: Reference,
+) -> Result<Response<ResponseBody>, Error> {
+    let mime_type = parts.get_header(CONTENT_TYPE).ok_or(Error::BadRequest(
+        "No Content-Type header provided".to_string(),
+    ))?;
+
+    let body_stream = incoming.into_async_read();
+
+    Ok(context
+        .registry
+        .handle_put_manifest(namespace, reference, mime_type, body_stream)
+        .await?)
+}
+
+async fn handle_delete_manifest(
+    context: &ServerContext,
+    namespace: &str,
+    reference: Reference,
+) -> Result<Response<ResponseBody>, Error> {
+    Ok(context
+        .registry
+        .handle_delete_manifest(namespace, reference)
+        .await?)
+}
+
+async fn handle_get_referrer(
+    context: &ServerContext,
+    namespace: &str,
+    digest: Digest,
+    artifact_type: Option<String>,
+) -> Result<Response<ResponseBody>, Error> {
+    Ok(context
+        .registry
+        .handle_get_referrers(namespace, &digest, artifact_type)
+        .await?)
+}
+
+async fn handle_list_catalog(
+    context: &ServerContext,
+    n: Option<u16>,
+    last: Option<String>,
+) -> Result<Response<ResponseBody>, Error> {
+    Ok(context.registry.handle_list_catalog(n, last).await?)
+}
+
+async fn handle_list_tags(
+    context: &ServerContext,
+    namespace: &str,
+    n: Option<u16>,
+    last: Option<String>,
+) -> Result<Response<ResponseBody>, Error> {
+    Ok(context
+        .registry
+        .handle_list_tags(namespace, n, last)
+        .await?)
+}
+
+async fn handle_list_revisions(
+    context: &ServerContext,
+    namespace: &str,
+) -> Result<Response<ResponseBody>, Error> {
+    Ok(context.registry.handle_list_revisions(namespace).await?)
+}
+
+async fn handle_list_uploads(
+    context: &ServerContext,
+    namespace: &str,
+) -> Result<Response<ResponseBody>, Error> {
+    Ok(context.registry.handle_list_uploads(namespace).await?)
+}
+
+async fn handle_list_repositories(
+    context: &ServerContext,
+) -> Result<Response<ResponseBody>, Error> {
+    Ok(context.registry.handle_list_repositories().await?)
+}
+
+async fn handle_list_namespaces(
+    context: &ServerContext,
+    repository: &str,
+) -> Result<Response<ResponseBody>, Error> {
+    Ok(context.registry.handle_list_namespaces(repository).await?)
 }
 
 fn handle_ui_config(context: &ServerContext) -> Result<Response<ResponseBody>, Error> {
