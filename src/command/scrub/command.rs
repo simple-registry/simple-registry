@@ -12,9 +12,9 @@ use crate::command::scrub::check::{
 };
 use crate::command::scrub::error::Error;
 use crate::configuration::Configuration;
+use crate::policy::{RetentionPolicy, RetentionPolicyConfig};
 use crate::registry::{
-    Repository, RetentionPolicy, RetentionPolicyConfig, blob_store, blob_store::BlobStore,
-    metadata_store::MetadataStore, repository,
+    Repository, blob_store, blob_store::BlobStore, metadata_store::MetadataStore, repository,
 };
 
 #[derive(FromArgs, PartialEq, Debug)]

@@ -23,6 +23,7 @@ mod configuration;
 mod identity;
 mod metrics_provider;
 mod oci;
+mod policy;
 mod registry;
 mod secret;
 mod watcher;

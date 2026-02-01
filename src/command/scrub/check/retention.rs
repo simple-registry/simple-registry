@@ -5,12 +5,13 @@ use futures_util::future::join_all;
 use tracing::{debug, info};
 
 use crate::oci::Digest;
+use crate::policy::{ManifestImage, RetentionPolicy};
+use crate::registry::Error;
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::metadata_store::{LinkMetadata, MetadataStore, MetadataStoreExt};
 use crate::registry::parse_manifest_digests;
 use crate::registry::repository::Repository;
-use crate::registry::{Error, ManifestImage, RetentionPolicy};
 
 struct TagWithMetadata {
     name: String,
@@ -392,7 +393,7 @@ impl RetentionChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::RetentionPolicy;
+    use crate::policy::{RetentionPolicy, RetentionPolicyConfig};
     use crate::registry::test_utils;
     use crate::registry::tests::backends;
 
@@ -415,7 +416,7 @@ mod tests {
             tx.create_link(&LinkKind::Tag("v1.0.0".to_string()), &blob_digest);
             tx.commit().await.unwrap();
 
-            let retention_config = crate::registry::RetentionPolicyConfig {
+            let retention_config = RetentionPolicyConfig {
                 rules: vec!["top_pushed(10)".to_string()],
             };
 
@@ -494,7 +495,7 @@ mod tests {
             tx.commit().await.unwrap();
 
             let policy = Arc::new(
-                RetentionPolicy::new(&crate::registry::RetentionPolicyConfig {
+                RetentionPolicy::new(&RetentionPolicyConfig {
                     rules: vec!["image.tag != null".to_string()],
                 })
                 .unwrap(),
@@ -574,7 +575,7 @@ mod tests {
             tx.commit().await.unwrap();
 
             let policy = Arc::new(
-                RetentionPolicy::new(&crate::registry::RetentionPolicyConfig {
+                RetentionPolicy::new(&RetentionPolicyConfig {
                     rules: vec!["image.tag != null".to_string()],
                 })
                 .unwrap(),

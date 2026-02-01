@@ -5,15 +5,14 @@ use tracing::instrument;
 
 use crate::cache::Cache;
 use crate::oci::{Digest, Reference};
+use crate::policy::{AccessPolicyConfig, RetentionPolicy, RetentionPolicyConfig};
+use crate::registry::Error;
+use crate::registry::blob_store::BoxedReader;
+
 mod registry_client;
 
 use registry_client::RegistryClient;
 pub use registry_client::RegistryClientConfig;
-
-use crate::registry::Error;
-use crate::registry::access_policy::AccessPolicyConfig;
-use crate::registry::blob_store::BoxedReader;
-use crate::registry::retention_policy::{RetentionPolicy, RetentionPolicyConfig};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Config {

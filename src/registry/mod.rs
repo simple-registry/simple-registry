@@ -5,10 +5,9 @@ use std::sync::{Arc, LazyLock};
 use regex::Regex;
 use tracing::instrument;
 
-mod access_policy;
 pub mod blob;
 pub mod blob_store;
-mod cel;
+pub mod cel;
 pub mod content_discovery;
 pub mod data_store;
 mod error;
@@ -18,20 +17,18 @@ pub mod metadata_store;
 pub mod pagination;
 mod path_builder;
 pub mod repository;
-mod retention_policy;
 pub mod task_queue;
 #[cfg(test)]
 pub mod tests;
 pub mod upload;
 mod version;
 
-pub use access_policy::{AccessPolicy, AccessPolicyConfig};
 pub use error::Error;
 pub use manifest::parse_manifest_digests;
 pub use repository::Repository;
-pub use retention_policy::{ManifestImage, RetentionPolicy, RetentionPolicyConfig};
 
 use crate::cache;
+pub use crate::policy::AccessPolicy;
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::task_queue::TaskQueue;
@@ -152,10 +149,9 @@ pub mod test_utils {
     use super::*;
     use crate::configuration::GlobalConfig;
     use crate::oci::Digest;
-    use crate::registry::access_policy::AccessPolicyConfig;
+    use crate::policy::{AccessPolicyConfig, RetentionPolicyConfig};
     use crate::registry::metadata_store::MetadataStoreExt;
     use crate::registry::metadata_store::link_kind::LinkKind;
-    use crate::registry::retention_policy::RetentionPolicyConfig;
 
     pub fn create_test_repositories() -> Arc<HashMap<String, Repository>> {
         let token_cache = cache::Config::default().to_backend().unwrap();

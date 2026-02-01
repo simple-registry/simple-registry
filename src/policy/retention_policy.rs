@@ -67,6 +67,7 @@ impl RetentionPolicy {
     pub fn has_rules(&self) -> bool {
         !self.rules.is_empty()
     }
+
     /// Evaluates whether a manifest should be retained.
     ///
     /// # Arguments
@@ -287,7 +288,7 @@ mod tests {
         .unwrap();
 
         let manifest = ManifestImage {
-            tag: Some("v1".to_string()),
+            tag: Some("v2".to_string()),
             last_pulled_at: Utc::now().timestamp() - 2 * 3600,
             ..Default::default()
         };
