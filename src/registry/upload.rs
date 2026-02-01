@@ -5,7 +5,7 @@ use tracing::{error, instrument, warn};
 use uuid::Uuid;
 
 use crate::command::server::response_body::ResponseBody;
-use crate::oci::Digest;
+use crate::oci::{Digest, Namespace};
 use crate::registry::{Error, Registry, blob_store};
 
 pub const DOCKER_UPLOAD_UUID: &str = "Docker-Upload-UUID";
@@ -20,7 +20,7 @@ impl Registry {
     #[instrument]
     pub async fn start_upload(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         digest: Option<Digest>,
     ) -> Result<StartUploadResponse, Error> {
         if let Some(digest) = digest
@@ -41,7 +41,7 @@ impl Registry {
     #[instrument(skip(stream))]
     pub async fn patch_upload<S>(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         session_id: Uuid,
         start_offset: Option<u64>,
         stream: S,
@@ -84,7 +84,7 @@ impl Registry {
     #[instrument(skip(stream))]
     pub async fn complete_upload<S>(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         session_id: Uuid,
         digest: &Digest,
         stream: S,
@@ -129,7 +129,11 @@ impl Registry {
     }
 
     #[instrument]
-    pub async fn delete_upload(&self, namespace: &str, session_id: Uuid) -> Result<(), Error> {
+    pub async fn delete_upload(
+        &self,
+        namespace: &Namespace,
+        session_id: Uuid,
+    ) -> Result<(), Error> {
         let uuid = session_id.to_string();
         self.blob_store.delete_upload(namespace, &uuid).await?;
 
@@ -139,7 +143,7 @@ impl Registry {
     #[instrument]
     pub async fn get_upload_range_max(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         session_id: Uuid,
     ) -> Result<u64, Error> {
         let uuid = session_id.to_string();
@@ -159,7 +163,7 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn handle_start_upload(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         digest: Option<Digest>,
     ) -> Result<Response<ResponseBody>, Error> {
         let res = match self.start_upload(namespace, digest).await? {
@@ -182,7 +186,7 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn handle_get_upload(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         uuid: Uuid,
     ) -> Result<Response<ResponseBody>, Error> {
         let range_max = self.get_upload_range_max(namespace, uuid).await?;
@@ -200,7 +204,7 @@ impl Registry {
     #[instrument(skip(self, body_stream))]
     pub async fn handle_patch_upload<S>(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         uuid: Uuid,
         start_offset: Option<u64>,
         body_stream: S,
@@ -226,7 +230,7 @@ impl Registry {
     #[instrument(skip(self, body_reader))]
     pub async fn handle_put_upload<S>(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         uuid: Uuid,
         digest: &Digest,
         body_reader: S,
@@ -249,7 +253,7 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn handle_delete_upload(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         uuid: Uuid,
     ) -> Result<Response<ResponseBody>, Error> {
         self.delete_upload(namespace, uuid).await?;
@@ -270,6 +274,7 @@ mod tests {
 
     use super::*;
     use crate::command::server::request_ext::HeaderExt;
+    use crate::oci::Namespace;
     use crate::registry::path_builder;
     use crate::registry::tests::{FSRegistryTestCase, backends};
 
@@ -277,7 +282,7 @@ mod tests {
     async fn test_start_upload() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test upload content";
 
             let response = registry.start_upload(namespace, None).await.unwrap();
@@ -307,7 +312,7 @@ mod tests {
     async fn test_patch_upload() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test patch content";
             let session_id = Uuid::new_v4();
 
@@ -348,7 +353,7 @@ mod tests {
     async fn test_complete_upload() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test complete content";
             let session_id = Uuid::new_v4();
 
@@ -385,7 +390,7 @@ mod tests {
     async fn test_delete_upload() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let session_id = Uuid::new_v4();
 
             registry
@@ -418,7 +423,7 @@ mod tests {
     async fn test_get_upload_range_max() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test range content";
             let session_id = Uuid::new_v4();
 
@@ -453,7 +458,7 @@ mod tests {
 
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
 
             let response = registry.handle_start_upload(namespace, None).await.unwrap();
 
@@ -493,7 +498,7 @@ mod tests {
     async fn test_handle_get_upload() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let uuid = Uuid::new_v4();
 
             registry
@@ -520,7 +525,7 @@ mod tests {
     async fn test_handle_patch_upload() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let uuid = Uuid::new_v4();
 
             registry
@@ -551,7 +556,7 @@ mod tests {
     async fn test_handle_put_upload() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let uuid = Uuid::new_v4();
             let content = b"test content";
 
@@ -601,7 +606,7 @@ mod tests {
     async fn test_handle_delete_upload() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let uuid = Uuid::new_v4();
 
             registry
@@ -631,7 +636,7 @@ mod tests {
     async fn test_complete_upload_with_corrupted_hash_state_returns_error() {
         let test_case = FSRegistryTestCase::new();
         let registry = test_case.registry();
-        let namespace = "test-repo";
+        let namespace = &Namespace::new("test-repo").unwrap();
         let content = b"test content that should not be lost";
         let session_id = Uuid::new_v4();
 

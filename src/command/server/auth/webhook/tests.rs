@@ -19,6 +19,7 @@ use crate::command::server::auth::webhook::{
     set_registry_reference_header, set_registry_username_header,
 };
 use crate::identity::{ClientIdentity, Route};
+use crate::oci::Namespace;
 use crate::oci::{Digest, Reference};
 use crate::secret::Secret;
 
@@ -374,7 +375,7 @@ fn test_set_registry_action_header() {
 #[test]
 fn test_set_registry_namespace_header() {
     let route = Route::GetManifest {
-        namespace: "test-namespace",
+        namespace: Namespace::new("test-namespace").unwrap(),
         reference: Reference::Tag("latest".to_string()),
     };
     let mut headers = HeaderMap::new();
@@ -395,7 +396,7 @@ fn test_set_registry_namespace_header() {
 #[test]
 fn test_set_registry_reference_header() {
     let route = Route::GetManifest {
-        namespace: "test-namespace",
+        namespace: Namespace::new("test-namespace").unwrap(),
         reference: Reference::Tag("v1.0.0".to_string()),
     };
     let mut headers = HeaderMap::new();
@@ -415,7 +416,7 @@ fn test_set_registry_digest_header() {
     let digest = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
     let digest = Digest::from_str(digest).unwrap();
     let route = Route::DeleteBlob {
-        namespace: "test-namespace",
+        namespace: Namespace::new("test-namespace").unwrap(),
         digest: digest.clone(),
     };
     let mut headers = HeaderMap::new();
@@ -547,7 +548,7 @@ fn test_build_headers() {
     let (parts, ()) = request.into_parts();
 
     let route = Route::GetManifest {
-        namespace: "test-namespace",
+        namespace: Namespace::new("test-namespace").unwrap(),
         reference: Reference::Tag("latest".to_string()),
     };
 

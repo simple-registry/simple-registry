@@ -6,7 +6,7 @@ use serde::Serialize;
 use tracing::instrument;
 
 use crate::command::server::response_body::ResponseBody;
-use crate::oci::{Descriptor, Digest, ReferrerList};
+use crate::oci::{Descriptor, Digest, Namespace, ReferrerList};
 use crate::registry::{Error, Registry};
 
 pub const OCI_FILTERS_APPLIED: &str = "OCI-Filters-Applied";
@@ -34,7 +34,7 @@ impl Registry {
     #[instrument]
     pub async fn get_referrers(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         digest: &Digest,
         artifact_type: Option<String>,
     ) -> Result<Vec<Descriptor>, Error> {
@@ -61,7 +61,7 @@ impl Registry {
     #[instrument]
     pub async fn list_tags(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         n: Option<u16>,
         last: Option<String>,
     ) -> Result<(Vec<String>, Option<String>), Error> {
@@ -78,7 +78,7 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn handle_get_referrers(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         digest: &Digest,
         artifact_type: Option<String>,
     ) -> Result<Response<ResponseBody>, Error> {
@@ -130,7 +130,7 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn handle_list_tags(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         n: Option<u16>,
         last: Option<String>,
     ) -> Result<Response<ResponseBody>, Error> {
@@ -161,6 +161,7 @@ mod tests {
     use tokio_util::io::StreamReader;
 
     use super::*;
+    use crate::oci::Namespace;
     use crate::oci::Reference;
     use crate::registry::metadata_store::MetadataStoreExt;
     use crate::registry::metadata_store::link_kind::LinkKind;
@@ -171,7 +172,7 @@ mod tests {
     async fn test_get_referrers() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let digest = Digest::from_str(
                 "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
             )
@@ -224,7 +225,7 @@ mod tests {
     async fn test_list_tags() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
 
             let test_content = b"test content";
             let test_digest = registry.blob_store.create_blob(test_content).await.unwrap();
@@ -290,7 +291,7 @@ mod tests {
     async fn test_handle_get_referrers() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
 
             let manifest_content = r#"{"schemaVersion": 2, "mediaType": "application/vnd.docker.distribution.manifest.v2+json"}"#;
             let media_type = "application/vnd.docker.distribution.manifest.v2+json".to_string();
@@ -401,7 +402,7 @@ mod tests {
     async fn test_handle_list_tags() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test content";
             let (digest, _) = create_test_blob(registry, namespace, content).await;
 

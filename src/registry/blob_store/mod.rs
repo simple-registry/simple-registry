@@ -90,10 +90,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::oci::Namespace;
     use crate::registry::blob_store::sha256_ext::Sha256Ext;
 
     pub async fn test_datastore_list_uploads(store: &impl BlobStore) {
-        let namespace = "test-repo";
+        let namespace = &Namespace::new("test-repo").unwrap();
 
         let upload_ids = ["upload1", "upload2", "upload3"];
         for id in upload_ids {
@@ -217,7 +218,7 @@ mod tests {
     }
 
     pub async fn test_datastore_upload_operations(store: &impl BlobStore) {
-        let namespace = "test-namespace";
+        let namespace = &Namespace::new("test-namespace").unwrap();
         let uuid = Uuid::new_v4().to_string();
 
         let upload_id = store.create_upload(namespace, &uuid).await.unwrap();

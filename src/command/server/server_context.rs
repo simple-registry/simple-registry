@@ -90,7 +90,7 @@ pub mod tests {
 
     use super::*;
     use crate::configuration::Configuration;
-    use crate::oci::Reference;
+    use crate::oci::{Namespace, Reference};
     use crate::registry::{RegistryConfig, Repository};
 
     fn create_test_config() -> Configuration {
@@ -499,7 +499,7 @@ pub mod tests {
         let context = ServerContext::new(&config, registry).unwrap();
 
         let route = Route::GetManifest {
-            namespace: "test/repo",
+            namespace: Namespace::new("test/repo").unwrap(),
             reference: Reference::Tag("latest".to_string()),
         };
         let identity = ClientIdentity::new(None);

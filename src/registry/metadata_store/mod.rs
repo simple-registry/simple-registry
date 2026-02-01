@@ -175,7 +175,7 @@ mod tests {
 
     use chrono::{Duration, Utc};
 
-    use crate::oci::{Descriptor, Digest};
+    use crate::oci::{Descriptor, Digest, Namespace};
     use crate::registry::blob_store::BlobStore;
     use crate::registry::metadata_store::link_kind::LinkKind;
     use crate::registry::metadata_store::{MetadataStore, MetadataStoreExt};
@@ -251,7 +251,7 @@ mod tests {
         b: Arc<dyn BlobStore>,
         m: Arc<dyn MetadataStore + Send + Sync>,
     ) {
-        let namespace = "test-repo";
+        let namespace = &Namespace::new("test-repo").unwrap();
         let digest = b.create_blob(b"test blob content").await.unwrap();
 
         let tags = ["latest", "v1.0", "v2.0"];
@@ -304,7 +304,7 @@ mod tests {
         b: Arc<dyn BlobStore>,
         m: Arc<dyn MetadataStore + Send + Sync>,
     ) {
-        let namespace = "test-repo";
+        let namespace = &Namespace::new("test-repo").unwrap();
         let base_digest = b.create_blob(b"base manifest content").await.unwrap();
         let base_link = LinkKind::Digest(base_digest.clone());
 
@@ -383,7 +383,7 @@ mod tests {
         b: Arc<dyn BlobStore>,
         m: Arc<dyn MetadataStore + Send + Sync>,
     ) {
-        let namespace = "test-repo";
+        let namespace = &Namespace::new("test-repo").unwrap();
 
         let manifest_contents = [
             b"manifest content 1".to_vec(),
@@ -435,7 +435,7 @@ mod tests {
         b: Arc<dyn BlobStore>,
         m: Arc<dyn MetadataStore + Send + Sync>,
     ) {
-        let namespace = "test-namespace";
+        let namespace = &Namespace::new("test-namespace").unwrap();
         let digest = b.create_blob(b"test blob content").await.unwrap();
 
         // Test creating and reading tag link
@@ -491,7 +491,7 @@ mod tests {
     }
 
     pub async fn test_update_links(b: Arc<dyn BlobStore>, m: Arc<dyn MetadataStore + Send + Sync>) {
-        let namespace = "test-update-links";
+        let namespace = &Namespace::new("test-update-links").unwrap();
         let digest1 = b.create_blob(b"content1").await.unwrap();
         let digest2 = b.create_blob(b"content2").await.unwrap();
 

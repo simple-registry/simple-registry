@@ -1,7 +1,7 @@
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::oci::{Digest, Reference};
+use crate::oci::{Digest, Namespace, Reference};
 
 /// Route represents the parsed request path and action.
 /// Serializes to a flat structure compatible with CEL policy expressions.
@@ -38,7 +38,7 @@ pub enum Route<'a> {
     },
     #[serde(rename = "list-tags")]
     ListTags {
-        namespace: &'a str,
+        namespace: Namespace,
         #[serde(skip_serializing_if = "Option::is_none")]
         n: Option<u16>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,80 +46,80 @@ pub enum Route<'a> {
     },
     #[serde(rename = "start-upload")]
     StartUpload {
-        namespace: &'a str,
+        namespace: Namespace,
         #[serde(skip_serializing_if = "Option::is_none")]
         digest: Option<Digest>,
     },
     #[serde(rename = "get-upload")]
     GetUpload {
-        namespace: &'a str,
+        namespace: Namespace,
         uuid: Uuid,
     },
     #[serde(rename = "update-upload")]
     PatchUpload {
-        namespace: &'a str,
+        namespace: Namespace,
         uuid: Uuid,
     },
     #[serde(rename = "complete-upload")]
     PutUpload {
-        namespace: &'a str,
+        namespace: Namespace,
         digest: Digest,
         uuid: Uuid,
     },
     #[serde(rename = "cancel-upload")]
     DeleteUpload {
-        namespace: &'a str,
+        namespace: Namespace,
         uuid: Uuid,
     },
     #[serde(rename = "get-blob")]
     GetBlob {
-        namespace: &'a str,
+        namespace: Namespace,
         digest: Digest,
     },
     #[serde(rename = "get-blob")]
     HeadBlob {
-        namespace: &'a str,
+        namespace: Namespace,
         digest: Digest,
     },
     #[serde(rename = "delete-blob")]
     DeleteBlob {
-        namespace: &'a str,
+        namespace: Namespace,
         digest: Digest,
     },
     #[serde(rename = "get-manifest")]
     GetManifest {
-        namespace: &'a str,
+        namespace: Namespace,
         reference: Reference,
     },
     #[serde(rename = "get-manifest")]
     HeadManifest {
-        namespace: &'a str,
+        namespace: Namespace,
         reference: Reference,
     },
     #[serde(rename = "put-manifest")]
     PutManifest {
-        namespace: &'a str,
+        namespace: Namespace,
         reference: Reference,
     },
     #[serde(rename = "delete-manifest")]
     DeleteManifest {
-        namespace: &'a str,
+        namespace: Namespace,
         reference: Reference,
     },
     #[serde(rename = "get-referrers")]
     GetReferrer {
-        namespace: &'a str,
+        namespace: Namespace,
         digest: Digest,
         #[serde(skip_serializing_if = "Option::is_none")]
         artifact_type: Option<String>,
     },
     #[serde(rename = "list-revisions")]
     ListRevisions {
-        namespace: &'a str,
+        namespace: Namespace,
     },
     #[serde(rename = "list-uploads")]
     ListUploads {
-        namespace: &'a str,
+        namespace: Namespace,
     },
     #[serde(rename = "list-repositories")]
     ListRepositories,
@@ -131,8 +131,8 @@ pub enum Route<'a> {
     Unknown,
 }
 
-impl<'a> Route<'a> {
-    pub fn get_namespace(&self) -> Option<&'a str> {
+impl Route<'_> {
+    pub fn get_namespace(&self) -> Option<&Namespace> {
         match self {
             Route::ListTags { namespace, .. }
             | Route::StartUpload { namespace, .. }
@@ -240,7 +240,7 @@ mod tests {
         // Test get-manifest with namespace and reference
         let reference = Reference::from_str("v1.0.0").unwrap();
         let route = Route::GetManifest {
-            namespace: "library/nginx",
+            namespace: Namespace::new("library/nginx").unwrap(),
             reference,
         };
         let json = serde_json::to_value(&route).unwrap();
@@ -258,7 +258,7 @@ mod tests {
         )
         .unwrap();
         let route = Route::GetBlob {
-            namespace: "library/nginx",
+            namespace: Namespace::new("library/nginx").unwrap(),
             digest,
         };
         let json = serde_json::to_value(&route).unwrap();
@@ -278,7 +278,7 @@ mod tests {
 
         // Test start-upload with namespace
         let route = Route::StartUpload {
-            namespace: "library/nginx",
+            namespace: Namespace::new("library/nginx").unwrap(),
             digest: None,
         };
         let json = serde_json::to_value(&route).unwrap();
@@ -297,7 +297,7 @@ mod tests {
 
         // Test list-tags with namespace
         let route = Route::ListTags {
-            namespace: "library/nginx",
+            namespace: Namespace::new("library/nginx").unwrap(),
             n: Some(10),
             last: Some("library/alpine".to_string()),
         };
@@ -313,7 +313,7 @@ mod tests {
     fn test_is_write() {
         assert!(
             Route::StartUpload {
-                namespace: "test",
+                namespace: Namespace::new("test").unwrap(),
                 digest: None,
             }
             .is_write()
@@ -321,7 +321,7 @@ mod tests {
 
         assert!(
             Route::PutManifest {
-                namespace: "test",
+                namespace: Namespace::new("test").unwrap(),
                 reference: Reference::from_str("v1.0.0").unwrap(),
             }
             .is_write()
@@ -329,7 +329,7 @@ mod tests {
 
         assert!(
             !Route::GetManifest {
-                namespace: "test",
+                namespace: Namespace::new("test").unwrap(),
                 reference: Reference::from_str("v1.0.0").unwrap(),
             }
             .is_write()
@@ -340,12 +340,12 @@ mod tests {
 
     #[test]
     fn test_get_namespace() {
+        let route = Route::GetManifest {
+            namespace: Namespace::new("library/nginx").unwrap(),
+            reference: Reference::from_str("v1.0.0").unwrap(),
+        };
         assert_eq!(
-            Route::GetManifest {
-                namespace: "library/nginx",
-                reference: Reference::from_str("v1.0.0").unwrap(),
-            }
-            .get_namespace(),
+            route.get_namespace().map(std::convert::AsRef::as_ref),
             Some("library/nginx")
         );
 
@@ -372,7 +372,7 @@ mod tests {
 
         // Test routes with namespace
         let route = Route::ListTags {
-            namespace: "test-repo",
+            namespace: Namespace::new("test-repo").unwrap(),
             n: None,
             last: None,
         };
@@ -386,7 +386,7 @@ mod tests {
         )
         .unwrap();
         let route = Route::GetBlob {
-            namespace: "test-repo",
+            namespace: Namespace::new("test-repo").unwrap(),
             digest,
         };
         let json = serde_json::to_value(&route).unwrap();
@@ -406,7 +406,7 @@ mod tests {
         // Test routes with namespace and reference
         let reference = Reference::from_str("v1.0.0").unwrap();
         let route = Route::PutManifest {
-            namespace: "test-repo",
+            namespace: Namespace::new("test-repo").unwrap(),
             reference,
         };
         let json = serde_json::to_value(&route).unwrap();
@@ -420,7 +420,7 @@ mod tests {
         // Test routes with UUID
         let uuid = Uuid::nil();
         let route = Route::GetUpload {
-            namespace: "test-repo",
+            namespace: Namespace::new("test-repo").unwrap(),
             uuid,
         };
         let json = serde_json::to_value(&route).unwrap();
@@ -446,7 +446,7 @@ mod tests {
             ),
             (
                 Route::ListTags {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     n: None,
                     last: None,
                 },
@@ -454,28 +454,28 @@ mod tests {
             ),
             (
                 Route::StartUpload {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     digest: None,
                 },
                 "start-upload",
             ),
             (
                 Route::GetUpload {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     uuid: Uuid::nil(),
                 },
                 "get-upload",
             ),
             (
                 Route::PatchUpload {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     uuid: Uuid::nil(),
                 },
                 "update-upload",
             ),
             (
                 Route::PutUpload {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     uuid: Uuid::nil(),
                     digest: Digest::from_str(
                         "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -486,14 +486,14 @@ mod tests {
             ),
             (
                 Route::DeleteUpload {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     uuid: Uuid::nil(),
                 },
                 "cancel-upload",
             ),
             (
                 Route::GetBlob {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     digest: Digest::from_str(
                         "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                     )
@@ -503,7 +503,7 @@ mod tests {
             ),
             (
                 Route::HeadBlob {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     digest: Digest::from_str(
                         "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                     )
@@ -513,7 +513,7 @@ mod tests {
             ),
             (
                 Route::DeleteBlob {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     digest: Digest::from_str(
                         "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                     )
@@ -523,35 +523,35 @@ mod tests {
             ),
             (
                 Route::GetManifest {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     reference: Reference::from_str("v1.0.0").unwrap(),
                 },
                 "get-manifest",
             ),
             (
                 Route::HeadManifest {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     reference: Reference::from_str("v1.0.0").unwrap(),
                 },
                 "get-manifest",
             ),
             (
                 Route::PutManifest {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     reference: Reference::from_str("v1.0.0").unwrap(),
                 },
                 "put-manifest",
             ),
             (
                 Route::DeleteManifest {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     reference: Reference::from_str("v1.0.0").unwrap(),
                 },
                 "delete-manifest",
             ),
             (
                 Route::GetReferrer {
-                    namespace: "test",
+                    namespace: Namespace::new("test").unwrap(),
                     digest: Digest::from_str(
                         "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                     )

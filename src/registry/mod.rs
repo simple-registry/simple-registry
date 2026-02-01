@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
-use regex::Regex;
 use tracing::instrument;
 
 pub mod blob;
@@ -28,14 +27,11 @@ pub use manifest::parse_manifest_digests;
 pub use repository::Repository;
 
 use crate::cache;
+use crate::oci::Namespace;
 pub use crate::policy::AccessPolicy;
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
 use crate::registry::task_queue::TaskQueue;
-
-static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap()
-});
 
 pub struct RegistryConfig {
     pub update_pull_time: bool,
@@ -128,19 +124,18 @@ impl Registry {
     }
 
     #[instrument]
-    pub fn get_repository_for_namespace(&self, namespace: &str) -> Result<&Repository, Error> {
-        if NAMESPACE_RE.is_match(namespace) {
-            self.repositories
-                .iter()
-                .find(|(repository, _)| {
-                    namespace == repository.as_str()
-                        || namespace.starts_with(&format!("{repository}/"))
-                })
-                .map(|(_, repository)| repository)
-                .ok_or(Error::NameUnknown)
-        } else {
-            Err(Error::NameInvalid)
-        }
+    pub fn get_repository_for_namespace(
+        &self,
+        namespace: &Namespace,
+    ) -> Result<&Repository, Error> {
+        self.repositories
+            .iter()
+            .find(|(repository, _)| {
+                namespace.as_ref() == repository.as_str()
+                    || namespace.starts_with(&format!("{repository}/"))
+            })
+            .map(|(_, repository)| repository)
+            .ok_or(Error::NameUnknown)
     }
 }
 

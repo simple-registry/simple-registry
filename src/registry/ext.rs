@@ -7,7 +7,7 @@ use serde::Serialize;
 use tracing::instrument;
 
 use crate::command::server::response_body::ResponseBody;
-use crate::oci::{Digest, Manifest, Platform as OciPlatform};
+use crate::oci::{Digest, Manifest, Namespace, Platform as OciPlatform};
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::{Error, Registry};
 
@@ -76,11 +76,12 @@ impl Registry {
         let namespace_names = self.list_repository_namespaces(repository).await?;
         let mut namespaces = Vec::with_capacity(namespace_names.len());
 
-        for name in namespace_names {
+        for name_str in namespace_names {
+            let name = Namespace::new(&name_str).map_err(|_| Error::NameInvalid)?;
             let manifest_count = self.count_manifests(&name).await?;
             let upload_count = self.count_uploads(&name).await?;
             namespaces.push(NamespaceInfo {
-                name,
+                name: name_str,
                 manifest_count,
                 upload_count,
             });
@@ -110,7 +111,7 @@ impl Registry {
     #[allow(clippy::too_many_lines)]
     pub async fn handle_list_revisions(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
     ) -> Result<Response<ResponseBody>, Error> {
         #[derive(Serialize, Debug, Clone)]
         struct Platform {
@@ -286,7 +287,7 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn handle_list_uploads(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
     ) -> Result<Response<ResponseBody>, Error> {
         #[derive(Serialize, Debug)]
         struct UploadEntry {
@@ -362,11 +363,11 @@ impl Registry {
         }
     }
 
-    async fn count_manifests(&self, namespace: &str) -> Result<usize, Error> {
+    async fn count_manifests(&self, namespace: &Namespace) -> Result<usize, Error> {
         Ok(self.metadata_store.count_manifests(namespace).await?)
     }
 
-    async fn count_uploads(&self, namespace: &str) -> Result<usize, Error> {
+    async fn count_uploads(&self, namespace: &Namespace) -> Result<usize, Error> {
         let mut count = 0;
         let mut continuation_token = None;
 
@@ -387,7 +388,7 @@ impl Registry {
         Ok(count)
     }
 
-    async fn collect_all_revisions(&self, namespace: &str) -> Result<Vec<Digest>, Error> {
+    async fn collect_all_revisions(&self, namespace: &Namespace) -> Result<Vec<Digest>, Error> {
         let mut all_revisions = Vec::new();
         let mut continuation_token = None;
 
@@ -410,7 +411,7 @@ impl Registry {
 
     async fn build_digest_to_tags_map(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
     ) -> Result<HashMap<Digest, Vec<String>>, Error> {
         let mut all_tags = Vec::new();
         let mut last: Option<String> = None;

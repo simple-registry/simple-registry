@@ -8,7 +8,7 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::command::server::response_body::ResponseBody;
-use crate::oci::Digest;
+use crate::oci::{Digest, Namespace};
 use crate::registry::blob_store::{BlobStore, BoxedReader};
 use crate::registry::metadata_store::MetadataStoreExt;
 use crate::registry::metadata_store::link_kind::LinkKind;
@@ -36,7 +36,7 @@ impl Registry {
         &self,
         repository: &Repository,
         accepted_types: &[String],
-        namespace: &str,
+        namespace: &Namespace,
         digest: &Digest,
     ) -> Result<HeadBlobResponse, Error> {
         let blob = self.blob_store.get_blob_size(digest).await;
@@ -63,21 +63,21 @@ impl Registry {
     async fn copy_blob(
         storage_engine: Arc<dyn BlobStore + Send + Sync>,
         stream: impl AsyncRead + Send + Sync + Unpin + 'static,
-        namespace: String,
+        namespace: &Namespace,
         digest: &Digest,
     ) -> Result<(), Error> {
         let session_id = Uuid::new_v4().to_string();
 
         storage_engine
-            .create_upload(&namespace, &session_id)
+            .create_upload(namespace, &session_id)
             .await?;
 
         storage_engine
-            .write_upload(&namespace, &session_id, Box::new(stream), false)
+            .write_upload(namespace, &session_id, Box::new(stream), false)
             .await?;
 
         if let Err(error) = storage_engine
-            .complete_upload(&namespace, &session_id, Some(digest))
+            .complete_upload(namespace, &session_id, Some(digest))
             .await
         {
             debug!("Failed to complete upload: {error}");
@@ -92,7 +92,7 @@ impl Registry {
         &self,
         repository: &Repository,
         accepted_types: &[String],
-        namespace: &str,
+        namespace: &Namespace,
         digest: &Digest,
         range: Option<(u64, Option<u64>)>,
     ) -> Result<GetBlobResponse<BoxedReader>, Error> {
@@ -118,9 +118,9 @@ impl Registry {
         let (_, caching_stream) = repository
             .get_blob(accepted_types, namespace, digest)
             .await?;
-        let cache_namespace = namespace.to_string();
+        let cache_namespace = namespace.clone();
 
-        let task_key = format!("{cache_namespace}/{digest}");
+        let task_key = format!("{namespace}/{digest}");
         let cache_digest = digest.clone();
         let store = self.blob_store.clone();
 
@@ -128,7 +128,7 @@ impl Registry {
             let digest_string = cache_digest.to_string();
 
             debug!("Fetching blob: {digest_string}");
-            Self::copy_blob(store, caching_stream, cache_namespace, &cache_digest)
+            Self::copy_blob(store, caching_stream, &cache_namespace, &cache_digest)
                 .await
                 .map_err(|e| task_queue::Error::TaskExecution(e.to_string()))?;
 
@@ -180,7 +180,7 @@ impl Registry {
     }
 
     #[instrument]
-    pub async fn delete_blob(&self, namespace: &str, digest: &Digest) -> Result<(), Error> {
+    pub async fn delete_blob(&self, namespace: &Namespace, digest: &Digest) -> Result<(), Error> {
         let mut tx = self.metadata_store.begin_transaction(namespace);
         tx.delete_link(&LinkKind::Layer(digest.clone()));
         tx.delete_link(&LinkKind::Config(digest.clone()));
@@ -197,7 +197,7 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn handle_head_blob(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         digest: &Digest,
         mime_types: &[String],
     ) -> Result<Response<ResponseBody>, Error> {
@@ -219,7 +219,7 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn handle_delete_blob(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         digest: &Digest,
     ) -> Result<Response<ResponseBody>, Error> {
         self.delete_blob(namespace, digest).await?;
@@ -234,7 +234,7 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn handle_get_blob(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         digest: &Digest,
         mime_types: &[String],
         range: Option<(u64, Option<u64>)>,
@@ -298,6 +298,7 @@ mod tests {
 
     use super::*;
     use crate::command::server::request_ext::HeaderExt;
+    use crate::oci::Namespace;
     use crate::registry::test_utils::create_test_blob;
     use crate::registry::tests::backends;
 
@@ -305,7 +306,7 @@ mod tests {
     async fn test_head_blob() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test blob content";
 
             let (digest, repository) = create_test_blob(registry, namespace, content).await;
@@ -323,7 +324,7 @@ mod tests {
     async fn test_get_blob() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test blob content";
 
             let (digest, repository) = create_test_blob(registry, namespace, content).await;
@@ -348,7 +349,7 @@ mod tests {
     async fn test_get_blob_with_range() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test blob content";
 
             let (digest, repository) = create_test_blob(registry, namespace, content).await;
@@ -377,7 +378,7 @@ mod tests {
     async fn test_delete_blob() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test blob content";
 
             let (digest, _) = create_test_blob(registry, namespace, content).await;
@@ -410,8 +411,8 @@ mod tests {
                 .read_blob_index(&digest)
                 .await
                 .unwrap();
-            assert!(blob_index.namespace.contains_key(namespace));
-            let namespace_links = blob_index.namespace.get(namespace).unwrap();
+            assert!(blob_index.namespace.contains_key(namespace.as_ref()));
+            let namespace_links = blob_index.namespace.get(namespace.as_ref()).unwrap();
             assert!(namespace_links.contains(&layer_link));
             assert!(namespace_links.contains(&config_link));
 
@@ -438,7 +439,7 @@ mod tests {
     async fn test_copy_blob() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test blob content";
 
             let (digest, _) = create_test_blob(registry, namespace, content).await;
@@ -446,7 +447,7 @@ mod tests {
             let stream = Cursor::new(content.to_vec());
             let storage_engine = registry.blob_store.clone();
 
-            Registry::copy_blob(storage_engine, stream, namespace.to_string(), &digest)
+            Registry::copy_blob(storage_engine, stream, namespace, &digest)
                 .await
                 .unwrap();
 
@@ -459,7 +460,7 @@ mod tests {
     async fn test_handle_head_blob() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test blob content";
             let (digest, _) = create_test_blob(registry, namespace, content).await;
 
@@ -488,7 +489,7 @@ mod tests {
     async fn test_handle_delete_blob() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test blob content";
             let (digest, _) = create_test_blob(registry, namespace, content).await;
 
@@ -569,7 +570,7 @@ mod tests {
     async fn test_handle_get_blob() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test blob content";
             let (digest, _) = create_test_blob(registry, namespace, content).await;
 
@@ -609,7 +610,7 @@ mod tests {
     async fn test_handle_get_blob_with_range() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let content = b"test blob content";
             let (digest, _) = create_test_blob(registry, namespace, content).await;
 
