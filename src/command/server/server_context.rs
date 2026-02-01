@@ -92,7 +92,7 @@ pub mod tests {
     use super::*;
     use crate::configuration::Configuration;
     use crate::oci::Reference;
-    use crate::registry::Repository;
+    use crate::registry::{RegistryConfig, Repository};
 
     fn create_test_config() -> Configuration {
         let toml = r#"
@@ -122,17 +122,15 @@ pub mod tests {
         let metadata_store = config.resolve_metadata_config().to_backend().unwrap();
         let repositories = Arc::new(HashMap::new());
 
-        let registry = Registry::new(
-            blob_store,
-            metadata_store,
-            repositories,
-            false,
-            true,
-            10,
-            false,
-            Vec::new(),
-        )
-        .unwrap();
+        let registry_config = RegistryConfig::new()
+            .update_pull_time(false)
+            .enable_redirect(true)
+            .concurrent_cache_jobs(10)
+            .global_immutable_tags(false)
+            .global_immutable_tags_exclusions(Vec::new());
+
+        let registry =
+            Registry::new(blob_store, metadata_store, repositories, registry_config).unwrap();
 
         ServerContext::new(&config, registry).unwrap()
     }
@@ -171,17 +169,14 @@ pub mod tests {
         }
         let repositories = Arc::new(repositories_map);
 
-        Registry::new(
-            blob_store,
-            metadata_store,
-            repositories,
-            config.global.update_pull_time,
-            config.global.enable_redirect,
-            config.global.max_concurrent_cache_jobs,
-            config.global.immutable_tags,
-            config.global.immutable_tags_exclusions.clone(),
-        )
-        .unwrap()
+        let registry_config = RegistryConfig::new()
+            .update_pull_time(config.global.update_pull_time)
+            .enable_redirect(config.global.enable_redirect)
+            .concurrent_cache_jobs(config.global.max_concurrent_cache_jobs)
+            .global_immutable_tags(config.global.immutable_tags)
+            .global_immutable_tags_exclusions(config.global.immutable_tags_exclusions.clone());
+
+        Registry::new(blob_store, metadata_store, repositories, registry_config).unwrap()
     }
 
     #[test]
@@ -639,17 +634,15 @@ pub mod tests {
         let metadata_store = config.resolve_metadata_config().to_backend().unwrap();
         let repositories = Arc::new(HashMap::new());
 
-        let registry = Registry::new(
-            blob_store,
-            metadata_store,
-            repositories,
-            config.global.update_pull_time,
-            config.global.enable_redirect,
-            config.global.max_concurrent_cache_jobs,
-            config.global.immutable_tags,
-            config.global.immutable_tags_exclusions.clone(),
-        )
-        .unwrap();
+        let registry_config = RegistryConfig::new()
+            .update_pull_time(config.global.update_pull_time)
+            .enable_redirect(config.global.enable_redirect)
+            .concurrent_cache_jobs(config.global.max_concurrent_cache_jobs)
+            .global_immutable_tags(config.global.immutable_tags)
+            .global_immutable_tags_exclusions(config.global.immutable_tags_exclusions.clone());
+
+        let registry =
+            Registry::new(blob_store, metadata_store, repositories, registry_config).unwrap();
 
         let context = ServerContext::new(&config, registry);
 

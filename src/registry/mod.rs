@@ -40,6 +40,57 @@ static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap()
 });
 
+pub struct RegistryConfig {
+    pub update_pull_time: bool,
+    pub enable_redirect: bool,
+    pub concurrent_cache_jobs: usize,
+    pub global_immutable_tags: bool,
+    pub global_immutable_tags_exclusions: Vec<String>,
+}
+
+impl Default for RegistryConfig {
+    fn default() -> Self {
+        Self {
+            update_pull_time: false,
+            enable_redirect: true,
+            concurrent_cache_jobs: 4,
+            global_immutable_tags: false,
+            global_immutable_tags_exclusions: Vec::new(),
+        }
+    }
+}
+
+impl RegistryConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn update_pull_time(mut self, enabled: bool) -> Self {
+        self.update_pull_time = enabled;
+        self
+    }
+
+    pub fn enable_redirect(mut self, enabled: bool) -> Self {
+        self.enable_redirect = enabled;
+        self
+    }
+
+    pub fn concurrent_cache_jobs(mut self, jobs: usize) -> Self {
+        self.concurrent_cache_jobs = jobs;
+        self
+    }
+
+    pub fn global_immutable_tags(mut self, enabled: bool) -> Self {
+        self.global_immutable_tags = enabled;
+        self
+    }
+
+    pub fn global_immutable_tags_exclusions(mut self, exclusions: Vec<String>) -> Self {
+        self.global_immutable_tags_exclusions = exclusions;
+        self
+    }
+}
+
 pub struct Registry {
     blob_store: Arc<dyn BlobStore + Send + Sync>,
     metadata_store: Arc<dyn MetadataStore + Send + Sync>,
@@ -58,27 +109,22 @@ impl Debug for Registry {
 }
 
 impl Registry {
-    #[instrument(skip(blob_store, metadata_store, repositories))]
-    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip(blob_store, metadata_store, repositories, config))]
     pub fn new(
         blob_store: Arc<dyn BlobStore>,
         metadata_store: Arc<dyn MetadataStore>,
         repositories: Arc<HashMap<String, Repository>>,
-        update_pull_time: bool,
-        enable_redirect: bool,
-        concurrent_cache_jobs: usize,
-        global_immutable_tags: bool,
-        global_immutable_tags_exclusions: Vec<String>,
+        config: RegistryConfig,
     ) -> Result<Self, Error> {
         let res = Self {
-            update_pull_time,
-            enable_redirect,
+            update_pull_time: config.update_pull_time,
+            enable_redirect: config.enable_redirect,
             blob_store,
             metadata_store,
             repositories,
-            task_queue: TaskQueue::new(concurrent_cache_jobs, "cache-worker")?,
-            global_immutable_tags,
-            global_immutable_tags_exclusions,
+            task_queue: TaskQueue::new(config.concurrent_cache_jobs, "cache-worker")?,
+            global_immutable_tags: config.global_immutable_tags,
+            global_immutable_tags_exclusions: config.global_immutable_tags_exclusions,
         };
 
         Ok(res)
@@ -139,17 +185,14 @@ pub mod test_utils {
         let repositories_config = create_test_repositories();
         let global = GlobalConfig::default();
 
-        Registry::new(
-            blob_store,
-            metadata_store,
-            repositories_config,
-            global.update_pull_time,
-            global.enable_redirect,
-            global.max_concurrent_cache_jobs,
-            global.immutable_tags,
-            global.immutable_tags_exclusions.clone(),
-        )
-        .unwrap()
+        let config = RegistryConfig::new()
+            .update_pull_time(global.update_pull_time)
+            .enable_redirect(global.enable_redirect)
+            .concurrent_cache_jobs(global.max_concurrent_cache_jobs)
+            .global_immutable_tags(global.immutable_tags)
+            .global_immutable_tags_exclusions(global.immutable_tags_exclusions.clone());
+
+        Registry::new(blob_store, metadata_store, repositories_config, config).unwrap()
     }
 
     pub async fn create_test_blob(
