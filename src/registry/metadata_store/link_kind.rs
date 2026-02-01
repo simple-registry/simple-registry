@@ -47,8 +47,8 @@ mod tests {
         let tag_link = LinkKind::Tag("tag".to_string());
         assert_eq!(LinkKind::from(tag), tag_link);
 
-        let digest = Reference::Digest(Digest::Sha256("digest".to_string()));
-        let digest_link = LinkKind::Digest(Digest::Sha256("digest".to_string()));
+        let digest = Reference::Digest(Digest::Sha256("digest".into()));
+        let digest_link = LinkKind::Digest(Digest::Sha256("digest".into()));
         assert_eq!(LinkKind::from(digest), digest_link);
     }
 }

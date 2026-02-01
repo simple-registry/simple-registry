@@ -68,9 +68,7 @@ impl Registry {
     ) -> Result<(), Error> {
         let session_id = Uuid::new_v4().to_string();
 
-        storage_engine
-            .create_upload(namespace, &session_id)
-            .await?;
+        storage_engine.create_upload(namespace, &session_id).await?;
 
         storage_engine
             .write_upload(namespace, &session_id, Box::new(stream), false)

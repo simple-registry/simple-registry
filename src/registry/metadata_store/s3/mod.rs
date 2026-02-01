@@ -185,7 +185,7 @@ impl MetadataStore for Backend {
                     continue;
                 }
 
-                let manifest_digest = Digest::Sha256(parts[1].to_string());
+                let manifest_digest = Digest::Sha256(parts[1].into());
                 let blob_path = path_builder::blob_path(&manifest_digest);
 
                 let manifest = match self.store.read(&blob_path).await {
@@ -242,7 +242,7 @@ impl MetadataStore for Backend {
 
         let mut revisions = Vec::new();
         for key in prefixes {
-            revisions.push(Digest::Sha256(key));
+            revisions.push(Digest::Sha256(key.into()));
         }
 
         Ok((revisions, next_last))

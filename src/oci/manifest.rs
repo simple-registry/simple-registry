@@ -88,7 +88,7 @@ pub mod tests {
             config: Some(Descriptor {
                 media_type: "application/vnd.oci.image.config.v1+json".to_string(),
                 digest: Digest::Sha256(
-                    "99c9d5e2bdc7ef0223f56c845a695ea0f8f11f5b55ea6f74e1f7df0d4f90026c".to_string(),
+                    "99c9d5e2bdc7ef0223f56c845a695ea0f8f11f5b55ea6f74e1f7df0d4f90026c".into(),
                 ),
                 size: 1234,
                 annotations: HashMap::new(),
@@ -98,7 +98,7 @@ pub mod tests {
             layers: vec![Descriptor {
                 media_type: "application/vnd.oci.image.layer.v1.tar".to_string(),
                 digest: Digest::Sha256(
-                    "99c9d5e2bdc7ef0223f56c845a695ea0f8f11f5b55ea6f74e1f7df0d4f90026c".to_string(),
+                    "99c9d5e2bdc7ef0223f56c845a695ea0f8f11f5b55ea6f74e1f7df0d4f90026c".into(),
                 ),
                 size: 5678,
                 annotations: HashMap::new(),

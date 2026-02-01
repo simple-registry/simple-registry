@@ -124,7 +124,7 @@ impl BlobStore for Backend {
                 let key_without_data = &key[..key.len() - 5];
                 if let Some(slash_pos) = key_without_data.rfind('/') {
                     let digest = &key_without_data[slash_pos + 1..];
-                    all_blobs.push(Digest::Sha256(digest.to_string()));
+                    all_blobs.push(Digest::Sha256(digest.into()));
                 }
             }
 

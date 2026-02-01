@@ -91,7 +91,7 @@ impl BlobStore for Backend {
             let all_digests = self.store.list_dir(&blob_path).await?;
 
             for digest in all_digests {
-                digests.push(Digest::Sha256(digest));
+                digests.push(Digest::Sha256(digest.into()));
             }
         }
 

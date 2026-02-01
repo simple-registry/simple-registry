@@ -150,7 +150,7 @@ impl MetadataStore for Backend {
         let mut referrers = Vec::new();
 
         for manifest_digest in all_manifest {
-            let manifest_digest = Digest::Sha256(manifest_digest);
+            let manifest_digest = Digest::Sha256(manifest_digest.into());
             let blob_path = path_builder::blob_path(&manifest_digest);
 
             let manifest = self.store.read(&blob_path).await?;
@@ -190,7 +190,7 @@ impl MetadataStore for Backend {
         let mut revisions = Vec::new();
 
         for revision in all_revisions {
-            revisions.push(Digest::Sha256(revision));
+            revisions.push(Digest::Sha256(revision.into()));
         }
 
         Ok(pagination::paginate(
