@@ -20,6 +20,7 @@ use crate::watcher::ConfigWatcher;
 mod cache;
 mod command;
 mod configuration;
+mod identity;
 mod metrics_provider;
 mod oci;
 mod registry;

@@ -6,9 +6,9 @@ use tracing::{debug, instrument};
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
 
-use crate::command::server::auth::{AuthMiddleware, AuthResult};
+use super::{AuthMiddleware, AuthResult};
 use crate::command::server::error::Error;
-use crate::command::server::{ClientCertificate, ClientIdentity};
+use crate::identity::{ClientCertificate, ClientIdentity};
 
 /// Extension type for passing peer certificate data from TLS layer
 #[derive(Clone)]

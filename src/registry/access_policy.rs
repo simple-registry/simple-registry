@@ -19,8 +19,7 @@ use cel_interpreter::{Context, Program, Value};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-pub use crate::command::server::ClientIdentity;
-use crate::command::server::route::Route;
+use crate::identity::{ClientIdentity, Route};
 use crate::registry::{Error, cel};
 
 /// Configuration for access control policies.
@@ -111,7 +110,6 @@ impl AccessPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::server::route::Route;
 
     #[test]
     fn test_access_policy_default_allow_no_rules() {

@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
-use super::route::Route;
+use crate::identity::Route;
 use crate::oci::{Digest, Reference};
 
 fn parse_query<T: DeserializeOwned + Default>(params: &str) -> T {

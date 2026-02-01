@@ -19,9 +19,8 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::cache::{Cache, CacheExt};
-use crate::command::server::client_identity::ClientIdentity;
 use crate::command::server::error::Error;
-use crate::command::server::route::Route;
+use crate::identity::{ClientIdentity, Route};
 use crate::secret::Secret;
 
 static WEBHOOK_REQUESTS: LazyLock<IntCounterVec> = LazyLock::new(|| {

@@ -8,6 +8,7 @@ use wiremock::matchers::{header, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::cache;
+use crate::command::server::Error;
 use crate::command::server::auth::webhook::{
     Config, WebhookAuth, WebhookAuthorizer, build_header_name, build_header_value, build_headers,
     load_certificate_bundle, load_file, load_identity, set_forwarded_for_header,
@@ -17,8 +18,7 @@ use crate::command::server::auth::webhook::{
     set_registry_digest_header, set_registry_identity_id_header, set_registry_namespace_header,
     set_registry_reference_header, set_registry_username_header,
 };
-use crate::command::server::route::Route;
-use crate::command::server::{ClientIdentity, Error};
+use crate::identity::{ClientIdentity, Route};
 use crate::oci::{Digest, Reference};
 use crate::secret::Secret;
 

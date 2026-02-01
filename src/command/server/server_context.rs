@@ -3,11 +3,10 @@ use std::sync::Arc;
 use hyper::http::request::Parts;
 use tracing::instrument;
 
-use crate::command::server::ClientIdentity;
 use crate::command::server::auth::{Authenticator, Authorizer};
 use crate::command::server::error::Error;
-use crate::command::server::route::Route;
 use crate::configuration::Configuration;
+use crate::identity::{ClientIdentity, Route};
 use crate::registry::Registry;
 
 pub struct ServerContext {

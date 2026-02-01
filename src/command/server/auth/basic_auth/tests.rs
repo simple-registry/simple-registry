@@ -7,9 +7,9 @@ use hyper::Request;
 use hyper::http::request::Parts;
 use serde::Deserialize;
 
-use crate::command::server::ClientIdentity;
 use crate::command::server::auth::basic_auth::{Config, build_users};
 use crate::command::server::auth::{AuthMiddleware, AuthResult, BasicAuthValidator};
+use crate::identity::ClientIdentity;
 
 #[derive(Deserialize)]
 struct TestConfig {

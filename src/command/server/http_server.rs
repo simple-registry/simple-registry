@@ -21,8 +21,8 @@ use crate::command::server::auth::PeerCertificate;
 use crate::command::server::error::Error;
 use crate::command::server::request_ext::{HeaderExt, IntoAsyncRead};
 use crate::command::server::response_body::ResponseBody;
-use crate::command::server::route::Route;
 use crate::command::server::{ServerContext, router, ui};
+use crate::identity::Route;
 use crate::metrics_provider::{IN_FLIGHT_REQUESTS, METRICS_PROVIDER};
 use crate::oci::{Digest, Reference};
 

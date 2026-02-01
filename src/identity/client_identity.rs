@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use serde::Serialize;
-use serde_json;
 
 /// Client identity information used in access control decisions.
 ///

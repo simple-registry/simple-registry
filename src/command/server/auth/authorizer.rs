@@ -6,11 +6,10 @@ use regex::Regex;
 use tracing::{debug, error, info, instrument};
 
 use crate::cache::Cache;
-use crate::command::server::ClientIdentity;
 use crate::command::server::auth::webhook::WebhookAuthorizer;
 use crate::command::server::error::Error;
-use crate::command::server::route::Route;
 use crate::configuration::Configuration;
+use crate::identity::{ClientIdentity, Route};
 use crate::oci::Reference;
 use crate::registry::{AccessPolicy, Registry};
 
