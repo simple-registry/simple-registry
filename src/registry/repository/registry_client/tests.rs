@@ -3,7 +3,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 use crate::cache;
-use crate::oci::{Digest, Reference};
+use crate::oci::{Digest, Namespace, Reference};
 use crate::secret::Secret;
 
 #[test]
@@ -15,7 +15,7 @@ fn test_get_upstream_namespace() {
     assert_eq!(result, "repo");
 
     let repo_name = "local/nested";
-    let namespace = "completely/different/path";
+    let namespace = &Namespace::new("completely/different/path").unwrap();
     let result = RegistryClient::get_upstream_namespace(repo_name, namespace);
     assert_eq!(result, "completely/different/path");
 }
@@ -42,7 +42,7 @@ async fn test_get_manifest_path() {
     let upstream = RegistryClient::new(&config, cache).unwrap();
 
     let repo_name = "local";
-    let namespace = "local/repo";
+    let namespace = &Namespace::new("local/repo").unwrap();
     let reference = Reference::Tag("latest".to_string());
 
     let path = upstream.get_manifest_path(repo_name, namespace, &reference);
@@ -65,7 +65,7 @@ async fn test_get_blob_path() {
     let upstream = RegistryClient::new(&config, cache).unwrap();
 
     let repo_name = "local";
-    let namespace = "local/repo";
+    let namespace = &Namespace::new("local/repo").unwrap();
     let digest =
         Digest::try_from("sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
             .unwrap();

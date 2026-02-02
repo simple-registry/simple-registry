@@ -4,7 +4,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{error, instrument, warn};
 
 use crate::command::server::response_body::ResponseBody;
-use crate::oci::{Digest, Manifest, Reference};
+use crate::oci::{Digest, Manifest, Namespace, Reference};
 use crate::registry::metadata_store::MetadataStoreExt;
 use crate::registry::metadata_store::link_kind::LinkKind;
 use crate::registry::{Error, Registry, Repository};
@@ -85,7 +85,7 @@ impl Registry {
         &self,
         repository: &Repository,
         accepted_types: &[String],
-        namespace: &str,
+        namespace: &Namespace,
         reference: Reference,
         is_tag_immutable: bool,
     ) -> Result<HeadManifestResponse, Error> {
@@ -134,7 +134,7 @@ impl Registry {
 
     async fn head_local_manifest(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         reference: &Reference,
     ) -> Result<HeadManifestResponse, Error> {
         let blob_link = reference.clone().into();
@@ -170,7 +170,7 @@ impl Registry {
         &self,
         repository: &Repository,
         accepted_types: &[String],
-        namespace: &str,
+        namespace: &Namespace,
         reference: Reference,
         is_tag_immutable: bool,
     ) -> Result<GetManifestResponse, Error> {
@@ -216,7 +216,7 @@ impl Registry {
 
     async fn get_local_manifest(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         reference: &Reference,
     ) -> Result<GetManifestResponse, Error> {
         let blob_link = reference.clone().into();
@@ -241,7 +241,7 @@ impl Registry {
     #[instrument(skip(body))]
     pub async fn put_manifest(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         reference: &Reference,
         content_type: Option<&String>,
         body: &[u8],
@@ -321,7 +321,7 @@ impl Registry {
     #[instrument]
     pub async fn delete_manifest(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         reference: &Reference,
     ) -> Result<(), Error> {
         let mut tx = self.metadata_store.begin_transaction(namespace);
@@ -391,7 +391,7 @@ impl Registry {
     #[instrument(skip(self, is_tag_immutable))]
     pub async fn handle_head_manifest(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         reference: Reference,
         mime_types: &[String],
         is_tag_immutable: bool,
@@ -429,7 +429,7 @@ impl Registry {
     #[instrument(skip(self, is_tag_immutable))]
     pub async fn handle_get_manifest(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         reference: Reference,
         mime_types: &[String],
         is_tag_immutable: bool,
@@ -480,7 +480,7 @@ impl Registry {
     #[instrument(skip(self, body_stream))]
     pub async fn handle_put_manifest<S>(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         reference: Reference,
         mime_type: String,
         mut body_stream: S,
@@ -524,7 +524,7 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn handle_delete_manifest(
         &self,
-        namespace: &str,
+        namespace: &Namespace,
         reference: Reference,
     ) -> Result<Response<ResponseBody>, Error> {
         self.delete_manifest(namespace, &reference).await?;
@@ -550,6 +550,7 @@ mod tests {
 
     use super::*;
     use crate::command::server::request_ext::HeaderExt;
+    use crate::oci::Namespace;
     use crate::registry::tests::{FSRegistryTestCase, backends};
 
     fn create_test_manifest() -> (Vec<u8>, String) {
@@ -607,7 +608,7 @@ mod tests {
     async fn test_put_manifest() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let tag = "latest";
             let (content, media_type) = create_test_manifest();
 
@@ -658,7 +659,7 @@ mod tests {
     async fn test_get_manifest() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let tag = "latest";
             let (content, media_type) = create_test_manifest();
 
@@ -711,7 +712,7 @@ mod tests {
     async fn test_head_manifest() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let tag = "latest";
             let (content, media_type) = create_test_manifest();
 
@@ -764,7 +765,7 @@ mod tests {
     async fn test_delete_manifest() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let tag = "latest";
             let (content, media_type) = create_test_manifest();
 
@@ -863,7 +864,7 @@ mod tests {
     async fn test_handle_head_manifest() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let tag = "latest";
             let (content, media_type) = create_test_manifest();
 
@@ -906,7 +907,7 @@ mod tests {
     async fn test_handle_get_manifest() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let tag = "latest";
             let (content, media_type) = create_test_manifest();
 
@@ -957,7 +958,7 @@ mod tests {
     async fn test_handle_put_manifest() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let tag = "latest";
             let (content, media_type) = create_test_manifest();
 
@@ -1005,7 +1006,7 @@ mod tests {
     async fn test_handle_delete_manifest() {
         for test_case in backends() {
             let registry = test_case.registry();
-            let namespace = "test-repo";
+            let namespace = &Namespace::new("test-repo").unwrap();
             let tag = "latest";
             let (content, media_type) = create_test_manifest();
 
@@ -1046,7 +1047,7 @@ mod tests {
     }
 
     async fn test_pull_through_cache_optimization_impl(test_case: &mut FSRegistryTestCase) {
-        let namespace = "test-repo";
+        let namespace = &Namespace::new("test-repo").unwrap();
         let (content, media_type) = create_test_manifest();
 
         let repositories = crate::registry::test_utils::create_test_repositories();

@@ -3,11 +3,10 @@ use std::sync::Arc;
 use hyper::http::request::Parts;
 use tracing::instrument;
 
-use crate::command::server::ClientIdentity;
 use crate::command::server::auth::{Authenticator, Authorizer};
 use crate::command::server::error::Error;
-use crate::command::server::route::Route;
 use crate::configuration::Configuration;
+use crate::identity::{ClientIdentity, Route};
 use crate::registry::Registry;
 
 pub struct ServerContext {
@@ -91,8 +90,8 @@ pub mod tests {
 
     use super::*;
     use crate::configuration::Configuration;
-    use crate::oci::Reference;
-    use crate::registry::Repository;
+    use crate::oci::{Namespace, Reference};
+    use crate::registry::{RegistryConfig, Repository};
 
     fn create_test_config() -> Configuration {
         let toml = r#"
@@ -122,17 +121,15 @@ pub mod tests {
         let metadata_store = config.resolve_metadata_config().to_backend().unwrap();
         let repositories = Arc::new(HashMap::new());
 
-        let registry = Registry::new(
-            blob_store,
-            metadata_store,
-            repositories,
-            false,
-            true,
-            10,
-            false,
-            Vec::new(),
-        )
-        .unwrap();
+        let registry_config = RegistryConfig::new()
+            .update_pull_time(false)
+            .enable_redirect(true)
+            .concurrent_cache_jobs(10)
+            .global_immutable_tags(false)
+            .global_immutable_tags_exclusions(Vec::new());
+
+        let registry =
+            Registry::new(blob_store, metadata_store, repositories, registry_config).unwrap();
 
         ServerContext::new(&config, registry).unwrap()
     }
@@ -171,17 +168,14 @@ pub mod tests {
         }
         let repositories = Arc::new(repositories_map);
 
-        Registry::new(
-            blob_store,
-            metadata_store,
-            repositories,
-            config.global.update_pull_time,
-            config.global.enable_redirect,
-            config.global.max_concurrent_cache_jobs,
-            config.global.immutable_tags,
-            config.global.immutable_tags_exclusions.clone(),
-        )
-        .unwrap()
+        let registry_config = RegistryConfig::new()
+            .update_pull_time(config.global.update_pull_time)
+            .enable_redirect(config.global.enable_redirect)
+            .concurrent_cache_jobs(config.global.max_concurrent_cache_jobs)
+            .global_immutable_tags(config.global.immutable_tags)
+            .global_immutable_tags_exclusions(config.global.immutable_tags_exclusions.clone());
+
+        Registry::new(blob_store, metadata_store, repositories, registry_config).unwrap()
     }
 
     #[test]
@@ -505,7 +499,7 @@ pub mod tests {
         let context = ServerContext::new(&config, registry).unwrap();
 
         let route = Route::GetManifest {
-            namespace: "test/repo",
+            namespace: Namespace::new("test/repo").unwrap(),
             reference: Reference::Tag("latest".to_string()),
         };
         let identity = ClientIdentity::new(None);
@@ -639,17 +633,15 @@ pub mod tests {
         let metadata_store = config.resolve_metadata_config().to_backend().unwrap();
         let repositories = Arc::new(HashMap::new());
 
-        let registry = Registry::new(
-            blob_store,
-            metadata_store,
-            repositories,
-            config.global.update_pull_time,
-            config.global.enable_redirect,
-            config.global.max_concurrent_cache_jobs,
-            config.global.immutable_tags,
-            config.global.immutable_tags_exclusions.clone(),
-        )
-        .unwrap();
+        let registry_config = RegistryConfig::new()
+            .update_pull_time(config.global.update_pull_time)
+            .enable_redirect(config.global.enable_redirect)
+            .concurrent_cache_jobs(config.global.max_concurrent_cache_jobs)
+            .global_immutable_tags(config.global.immutable_tags)
+            .global_immutable_tags_exclusions(config.global.immutable_tags_exclusions.clone());
+
+        let registry =
+            Registry::new(blob_store, metadata_store, repositories, registry_config).unwrap();
 
         let context = ServerContext::new(&config, registry);
 

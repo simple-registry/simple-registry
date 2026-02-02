@@ -7,12 +7,12 @@ use serde::Deserialize;
 use tracing::{debug, instrument, warn};
 
 use super::oidc::OidcValidator;
+use super::webhook;
 use super::{AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator, basic_auth, oidc};
 use crate::cache::Cache;
-use crate::command::server::ClientIdentity;
-use crate::command::server::auth::webhook;
 use crate::command::server::error::Error;
 use crate::configuration::Configuration;
+use crate::identity::ClientIdentity;
 use crate::metrics_provider::AUTH_ATTEMPTS;
 
 #[derive(Clone, Debug, Default, Deserialize)]

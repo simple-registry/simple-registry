@@ -5,8 +5,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
-use super::route::Route;
-use crate::oci::{Digest, Reference};
+use crate::identity::Route;
+use crate::oci::{Digest, Namespace, Reference};
 
 fn parse_query<T: DeserializeOwned + Default>(params: &str) -> T {
     serde_urlencoded::from_str(params).unwrap_or_default()
@@ -110,11 +110,13 @@ fn try_parse_extension<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> 
         return Some(Route::ListNamespaces { repository });
     }
 
-    if let Some(namespace) = path.strip_suffix("/_revisions") {
+    if let Some(namespace_str) = path.strip_suffix("/_revisions") {
+        let namespace = Namespace::new(namespace_str).ok()?;
         return Some(Route::ListRevisions { namespace });
     }
 
-    if let Some(namespace) = path.strip_suffix("/_uploads") {
+    if let Some(namespace_str) = path.strip_suffix("/_uploads") {
+        let namespace = Namespace::new(namespace_str).ok()?;
         return Some(Route::ListUploads { namespace });
     }
 
@@ -129,9 +131,10 @@ fn try_parse_uploads<'a>(
     let suffixes = ["/blobs/uploads", "/blobs/uploads/"];
 
     for suffix in suffixes {
-        if let Some(namespace) = path.strip_suffix(suffix)
+        if let Some(namespace_str) = path.strip_suffix(suffix)
             && method == Method::POST
         {
+            let namespace = Namespace::new(namespace_str).ok()?;
             let digest = params
                 .map(parse_query::<DigestQuery>)
                 .and_then(|r| r.to_digest());
@@ -149,7 +152,8 @@ fn try_parse_upload<'a>(
     params: Option<&'a str>,
 ) -> Option<Route<'a>> {
     if let Some(upload_position) = path.rfind("/blobs/uploads/") {
-        let namespace = &path[..upload_position];
+        let namespace_str = &path[..upload_position];
+        let namespace = Namespace::new(namespace_str).ok()?;
 
         let uuid = &path[upload_position + "/blobs/uploads/".len()..];
         let uuid = Uuid::from_str(uuid).ok()?;
@@ -179,7 +183,8 @@ fn try_parse_upload<'a>(
 
 fn try_find_blobs<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> {
     if let Some(blob_position) = path.rfind("/blobs/") {
-        let namespace = &path[..blob_position];
+        let namespace_str = &path[..blob_position];
+        let namespace = Namespace::new(namespace_str).ok()?;
 
         let digest = &path[blob_position + "/blobs/".len()..];
         let digest = Digest::from_str(digest).ok()?;
@@ -197,7 +202,8 @@ fn try_find_blobs<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> {
 
 fn try_find_manifests<'a>(method: &Method, path: &'a str) -> Option<Route<'a>> {
     if let Some(manifest_position) = path.rfind("/manifests/") {
-        let namespace = &path[..manifest_position];
+        let namespace_str = &path[..manifest_position];
+        let namespace = Namespace::new(namespace_str).ok()?;
 
         let reference = &path[manifest_position + "/manifests/".len()..];
         let reference = Reference::from_str(reference).ok()?;
@@ -240,7 +246,8 @@ fn try_find_referrers<'a>(
     params: Option<&'a str>,
 ) -> Option<Route<'a>> {
     if let Some(referrers_position) = path.rfind("/referrers/") {
-        let namespace = &path[..referrers_position];
+        let namespace_str = &path[..referrers_position];
+        let namespace = Namespace::new(namespace_str).ok()?;
 
         let digest = &path[referrers_position + "/referrers/".len()..];
         let digest = Digest::from_str(digest).ok()?;
@@ -262,9 +269,10 @@ fn try_find_referrers<'a>(
 }
 
 fn try_find_tags<'a>(method: &Method, path: &'a str, params: Option<&'a str>) -> Option<Route<'a>> {
-    if let Some(namespace) = path.strip_suffix("/tags/list")
+    if let Some(namespace_str) = path.strip_suffix("/tags/list")
         && *method == Method::GET
     {
+        let namespace = Namespace::new(namespace_str).ok()?;
         let (n, last) = if let Some(p) = params.map(parse_query::<PaginationQuery>) {
             (p.n, p.last)
         } else {

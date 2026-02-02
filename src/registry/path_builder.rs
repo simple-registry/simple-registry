@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn test_blob_paths() {
-        let digest = Digest::Sha256("1234567890abcdef".to_string());
+        let digest = Digest::Sha256("1234567890abcdef".into());
         assert_eq!(
             blob_path(&digest),
             "v2/blobs/sha256/12/1234567890abcdef/data"
@@ -186,7 +186,7 @@ mod tests {
             "v2/repositories/ns/_manifests/tags"
         );
 
-        let subject = Digest::Sha256("subject123".to_string());
+        let subject = Digest::Sha256("subject123".into());
         assert_eq!(
             manifest_referrers_dir("ns", &subject),
             "v2/repositories/ns/_manifests/referrers/sha256/subject123"
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_link_paths() {
-        let digest = Digest::Sha256("digest123".to_string());
+        let digest = Digest::Sha256("digest123".into());
 
         let tag = LinkKind::Tag("v1.0".to_string());
         assert_eq!(
@@ -237,8 +237,8 @@ mod tests {
             "v2/repositories/ns/_config/sha256/digest123"
         );
 
-        let subject = Digest::Sha256("subject456".to_string());
-        let referrer = Digest::Sha256("referrer789".to_string());
+        let subject = Digest::Sha256("subject456".into());
+        let referrer = Digest::Sha256("referrer789".into());
         let referrer_link = LinkKind::Referrer(subject, referrer);
         assert_eq!(
             link_path(&referrer_link, "ns"),
@@ -249,8 +249,8 @@ mod tests {
             "v2/repositories/ns/_manifests/referrers/sha256/subject456/sha256/referrer789"
         );
 
-        let index = Digest::Sha256("index123".to_string());
-        let child = Digest::Sha256("child456".to_string());
+        let index = Digest::Sha256("index123".into());
+        let child = Digest::Sha256("child456".into());
         let manifest_link = LinkKind::Manifest(index, child);
         assert_eq!(
             link_path(&manifest_link, "ns"),

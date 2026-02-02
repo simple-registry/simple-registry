@@ -117,7 +117,7 @@ impl MetadataStore for Backend {
         let mut repositories = self.collect_repositories(base_path).await;
         repositories.dedup();
 
-        Ok(pagination::paginate(&repositories, n, last))
+        Ok(pagination::paginate(&repositories, n, last.as_deref()))
     }
 
     #[instrument(skip(self))]
@@ -132,7 +132,7 @@ impl MetadataStore for Backend {
         let mut tags = self.store.list_dir(&path).await?;
         tags.sort();
 
-        Ok(pagination::paginate(&tags, n, last))
+        Ok(pagination::paginate(&tags, n, last.as_deref()))
     }
 
     #[instrument(skip(self))]
@@ -150,7 +150,7 @@ impl MetadataStore for Backend {
         let mut referrers = Vec::new();
 
         for manifest_digest in all_manifest {
-            let manifest_digest = Digest::Sha256(manifest_digest);
+            let manifest_digest = Digest::Sha256(manifest_digest.into());
             let blob_path = path_builder::blob_path(&manifest_digest);
 
             let manifest = self.store.read(&blob_path).await?;
@@ -190,10 +190,14 @@ impl MetadataStore for Backend {
         let mut revisions = Vec::new();
 
         for revision in all_revisions {
-            revisions.push(Digest::Sha256(revision));
+            revisions.push(Digest::Sha256(revision.into()));
         }
 
-        Ok(pagination::paginate(&revisions, n, continuation_token))
+        Ok(pagination::paginate(
+            &revisions,
+            n,
+            continuation_token.as_deref(),
+        ))
     }
 
     async fn count_manifests(&self, namespace: &str) -> Result<usize, Error> {

@@ -13,7 +13,7 @@ use crate::command::server::error::Error;
 use crate::configuration::{Configuration, ServerConfig};
 use crate::registry::blob_store::BlobStore;
 use crate::registry::metadata_store::MetadataStore;
-use crate::registry::{Registry, Repository, blob_store, repository};
+use crate::registry::{Registry, RegistryConfig, Repository, blob_store, repository};
 use crate::watcher::ConfigNotifier;
 
 pub enum ServiceListener {
@@ -96,16 +96,15 @@ fn build_registry(config: &Configuration) -> Result<Registry, Error> {
     let auth_cache = build_auth_cache(&config.cache)?;
     let repositories = build_repositories(&config.repository, &auth_cache)?;
 
-    let Ok(registry) = Registry::new(
-        blob_store,
-        metadata_store,
-        repositories,
-        config.global.update_pull_time,
-        config.global.enable_redirect,
-        config.global.max_concurrent_cache_jobs,
-        config.global.immutable_tags,
-        config.global.immutable_tags_exclusions.clone(),
-    ) else {
+    let registry_config = RegistryConfig::new()
+        .update_pull_time(config.global.update_pull_time)
+        .enable_redirect(config.global.enable_redirect)
+        .concurrent_cache_jobs(config.global.max_concurrent_cache_jobs)
+        .global_immutable_tags(config.global.immutable_tags)
+        .global_immutable_tags_exclusions(config.global.immutable_tags_exclusions.clone());
+
+    let Ok(registry) = Registry::new(blob_store, metadata_store, repositories, registry_config)
+    else {
         let msg = "Failed to initialize registry".to_string();
         return Err(Error::Initialization(msg));
     };
@@ -538,16 +537,14 @@ mod tests {
         let auth_cache = build_auth_cache(&config.cache).unwrap();
         let repositories = build_repositories(&config.repository, &auth_cache).unwrap();
 
-        let registry = Registry::new(
-            blob_store,
-            metadata_store,
-            repositories,
-            config.global.update_pull_time,
-            config.global.enable_redirect,
-            config.global.max_concurrent_cache_jobs,
-            config.global.immutable_tags,
-            config.global.immutable_tags_exclusions.clone(),
-        );
+        let registry_config = RegistryConfig::new()
+            .update_pull_time(config.global.update_pull_time)
+            .enable_redirect(config.global.enable_redirect)
+            .concurrent_cache_jobs(config.global.max_concurrent_cache_jobs)
+            .global_immutable_tags(config.global.immutable_tags)
+            .global_immutable_tags_exclusions(config.global.immutable_tags_exclusions.clone());
+
+        let registry = Registry::new(blob_store, metadata_store, repositories, registry_config);
 
         assert!(registry.is_ok());
     }

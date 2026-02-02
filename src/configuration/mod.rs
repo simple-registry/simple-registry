@@ -12,9 +12,8 @@ pub use error::Error;
 use crate::cache;
 use crate::command::server::auth::authenticator;
 use crate::command::server::listeners::{insecure, tls};
-use crate::registry::{
-    AccessPolicyConfig, RetentionPolicyConfig, blob_store, metadata_store, repository,
-};
+use crate::policy::{AccessPolicyConfig, RetentionPolicyConfig};
+use crate::registry::{blob_store, metadata_store, repository};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Configuration {

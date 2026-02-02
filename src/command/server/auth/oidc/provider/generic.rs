@@ -11,7 +11,8 @@ use tracing::{debug, info, warn};
 use crate::cache::{Cache, CacheExt};
 use crate::command::server::auth::oidc::{Jwk, OidcProvider};
 use crate::command::server::error::Error;
-use crate::command::server::{OidcClaims, sha256_hash};
+use crate::command::server::sha256_hash;
+use crate::identity::OidcClaims;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProviderConfig {

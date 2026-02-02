@@ -28,7 +28,7 @@ impl Sha256Ext for Sha256 {
     fn digest(self) -> oci::Digest {
         let hash = self.finalize();
         let digest = hex::encode(hash.as_slice());
-        oci::Digest::Sha256(digest)
+        oci::Digest::Sha256(digest.into())
     }
 }
 

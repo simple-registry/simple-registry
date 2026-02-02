@@ -91,11 +91,15 @@ impl BlobStore for Backend {
             let all_digests = self.store.list_dir(&blob_path).await?;
 
             for digest in all_digests {
-                digests.push(Digest::Sha256(digest));
+                digests.push(Digest::Sha256(digest.into()));
             }
         }
 
-        Ok(pagination::paginate(&digests, n, continuation_token))
+        Ok(pagination::paginate(
+            &digests,
+            n,
+            continuation_token.as_deref(),
+        ))
     }
 
     #[instrument(skip(self))]
@@ -108,7 +112,11 @@ impl BlobStore for Backend {
         let path = path_builder::uploads_root_dir(namespace);
         let uploads = self.store.list_dir(&path).await?;
 
-        Ok(pagination::paginate(&uploads, n, continuation_token))
+        Ok(pagination::paginate(
+            &uploads,
+            n,
+            continuation_token.as_deref(),
+        ))
     }
 
     #[instrument(skip(self))]

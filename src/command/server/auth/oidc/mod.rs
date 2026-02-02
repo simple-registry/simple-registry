@@ -12,12 +12,12 @@ use reqwest::Client;
 use serde::Deserialize;
 use tracing::debug;
 
+use super::{AuthMiddleware, AuthResult};
 use crate::cache::Cache;
 use crate::command::server::auth::oidc::provider::{generic, github};
-use crate::command::server::auth::{AuthMiddleware, AuthResult};
 use crate::command::server::error::Error;
 use crate::command::server::request_ext::HeaderExt;
-use crate::command::server::{ClientIdentity, OidcClaims};
+use crate::identity::{ClientIdentity, OidcClaims};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "provider", rename_all = "lowercase")]
@@ -141,8 +141,7 @@ mod tests {
 
     use super::*;
     use crate::cache;
-    use crate::command::server::ClientIdentity;
-    use crate::command::server::auth::{AuthMiddleware, AuthResult};
+    use crate::identity::ClientIdentity;
 
     fn build_config(mock_server: &MockServer) -> Config {
         Config::Generic(generic::ProviderConfig {

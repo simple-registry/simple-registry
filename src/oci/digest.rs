@@ -9,7 +9,7 @@ use crate::oci::Error;
 #[derive(Debug, Clone, Ord, Eq, Hash, PartialEq, PartialOrd, Deserialize)]
 #[serde(try_from = "String")]
 pub enum Digest {
-    Sha256(String),
+    Sha256(Box<str>),
 }
 
 impl Digest {
@@ -77,7 +77,7 @@ impl TryFrom<&str> for Digest {
             )));
         }
 
-        Ok(Digest::Sha256(hash.to_string()))
+        Ok(Digest::Sha256(hash.into()))
     }
 }
 
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn test_display() {
-        let digest = Digest::Sha256(VALID_HASH.to_string());
+        let digest = Digest::Sha256(VALID_HASH.into());
         assert_eq!(digest.to_string(), format!("sha256:{VALID_HASH}"));
     }
 }

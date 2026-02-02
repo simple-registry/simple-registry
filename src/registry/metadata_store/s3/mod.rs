@@ -12,7 +12,7 @@ use crate::registry::metadata_store::{BlobIndex, Error};
 use crate::registry::metadata_store::{
     BlobIndexOperation, LinkMetadata, LinkOperation, LockConfig, MetadataStore,
 };
-use crate::registry::{data_store, path_builder};
+use crate::registry::{data_store, pagination, path_builder};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct BackendConfig {
@@ -125,25 +125,7 @@ impl MetadataStore for Backend {
         // Sort namespaces for consistent pagination
         namespaces.sort();
 
-        let start_idx = if let Some(last_item) = &last {
-            namespaces
-                .iter()
-                .position(|ns| ns > last_item)
-                .unwrap_or(namespaces.len())
-        } else {
-            0
-        };
-
-        let end_idx = std::cmp::min(start_idx + usize::from(n), namespaces.len());
-        let result_namespaces = namespaces[start_idx..end_idx].to_vec();
-
-        let next_token = if end_idx < namespaces.len() {
-            result_namespaces.last().cloned()
-        } else {
-            None
-        };
-
-        Ok((result_namespaces, next_token))
+        Ok(pagination::paginate_sorted(&namespaces, n, last.as_deref()))
     }
 
     #[instrument(skip(self))]
@@ -167,9 +149,7 @@ impl MetadataStore for Backend {
                 .list_prefixes(&tags_dir, "/", 1000, continuation_token)
                 .await?;
 
-            for tag in prefixes {
-                all_tags.push(tag);
-            }
+            all_tags.extend(prefixes);
 
             continuation_token = next_token;
             if continuation_token.is_none() {
@@ -177,25 +157,7 @@ impl MetadataStore for Backend {
             }
         }
 
-        let start_idx = if let Some(last_tag) = &last {
-            all_tags
-                .iter()
-                .position(|tag| tag > last_tag)
-                .unwrap_or(all_tags.len())
-        } else {
-            0
-        };
-
-        let end_idx = std::cmp::min(start_idx + usize::from(n), all_tags.len());
-        let result_tags = all_tags[start_idx..end_idx].to_vec();
-
-        let next_token = if end_idx < all_tags.len() {
-            result_tags.last().cloned()
-        } else {
-            None
-        };
-
-        Ok((result_tags, next_token))
+        Ok(pagination::paginate_sorted(&all_tags, n, last.as_deref()))
     }
 
     #[instrument(skip(self))]
@@ -223,7 +185,7 @@ impl MetadataStore for Backend {
                     continue;
                 }
 
-                let manifest_digest = Digest::Sha256(parts[1].to_string());
+                let manifest_digest = Digest::Sha256(parts[1].into());
                 let blob_path = path_builder::blob_path(&manifest_digest);
 
                 let manifest = match self.store.read(&blob_path).await {
@@ -280,7 +242,7 @@ impl MetadataStore for Backend {
 
         let mut revisions = Vec::new();
         for key in prefixes {
-            revisions.push(Digest::Sha256(key));
+            revisions.push(Digest::Sha256(key.into()));
         }
 
         Ok((revisions, next_last))

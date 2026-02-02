@@ -10,10 +10,10 @@ use hyper::http::request::Parts;
 use serde::Deserialize;
 use tracing::{debug, instrument, warn};
 
-use crate::command::server::ClientIdentity;
-use crate::command::server::auth::{AuthMiddleware, AuthResult};
+use super::{AuthMiddleware, AuthResult};
 use crate::command::server::error::Error;
 use crate::command::server::request_ext::HeaderExt;
+use crate::identity::ClientIdentity;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Config {
