@@ -32,8 +32,8 @@ use crate::{
     executor::{
         CAS_RETRY_BACKOFF, Outcome, TransactionExecutor, common,
         common::{
-            ApplyMode, build_intent, finish, rollback, stage_bodies, stamp_applied, stamp_progress,
-            write_intent,
+            ApplyMode, build_intent, discard_staged_bodies, finish, rollback, stage_bodies,
+            stamp_applied, stamp_progress, write_intent,
         },
     },
     intent::{DEFAULT_INTENT_TTL_SECS, IntentRecord, MutationRecord},
@@ -512,6 +512,9 @@ impl TransactionExecutor for CasExecutor {
 
         let prepared_reads = self.prepare_reads(&tx).await?;
 
+        // Every error return between here and the intent write reclaims the
+        // staging: coarse-lock contention is an ordinary outcome, so leaving it
+        // behind would make normal operation produce garbage.
         let mut mutation_records = stage_bodies(self.store.as_ref(), &tx, tx_id).await?;
 
         // Linearise read-modify-write: a mutation whose key was read becomes a
@@ -529,7 +532,13 @@ impl TransactionExecutor for CasExecutor {
             None
         } else {
             let keys = lock_key_set(tx.coarse_lock_keys.iter().cloned());
-            Some(self.lock.acquire(&keys).await.map_err(Error::Lock)?)
+            match self.lock.acquire(&keys).await {
+                Ok(session) => Some(session),
+                Err(e) => {
+                    discard_staged_bodies(self.store.as_ref(), tx_id).await;
+                    return Err(Error::Lock(e));
+                }
+            }
         };
 
         let mut intent = build_intent(
@@ -543,6 +552,7 @@ impl TransactionExecutor for CasExecutor {
             if let Some(session) = coarse_session {
                 session.release().await;
             }
+            discard_staged_bodies(self.store.as_ref(), tx_id).await;
             return Err(e);
         }
 

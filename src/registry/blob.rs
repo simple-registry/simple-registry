@@ -125,11 +125,51 @@ pub async fn cache_blob(
     blob_store
         .create_upload(namespace, session_id.as_ref())
         .await?;
+
+    let result = fill_cache_session(
+        blob_store,
+        metadata_store,
+        namespace,
+        digest,
+        stream,
+        content_length,
+        session_id.as_ref(),
+    )
+    .await;
+
+    // Reclaim the session whatever the outcome. A fill that fails partway
+    // otherwise strands a layer-sized staging directory until scrub runs, and
+    // repeated failures (a flaky upstream, a poisoning attempt) would fill the
+    // disk. On success the bytes have been promoted and the session is spent;
+    // so has a racer's session whose bytes this one found already promoted.
+    if let Err(error) = blob_store
+        .delete_upload(namespace, session_id.as_ref())
+        .await
+    {
+        warn!("Failed to delete cache-fill upload state: {error}");
+    }
+    result?;
+
+    info!("Caching of {digest} completed");
+    Ok(())
+}
+
+/// Stream the upstream bytes into the staged session and promote them. The
+/// caller owns the session's lifetime and reclaims it on every outcome.
+async fn fill_cache_session(
+    blob_store: &BlobStore,
+    metadata_store: &MetadataStore,
+    namespace: &Namespace,
+    digest: &Digest,
+    stream: BoxedReader,
+    content_length: u64,
+    session_key: &str,
+) -> Result<(), Error> {
     // A single-shot copy of a known blob: hash only the target algorithm.
     let (computed_digest, _) = blob_store
         .write_monolithic_upload(
             namespace,
-            session_id.as_ref(),
+            session_key,
             stream,
             Some(content_length),
             digest.algorithm(),
@@ -137,40 +177,15 @@ pub async fn cache_blob(
         .await?;
     // Reject a pull-through blob whose bytes do not hash to the requested
     // digest: a compromised or man-in-the-middle upstream must not poison the
-    // cache under a trusted digest. Reclaim the staged bytes so repeated
-    // poisoning attempts cannot fill the disk; they are never promoted or
-    // granted, so no client can read them.
+    // cache under a trusted digest. They are never promoted or granted, so no
+    // client can read them.
     if &computed_digest != digest {
         warn!("Pull-through blob digest mismatch: expected {digest}, got {computed_digest}");
-        if let Err(error) = blob_store
-            .delete_upload(namespace, session_id.as_ref())
-            .await
-        {
-            warn!("Failed to delete mismatched upload state: {error}");
-        }
         return Err(Error::DigestInvalid);
     }
     // Promotion and grant share the coarse lock `delete_blob` holds while
-    // reclaiming, mirroring the manifest path's bytes-then-link order. A racer
-    // that already promoted the bytes leaves this session behind; the
-    // best-effort delete reclaims it.
-    promote_and_grant(
-        blob_store,
-        metadata_store,
-        namespace,
-        session_id.as_ref(),
-        digest,
-    )
-    .await?;
-    if let Err(error) = blob_store
-        .delete_upload(namespace, session_id.as_ref())
-        .await
-    {
-        warn!("Failed to delete completed upload state: {error}");
-    }
-
-    info!("Caching of {digest} completed");
-    Ok(())
+    // reclaiming, mirroring the manifest path's bytes-then-link order.
+    promote_and_grant(blob_store, metadata_store, namespace, session_key, digest).await
 }
 
 impl Registry {
@@ -415,8 +430,8 @@ mod tests {
             metadata_store::{BlobIndexOperation, LinkOperation},
             path_builder,
             test_utils::{
-                create_test_blob, create_test_registry, for_each_backend, get_blob,
-                metadata_store_over, put_blob_direct,
+                RegistryTestCase, create_test_blob, create_test_registry, for_each_backend,
+                get_blob, metadata_store_over, put_blob_direct,
             },
         },
     };
@@ -852,6 +867,65 @@ mod tests {
         .await;
     }
 
+    /// Upload-session directories still staged under `namespace`.
+    async fn staged_session_count(
+        test_case: &dyn RegistryTestCase,
+        namespace: &Namespace,
+    ) -> usize {
+        test_case
+            .blob_store()
+            .object_store()
+            .list_all_children(&path_builder::uploads_root_dir(namespace))
+            .await
+            .expect("list upload sessions")
+            .0
+            .len()
+    }
+
+    /// A reader that fails on its first poll, standing in for an upstream
+    /// connection dropping mid-fill.
+    struct FailingReader;
+
+    impl tokio::io::AsyncRead for FailingReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("upstream dropped mid-fill")))
+        }
+    }
+
+    /// Regression: a fill that fails partway must not strand its staged session.
+    /// The bytes are layer-sized, so leaving them for scrub turns an ordinary
+    /// upstream fault into disk pressure.
+    #[tokio::test]
+    async fn cache_blob_reclaims_its_session_when_the_fill_fails() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = Namespace::new("test-repo").unwrap();
+            let digest = Digest::sha256_of_bytes(b"bytes that never arrive");
+
+            let result = cache_blob(
+                &registry.blob_store,
+                &registry.metadata_store,
+                &namespace,
+                &digest,
+                Box::new(FailingReader),
+                64,
+            )
+            .await;
+
+            assert!(result.is_err(), "a fill whose upstream drops must fail");
+            assert_eq!(
+                staged_session_count(test_case, &namespace).await,
+                0,
+                "a failed fill must not strand its staged upload session"
+            );
+        })
+        .await;
+    }
+
     /// Pull-through cache poisoning guard: an upstream serving bytes that do not
     /// hash to the requested digest must be rejected, and the poisoned bytes
     /// must never be cached under the trusted digest.
@@ -880,6 +954,11 @@ mod tests {
             assert!(
                 registry.blob_store.read(&requested).await.is_err(),
                 "poisoned bytes must not be cached under the requested digest"
+            );
+            assert_eq!(
+                staged_session_count(test_case, &namespace).await,
+                0,
+                "the rejected fill must not leave its staged bytes behind"
             );
         })
         .await;
