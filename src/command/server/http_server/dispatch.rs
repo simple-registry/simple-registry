@@ -179,6 +179,11 @@ async fn dispatch_route<'a>(
     }
 }
 
+/// A read is a miss, a write is a bad request. The router collapses a malformed
+/// reference, digest, or query value into the same `None` as a path it does not
+/// serve, and a write carrying one is malformed rather than missing: OCI
+/// conformance requires `400` from a manifest `PUT` whose reference parses as
+/// neither a tag nor a digest.
 pub fn handle_unknown_route(parts: &Parts) -> Result<Response<ResponseBody>, Error> {
     if [Method::GET, Method::HEAD].contains(&parts.method) {
         let msg = format!("unknown route: {} {}", parts.method, parts.uri);

@@ -32,6 +32,36 @@ fn test_parse_api_version_with_trailing_slash() {
     assert!(matches!(route, Some(Action::ApiVersion)));
 }
 
+/// The version check must resolve for HEAD too, or it reaches the UI-asset arm
+/// and answers `index.html` with a 200.
+#[test]
+fn test_parse_api_version_head() {
+    let method = Method::HEAD;
+    for path in ["/v2", "/v2/"] {
+        let uri: Uri = path.parse().unwrap();
+        let route = parse(&method, &uri);
+        assert!(
+            matches!(route, Some(Action::ApiVersion)),
+            "HEAD {path} must resolve to the API version check"
+        );
+    }
+}
+
+/// A reference that parses as neither a tag nor a digest must not route, so the
+/// dispatcher answers a `PUT` carrying one with `400`, as OCI conformance
+/// requires.
+#[test]
+fn test_parse_put_manifest_with_unparseable_reference_is_rejected() {
+    let uri: Uri = "/v2/myrepo/app/manifests/sha256:not-a-digest"
+        .parse()
+        .unwrap();
+    let route = parse(&Method::PUT, &uri);
+    assert!(
+        route.is_none(),
+        "a manifest reference that is neither tag nor digest must not route (PUT -> 400), got: {route:?}"
+    );
+}
+
 #[test]
 fn test_parse_list_catalog_no_params() {
     let method = Method::GET;

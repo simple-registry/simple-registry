@@ -5,7 +5,7 @@ use argon2::{
 use base64::{Engine, prelude::BASE64_STANDARD};
 use http_body_util::BodyExt;
 use hyper::{
-    Request, StatusCode,
+    Method, Request, StatusCode,
     header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
 };
 use opentelemetry::trace::TracerProvider;
@@ -21,7 +21,7 @@ use crate::{
         handlers::{content_discovery::handle_list_catalog, ext::handle_list_repositories},
         http_server::{
             connection::{current_trace_id, inject_peer_certificate},
-            dispatch::authenticate_and_authorize,
+            dispatch::{authenticate_and_authorize, handle_unknown_route},
             error_response::{error_to_response, fallback_500},
             observability::{handle_healthz, handle_metrics},
         },
@@ -257,6 +257,37 @@ fn test_error_to_response_with_empty_message() {
         response.headers().get(CONTENT_TYPE).unwrap(),
         "application/json"
     );
+}
+
+/// The router reports a malformed reference and a path it does not serve as the
+/// same `None`, so the method decides the status: a read missed, a write was
+/// malformed. OCI conformance fails the registry when a manifest `PUT` carrying
+/// an unparseable reference answers anything but `400`.
+#[test]
+fn unknown_route_status_follows_the_method() {
+    for (method, expected_not_found) in [
+        (Method::GET, true),
+        (Method::HEAD, true),
+        (Method::PUT, false),
+        (Method::POST, false),
+        (Method::DELETE, false),
+    ] {
+        let request = Request::builder()
+            .method(method.clone())
+            .uri("/v2/conformance/test/manifests/sha256:not-a-digest")
+            .body(())
+            .unwrap();
+        let (parts, ()) = request.into_parts();
+
+        let Err(error) = handle_unknown_route(&parts) else {
+            panic!("{method} on an unmatched path must be rejected, not served");
+        };
+        assert_eq!(
+            matches!(error, Error::NotFound(_)),
+            expected_not_found,
+            "{method} on an unmatched path returned the wrong status: {error:?}"
+        );
+    }
 }
 
 #[tokio::test]

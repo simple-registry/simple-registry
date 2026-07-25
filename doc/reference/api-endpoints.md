@@ -20,6 +20,7 @@ Comma-separated `Accept` header values are parsed and ordered by quality (`q`) b
 
 ```
 GET /v2/
+HEAD /v2/
 ```
 
 Returns `200 OK` if the registry is available. Used for authentication challenges.
