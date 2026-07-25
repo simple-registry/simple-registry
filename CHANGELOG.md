@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A lock object whose body no longer parses is now reclaimed by the lock janitor once its object mtime ages past the longest permitted lock TTL, instead of blocking every acquire on that key until an operator deleted it by hand.
 - A job claim whose dedup index cannot be retired is now left for the next scan instead of running with that index live (which coalesced every same-`lock_key` enqueue into the running job and dropped its write), and a rescheduled retry no longer overwrites an index a concurrent enqueue just pointed at its own fresh job.
 - Error paths now reclaim what they staged instead of leaving it for scrub: an aborted transaction discards its staged bodies, a failed or rejected pull-through cache fill drops its upload session, and a completion whose bytes hash to the wrong digest aborts the session rather than keeping a full blob on disk.
+- `HEAD /v2/` now answers the API version check instead of falling through to the web UI and serving `index.html` with a `200`.
 
 ## 1.4.1
 

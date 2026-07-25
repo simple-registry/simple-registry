@@ -29,7 +29,12 @@ pub fn parse(method: &Method, uri: &Uri) -> Option<Action> {
         "/readyz" if method == Method::GET => return Some(Action::Readyz),
         "/metrics" if method == Method::GET => return Some(Action::Metrics),
         "/_ui/config" if method == Method::GET => return Some(Action::UiConfig),
-        "/v2" | "/v2/" if method == Method::GET => return Some(Action::ApiVersion),
+        // HEAD as well as GET: the version check is the OCI conformance probe,
+        // and without this it falls through to the UI-asset arm below and
+        // answers with `index.html`.
+        "/v2" | "/v2/" if method == Method::GET || method == Method::HEAD => {
+            return Some(Action::ApiVersion);
+        }
         "/v2/_catalog" if method == Method::GET => {
             let (n, last) = parse_pagination(params);
             return Some(Action::ListCatalog { n, last });
