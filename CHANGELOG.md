@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## 1.4.2 - UNRELEASED
 
+### Changed
+
+- The web UI's embedded assets are served straight from the binary instead of being copied into a fresh buffer on every request.
+
 ### Fixed
 
 - A manifest push now checks reference ownership inside the link transaction (strict rejects, permissive drops the link), so a delete or prune reclaiming a referenced blob mid-push can no longer slip a manifest whose layer bytes are gone past the pre-write validation.
