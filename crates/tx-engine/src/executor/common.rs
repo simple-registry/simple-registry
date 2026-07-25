@@ -13,7 +13,10 @@ use angos_storage::{Error as StorageError, Etag, ObjectStore};
 
 use crate::{
     error::Error,
-    intent::{IntentRecord, MutationProgress, MutationRecord, ReadRecord, body_ref_key},
+    intent::{
+        INTENT_BODIES_PREFIX, IntentRecord, MutationProgress, MutationRecord, ReadRecord,
+        body_ref_key,
+    },
     transaction::{Mutation, Read, Transaction},
 };
 
@@ -424,6 +427,26 @@ async fn cleanup(store: &dyn ObjectStore, intent: &IntentRecord, mode: CleanupMo
                 "Rollback: failed to delete intent log entry"
             ),
         }
+    }
+}
+
+/// Best-effort reclaim of a transaction's staged bodies on an error return
+/// taken before its intent was written, so an aborted attempt leaves no
+/// staging garbage behind. A failure here is logged, not surfaced: the caller
+/// already has a terminal error, and the body janitor sweeps what is left.
+///
+/// Safe even when the intent write itself failed ambiguously and the record did
+/// land: the intent's slots are all `Pending` until Apply starts, so recovery
+/// rolls it back rather than replaying it against the bodies removed here.
+pub async fn discard_staged_bodies(store: &dyn ObjectStore, tx_id: Uuid) {
+    let prefix = format!("{INTENT_BODIES_PREFIX}/{tx_id}/");
+    if let Err(e) = store.delete_prefix(&prefix).await {
+        warn!(
+            tx_id = %tx_id,
+            prefix,
+            error = %e,
+            "Failed to discard staged bodies of an aborted transaction; the body janitor will reclaim them"
+        );
     }
 }
 

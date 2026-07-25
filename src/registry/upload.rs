@@ -335,12 +335,13 @@ impl Registry {
         Ok(())
     }
 
-    /// Best-effort abort of an upload session whose body breached the size cap;
-    /// a cleanup failure is logged, not surfaced, since the caller already has a
-    /// terminal error to return.
+    /// Best-effort abort of an upload session that can never complete (its body
+    /// breached the size cap, or hashed to the wrong digest); a cleanup failure
+    /// is logged, not surfaced, since the caller already has a terminal error to
+    /// return.
     async fn abort_upload_quietly(&self, namespace: &Namespace, session_key: &str) {
         if let Err(error) = self.blob_store.delete_upload(namespace, session_key).await {
-            warn!("Failed to abort oversized upload session: {error}");
+            warn!("Failed to abort upload session: {error}");
         }
     }
 
@@ -490,6 +491,10 @@ impl Registry {
 
         if &upload_digest != digest {
             warn!("Expected digest '{digest}', got '{upload_digest}'");
+            // The session can never complete now: its bytes hash to something
+            // the client did not ask for, so reclaim them here rather than
+            // leaving a full upload for scrub.
+            self.abort_upload_quietly(namespace, &session_key).await;
             return Err(Error::DigestInvalid);
         }
 
@@ -1676,6 +1681,14 @@ mod tests {
                 .await;
 
             assert!(matches!(result, Err(Error::DigestInvalid)));
+            assert!(
+                registry
+                    .blob_store
+                    .upload_summary(namespace, session_id.as_ref())
+                    .await
+                    .is_err(),
+                "a completion whose bytes hash to the wrong digest must abort its session"
+            );
         })
         .await;
     }

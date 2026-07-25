@@ -28,8 +28,8 @@ use crate::{
     executor::{
         Outcome, TransactionExecutor,
         common::{
-            ApplyMode, apply_object_store, build_intent, finish, stage_bodies, stamp_applied,
-            write_intent,
+            ApplyMode, apply_object_store, build_intent, discard_staged_bodies, finish,
+            stage_bodies, stamp_applied, write_intent,
         },
     },
     intent::{DEFAULT_INTENT_TTL_SECS, IntentRecord, MutationRecord},
@@ -174,14 +174,24 @@ impl TransactionExecutor for LockedExecutor {
         let lock_set = tx.lock_set();
 
         // Stage bodies before acquiring the lock so lock hold time is minimal.
+        // Every error return between here and the intent write reclaims them:
+        // contention and stale reads are ordinary outcomes, so leaving their
+        // staging behind would make normal operation produce garbage.
         let mutation_records = stage_bodies(self.store.as_ref(), &tx, tx_id).await?;
 
         // Acquire the engine's own locks in sorted order (deadlock-free).
-        let session = self.lock.acquire(&lock_set).await.map_err(Error::Lock)?;
+        let session = match self.lock.acquire(&lock_set).await {
+            Ok(session) => session,
+            Err(e) => {
+                discard_staged_bodies(self.store.as_ref(), tx_id).await;
+                return Err(Error::Lock(e));
+            }
+        };
 
         // Verify read fingerprints now that we hold the locks.
         if let Err(e) = self.verify_reads_under_lock(&tx).await {
             session.release().await;
+            discard_staged_bodies(self.store.as_ref(), tx_id).await;
             return Err(e);
         }
 
@@ -194,6 +204,7 @@ impl TransactionExecutor for LockedExecutor {
         );
         if let Err(e) = write_intent(self.store.as_ref(), &intent).await {
             session.release().await;
+            discard_staged_bodies(self.store.as_ref(), tx_id).await;
             return Err(e);
         }
 
@@ -309,6 +320,35 @@ mod tests {
         assert!(
             matches!(result, Err(Error::Conflict)),
             "stale body should return Conflict, got: {result:?}"
+        );
+    }
+
+    /// Regression: bodies are staged before the lock so the hold stays short,
+    /// which puts the ordinary contention and stale-read outcomes between the
+    /// staging and the intent. Leaving that staging behind would turn a routine
+    /// retry into garbage only the janitor reclaims.
+    #[tokio::test]
+    async fn a_conflicting_read_verify_discards_its_staged_bodies() {
+        let store = Arc::new(MemoryObjectStore::new());
+        store.put("k", Bytes::from_static(b"hello")).await.unwrap();
+        let executor = make_executor(Arc::clone(&store));
+
+        let tx = Transaction::builder()
+            .read("k", Bytes::from_static(b"stale-content"))
+            .mutation(Mutation::Put {
+                key: "out".to_string(),
+                body: Bytes::from("staged-body"),
+                expected: None,
+            })
+            .build();
+
+        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        assert!(matches!(result, Err(Error::Conflict)));
+
+        assert_eq!(
+            list_count(store.as_ref(), ".tx-bodies/").await,
+            0,
+            "an aborted attempt must not leave staged bodies behind"
         );
     }
 
