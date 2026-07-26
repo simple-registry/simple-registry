@@ -1,7 +1,7 @@
 /// Errors from the outbound registry client, one variant per remote outcome
-/// the callers distinguish. Converted into `registry::Error` variant for
-/// variant where the pull-through path surfaces a remote miss as its local
-/// OCI code.
+/// the callers distinguish. Each converts to its `registry::Error`
+/// counterpart, which is how the pull-through path surfaces a remote miss as
+/// its own OCI code.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]

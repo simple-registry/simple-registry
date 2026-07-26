@@ -144,7 +144,7 @@ pub async fn handle_get_manifest(
 }
 
 /// The stream-generic core of [`handle_put_manifest`], separate so tests can
-/// drive it with an in-memory body instead of a hyper [`Incoming`].
+/// drive it with an in-memory body instead of a hyper [`Incoming`](hyper::body::Incoming).
 async fn put_manifest<S>(
     context: &ServerContext,
     request: PutManifestRequest<'_>,

@@ -32,7 +32,7 @@ use crate::{
             stage_bodies, stamp_applied, write_intent,
         },
     },
-    intent::{DEFAULT_INTENT_TTL_SECS, IntentRecord, MutationRecord},
+    intent::{DEFAULT_INTENT_TTL_SECS, IntentRecord},
     lock::primitive::Lock,
     transaction::Transaction,
 };
@@ -55,7 +55,7 @@ pub struct LockedExecutor {
     ttl_secs: u64,
 }
 
-impl std::fmt::Debug for LockedExecutor {
+impl fmt::Debug for LockedExecutor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedExecutor")
             .field("ttl_secs", &self.ttl_secs)
@@ -103,15 +103,6 @@ impl LockedExecutor {
         }
     }
 
-    /// Apply a single mutation under the pre-acquired lock.
-    ///
-    /// Delegates to the shared [`apply_object_store`] in `Abort` mode: `expected`
-    /// is honored via a HEAD/ETag compare under the lock, mirroring the CAS
-    /// executor's `put_if_match` / `delete_if_match` semantics.
-    async fn apply_mutation(&self, mutation: &MutationRecord) -> Result<(), Error> {
-        apply_object_store(self.store.as_ref(), mutation, ApplyMode::Abort).await
-    }
-
     /// Verify read fingerprints after acquiring the lock.
     ///
     /// Re-fetches each key and checks the SHA-256 of the live body against the
@@ -151,7 +142,7 @@ impl LockedExecutor {
     async fn apply_all(&self, intent: &mut IntentRecord) -> Result<(), Error> {
         for idx in 0..intent.mutations.len() {
             let mutation = intent.mutations[idx].clone();
-            match self.apply_mutation(&mutation).await {
+            match apply_object_store(self.store.as_ref(), &mutation, ApplyMode::Abort).await {
                 Ok(()) => stamp_applied(self.store.as_ref(), intent, idx).await,
                 Err(e) => return Err(e),
             }

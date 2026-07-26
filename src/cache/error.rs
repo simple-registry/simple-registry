@@ -12,13 +12,9 @@ pub enum Error {
     Redis(#[from] RedisError),
 }
 
-// Manual `PartialEq` is required because `redis::RedisError` does not implement
-// `PartialEq`, so `#[derive(PartialEq)]` cannot be used on an enum that contains
-// it. Tests in `memory.rs` and `redis.rs` compare `Result<Option<String>, Error>`
-// against `Ok(...)` values, which requires `Error: PartialEq` to compile. The
-// `Redis` variant is intentionally excluded from equality because two distinct
-// `RedisError` values produced by separate I/O operations are not meaningfully
-// comparable.
+// `redis::RedisError` does not implement `PartialEq`, so the derive cannot be
+// used and the `Redis` variant is excluded from equality: two `RedisError`
+// values from separate I/O operations are not meaningfully comparable.
 impl PartialEq for Error {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {

@@ -1,7 +1,7 @@
 //! Storage backends for the lock primitive.
 //!
 //! The [`LockStorage`] trait defines the minimal set of operations the concrete
-//! [`Lock`](crate::lock::Lock) needs from its storage layer. Three implementations
+//! [`Lock`](crate::lock::primitive::Lock) needs from its storage layer. Three implementations
 //! are provided:
 //!
 //! - [`MemoryLockStorage`](memory::MemoryLockStorage): in-process mutex map
@@ -9,7 +9,7 @@
 //! - [`S3LockStorage`](s3::S3LockStorage): uses `put_if_absent`,
 //!   `put_if_match`, and conditional delete on S3-compatible stores that
 //!   advertise CAS support.
-//! - [`RedisLockStorage`](redis::RedisLockStorage) (feature `redis`): Redis
+//! - `RedisLockStorage` (feature `redis`): Redis
 //!   `SET NX EX` plus Lua scripts for atomic refresh and release; suitable for
 //!   FS deployments under heavy concurrent load.
 

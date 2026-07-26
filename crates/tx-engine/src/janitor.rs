@@ -46,7 +46,7 @@ pub struct BodyJanitor {
     cancellation: CancellationToken,
 }
 
-impl std::fmt::Debug for BodyJanitor {
+impl fmt::Debug for BodyJanitor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BodyJanitor")
             .field("interval", &self.interval)
@@ -270,7 +270,7 @@ pub struct LockJanitor {
     cancellation: CancellationToken,
 }
 
-impl std::fmt::Debug for LockJanitor {
+impl fmt::Debug for LockJanitor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockJanitor")
             .field("interval", &self.interval)

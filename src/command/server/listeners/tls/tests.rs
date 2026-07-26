@@ -378,7 +378,7 @@ async fn test_tls_listener_notify_tls_config_change_with_invalid_certs() {
     assert!(result.is_err());
 }
 
-// --- client_auth validation matrix ---
+// client_auth validation matrix
 
 #[test]
 fn bare_tls_without_client_auth_field_is_ok() {
@@ -463,7 +463,7 @@ fn client_auth_defaults_to_optional_when_ca_bundle_present_and_field_omitted() {
     assert_eq!(result.unwrap().client_auth, ClientAuth::Optional);
 }
 
-// --- build_tls_acceptor with required mode ---
+// build_tls_acceptor with required mode
 
 #[test]
 fn test_build_tls_acceptor_with_client_auth_required() {

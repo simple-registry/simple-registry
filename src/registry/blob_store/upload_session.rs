@@ -16,7 +16,7 @@
 //!   offset, superseded as the upload advances.
 //!
 //! Backend-specific upload mechanics (FS append, S3 multipart) are encapsulated
-//! inside the storage backend's keyed [`ObjectStore`] methods; there is no
+//! inside the storage backend's keyed [`ObjectStore`](angos_storage::ObjectStore) methods; there is no
 //! persisted session value, so the S3 backend recovers its multipart state from
 //! S3 on each call and the upload is addressed purely by its `data` key. Upload
 //! progress (size, hash) is the blob store's concern, reconstructed by reading
@@ -259,7 +259,7 @@ impl BlobStore {
     }
 
     #[instrument(skip(self))]
-    pub async fn create_upload(&self, namespace: &Namespace, uuid: &str) -> Result<String, Error> {
+    pub async fn create_upload(&self, namespace: &Namespace, uuid: &str) -> Result<(), Error> {
         let upload_path = path_builder::upload_path(namespace, uuid);
         // Begin/clear a fresh upload at the data key (clears any leaked prior
         // multipart and staged remainder).
@@ -274,7 +274,7 @@ impl BlobStore {
             uploaded_size: 0,
         };
         self.write_session(&record).await?;
-        Ok(uuid.to_string())
+        Ok(())
     }
 
     /// Append the final chunk of a chunked upload and return its digest under

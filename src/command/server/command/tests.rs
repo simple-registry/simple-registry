@@ -5,6 +5,7 @@ use std::{
 
 use tempfile::TempDir;
 
+use crate::metrics_provider::init_for_tests;
 use crate::{
     cache,
     command::{
@@ -39,7 +40,7 @@ fn init_crypto_provider() {
 // duration of the test that uses the config. `extra` is appended after the
 // `[global]` section, so it may extend it with bare keys or add new tables.
 fn tempdir_config(extra: &str) -> (Configuration, TempDir, TempDir) {
-    crate::metrics_provider::init_for_tests();
+    init_for_tests();
     let blobs = TempDir::new().unwrap();
     let meta = TempDir::new().unwrap();
     let toml = format!(

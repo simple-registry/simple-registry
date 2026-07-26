@@ -6,9 +6,10 @@
 //! [`Store::new`] is the engine's construction seam: it builds the lock
 //! primitive and selects the executor from operator-level inputs, so
 //! subsystems (`metadata_store`, `job_store`) hold a single `Arc<Store>` and
-//! never instantiate locks or executors directly. [`Store::maintenance`]
+//! never instantiate locks or executors directly. [`Store::recovery`]
 //! returns the engine's recovery loop wired over the same primitives (the
-//! caller spawns it) and a one-shot janitor sweep for external maintenance.
+//! caller spawns it) and [`Store::janitor_sweep`] is the one-shot sweep for
+//! external maintenance.
 //!
 //! The façade stays domain-agnostic: it speaks only `String` keys and `Bytes`
 //! bodies. Registry domain types (`Digest`, `LinkKind`, OCI hashing, serde)
@@ -402,7 +403,7 @@ impl Store {
     /// need the value they just wrote (e.g. the updated metadata record).
     ///
     /// The retry loop is written out here rather than routed through
-    /// [`execute_with_retry_payload`]: that helper's build closure cannot
+    /// [`crate::executor::execute_with_retry_payload`]: that helper's build closure cannot
     /// borrow `map` mutably across its returned future, which the `&mut self`
     /// receiver of `FnMut` requires.
     ///

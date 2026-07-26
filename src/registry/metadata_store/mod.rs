@@ -1,6 +1,6 @@
 use std::{future::Future, sync::Arc};
 
-use angos_tx_engine::{executor::TransactionExecutor, lock::LockSession, store::Store};
+use angos_tx_engine::{lock::LockSession, store::Store};
 
 use crate::{
     cache::Cache,
@@ -20,13 +20,6 @@ pub use blob_index::{BlobIndex, BlobIndexOperation, shard::decode_blob_index_sha
 pub use link::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, LinksTx, ReferencePolicy};
 
 use access_time::{AccessTimeWriter, FlushHandle};
-
-/// Canonical key for the coarse `blob-data:{digest}` lock, held via
-/// [`MetadataStore::acquire_blob_data_lock`] / `with_blob_data_lock` by every
-/// path that mutates a blob's bytes or ownership grants.
-pub fn blob_data_lock_key(digest: &Digest) -> String {
-    format!("blob-data:{digest}")
-}
 
 // MetadataStore (concrete implementation)
 
@@ -120,11 +113,7 @@ impl MetadataStore {
         self.store.clone()
     }
 
-    pub fn executor(&self) -> &dyn TransactionExecutor {
-        self.store.executor().as_ref()
-    }
-
-    /// Acquire the coarse [`blob_data_lock_key`] lock for `digest`, which
+    /// Acquire the coarse `blob-data:{digest}` lock, which
     /// serialises blob-data creation (upload completion) against reclamation
     /// (unreferenced delete) and against concurrent manifest pushes, which
     /// declare the same coarse lock on their link transactions.
@@ -134,7 +123,7 @@ impl MetadataStore {
     /// bytes may be mutated on the separate BLOB engine, so the pairing can't
     /// drift.
     pub async fn acquire_blob_data_lock(&self, digest: &Digest) -> Result<LockSession, Error> {
-        let keys = [blob_data_lock_key(digest)];
+        let keys = [format!("blob-data:{digest}")];
         self.store
             .acquire(&keys)
             .await

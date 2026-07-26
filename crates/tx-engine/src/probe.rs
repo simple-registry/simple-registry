@@ -4,6 +4,8 @@
 //! relies on against the live store. The verdict drives the executor choice
 //! (CAS or locked) in [`Store::new`](crate::store::Store::new).
 
+use uuid::Uuid;
+
 use bytes::Bytes;
 use tracing::{info, warn};
 
@@ -30,7 +32,7 @@ pub const PROBE_KEY_PREFIX: &str = "_angos_probe_";
 /// Returns [`Error::Storage`] when the initial probe object cannot be
 /// written (e.g. the bucket does not exist or credentials are invalid).
 pub async fn probe_cas_support(store: &impl ConditionalStore) -> Result<bool, Error> {
-    let probe_key = format!("{PROBE_KEY_PREFIX}{}", uuid::Uuid::new_v4());
+    let probe_key = format!("{PROBE_KEY_PREFIX}{}", Uuid::new_v4());
     probe_cas_support_with_key(store, &probe_key).await
 }
 

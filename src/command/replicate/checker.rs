@@ -48,7 +48,7 @@ impl ReplicationChecker {
     }
 
     /// Override the per-tag digest-resolve fan-out; the replicate command
-    /// derives it from its `--concurrency` option.
+    /// derives it from `global.max_concurrent_replication_jobs`.
     #[must_use]
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
         self.tag_resolve_concurrency = concurrency.max(1);

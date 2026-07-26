@@ -16,7 +16,7 @@ use crate::command::server::{
     error::Error,
     listeners::{Connector, HandshakeResult, Listener},
 };
-pub use crate::configuration::listeners::{ClientAuth, ServerTlsConfig, TlsListenerConfig};
+use crate::configuration::listeners::{ClientAuth, ServerTlsConfig, TlsListenerConfig};
 
 fn load_certificate_bundle(
     path: &Path,
@@ -174,7 +174,7 @@ impl TlsListener {
         config: &TlsListenerConfig,
         context: ServerContext,
     ) -> Result<(), Error> {
-        self.connector().reload(&config.tls)?;
+        self.connector.reload(&config.tls)?;
         self.store_timeouts(&config.base);
         self.store_context(context);
         Ok(())
@@ -182,7 +182,7 @@ impl TlsListener {
 
     /// Apply a TLS-only reload (certificate rotation): rebuild the acceptor.
     pub fn notify_tls_config_change(&self, config: &ServerTlsConfig) -> Result<(), Error> {
-        self.connector().reload(config)
+        self.connector.reload(config)
     }
 }
 

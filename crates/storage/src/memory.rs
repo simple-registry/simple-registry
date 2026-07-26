@@ -15,6 +15,8 @@
 //! the conformance suites in `crate::tests`, which hold it to the same trait
 //! contract as the real backends.
 
+use std::fmt;
+
 use std::{
     collections::{BTreeSet, HashMap},
     io::Cursor,
@@ -47,7 +49,7 @@ impl Inner {
     }
 }
 
-impl std::fmt::Debug for Inner {
+impl fmt::Debug for Inner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Inner")
             .field("entry_count", &self.data.len())

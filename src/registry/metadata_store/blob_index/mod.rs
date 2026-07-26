@@ -64,7 +64,7 @@ impl MetadataStore {
     ) -> Result<(), Error> {
         let operations = [operation];
         execute_with_retry(
-            self.executor(),
+            self.store().executor().as_ref(),
             || async {
                 let builder = append_shard_for_digest(
                     self.store_arc().as_ref(),

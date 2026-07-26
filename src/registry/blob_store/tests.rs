@@ -163,8 +163,7 @@ pub async fn test_datastore_upload_operations(store: &BlobStore) {
     let namespace = &Namespace::new("test-namespace").unwrap();
     let uuid = Uuid::new_v4().to_string();
 
-    let upload_id = store.create_upload(namespace, &uuid).await.unwrap();
-    assert_eq!(upload_id, uuid);
+    store.create_upload(namespace, &uuid).await.unwrap();
 
     let test_content = b"Test upload content";
 

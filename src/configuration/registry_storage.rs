@@ -67,8 +67,8 @@ pub struct MetadataS3Config {
     pub access_time_debounce_secs: u64,
     /// Explicitly declare whether the provider supports the conditional
     /// operations CAS coordination requires, as one all-or-nothing set:
-    /// `PutObject` with If-None-Match: *, `PutObject` with If-Match: <etag>,
-    /// and `DeleteObject` with If-Match: <etag>.
+    /// `PutObject` with `If-None-Match: *`, `PutObject` with `If-Match: <etag>`,
+    /// and `DeleteObject` with `If-Match: <etag>`.
     ///
     /// When set, the startup probe is skipped entirely and the declared value
     /// is used. When absent, the probe runs automatically for S3 metadata

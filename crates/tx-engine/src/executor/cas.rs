@@ -62,7 +62,7 @@ pub struct CasExecutor {
     ttl_secs: u64,
 }
 
-impl std::fmt::Debug for CasExecutor {
+impl fmt::Debug for CasExecutor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CasExecutor")
             .field("ttl_secs", &self.ttl_secs)

@@ -389,17 +389,17 @@ mod tests {
     }
 
     #[test]
-    fn error_into_scrub_error_registry_variant() {
+    fn error_into_maintenance_error_registry_variant() {
         let bootstrap_err: Error = registry::Error::BlobUnknown.into();
-        let scrub_err: MaintenanceError = bootstrap_err.into();
-        assert!(matches!(scrub_err, MaintenanceError::Registry(_)));
+        let maintenance_err: MaintenanceError = bootstrap_err.into();
+        assert!(matches!(maintenance_err, MaintenanceError::Registry(_)));
     }
 
     #[test]
-    fn error_into_scrub_error_cache_variant() {
+    fn error_into_maintenance_error_cache_variant() {
         let bootstrap_err: Error = cache::Error::Execution("x".to_string()).into();
-        let scrub_err: MaintenanceError = bootstrap_err.into();
-        assert!(matches!(scrub_err, MaintenanceError::Cache(_)));
+        let maintenance_err: MaintenanceError = bootstrap_err.into();
+        assert!(matches!(maintenance_err, MaintenanceError::Cache(_)));
     }
 
     #[test]

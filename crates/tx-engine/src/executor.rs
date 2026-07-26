@@ -79,13 +79,14 @@ pub trait TransactionExecutor: Send + Sync {
 /// The closure returns `(Transaction, T)` so callers can thread any per-attempt
 /// value out of the retry loop without needing shared mutable state.
 ///
-/// Returns [`Error::Conflict`] when all attempts are exhausted.
+/// Returns the last retriable error ([`Error::Conflict`] or
+/// [`Error::Precondition`]) when all attempts are exhausted.
 ///
 /// # Errors
 ///
 /// Returns the first non-retriable error from `build` or `executor.execute`.
-/// Returns [`Error::Conflict`] once `max_attempts` retriable conflicts are
-/// exhausted.
+/// Returns the last retriable error once `max_attempts` retriable conflicts
+/// are exhausted.
 pub async fn execute_with_retry_payload<E, F, Fut, T>(
     executor: &E,
     mut build: F,
@@ -119,13 +120,14 @@ where
 /// incorporate fresh state on every retry. Any error returned by `build`
 /// is propagated immediately without retrying.
 ///
-/// Returns [`Error::Conflict`] when all attempts are exhausted.
+/// Returns the last retriable error ([`Error::Conflict`] or
+/// [`Error::Precondition`]) when all attempts are exhausted.
 ///
 /// # Errors
 ///
 /// Returns the first non-retriable error from `build` or `executor.execute`.
-/// Returns [`Error::Conflict`] once `max_attempts` retriable conflicts are
-/// exhausted.
+/// Returns the last retriable error once `max_attempts` retriable conflicts
+/// are exhausted.
 ///
 /// # Example
 ///

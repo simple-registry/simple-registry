@@ -1,7 +1,8 @@
-use std::{collections::HashSet, io::Cursor};
+use std::{collections::HashSet, io::Cursor, time::Duration};
 
 use futures_util::future::join_all;
 use serde_json::json;
+use tokio::time::sleep;
 
 use super::*;
 use crate::{
@@ -944,12 +945,6 @@ async fn test_delete_manifest() {
 #[tokio::test]
 async fn delete_manifest_holds_blob_data_lock_against_concurrent_grant() {
     for_each_backend(async |test_case| {
-        use std::time::Duration;
-
-        use tokio::time::sleep;
-
-        use crate::registry::blob_ownership::BlobOwnership;
-
         let registry = test_case.registry();
         let first = &Namespace::new("test-repo/first").unwrap();
         let second = &Namespace::new("test-repo/second").unwrap();
@@ -1027,10 +1022,6 @@ async fn delete_manifest_holds_blob_data_lock_against_concurrent_grant() {
 #[tokio::test]
 async fn delete_manifest_by_digest_cascades_a_tag_pushed_while_it_waits_for_the_lock() {
     for_each_backend(async |test_case| {
-        use std::time::Duration;
-
-        use tokio::time::sleep;
-
         let registry = test_case.registry();
         let namespace = &Namespace::new("test-repo").unwrap();
 
@@ -2087,7 +2078,7 @@ async fn delete_manifest_removes_links_and_blob_data() {
     );
 }
 
-// --- Receiver-side last-writer-wins (LWW) ------------------------------------
+// Receiver-side last-writer-wins (LWW)
 
 async fn seed_tag(registry: &Registry, namespace: &Namespace, tag: &str) -> (Vec<u8>, MediaType) {
     let (content, media_type) = create_test_manifest(registry, namespace).await;
@@ -3880,6 +3871,8 @@ mod noop_suppression_tests {
 mod dispatch_replication_tests {
     use std::sync::Arc;
 
+    use crate::metrics_provider::init_for_tests;
+
     use tempfile::TempDir;
 
     use chrono::{DateTime, Duration, Utc};
@@ -3964,7 +3957,7 @@ mod dispatch_replication_tests {
 
     #[tokio::test]
     async fn dispatch_replication_enqueues_for_matching_downstream() {
-        crate::metrics_provider::init_for_tests();
+        init_for_tests();
         let (registry, job_store, _dir) = build_registry();
 
         let namespace = Namespace::new(NAMESPACE).unwrap();
@@ -3997,7 +3990,7 @@ mod dispatch_replication_tests {
     /// a populated `source_ts`.
     #[tokio::test]
     async fn dispatch_replication_payload_is_well_formed() {
-        crate::metrics_provider::init_for_tests();
+        init_for_tests();
         let (registry, job_store, _dir) = build_registry();
 
         let namespace = Namespace::new(NAMESPACE).unwrap();
@@ -4034,7 +4027,7 @@ mod dispatch_replication_tests {
     /// job carrying its own name.
     #[tokio::test]
     async fn dispatch_replication_enqueues_one_job_per_downstream() {
-        crate::metrics_provider::init_for_tests();
+        init_for_tests();
         let (registry, job_store, _dir) = build_registry_with(repository_with_replication(
             REPO,
             vec![
@@ -4087,7 +4080,7 @@ mod dispatch_replication_tests {
     /// delete outrank a recreate authored in between.
     #[tokio::test]
     async fn dispatch_replication_uses_provided_source_ts_verbatim() {
-        crate::metrics_provider::init_for_tests();
+        init_for_tests();
         let (registry, job_store, _dir) = build_registry();
 
         let namespace = Namespace::new(NAMESPACE).unwrap();
@@ -4117,7 +4110,7 @@ mod dispatch_replication_tests {
 
     #[tokio::test]
     async fn dispatch_replication_skips_reconcile_only_downstream() {
-        crate::metrics_provider::init_for_tests();
+        init_for_tests();
         let (registry, job_store, _dir) =
             build_registry_with(repository_with(ReplicationMode::ReconcileOnly, Vec::new()));
 
@@ -4149,7 +4142,7 @@ mod dispatch_replication_tests {
 
     #[tokio::test]
     async fn dispatch_replication_skips_non_matching_namespace_filter() {
-        crate::metrics_provider::init_for_tests();
+        init_for_tests();
         let (registry, job_store, _dir) = build_registry_with(repository_with(
             ReplicationMode::EventReconcile,
             vec![Regex::new("^other/.*").unwrap()],

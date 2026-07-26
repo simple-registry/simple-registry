@@ -20,7 +20,7 @@ use crate::{
     oci::{Algorithm, Digest},
     registry::{
         metadata_store::decode_blob_index_shard_namespace,
-        path_builder::{blobs_root_dir, repository_dir},
+        path_builder::{BLOBS_ROOT, REPOS_ROOT},
     },
 };
 
@@ -126,10 +126,10 @@ pub fn categorize(key: &str) -> KeyCategory {
     if let Some(rest) = strip_prefix_dir(key, JOBS_ROOT) {
         return categorize_job(rest);
     }
-    if let Some(rest) = strip_prefix_dir(key, blobs_root_dir()) {
+    if let Some(rest) = strip_prefix_dir(key, BLOBS_ROOT) {
         return categorize_blob(rest);
     }
-    if let Some(rest) = strip_prefix_dir(key, repository_dir()) {
+    if let Some(rest) = strip_prefix_dir(key, REPOS_ROOT) {
         return categorize_repository(rest);
     }
 

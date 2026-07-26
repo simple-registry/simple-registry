@@ -16,7 +16,7 @@ use serde::Deserialize;
 /// Configuration for the Redis lock storage.
 ///
 /// This is a DTO. Deserialized from operator config; used to construct a
-/// [`RedisLockStorage`]. Not held as a runtime field.
+/// `RedisLockStorage`. Not held as a runtime field.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RedisLockStorageConfig {
     pub url: String,
@@ -65,6 +65,7 @@ mod backend {
     use chrono::{DateTime, Utc};
     use redis::{Client, Script};
 
+    use super::RedisLockStorageConfig;
     use crate::lock::{
         Error,
         storage::{DeleteIfMatchOutcome, LockStorage, PutIfAbsentOutcome, PutIfMatchOutcome},
@@ -97,8 +98,6 @@ end
 redis.call('DEL', KEYS[1])
 return 1
 ";
-
-    use super::RedisLockStorageConfig;
 
     /// Redis-backed lock storage.
     ///

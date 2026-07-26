@@ -134,7 +134,7 @@ impl Command {
         }
 
         self.walk_pass(Pass::MetadataLinks, "").await?;
-        self.walk_pass(Pass::MetadataShards, path_builder::blobs_root_dir())
+        self.walk_pass(Pass::MetadataShards, path_builder::BLOBS_ROOT)
             .await?;
         self.walk_pass(Pass::Blob, "").await?;
 

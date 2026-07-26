@@ -219,7 +219,7 @@ mod tests {
         }
     }
 
-    // --- push ---
+    // push
 
     #[test]
     fn push_digest_self_link_always_present() {
@@ -465,7 +465,7 @@ mod tests {
         );
     }
 
-    // --- delete ---
+    // delete
 
     #[test]
     fn delete_tag_reference_emits_single_tag_delete() {

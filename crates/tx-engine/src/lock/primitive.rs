@@ -796,6 +796,7 @@ enum AcquireAllOutcome {
 mod tests {
     use std::{
         collections::{HashMap, HashSet},
+        fmt,
         sync::{
             Arc, Mutex, RwLock,
             atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -873,7 +874,7 @@ mod tests {
         stored_nonce: Mutex<Option<Uuid>>,
     }
 
-    impl std::fmt::Debug for FakeLockStorage {
+    impl fmt::Debug for FakeLockStorage {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("FakeLockStorage").finish_non_exhaustive()
         }
@@ -1582,7 +1583,7 @@ mod tests {
         barrier: Barrier,
     }
 
-    impl std::fmt::Debug for ConcurrencyRecordingStorage {
+    impl fmt::Debug for ConcurrencyRecordingStorage {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("ConcurrencyRecordingStorage")
                 .finish_non_exhaustive()

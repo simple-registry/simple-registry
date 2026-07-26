@@ -120,7 +120,7 @@ impl From<TxError> for Error {
             TxError::Lock(e) => Error::from(e),
             TxError::Serde(e) => Error::from(e),
             TxError::Conflict | TxError::Precondition | TxError::PartialCommit => {
-                Error::Conflict("transaction conflict: retry budget exhausted".to_string())
+                Error::Conflict("transaction conflict".to_string())
             }
             TxError::Build(msg) => Error::Internal(format!("engine build error: {msg}")),
         }
@@ -210,6 +210,8 @@ impl From<x509_parser::error::X509Error> for Error {
 #[cfg(test)]
 mod tests {
     use std::error::Error as StdError;
+
+    use x509_parser::error::X509Error;
 
     use super::*;
 
@@ -301,7 +303,6 @@ mod tests {
 
     #[test]
     fn from_x509_error_routes_to_unauthorized() {
-        use x509_parser::error::X509Error;
         let err: Error = X509Error::InvalidCertificate.into();
         assert!(matches!(err, Error::Unauthorized(_)));
         assert!(err.to_string().contains("Invalid client certificate"));

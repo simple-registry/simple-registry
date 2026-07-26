@@ -153,7 +153,7 @@ pub async fn sweep_byteless_shards(
     let ctx = &ctx;
     walk::for_each_key(
         objects,
-        path_builder::blobs_root_dir(),
+        path_builder::BLOBS_ROOT,
         concurrency,
         |key| async move {
             let KeyCategory::BlobIndexShard { digest, namespace } = categorize(&key) else {

@@ -66,15 +66,12 @@ impl From<registry::Error> for Error {
             }
             registry::Error::NotFound => oci_error(StatusCode::NOT_FOUND, "NOT_FOUND", None),
             // A concurrent-writer CAS conflict: HTTP 409 so the client retries.
-            // Previously this collapsed into a 500 (the bug this fix corrects).
             registry::Error::Conflict(msg) => {
                 oci_error(StatusCode::CONFLICT, "CONFLICT", Some(msg))
             }
             registry::Error::ReplicationSuperseded(msg) => {
                 oci_error(StatusCode::CONFLICT, REPLICATION_SUPERSEDED_CODE, Some(msg))
             }
-            // Same surface a handler-side dispatch failure had before emission
-            // moved into the registry.
             registry::Error::EventDelivery(msg) => Error::Execution(msg),
             registry::Error::Internal(msg) => oci_error(
                 StatusCode::INTERNAL_SERVER_ERROR,

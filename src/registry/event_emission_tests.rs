@@ -19,6 +19,7 @@ use url::Url;
 use uuid::Uuid;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
+use crate::metrics_provider::init_for_tests;
 use crate::{
     event_webhook::{
         config::{DeliveryPolicy, EventWebhookConfig},
@@ -757,7 +758,7 @@ fn mirror_and_additive_downstreams() -> Vec<ReplicationDownstream> {
 
 #[tokio::test]
 async fn fresh_local_tag_push_enqueues_replication_job() {
-    crate::metrics_provider::init_for_tests();
+    init_for_tests();
     let fixture = ReplicationFixture::new();
     let namespace = Namespace::new(REPLICATION_REPO).unwrap();
     let (manifest_bytes, mime_type) = test_manifest_bytes(&fixture.registry, &namespace).await;
@@ -803,7 +804,7 @@ async fn fresh_local_tag_push_enqueues_replication_job() {
 
 #[tokio::test]
 async fn tag_delete_enqueues_replication_delete_job() {
-    crate::metrics_provider::init_for_tests();
+    init_for_tests();
     let fixture = ReplicationFixture::new();
     let namespace = Namespace::new(REPLICATION_REPO).unwrap();
     let (manifest_bytes, mime_type) = test_manifest_bytes(&fixture.registry, &namespace).await;
@@ -860,7 +861,7 @@ async fn tag_delete_enqueues_replication_delete_job() {
 /// `prune = true` downstream; the additive downstream keeps its copy.
 #[tokio::test]
 async fn retention_delete_mirrors_only_to_prune_downstreams() {
-    crate::metrics_provider::init_for_tests();
+    init_for_tests();
     let fixture = ReplicationFixture::with_repository(repository_with_replication(
         REPLICATION_REPO,
         mirror_and_additive_downstreams(),
@@ -908,7 +909,7 @@ async fn retention_delete_mirrors_only_to_prune_downstreams() {
 /// A client-initiated delete fans out to every matching downstream.
 #[tokio::test]
 async fn client_delete_mirrors_to_all_downstreams() {
-    crate::metrics_provider::init_for_tests();
+    init_for_tests();
     let fixture = ReplicationFixture::with_repository(repository_with_replication(
         REPLICATION_REPO,
         mirror_and_additive_downstreams(),

@@ -152,7 +152,7 @@ async fn migrate_links(
     blob_store: &BlobStore,
     dry_run: bool,
 ) -> Result<Report, Error> {
-    let root = path_builder::repository_dir();
+    let root = path_builder::REPOS_ROOT;
     let mut report = Report::default();
     let mut keys = object_store.list_all(root).map_err(registry::Error::from);
     while let Some(key) = keys.try_next().await? {
