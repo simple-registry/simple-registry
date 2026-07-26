@@ -802,7 +802,7 @@ mod tests {
         }
     }
 
-    // --- extract_in_toto_predicate ---
+    // extract_in_toto_predicate
 
     #[test]
     fn extract_in_toto_predicate_returns_none_for_no_layers() {
@@ -849,7 +849,7 @@ mod tests {
         );
     }
 
-    // --- extract_docker_referrer ---
+    // extract_docker_referrer
 
     #[test]
     fn extract_docker_referrer_returns_none_when_annotation_absent() {
@@ -893,7 +893,7 @@ mod tests {
         );
     }
 
-    // --- analyze_manifest ---
+    // analyze_manifest
 
     #[test]
     fn analyze_manifest_returns_empty_for_manifest_with_no_children() {
@@ -1005,7 +1005,7 @@ mod tests {
         );
     }
 
-    // --- build_digest_to_tags_map_from_pairs ---
+    // build_digest_to_tags_map_from_pairs
 
     #[test]
     fn build_digest_to_tags_map_empty_input_produces_empty_map() {
@@ -1053,7 +1053,7 @@ mod tests {
         assert_eq!(result[&d2], vec![Tag::new("beta").unwrap()]);
     }
 
-    // --- parent_refs_for ---
+    // parent_refs_for
 
     #[test]
     fn parent_refs_for_returns_empty_when_digest_not_in_parent_map() {

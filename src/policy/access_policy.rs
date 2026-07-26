@@ -392,7 +392,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- Non-boolean and error rule behaviour ---
+    // Non-boolean and error rule behaviour
 
     #[test]
     fn non_boolean_rule_in_allow_mode_denies_fail_closed() {
@@ -488,7 +488,7 @@ mod tests {
         );
     }
 
-    // --- Multi-rule ordering and short-circuit semantics ---
+    // Multi-rule ordering and short-circuit semantics
 
     #[test]
     fn multi_rule_allow_mode_first_match_denies_second_rule_unreached() {

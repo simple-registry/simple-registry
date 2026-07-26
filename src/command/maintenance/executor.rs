@@ -636,21 +636,6 @@ impl ActionSink for Executor {
     }
 }
 
-/// Captures actions into a locked `Vec` without performing any I/O.
-///
-/// Used in tests to assert which actions a check would produce without
-/// touching any real storage backend; the lock lets one capture serve
-/// concurrent producers, matching the `&self` sink contract.
-#[async_trait]
-impl ActionSink for std::sync::Mutex<Vec<Action>> {
-    async fn apply(&self, action: Action) -> Result<(), Error> {
-        self.lock()
-            .map_err(|e| Error::Initialization(format!("capture sink poisoned: {e}")))?
-            .push(action);
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;

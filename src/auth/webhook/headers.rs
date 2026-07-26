@@ -273,7 +273,7 @@ mod tests {
         );
     }
 
-    // Regression guards for M1: a cached decision must not replay across a
+    // Regression guards: a cached decision must not replay across a
     // forwarded context the webhook could have decided on differently.
 
     #[test]

@@ -3,16 +3,8 @@ use crate::{
     registry::metadata_store::LinkKind,
 };
 
-const BLOBS_ROOT: &str = "v2/blobs";
-const REPOS_ROOT: &str = "v2/repositories";
-
-pub fn blobs_root_dir() -> &'static str {
-    BLOBS_ROOT
-}
-
-pub fn repository_dir() -> &'static str {
-    REPOS_ROOT
-}
+pub const BLOBS_ROOT: &str = "v2/blobs";
+pub const REPOS_ROOT: &str = "v2/repositories";
 
 /// Root directory and namespace-name prefix for a namespace tree walk. `None`
 /// walks the whole repositories tree; `Some(repository)` restricts the walk to
@@ -43,7 +35,7 @@ pub fn namespace_dir(name: &str) -> Option<String> {
     Some(format!("{REPOS_ROOT}/{name}"))
 }
 
-fn blob_dir(digest: &Digest) -> String {
+pub fn blob_dir(digest: &Digest) -> String {
     format!(
         "{BLOBS_ROOT}/{}/{}/{}",
         digest.algorithm(),
@@ -65,10 +57,6 @@ pub fn blob_index_shard_path(digest: &Digest, namespace: &Namespace) -> String {
     // ambiguity (namespaces can contain underscores, so '/' -> '_' is lossy).
     let safe_ns = namespace.replace('%', "%25").replace('/', "%2F");
     format!("{}/refs/{safe_ns}.json", blob_dir(digest))
-}
-
-pub fn blob_container_dir(digest: &Digest) -> String {
-    blob_dir(digest)
 }
 
 /// Root directory holding every upload container for a namespace. Used to
@@ -202,10 +190,7 @@ mod tests {
             blob_path(&digest),
             format!("v2/blobs/sha256/aa/{HASH_A}/data")
         );
-        assert_eq!(
-            blob_container_dir(&digest),
-            format!("v2/blobs/sha256/aa/{HASH_A}")
-        );
+        assert_eq!(blob_dir(&digest), format!("v2/blobs/sha256/aa/{HASH_A}"));
     }
 
     #[test]

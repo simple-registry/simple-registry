@@ -137,7 +137,7 @@ fn test_as_json_all_error_types() {
     }
 }
 
-/// Security regression guard for L6: a 5xx body must never carry the internal
+/// Security regression guard: a 5xx body must never carry the internal
 /// error string. The detail is logged server-side (via the response extension),
 /// not surfaced to the client, which keeps the request id to quote to an
 /// operator.
@@ -311,7 +311,7 @@ fn test_blob_referenced_registry_error_mapping() {
     assert_eq!(json["errors"][0]["message"], "blob is still referenced");
 }
 
-/// Variants outside the OCI-spec set route through the wildcard arm to a
+/// Variants outside the OCI-spec set are matched by name and route to a
 /// generic 500 `INTERNAL_ERROR`. The rendered Display text stays server-side
 /// (logs); the client body carries no message. Pins both the routing and the
 /// no-leak contract.

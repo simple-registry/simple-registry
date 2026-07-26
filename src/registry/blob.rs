@@ -412,6 +412,7 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use crate::metrics_provider::init_for_tests;
     use std::{io::Cursor, sync::Arc, time::Duration};
 
     use angos_storage::{
@@ -972,7 +973,7 @@ mod tests {
     /// blob-index read was verified against the wrong backend.
     #[tokio::test]
     async fn cache_blob_grants_reference_with_split_blob_and_metadata_backends() {
-        crate::metrics_provider::init_for_tests();
+        init_for_tests();
         let blob_dir = TempDir::new().unwrap();
         let meta_dir = TempDir::new().unwrap();
 

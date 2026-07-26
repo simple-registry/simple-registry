@@ -1,11 +1,11 @@
 //! Distributed-lock primitive for the transaction engine.
 //!
-//! The single concrete type is [`Lock`]. Callers never see a RAII guard:
-//! they call [`Lock::acquire`] (blocking retry) or [`Lock::try_acquire`]
+//! The single concrete type is [`primitive::Lock`]. Callers never see a RAII guard:
+//! they call [`primitive::Lock::acquire`] (blocking retry) or [`primitive::Lock::try_acquire`]
 //! (non-blocking, single attempt) with the keys to lock, run their work, then
 //! await [`LockSession::release`], always on the calling task's own call
 //! path. A background heartbeat task refreshes the lock TTL and fires the
-//! session's [`CancellationToken`] when ownership is lost, so a caller racing
+//! session's [`tokio_util::sync::CancellationToken`] when ownership is lost, so a caller racing
 //! its operation against [`LockSession::cancellation`] can short-circuit to
 //! [`Error::Invalidated`] at the next await point.
 //!
@@ -13,26 +13,26 @@
 //!
 //! - **Release**: the happy path awaits [`LockSession::release`] on the
 //!   calling task's own call path. If the session is instead dropped before
-//!   `release` runs (outer task cancellation), [`LockSession::Drop`]
+//!   `release` runs (outer task cancellation), `LockSession`'s `Drop`
 //!   best-effort spawns the async release on the current Tokio runtime so the
 //!   remote lock is freed promptly instead of waiting on TTL. The spawn is
 //!   fire-and-forget; if no runtime is available the lock expires via TTL.
 //! - **Heartbeat failure**: the heartbeat task fires the
-//!   [`CancellationToken`] when the heartbeat tick fails (ownership lost,
+//!   [`tokio_util::sync::CancellationToken`] when the heartbeat tick fails (ownership lost,
 //!   refresh failed, max hold exceeded). Callers that race their operation
 //!   against the token short-circuit to [`Error::Invalidated`] at the next
 //!   await point.
 //!
 //! ## Storage flavours
 //!
-//! [`Lock`] is parameterised by a [`LockStorage`] implementation selected at
+//! [`primitive::Lock`] is parameterised by a [`storage::LockStorage`] implementation selected at
 //! startup from the operator's `lock_strategy` config:
 //!
-//! | `lock_strategy` | [`LockStorage`] impl | Notes |
+//! | `lock_strategy` | [`storage::LockStorage`] impl | Notes |
 //! |---|---|---|
-//! | `memory` | [`MemoryLockStorage`] | In-process; single-process only (default for FS deployments) |
-//! | `redis`  | [`RedisLockStorage`] | Feature `redis`; suitable for FS stores under heavy load |
-//! | `s3`     | [`S3LockStorage`] | CAS-capable S3; uses `.tx-locks/<shard>/<key>` objects |
+//! | `memory` | [`storage::memory::MemoryLockStorage`] | In-process; single-process only (default for FS deployments) |
+//! | `redis`  | `RedisLockStorage` | Feature `redis`; suitable for FS stores under heavy load |
+//! | `s3`     | [`storage::s3::S3LockStorage`] | CAS-capable S3; uses `.tx-locks/<shard>/<key>` objects |
 
 use std::{fmt::Debug, future::Future, pin::Pin};
 
@@ -73,7 +73,7 @@ impl From<::redis::RedisError> for Error {
 
 type AsyncReleaseFn = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
-/// Opaque bookkeeping returned by [`Lock::acquire`].
+/// Opaque bookkeeping returned by [`primitive::Lock::acquire`].
 ///
 /// Backends construct one of these from their `acquire` impl; callers consume
 /// it by awaiting [`release`](Self::release) and nothing else should reach for
@@ -156,7 +156,7 @@ impl Drop for LockSession {
 /// Parsed configuration for the S3-backed lock storage.
 ///
 /// This is a DTO: deserialized from operator config and used to construct an
-/// [`S3LockStorage`]. Not held as a field on any runtime struct.
+/// [`storage::s3::S3LockStorage`]. Not held as a field on any runtime struct.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct S3LockConfig {
     /// Lock TTL in seconds; the bounds are enforced when the lock is built.
@@ -228,7 +228,7 @@ impl Default for S3LockConfig {
 
 /// Lock strategy configuration.
 ///
-/// Determines which [`LockStorage`] implementation is constructed at startup.
+/// Determines which [`storage::LockStorage`] implementation is constructed at startup.
 /// Deserialized from operator configuration; selection is per-deployment.
 /// `lock_strategy = "memory" | "redis" | "s3"` selects the lock-object storage
 /// backend.

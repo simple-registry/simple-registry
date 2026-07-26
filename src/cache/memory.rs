@@ -179,14 +179,8 @@ mod tests {
         assert_eq!(cache.retrieve_value("shared").await, Ok(None));
     }
 
-    /// An entry stored with TTL 0 is stored with expiry equal to the instant of
-    /// insertion (`Instant::now() + 0`).  The retrieval check is strict `expiry > now`,
-    /// so any non-negative wall-clock progress between store and retrieve makes
-    /// the entry invisible.  In practice the entry is never observable: the
-    /// `maybe_cleanup` call inside `retrieve_value` runs first, which also
-    /// acquires the write lock before the read, giving the clock time to advance
-    /// at least slightly.  This test documents that TTL 0 behaves as
-    /// "already expired" from the caller's perspective.
+    /// TTL 0 sets expiry to the instant of insertion and the retrieval check is
+    /// a strict `expiry > now`, so the entry is never observable to a caller.
     #[tokio::test]
     async fn test_ttl_zero_expires_immediately() {
         let cache = Backend::new();

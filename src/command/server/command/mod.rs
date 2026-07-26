@@ -14,13 +14,10 @@ use crate::{
         server::{
             ServerContext,
             error::Error,
-            listeners::{
-                insecure::InsecureListener,
-                tls::{ServerTlsConfig, TlsListener},
-            },
+            listeners::{insecure::InsecureListener, tls::TlsListener},
         },
     },
-    configuration::{Configuration, ServerConfig},
+    configuration::{Configuration, ServerConfig, listeners::ServerTlsConfig},
     jobs::Queue,
     jobs::store::queue_depth_refresh_loop,
 };

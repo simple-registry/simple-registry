@@ -59,11 +59,7 @@ async fn run_passes_with(
     let meta_objects = metadata_store.store().object_store();
     let passes = [
         (Pass::MetadataLinks, "", meta_objects),
-        (
-            Pass::MetadataShards,
-            path_builder::blobs_root_dir(),
-            meta_objects,
-        ),
+        (Pass::MetadataShards, path_builder::BLOBS_ROOT, meta_objects),
         (Pass::Blob, "", blob_store.object_store()),
     ];
     for (pass, prefix, objects) in passes {

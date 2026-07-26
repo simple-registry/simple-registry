@@ -78,7 +78,7 @@ pub struct PushContext<'a> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Registry`] when a local read or downstream operation fails
+/// Returns [`Error::Client`] when a local read or downstream operation fails
 /// with anything other than an LWW-superseded 409, which converges as
 /// [`PushOutcome::Superseded`].
 #[instrument(skip(ctx, body))]
@@ -396,7 +396,7 @@ async fn cancel_upload_session(downstream: &RegistryClient, session_url: &str) {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Registry`] when the delete fails with anything other than
+/// Returns [`Error::Client`] when the delete fails with anything other than
 /// a 404, an LWW-superseded 409, or a 405.
 #[instrument(skip(downstream, metadata_store))]
 pub async fn delete_manifest(

@@ -5,7 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -59,7 +59,7 @@ pub struct RecoveryLoop {
     abandon_after_secs: Option<u64>,
 }
 
-impl std::fmt::Debug for RecoveryLoop {
+impl fmt::Debug for RecoveryLoop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RecoveryLoop")
             .field("interval", &self.interval)
@@ -321,7 +321,7 @@ impl RecoveryLoop {
         let Some(grace_secs) = self.abandon_after_secs else {
             return false;
         };
-        let grace = chrono::Duration::seconds(grace_secs.cast_signed());
+        let grace = ChronoDuration::seconds(grace_secs.cast_signed());
         Utc::now() > intent.created_at + grace
     }
 

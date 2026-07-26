@@ -9,6 +9,7 @@ use opentelemetry::trace::TraceContextExt;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     pin,
+    time::sleep,
 };
 use tracing::{Span, debug, error, info, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -70,7 +71,7 @@ pub async fn serve_request<S>(
             }
             return;
         }
-        () = tokio::time::sleep(query_timeout) => {
+        () = sleep(query_timeout) => {
             debug!("query timeout reached, signalling graceful shutdown");
             conn.as_mut().graceful_shutdown();
         }
@@ -85,7 +86,7 @@ pub async fn serve_request<S>(
                 Err(error) => debug!("connection error during graceful shutdown: {error}"),
             }
         }
-        () = tokio::time::sleep(grace_period) => {
+        () = sleep(grace_period) => {
             debug!("grace period expired, dropping connection");
         }
     }

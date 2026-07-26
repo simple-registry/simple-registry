@@ -595,7 +595,7 @@ async fn coalesce_events_returns_none_on_channel_close() {
     assert_eq!(result, None);
 }
 
-// --- Direct unit tests for the cache-empty path ---
+// Direct unit tests for the cache-empty path
 //
 // These exercise the bug fix at the unit level: the integration path
 // through `watch_config_loop` does not normally exhibit the empty-cache
@@ -901,7 +901,7 @@ async fn missing_tls_dir_does_not_prevent_config_reload() {
 async fn dynamic_tls_path_change_rewatches_new_directory() {
     let temp_dir = TempDir::new().unwrap();
 
-    // --- initial TLS dir ---
+    // initial TLS dir
     let tls_v1 = temp_dir.path().join("tls_v1");
     fs::create_dir_all(&tls_v1).unwrap();
     let cert_v1 = tls_v1.join("server.pem");
@@ -909,7 +909,7 @@ async fn dynamic_tls_path_change_rewatches_new_directory() {
     fs::write(&cert_v1, "cert-v1").unwrap();
     fs::write(&key_v1, "key-v1").unwrap();
 
-    // --- new TLS dir (not yet in config) ---
+    // new TLS dir (not yet in config)
     let tls_v2 = temp_dir.path().join("tls_v2");
     fs::create_dir_all(&tls_v2).unwrap();
     let cert_v2 = tls_v2.join("server.pem");

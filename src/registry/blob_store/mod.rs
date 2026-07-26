@@ -153,7 +153,7 @@ impl BlobStore {
     async fn collect_blob_shards(&self) -> Result<Vec<(Algorithm, String)>, Error> {
         let mut shards = Vec::new();
         for algorithm in Algorithm::supported_algorithms() {
-            let root = format!("{}/{algorithm}/", path_builder::blobs_root_dir());
+            let root = format!("{}/{algorithm}/", path_builder::BLOBS_ROOT);
             let names = paginated(move |token| {
                 let root = root.clone();
                 async move {
@@ -176,7 +176,7 @@ impl BlobStore {
         algorithm: Algorithm,
         shard: &str,
     ) -> impl Stream<Item = Result<Digest, Error>> + Send + use<'a> {
-        let prefix = format!("{}/{algorithm}/{shard}/", path_builder::blobs_root_dir());
+        let prefix = format!("{}/{algorithm}/{shard}/", path_builder::BLOBS_ROOT);
         paginated(move |token| {
             let prefix = prefix.clone();
             async move {
@@ -243,7 +243,7 @@ impl BlobStore {
 
     #[instrument(skip(self))]
     pub async fn delete_blob(&self, digest: &Digest) -> Result<(), Error> {
-        let container = path_builder::blob_container_dir(digest);
+        let container = path_builder::blob_dir(digest);
         self.object.delete_prefix(&container).await?;
         Ok(())
     }

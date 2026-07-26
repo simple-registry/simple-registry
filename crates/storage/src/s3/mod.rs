@@ -3,8 +3,8 @@
 //! Wraps [`angos_s3_client::Backend`] so consumers get the storage abstraction
 //! without depending on the HTTP/S3 layer directly. The wrapper translates
 //! `s3_client::Error` and `io::Error` into [`crate::Error`], adapts S3's
-//! flat/delimited listing modes to [`Page`](crate::Page) /
-//! [`ChildrenPage`](crate::ChildrenPage), and forwards every conditional and
+//! flat/delimited listing modes to [`crate::Page`] /
+//! [`crate::ChildrenPage`], and forwards every conditional and
 //! presign operation through unchanged.
 //!
 //! The [`ObjectStore`] upload methods layer the keyed, append-only upload

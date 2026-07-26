@@ -8,6 +8,7 @@ use wiremock::{
     matchers::{header, method},
 };
 
+use crate::metrics_provider::init_for_tests;
 use crate::{
     auth::Error,
     auth::webhook::{
@@ -268,7 +269,7 @@ fn build_test_webhook(
     config: Config,
     cache: Arc<Cache>,
 ) -> Result<WebhookAuthorizer, Error> {
-    crate::metrics_provider::init_for_tests();
+    init_for_tests();
     let client = build_test_client(&config).map_err(Error::Initialization)?;
     WebhookAuthorizer::new(name, config, client, cache)
 }

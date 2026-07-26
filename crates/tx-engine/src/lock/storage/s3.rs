@@ -1,7 +1,7 @@
 //! S3 lock storage.
 //!
 //! Writes lock objects at `.tx-locks/<shard>/<key>` on a
-//! [`ConditionalStore`](angos_storage::ConditionalStore) backend, using
+//! [`angos_storage::ConditionalStore`] backend, using
 //! `put_if_absent` for atomic acquire, `put_if_match` for heartbeat refresh,
 //! and `delete_if_match` for release. The CAS capability gate guarantees the
 //! provider enforces all three conditions and surfaces `ETag`s.

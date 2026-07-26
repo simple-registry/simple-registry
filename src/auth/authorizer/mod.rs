@@ -12,8 +12,8 @@ use crate::{
     http_client::apply_tls_files,
     identity::{Action, ClientIdentity},
     oci::{Namespace, Tag},
-    policy::PolicyDecision,
-    registry::{AccessPolicy, BlobMount, Registry},
+    policy::{AccessPolicy, PolicyDecision},
+    registry::{BlobMount, Registry},
 };
 
 const ACCESS_DENIED: &str = "Access denied";

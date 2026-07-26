@@ -1,8 +1,8 @@
 //! Orphan multipart-upload detection and cleanup orchestration.
 //!
-//! This is registry-domain logic layered on the engine's raw upload
-//! *primitives* ([`Store::list_multipart_uploads`](angos_tx_engine::store::Store::list_multipart_uploads)
-//! and the keyed [`Store::abort_upload`](angos_tx_engine::store::Store::abort_upload)):
+//! This is registry-domain logic layered on the storage backend's raw upload
+//! *primitives* ([`ObjectStore::list_multipart_uploads`](angos_storage::ObjectStore::list_multipart_uploads)
+//! and the keyed [`ObjectStore::abort_upload`](angos_storage::ObjectStore::abort_upload)):
 //! it walks in-flight multipart uploads, applies an age threshold, and skips
 //! any upload that still has a live session (its `startedat` marker exists).
 //! The engine stays oblivious to upload-session semantics; the policy lives
@@ -37,7 +37,7 @@ pub struct OrphanMultipartUpload {
 /// Returns slices borrowed from `key` so cleanup passes don't allocate per upload.
 pub fn parse_upload_key(key: &str) -> Option<(&str, &str)> {
     let rest = key
-        .strip_prefix(path_builder::repository_dir())?
+        .strip_prefix(path_builder::REPOS_ROOT)?
         .strip_prefix('/')?;
     rest.strip_suffix("/data")
         .or_else(|| rest.strip_suffix("/staged/coalesce"))?

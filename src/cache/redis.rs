@@ -1,3 +1,5 @@
+use std::fmt;
+
 use redis::AsyncCommands;
 use serde::{Deserialize, Deserializer};
 use tokio::sync::OnceCell;
@@ -30,7 +32,7 @@ pub struct Backend {
     key_prefix: String,
 }
 
-impl std::fmt::Debug for Backend {
+impl fmt::Debug for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Backend")
             .field("key_prefix", &self.key_prefix)

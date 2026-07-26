@@ -3,11 +3,11 @@
 //! Provides lock-object storage backed by an in-process `HashMap<String,
 //! Bytes>` guarded by a `Mutex`. Suitable for single-process deployments and
 //! tests. There is no TTL: a lock "expires" only when the holder releases it
-//! (via [`Lock::release`](crate::lock::Lock)) or drops the session. Because
+//! (via [`Lock::release`](crate::lock::primitive::Lock)) or drops the session. Because
 //! there is no heartbeat in the storage layer (the lock-expiry logic lives in
-//! the heartbeat spawned by [`Lock`](crate::lock::Lock)), `get_with_etag`
+//! the heartbeat spawned by [`Lock`](crate::lock::primitive::Lock)), `get_with_etag`
 //! returns a `last_modified` of `None`: the TTL-staleness check in
-//! [`LockBody::is_expired`] will fall back to the embedded `refreshed_at`
+//! [`super::LockBody::is_expired`] will fall back to the embedded `refreshed_at`
 //! field.
 
 use std::{

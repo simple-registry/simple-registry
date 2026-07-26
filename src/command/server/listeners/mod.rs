@@ -76,11 +76,6 @@ impl<C: Connector> Listener<C> {
         }
     }
 
-    /// The connector, so scheme-specific reloads (the TLS acceptor) reach it.
-    pub fn connector(&self) -> &C {
-        &self.connector
-    }
-
     /// Swap in a freshly-built server context on a non-listener config reload.
     pub fn store_context(&self, context: ServerContext) {
         self.context.store(Arc::new(context));
@@ -174,6 +169,8 @@ async fn accept(listener: &TcpListener) -> Result<(TcpStream, SocketAddr), Error
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncWriteExt;
+
     use super::*;
 
     #[tokio::test]
@@ -195,8 +192,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_accept_with_connection() {
-        use tokio::io::AsyncWriteExt;
-
         let addr = "127.0.0.1:0".parse().unwrap();
         let listener = build_listener(addr).await.unwrap();
         let local_addr = listener.local_addr().unwrap();

@@ -15,7 +15,7 @@
 /// `CasExecutor` and `LockedExecutor` builders.
 pub const DEFAULT_INTENT_TTL_SECS: u64 = 300;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::warn;
@@ -168,7 +168,7 @@ impl IntentRecord {
     /// Returns `true` if the owner's heartbeat is considered stale.
     #[must_use]
     pub fn is_stale(&self, now: DateTime<Utc>) -> bool {
-        let expiry = self.created_at + chrono::Duration::seconds(self.ttl_secs.cast_signed());
+        let expiry = self.created_at + Duration::seconds(self.ttl_secs.cast_signed());
         now > expiry
     }
 

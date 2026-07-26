@@ -26,9 +26,10 @@ impl MtlsValidator {
         Self
     }
 
-    /// Extract certificate identity information from X509 certificate
+    /// The organizations and common names of a certificate subject. Entries
+    /// that are not valid UTF-8 are dropped, so this cannot fail.
     #[instrument(skip(cert))]
-    fn extract_certificate_identity(cert: &X509Certificate) -> Result<ClientCertificate, Error> {
+    fn extract_certificate_identity(cert: &X509Certificate) -> ClientCertificate {
         let subject = cert.subject();
 
         let organizations = subject
@@ -41,10 +42,10 @@ impl MtlsValidator {
             .filter_map(|cn| cn.as_str().ok().map(String::from))
             .collect::<Vec<_>>();
 
-        Ok(ClientCertificate {
+        ClientCertificate {
             organizations,
             common_names,
-        })
+        }
     }
 }
 
@@ -76,8 +77,7 @@ impl AuthMiddleware for MtlsValidator {
         })?;
 
         debug!("Extracting identity from client certificate");
-        let cert_info = Self::extract_certificate_identity(&cert)
-            .inspect_err(|e| debug!("Failed to extract identity from certificate: {e}"))?;
+        let cert_info = Self::extract_certificate_identity(&cert);
 
         identity.certificate = cert_info;
         Ok(AuthResult::Authenticated)

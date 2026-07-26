@@ -45,15 +45,10 @@ fn has_link_kind(
         .is_some_and(|refs| refs.iter().any(predicate))
 }
 
-fn to_epoch(timestamp: Option<DateTime<Utc>>) -> i64 {
-    timestamp.map_or(0, |t| t.timestamp())
-}
-
 /// Push time for retention: an unknown timestamp is treated as the current
 /// instant so an age rule keeps content of unknown age (a migrated legacy link
-/// carries none) rather than deleting it as if pushed at the Unix epoch. Pull
-/// time keeps `to_epoch`, since an unknown (never-pulled) timestamp is
-/// legitimately cold.
+/// carries none) rather than deleting it as if pushed at the Unix epoch. An
+/// unknown pull time stays 0, since never-pulled is legitimately cold.
 fn pushed_at_epoch(created_at: Option<DateTime<Utc>>) -> i64 {
     created_at.map_or_else(|| Utc::now().timestamp(), |t| t.timestamp())
 }
@@ -148,7 +143,9 @@ fn decide_orphan_fate(
     let manifest = ManifestImage {
         tag: None,
         pushed_at: EpochSeconds::from_seconds(pushed_at_epoch(metadata.created_at)),
-        last_pulled_at: EpochSeconds::from_seconds(to_epoch(metadata.accessed_at)),
+        last_pulled_at: EpochSeconds::from_seconds(
+            metadata.accessed_at.map_or(0, |t| t.timestamp()),
+        ),
     };
 
     let global = check_global_policy(global_policy, &manifest, last_pushed, last_pulled)?;
@@ -404,7 +401,9 @@ impl RetentionChecker {
         let manifest = ManifestImage {
             tag: Some(tag.name.to_string()),
             pushed_at: EpochSeconds::from_seconds(pushed_at_epoch(tag.metadata.created_at)),
-            last_pulled_at: EpochSeconds::from_seconds(to_epoch(tag.metadata.accessed_at)),
+            last_pulled_at: EpochSeconds::from_seconds(
+                tag.metadata.accessed_at.map_or(0, |t| t.timestamp()),
+            ),
         };
 
         self.evaluate_retention_policies(namespace, &tag.name, &manifest, last_pushed, last_pulled)
@@ -663,7 +662,7 @@ mod tests {
             .unwrap();
     }
 
-    // --- rank_by ---
+    // rank_by
 
     #[test]
     fn rank_by_sorts_descending_by_key() {
@@ -700,7 +699,7 @@ mod tests {
         assert!(ranked.contains(&"beta".to_string()));
     }
 
-    // --- build_sorted_rankings ---
+    // build_sorted_rankings
 
     #[test]
     fn build_sorted_rankings_pushed_order() {

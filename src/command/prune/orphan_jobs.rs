@@ -195,7 +195,7 @@ impl OrphanJobChecker {
                 let Some(payload) = payload else {
                     continue;
                 };
-                // A payload that fails to decode is skipped: scrub must not
+                // A payload that fails to decode is skipped: prune must not
                 // delete what it cannot attribute.
                 let reason = match self.queue.classify(&self.resolver, payload) {
                     Ok(reason) => reason,
@@ -565,7 +565,7 @@ mod tests {
 
         assert!(
             sink.lock().unwrap().is_empty(),
-            "a payload scrub cannot attribute must be skipped, got {} action(s)",
+            "a payload prune cannot attribute must be skipped, got {} action(s)",
             sink.lock().unwrap().len()
         );
         assert_eq!(
@@ -801,7 +801,7 @@ mod tests {
 
         assert!(
             sink.lock().unwrap().is_empty(),
-            "a payload scrub cannot attribute must be skipped, got {} action(s)",
+            "a payload prune cannot attribute must be skipped, got {} action(s)",
             sink.lock().unwrap().len()
         );
         assert_eq!(

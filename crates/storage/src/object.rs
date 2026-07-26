@@ -91,7 +91,7 @@ pub trait ObjectStore: Send + Sync {
     /// Delete every object under the directory `prefix`.
     ///
     /// The prefix is treated as a directory boundary: a non-empty prefix is
-    /// normalised to a trailing `/` (see [`dir_prefix`]), then every object
+    /// normalised to a trailing `/`, then every object
     /// whose key sits under that directory is removed. A key that merely shares
     /// a string prefix is never affected: `delete_prefix("tags/v1")` deletes
     /// `tags/v1/...` but leaves `tags/v1-rc/...` untouched.

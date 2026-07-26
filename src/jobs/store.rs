@@ -537,7 +537,7 @@ fn tx_error_to_job(err: TxError) -> Error {
         TxError::Lock(e) => Error::from(e),
         TxError::Serde(e) => Error::Storage(format!("serialisation error: {e}")),
         TxError::Conflict | TxError::Precondition | TxError::PartialCommit => {
-            Error::Storage("transaction conflict: retry budget exhausted".to_string())
+            Error::Storage("transaction conflict".to_string())
         }
         TxError::Build(msg) => Error::Storage(format!("engine build error: {msg}")),
     }
@@ -552,7 +552,7 @@ fn tx_error_to_job(err: TxError) -> Error {
 /// (`list_pending`, `count_pending`, `find_pending_with_lock_key`).
 ///
 /// All write operations that require atomicity go through the
-/// [`TransactionExecutor`]; the raw `ObjectStore` is used for reads and
+/// [`TransactionExecutor`](angos_tx_engine::executor::TransactionExecutor); the raw `ObjectStore` is used for reads and
 /// low-level access patterns that do not need CAS.
 ///
 /// `worker_id` is an optional per-process identifier attached to structured

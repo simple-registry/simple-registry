@@ -24,7 +24,6 @@ pub mod test_utils;
 pub mod upload;
 pub mod version;
 
-pub use crate::policy::AccessPolicy;
 use crate::{
     cache,
     cache_fill::CacheFillJobHandler,
@@ -249,7 +248,7 @@ impl Registry {
         self.metadata_store
             .store()
             .object_store()
-            .list_children(path_builder::repository_dir(), 1, None, None)
+            .list_children(path_builder::REPOS_ROOT, 1, None, None)
             .await
             .map_err(|e| Error::Internal(format!("storage backend not ready: {e}")))?;
         Ok(())
@@ -395,6 +394,7 @@ impl Drop for Registry {
 
 #[cfg(test)]
 mod in_process_replication_tests {
+    use crate::metrics_provider::init_for_tests;
     use std::{sync::Arc, time::Duration};
 
     use tempfile::TempDir;
@@ -461,7 +461,7 @@ mod in_process_replication_tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn in_process_loop_drains_replication_push_job() {
-        crate::metrics_provider::init_for_tests();
+        init_for_tests();
         let mock_server = MockServer::start().await;
 
         let client = downstream_client(&mock_server.uri());
@@ -595,7 +595,7 @@ mod in_process_replication_tests {
     /// drained (the loops would otherwise poll an always-empty queue forever).
     #[tokio::test]
     async fn no_replication_loop_when_no_downstream_configured() {
-        crate::metrics_provider::init_for_tests();
+        init_for_tests();
         let (registry, _blob_store, _metadata_store, _dir) =
             build_registry_with(repository_without_downstream());
 

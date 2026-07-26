@@ -7,6 +7,8 @@ pub mod categorize;
 pub mod check;
 mod error;
 pub mod executor;
+#[cfg(test)]
+mod test_helper;
 pub mod walk;
 
 pub use error::Error;
