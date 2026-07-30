@@ -543,7 +543,7 @@ fn test_load_from_file() {
     temp_file.write_all(config_content.as_bytes()).unwrap();
     temp_file.flush().unwrap();
 
-    let result = Configuration::load(temp_file.path());
+    let result = Configuration::load_all(&[temp_file.path()]);
     assert!(result.is_ok());
 
     let config = result.unwrap();
@@ -560,7 +560,7 @@ fn test_load_from_file() {
 
 #[test]
 fn test_load_from_nonexistent_file() {
-    let result = Configuration::load("/nonexistent/path/to/config.toml");
+    let result = Configuration::load_all(&["/nonexistent/path/to/config.toml"]);
     assert!(result.is_err());
 
     match result {
@@ -591,7 +591,7 @@ fn test_load_from_file_with_tls_config() {
     temp_file.write_all(config_content.as_bytes()).unwrap();
     temp_file.flush().unwrap();
 
-    let result = Configuration::load(temp_file.path());
+    let result = Configuration::load_all(&[temp_file.path()]);
     assert!(result.is_ok());
 
     let config = result.unwrap();
@@ -628,7 +628,7 @@ fn test_load_from_file_with_validation_error() {
     temp_file.write_all(config_content.as_bytes()).unwrap();
     temp_file.flush().unwrap();
 
-    let result = Configuration::load(temp_file.path());
+    let result = Configuration::load_all(&[temp_file.path()]);
     assert!(result.is_err());
 
     match result {

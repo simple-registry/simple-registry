@@ -4,7 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 1.4.2 - UNRELEASED
+## 1.4.3 - UNRELEASED
+
+### Added
+
+- `-c` is repeatable: configuration files are merged in order with later files winning, so credentials can live in their own file and rotate without a restart.
+
+## 1.4.2
 
 ### Changed
 

@@ -95,6 +95,67 @@ kubectl create secret generic registry-config \
   --from-file=config.toml=config.toml
 ```
 
+#### Keeping credentials in their own Secret
+
+`-c` is repeatable and later files win, so credentials can live in a second
+Secret managed by External Secrets Operator, Vault or sealed-secrets while the
+Secret above holds no sensitive values. Drop `access_key_id` and `secret_key`
+from `config.toml` and render them into a fragment instead:
+
+```yaml
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: registry-credentials
+  namespace: registry
+spec:
+  secretStoreRef:
+    name: vault
+    kind: SecretStore
+  target:
+    name: registry-credentials
+    template:
+      data:
+        secrets.toml: |
+          [blob_store.s3]
+          access_key_id = "{{ .accessKeyId }}"
+          secret_key = "{{ .secretKey }}"
+
+          [metadata_store.s3]
+          access_key_id = "{{ .accessKeyId }}"
+          secret_key = "{{ .secretKey }}"
+  data:
+    - secretKey: accessKeyId
+      remoteRef: { key: registry/s3, property: access_key_id }
+    - secretKey: secretKey
+      remoteRef: { key: registry/s3, property: secret_key }
+```
+
+Mount both Secrets as directories and pass each file. Never use `subPath`: a
+`subPath` mount is not updated when the Secret changes, which defeats the config
+watcher and turns credential rotation into a rolling restart.
+
+```yaml
+args: ["-c", "/config/config.toml", "-c", "/secrets/secrets.toml", "server"]
+volumeMounts:
+  - name: config
+    mountPath: /config
+    readOnly: true
+  - name: credentials
+    mountPath: /secrets
+    readOnly: true
+volumes:
+  - name: config
+    secret:
+      secretName: registry-config
+  - name: credentials
+    secret:
+      secretName: registry-credentials
+```
+
+Rotating either Secret reloads the merged configuration in place, within the
+kubelet's sync period.
+
 ### Step 3: Create stateless Deployment
 
 ```yaml

@@ -261,10 +261,16 @@ Sensitive values in configuration:
 
 ### Recommendations
 
-1. Use environment variables for secrets in containers
-2. Use Kubernetes Secrets or similar
+1. Keep credentials in a separate configuration file and pass both with `-c`, so the file your deployment tooling renders holds no secrets
+2. Use Kubernetes Secrets or similar for that file
 3. Restrict file permissions on config
 4. Rotate credentials regularly
+
+Angos reads no credentials from environment variables. An environment is fixed
+when the process starts, so a rotated secret would need a restart, and it is
+readable through `/proc/<pid>/environ` and core dumps. A credentials file is
+watched like any other configuration file, so rotating it applies without a
+restart.
 
 ---
 

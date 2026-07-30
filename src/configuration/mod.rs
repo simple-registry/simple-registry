@@ -1,12 +1,17 @@
 use std::{collections::HashMap, fs, path::Path};
 
 use serde::{Deserialize, Deserializer, de::Error as DeError};
+use toml::{
+    Spanned,
+    de::{DeTable, Deserializer as TomlDeserializer},
+};
 
 use angos_tx_engine::lock::LockStrategy;
 
 mod error;
 pub mod global;
 pub mod listeners;
+mod merge;
 mod observability;
 pub mod regex_pattern;
 pub mod registry_storage;
@@ -120,15 +125,66 @@ impl Configuration {
         }
     }
 
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
-        let config = fs::read_to_string(path)
-            .map_err(|e| Error::NotReadable(format!("Unable to read configuration file: {e}")))?;
-        Self::load_from_str(&config)
+    /// Load and merge configuration files in order, later files winning. Every
+    /// file is read up front so the parsed trees can borrow from all of them,
+    /// and merging happens before deserialization because a file that only
+    /// overrides a few keys is not a `Configuration` on its own.
+    pub fn load_all<P: AsRef<Path>>(paths: &[P]) -> Result<Self, Error> {
+        let mut documents = Vec::with_capacity(paths.len());
+        for path in paths {
+            let path = path.as_ref();
+            let document = fs::read_to_string(path).map_err(|e| {
+                let path = path.display();
+                Error::NotReadable(format!("Unable to read configuration file {path}: {e}"))
+            })?;
+            documents.push(document);
+        }
+
+        match documents.as_slice() {
+            [] => Err(Error::NotReadable(
+                "No configuration file was provided".to_string(),
+            )),
+            [single] => Self::load_from_str(single),
+            _ => Self::merge_documents(paths, &documents),
+        }
+    }
+
+    fn merge_documents<P: AsRef<Path>>(paths: &[P], documents: &[String]) -> Result<Self, Error> {
+        let mut merged: Option<Spanned<DeTable<'_>>> = None;
+        for (path, document) in paths.iter().zip(documents) {
+            let table = DeTable::parse(document)
+                .map_err(|e| Error::InvalidFormat(format!("{}: {e}", path.as_ref().display())))?;
+            match &mut merged {
+                Some(base) => merge::merge(base.get_mut(), table.into_inner()),
+                None => merged = Some(table),
+            }
+        }
+
+        let Some(table) = merged else {
+            return Err(Error::NotReadable(
+                "No configuration file was provided".to_string(),
+            ));
+        };
+
+        // A merged tree spans several documents, so quoting one of them would
+        // point at the wrong file. The error then names the key path instead.
+        Self::from_table(table, None).map_err(|e| annotate_sources(e, paths))
     }
 
     /// Parse and resolve a TOML configuration string, returning typed errors.
     pub fn load_from_str(slice: &str) -> Result<Self, Error> {
-        toml::from_str(slice).map_err(|e| Error::InvalidFormat(e.to_string()))
+        let table = DeTable::parse(slice).map_err(|e| Error::InvalidFormat(e.to_string()))?;
+        Self::from_table(table, Some(slice))
+    }
+
+    /// Deserialize an already parsed TOML tree. `raw` is the document the tree
+    /// came from, and restores the source excerpt in error messages; a tree
+    /// merged from several documents has no single source and passes `None`.
+    fn from_table(table: Spanned<DeTable<'_>>, raw: Option<&str>) -> Result<Self, Error> {
+        Self::deserialize(TomlDeserializer::from(table)).map_err(|mut e| {
+            e.set_input(raw);
+            Error::InvalidFormat(e.to_string())
+        })
     }
 
     fn validate(self) -> Result<Self, Error> {
@@ -137,6 +193,21 @@ impl Configuration {
         validate_durable_queue_lock(&self)?;
         Ok(self)
     }
+}
+
+/// Name the files a merged configuration was built from, since an error on the
+/// merged tree can only report the offending key path.
+fn annotate_sources<P: AsRef<Path>>(error: Error, paths: &[P]) -> Error {
+    let Error::InvalidFormat(message) = &error else {
+        return error;
+    };
+
+    let sources = paths
+        .iter()
+        .map(|path| path.as_ref().display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Error::InvalidFormat(format!("{}\nmerged from {sources}", message.trim_end()))
 }
 
 fn validate_global(

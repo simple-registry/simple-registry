@@ -94,15 +94,26 @@ fn set_tracing(
     }
 }
 
+const DEFAULT_CONFIG_PATH: &str = "config.toml";
+
 #[derive(FromArgs, PartialEq, Debug)]
 /// An OCI-compliant and docker-compatible registry service
 struct GlobalArguments {
-    #[argh(option, short = 'c', default = "String::from(\"config.toml\")")]
-    /// the path to the configuration file, defaults to `config.toml`
-    config: String,
+    #[argh(option, short = 'c')]
+    /// path to a configuration file, repeatable to merge several with later
+    /// files winning, defaults to `config.toml`
+    config: Vec<String>,
 
     #[argh(subcommand)]
     subcommand: SubCommand,
+}
+
+/// The configuration files to load, in merge order.
+fn config_paths(arguments: &GlobalArguments) -> Vec<String> {
+    if arguments.config.is_empty() {
+        return vec![DEFAULT_CONFIG_PATH.to_string()];
+    }
+    arguments.config.clone()
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -128,10 +139,14 @@ fn main() {
 
     let cli_args: GlobalArguments = argh::from_env();
 
-    let config = match Configuration::load(&cli_args.config) {
+    let config_paths = config_paths(&cli_args);
+    let config = match Configuration::load_all(&config_paths) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("Failed to load configuration from {}: {e}", cli_args.config);
+            eprintln!(
+                "Failed to load configuration from {}: {e}",
+                config_paths.join(", ")
+            );
             exit(1);
         }
     };
@@ -149,10 +164,10 @@ fn main() {
             exit(1);
         }
     };
-    runtime.block_on(run_command(cli_args, config));
+    runtime.block_on(run_command(cli_args, config, config_paths));
 }
 
-async fn run_command(cli_args: GlobalArguments, config: Configuration) {
+async fn run_command(cli_args: GlobalArguments, config: Configuration, config_paths: Vec<String>) {
     let tracer_provider = match set_tracing(config.observability.clone()) {
         Ok(p) => p,
         Err(err) => {
@@ -174,10 +189,10 @@ async fn run_command(cli_args: GlobalArguments, config: Configuration) {
             replicate::run(&replicate_options, &config).await,
         ),
         SubCommand::Scrub(scrub_options) => report("Scrub", run_scrub(scrub_options, config).await),
-        SubCommand::Serve(_) => report("Server", run_server(cli_args, config).await),
+        SubCommand::Serve(_) => report("Server", run_server(&config_paths, config).await),
         SubCommand::Worker(worker_options) => report(
             "Worker",
-            run_worker(&cli_args.config, worker_options, config).await,
+            run_worker(&config_paths, worker_options, config).await,
         ),
     };
 
@@ -212,13 +227,13 @@ async fn run_scrub(
 }
 
 async fn run_worker(
-    config_path: &str,
+    config_paths: &[String],
     worker_options: worker::Options,
     config: Configuration,
 ) -> Result<(), bootstrap::Error> {
     let worker = Arc::new(worker::Command::new(&worker_options, &config).await?);
 
-    let Ok(_watcher) = ConfigWatcher::new(config_path, worker.clone()) else {
+    let Ok(_watcher) = ConfigWatcher::new(config_paths, worker.clone()) else {
         error!("Failed to start configuration watcher");
         exit(1);
     };
@@ -236,10 +251,10 @@ async fn run_worker(
     }
 }
 
-async fn run_server(options: GlobalArguments, config: Configuration) -> Result<(), server::Error> {
+async fn run_server(config_paths: &[String], config: Configuration) -> Result<(), server::Error> {
     let server = Arc::new(server::Command::new(&config).await?);
 
-    let Ok(_watcher) = ConfigWatcher::new(&options.config, server.clone()) else {
+    let Ok(_watcher) = ConfigWatcher::new(config_paths, server.clone()) else {
         error!("Failed to start configuration watcher");
         exit(1);
     };
