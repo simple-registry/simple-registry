@@ -13,8 +13,10 @@ use crate::{
     identity::{ClientCertificate, ManifestPutTarget, OidcClaims},
     oci::{Digest, Namespace, Reference, Tag},
     registry::{
-        RegistryConfig, Repository, metadata_store::MetadataStore,
+        BlobMount, RegistryConfig, Repository,
+        metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
+        test_utils::{for_each_backend, put_blob_direct},
     },
     test_fixtures::{
         configuration::{load_config, minimal_config, try_load_config},
@@ -925,4 +927,63 @@ async fn indeterminate_global_policy_denies_request() {
         matches!(result, Err(AuthError::Unauthorized(_))),
         "an indeterminate global policy must deny the request, got: {result:?}"
     );
+}
+
+#[tokio::test]
+async fn authorize_mount_source_requires_read_on_the_source() {
+    for_each_backend(async |test_case| {
+        let registry = test_case.registry();
+        let source = &Namespace::new("test-repo/source").unwrap();
+        let content = b"mount authorization blob";
+
+        let metadata_store = test_case.metadata_store();
+        let digest = put_blob_direct(metadata_store.store(), content).await;
+        registry
+            .blob_ownership()
+            .grant(source, &digest)
+            .await
+            .unwrap();
+
+        let config = load_config(
+            r#"
+                [global.access_policy]
+                default = "deny"
+                rules = ["identity.id == 'reader'"]
+
+                [repository."test-repo".access_policy]
+                default = "allow"
+            "#,
+        );
+        let cache = cache::Config::Memory.to_backend().unwrap();
+        let authorizer = Authorizer::new(&config, &cache).unwrap();
+
+        let parts = parts_with_uri("/v2/");
+        let mut reader = ClientIdentity::new(None);
+        reader.id = Some("reader".to_string());
+        let stranger = ClientIdentity::new(None);
+
+        for from in [Some(source.clone()), None] {
+            let mount = BlobMount {
+                digest: digest.clone(),
+                from,
+            };
+            assert!(
+                authorizer
+                    .authorize_mount_source(&mount, &reader, &parts, registry)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "a caller permitted to read the source must be allowed to mount"
+            );
+            assert!(
+                authorizer
+                    .authorize_mount_source(&mount, &stranger, &parts, registry)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a caller denied read on the source must not be allowed to mount"
+            );
+        }
+    })
+    .await;
 }

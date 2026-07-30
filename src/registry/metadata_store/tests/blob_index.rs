@@ -275,6 +275,9 @@ async fn test_mixed_creates_and_deletes_across_digests() {
     assert_eq!(new_meta.target, digest_add);
 }
 
+/// A shard holding an empty link set must not keep blob data alive. Removing
+/// the last link deletes the shard object outright, so the empty set is written
+/// directly here: it is the only way to reach the tolerance branch.
 #[tokio::test]
 async fn test_has_blob_references_ignores_empty_cas_shards() {
     // CAS shard updates only run when the backend's coordinator is `Cas`,
@@ -287,25 +290,33 @@ async fn test_has_blob_references_ignores_empty_cas_shards() {
     let digest =
         Digest::from_str("sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
             .unwrap();
-    let link = LinkKind::Blob(digest.clone());
     let namespace = Namespace::new("empty-cas-shard").unwrap();
+    let shard_path = path_builder::blob_index_shard_path(&digest, &namespace);
 
+    backend
+        .store()
+        .object_store()
+        .put(&shard_path, Bytes::from_static(b"[]"))
+        .await
+        .unwrap();
+    assert!(
+        !backend.has_blob_references(&digest).await.unwrap(),
+        "empty CAS shards must not keep blob data alive"
+    );
+
+    // The negative case above only means something if a populated shard of the
+    // same digest reports the opposite.
     backend
         .update_blob_index(
             &namespace,
             &digest,
-            BlobIndexOperation::Insert(link.clone()),
+            BlobIndexOperation::Insert(LinkKind::Blob(digest.clone())),
         )
         .await
         .unwrap();
-    backend
-        .update_blob_index(&namespace, &digest, BlobIndexOperation::Remove(link))
-        .await
-        .unwrap();
-
     assert!(
-        !backend.has_blob_references(&digest).await.unwrap(),
-        "empty CAS shards must not keep blob data alive"
+        backend.has_blob_references(&digest).await.unwrap(),
+        "a shard holding a link must keep blob data alive"
     );
 
     backend

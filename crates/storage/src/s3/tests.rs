@@ -53,6 +53,11 @@ conditional_store_conformance!((backend(), ()));
 /// (`v0`) pin the exclusive-start bookkeeping between adjacent ranges. The
 /// boundary object deliberately has no same-named dir: rustfs merges a
 /// same-named object and prefix, dropping the prefix from any listing.
+///
+/// Like the flat scan, the invariant is checked against the backend's own
+/// listing rather than the put set: rustfs's `ListObjectsV2` can omit a handful
+/// of existing keys, so the point under test is that the partitioned fan-out
+/// matches one serial enumeration, not that rustfs returns everything.
 #[tokio::test]
 async fn list_all_children_partitions_skewed_names_completely() {
     let store = backend();
@@ -76,11 +81,44 @@ async fn list_all_children_partitions_skewed_names_completely() {
         .await
         .unwrap();
 
-    let (mut sub_prefixes, objects) = store.list_all_children("skew").await.unwrap();
+    let (mut sub_prefixes, mut objects) = store.list_all_children("skew").await.unwrap();
+    let (mut plain_prefixes, mut plain_objects) = plain_list_children(&store, "skew").await;
     sub_prefixes.sort();
-    dirs.sort();
-    assert_eq!(sub_prefixes, dirs);
-    assert_eq!(objects, ["v0"]);
+    objects.sort();
+    plain_prefixes.sort();
+    plain_objects.sort();
+    assert_eq!(sub_prefixes, plain_prefixes);
+    assert_eq!(objects, plain_objects);
+
+    // The partition is only interesting if the listing really did span pages
+    // and include the boundary names the ranges split on.
+    assert!(
+        plain_prefixes.len() > 1000,
+        "the fixture must exceed one page, got {}",
+        plain_prefixes.len()
+    );
+    assert_eq!(plain_objects, ["v0"]);
+}
+
+/// Drain the plain paginated children listing of `prefix` into sub-prefixes and
+/// objects.
+async fn plain_list_children(store: &Backend, prefix: &str) -> (Vec<String>, Vec<String>) {
+    let mut sub_prefixes = Vec::new();
+    let mut objects = Vec::new();
+    let mut token = None;
+    loop {
+        let page = store
+            .list_children(prefix, 1000, token, None)
+            .await
+            .unwrap();
+        sub_prefixes.extend(page.sub_prefixes);
+        objects.extend(page.objects);
+        match page.next_token {
+            Some(next) => token = Some(next),
+            None => break,
+        }
+    }
+    (sub_prefixes, objects)
 }
 
 /// The concurrent flat scan enumerates exactly what one plain serial list does:
