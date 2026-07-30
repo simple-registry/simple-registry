@@ -24,11 +24,13 @@ pub fn is_k8s_data_symlink(path: &Path, config_dirs: &HashSet<PathBuf>) -> bool 
             .is_some_and(|parent| config_dirs.contains(parent))
 }
 
+/// Each set holds every spelling of a watched path, so one reached through a
+/// symlink matches whichever form the platform's `notify` backend reports.
 pub fn classify_event(
     event: &Event,
-    canonical_config_paths: &HashSet<PathBuf>,
-    canonical_config_dirs: &HashSet<PathBuf>,
-    canonical_tls_dirs: &HashSet<PathBuf>,
+    config_paths: &HashSet<PathBuf>,
+    config_dirs: &HashSet<PathBuf>,
+    tls_dirs: &HashSet<PathBuf>,
 ) -> ChangeKind {
     if !matches!(
         event.kind,
@@ -37,9 +39,10 @@ pub fn classify_event(
         return ChangeKind::Irrelevant;
     }
 
-    let affects_config = event.paths.iter().any(|p| {
-        canonical_config_paths.contains(p) || is_k8s_data_symlink(p, canonical_config_dirs)
-    });
+    let affects_config = event
+        .paths
+        .iter()
+        .any(|p| config_paths.contains(p) || is_k8s_data_symlink(p, config_dirs));
     if affects_config {
         return ChangeKind::Config;
     }
@@ -47,7 +50,7 @@ pub fn classify_event(
     let affects_tls = event
         .paths
         .iter()
-        .any(|p| p.parent().is_some_and(|d| canonical_tls_dirs.contains(d)));
+        .any(|p| p.parent().is_some_and(|d| tls_dirs.contains(d)));
     if affects_tls {
         return ChangeKind::Tls;
     }
