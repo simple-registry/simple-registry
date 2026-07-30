@@ -1,4 +1,6 @@
-use std::{fs, io::Write, sync::Mutex, time::Duration};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+use std::{fs, io::Write, path::absolute, sync::Mutex, time::Duration};
 
 use notify::{
     EventKind,
@@ -187,8 +189,6 @@ impl ConfigNotifier for TestNotifier {
 
 #[cfg(unix)]
 fn create_k8s_mount(dir: &Path, files: &[(&str, &str)]) {
-    use std::os::unix::fs::symlink;
-
     let timestamp_dir = dir.join("..2024_01_01_00_00_00.000000000");
     fs::create_dir_all(&timestamp_dir).unwrap();
 
@@ -209,8 +209,6 @@ fn create_k8s_mount(dir: &Path, files: &[(&str, &str)]) {
 
 #[cfg(unix)]
 fn rotate_k8s_mount(dir: &Path, files: &[(&str, &str)], new_timestamp: &str) {
-    use std::os::unix::fs::symlink;
-
     let new_dir = dir.join(format!("..{new_timestamp}"));
     fs::create_dir_all(&new_dir).unwrap();
 
@@ -1137,5 +1135,123 @@ async fn a_vanished_overlay_does_not_kill_the_watcher() {
     assert!(
         applied,
         "watcher did not recover after the overlay vanished"
+    );
+}
+
+/// inotify names the unresolved path while the watcher knew only the resolved
+/// one, so matching a single form drops the event and hot reload silently stops
+/// under a Kubernetes Secret mount.
+#[cfg(unix)]
+#[test]
+fn watched_config_matches_a_file_reported_through_its_symlink() {
+    let temp_dir = TempDir::new().unwrap();
+    let real = temp_dir.path().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("config.toml"), MINIMAL_CONFIG_TOML).unwrap();
+    let link = temp_dir.path().join("link");
+    symlink(&real, &link).unwrap();
+
+    // The operator names the path through the symlink.
+    let config = WatchedConfig::new(vec![link.join("config.toml")]);
+
+    // The event names it the same way, as inotify reports it.
+    let event = make_event(
+        EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+        vec![link.join("config.toml")],
+    );
+    assert_eq!(
+        classify_event(
+            &event,
+            &config.matchable_paths,
+            &config.dirs.matchable,
+            &HashSet::new()
+        ),
+        ChangeKind::Config,
+    );
+
+    // And the resolved form fsevents reports must match just as well.
+    let resolved = make_event(
+        EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+        vec![fs::canonicalize(real.join("config.toml")).unwrap()],
+    );
+    assert_eq!(
+        classify_event(
+            &resolved,
+            &config.matchable_paths,
+            &config.dirs.matchable,
+            &HashSet::new()
+        ),
+        ChangeKind::Config,
+    );
+}
+
+/// The `..data` symlink a Kubernetes mount swaps on update sits in the config
+/// directory, so that directory has to match under either spelling.
+#[cfg(unix)]
+#[test]
+fn watched_config_matches_a_k8s_data_symlink_through_a_symlinked_dir() {
+    let temp_dir = TempDir::new().unwrap();
+    let real = temp_dir.path().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("config.toml"), MINIMAL_CONFIG_TOML).unwrap();
+    let link = temp_dir.path().join("link");
+    symlink(&real, &link).unwrap();
+
+    let config = WatchedConfig::new(vec![link.join("config.toml")]);
+    let event = make_event(
+        EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+        vec![link.join("..data")],
+    );
+
+    assert_eq!(
+        classify_event(
+            &event,
+            &config.matchable_paths,
+            &config.dirs.matchable,
+            &HashSet::new()
+        ),
+        ChangeKind::Config,
+    );
+}
+
+/// TLS directories carry every spelling too, so certificate rotation behind a
+/// symlinked mount is still detected.
+#[cfg(unix)]
+#[test]
+fn watched_dirs_match_a_symlinked_path_and_its_target() {
+    let temp_dir = TempDir::new().unwrap();
+    let real = temp_dir.path().join("real");
+    fs::create_dir(&real).unwrap();
+    let link = temp_dir.path().join("link");
+    symlink(&real, &link).unwrap();
+
+    let dirs = WatchedDirs::new(path_set(link.clone()));
+
+    assert!(
+        dirs.matchable.contains(&link),
+        "the operator's own path must match: {:?}",
+        dirs.matchable
+    );
+    assert!(
+        dirs.matchable.contains(&fs::canonicalize(&real).unwrap()),
+        "the resolved target must match too: {:?}",
+        dirs.matchable
+    );
+}
+
+/// A relative path is reported absolute, so both forms have to match.
+#[test]
+fn watched_dirs_keep_the_raw_form_of_a_relative_path() {
+    let dirs = WatchedDirs::new(path_set("."));
+
+    assert!(
+        dirs.matchable.contains(Path::new(".")),
+        "the operator's own path must match: {:?}",
+        dirs.matchable
+    );
+    assert!(
+        dirs.matchable.contains(&absolute(".").unwrap()),
+        "the absolutized form must match: {:?}",
+        dirs.matchable
     );
 }

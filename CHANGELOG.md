@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `-c` is repeatable: configuration files are merged in order with later files winning, so credentials can live in their own file and rotate without a restart.
 
+### Fixed
+
+- The configuration watcher now matches events against every spelling of a watched path, so hot reload and certificate rotation keep working on Linux when the path is reached through a symlink, as it is under a Kubernetes Secret or ConfigMap mount.
+
 ## 1.4.2
 
 ### Changed

@@ -3,7 +3,7 @@ mod classify;
 use std::{
     collections::HashSet,
     fs,
-    path::{Path, PathBuf},
+    path::{Path, PathBuf, absolute},
     sync::Arc,
     time::Duration,
 };
@@ -28,20 +28,15 @@ const DEBOUNCE: Duration = Duration::from_millis(100);
 async fn coalesce_events(
     rx: &mut mpsc::Receiver<Event>,
     initial: ChangeKind,
-    canonical_config_paths: &HashSet<PathBuf>,
-    canonical_config_dirs: &HashSet<PathBuf>,
-    canonical_tls_dirs: &HashSet<PathBuf>,
+    config_paths: &HashSet<PathBuf>,
+    config_dirs: &HashSet<PathBuf>,
+    tls_dirs: &HashSet<PathBuf>,
 ) -> Option<ChangeKind> {
     let mut accumulated = initial;
     loop {
         match timeout(DEBOUNCE, rx.recv()).await {
             Ok(Some(event)) => {
-                let kind = classify_event(
-                    &event,
-                    canonical_config_paths,
-                    canonical_config_dirs,
-                    canonical_tls_dirs,
-                );
+                let kind = classify_event(&event, config_paths, config_dirs, tls_dirs);
                 accumulated = merge_change_kind(accumulated, kind);
             }
             Ok(None) => return None,
@@ -205,22 +200,18 @@ fn build_watcher(
     Ok(watcher)
 }
 
-/// The watched TLS directories in both forms: `raw` is the operator-supplied
-/// path handed to `notify`, `canonical` is matched against the canonicalized
-/// paths `notify` reports on its events. Rebuilt each loop iteration from the
-/// freshly loaded configuration.
+/// The watched TLS directories: `raw` is the operator-supplied path handed to
+/// `notify`, `matchable` holds every spelling an event for it can arrive as.
+/// Rebuilt each loop iteration from the freshly loaded configuration.
 struct WatchedDirs {
     raw: HashSet<PathBuf>,
-    canonical: HashSet<PathBuf>,
+    matchable: HashSet<PathBuf>,
 }
 
 impl WatchedDirs {
     fn new(raw: HashSet<PathBuf>) -> Self {
-        let canonical = raw
-            .iter()
-            .map(|dir| fs::canonicalize(dir).unwrap_or_else(|_| dir.clone()))
-            .collect();
-        Self { raw, canonical }
+        let matchable = raw.iter().flat_map(|dir| match_forms(dir)).collect();
+        Self { raw, matchable }
     }
 }
 
@@ -229,17 +220,17 @@ impl WatchedDirs {
 /// has to be recomputed.
 struct WatchedConfig {
     paths: Vec<PathBuf>,
-    canonical_paths: HashSet<PathBuf>,
+    matchable_paths: HashSet<PathBuf>,
     dirs: WatchedDirs,
 }
 
 impl WatchedConfig {
     fn new(paths: Vec<PathBuf>) -> Self {
-        let canonical_paths = paths.iter().map(|path| canonicalize(path)).collect();
+        let matchable_paths = paths.iter().flat_map(|path| match_forms(path)).collect();
         let dirs = paths.iter().map(|path| parent_dir(path)).collect();
         Self {
             paths,
-            canonical_paths,
+            matchable_paths,
             dirs: WatchedDirs::new(dirs),
         }
     }
@@ -260,8 +251,17 @@ fn parent_dir(path: &Path) -> PathBuf {
     }
 }
 
-fn canonicalize(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+/// Every spelling of `path` an event may arrive as: inotify absolutizes without
+/// resolving symlinks while fsevents resolves them, so a path reached through a
+/// symlink matches only one of these depending on the platform.
+fn match_forms(path: &Path) -> impl Iterator<Item = PathBuf> {
+    [
+        Some(path.to_path_buf()),
+        absolute(path).ok(),
+        fs::canonicalize(path).ok(),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 struct WatchState<'a> {
@@ -297,9 +297,9 @@ async fn run_event_loop(state: &mut WatchState<'_>) -> LoopOutcome {
 
         let initial_kind = classify_event(
             &event,
-            &state.config.canonical_paths,
-            &state.config.dirs.canonical,
-            &state.tls_dirs.canonical,
+            &state.config.matchable_paths,
+            &state.config.dirs.matchable,
+            &state.tls_dirs.matchable,
         );
         if matches!(initial_kind, ChangeKind::Irrelevant) {
             continue;
@@ -308,9 +308,9 @@ async fn run_event_loop(state: &mut WatchState<'_>) -> LoopOutcome {
         let Some(kind) = coalesce_events(
             state.rx,
             initial_kind,
-            &state.config.canonical_paths,
-            &state.config.dirs.canonical,
-            &state.tls_dirs.canonical,
+            &state.config.matchable_paths,
+            &state.config.dirs.matchable,
+            &state.tls_dirs.matchable,
         )
         .await
         else {
