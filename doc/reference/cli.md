@@ -11,14 +11,14 @@ Angos command-line interface.
 ## Synopsis
 
 ```
-angos [-c <config>] <command> [<args>]
+angos [-c <config...>] <command> [<args>]
 ```
 
 ## Global Options
 
 | Option                | Description                                         |
 |-----------------------|-----------------------------------------------------|
-| `-c, --config <path>` | Path to configuration file (default: `config.toml`) |
+| `-c, --config <path>` | Path to a configuration file (default: `config.toml`). Repeatable: files are merged in order and a later file wins. See [Multiple Configuration Files](configuration.md#multiple-configuration-files) |
 | `--help, help`        | Display usage information                           |
 
 ---

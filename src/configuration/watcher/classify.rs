@@ -17,14 +17,17 @@ pub enum ChangeKind {
 /// and content updates manifest as a swap of the symlink rather than a write to the
 /// target file. Treating modifications of `<config_dir>/..data` as config changes
 /// keeps hot-reload working under K8s.
-pub fn is_k8s_data_symlink(path: &Path, config_dir: &Path) -> bool {
-    path.file_name().is_some_and(|n| n == "..data") && path.parent() == Some(config_dir)
+pub fn is_k8s_data_symlink(path: &Path, config_dirs: &HashSet<PathBuf>) -> bool {
+    path.file_name().is_some_and(|n| n == "..data")
+        && path
+            .parent()
+            .is_some_and(|parent| config_dirs.contains(parent))
 }
 
 pub fn classify_event(
     event: &Event,
-    canonical_config_path: &Path,
-    canonical_config_dir: &Path,
+    canonical_config_paths: &HashSet<PathBuf>,
+    canonical_config_dirs: &HashSet<PathBuf>,
     canonical_tls_dirs: &HashSet<PathBuf>,
 ) -> ChangeKind {
     if !matches!(
@@ -34,10 +37,9 @@ pub fn classify_event(
         return ChangeKind::Irrelevant;
     }
 
-    let affects_config = event
-        .paths
-        .iter()
-        .any(|p| p == canonical_config_path || is_k8s_data_symlink(p, canonical_config_dir));
+    let affects_config = event.paths.iter().any(|p| {
+        canonical_config_paths.contains(p) || is_k8s_data_symlink(p, canonical_config_dirs)
+    });
     if affects_config {
         return ChangeKind::Config;
     }

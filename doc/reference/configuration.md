@@ -8,6 +8,54 @@ title: "Configuration"
 
 Angos is configured via a TOML file (default: `config.toml`). The configuration is automatically reloaded when the file changes.
 
+## Multiple Configuration Files
+
+`-c` is repeatable. Files are merged in the order given, and a later file wins:
+
+```bash
+angos -c /etc/angos/config.toml -c /etc/angos/secrets.toml server
+```
+
+This keeps credentials out of the file your deployment tooling renders. The base
+file carries everything else, and a second file, sourced from a Kubernetes
+Secret written by External Secrets Operator, Vault or sealed-secrets, supplies
+only the sensitive values:
+
+```toml
+# config.toml
+[blob_store.s3]
+endpoint = "https://s3.example.com"
+bucket = "my-registry"
+region = "us-east-1"
+```
+
+```toml
+# secrets.toml
+[blob_store.s3]
+access_key_id = "AKIA..."
+secret_key = "..."
+```
+
+Merge rules:
+
+| Value | Behaviour |
+|---|---|
+| Table | Merged recursively, so a later file can add keys to a table an earlier file opened |
+| Scalar | Replaced by the last file that sets it |
+| Array | Replaced as a whole, never appended to |
+
+Because arrays are replaced, an array of tables such as
+`[[repository."hub".upstream]]` must be declared entirely in one file. To give an
+upstream a password from a separate file, repeat the whole entry there.
+
+Only the merged result has to be a valid configuration, so an overriding file
+holds just the keys it changes. Every file is watched, so rotating any of them
+reloads the merged configuration without a restart.
+
+A syntax error names the file it came from. An error detected after merging
+names the offending key path and the files that were merged, because a merged
+document has no single source line to quote.
+
 ## Hot Reloading
 
 Most configuration changes take effect immediately without restart. The following options require a restart:

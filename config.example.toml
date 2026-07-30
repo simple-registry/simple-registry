@@ -1,3 +1,8 @@
+# `-c` is repeatable and later files win, so credentials can be kept out of this
+# file and supplied by a second one:
+#   angos -c config.toml -c secrets.toml server
+# Tables merge, scalars and arrays are replaced. See doc/reference/configuration.md.
+
 [server]
 bind_address = "0.0.0.0"
 port = 8000
@@ -127,7 +132,7 @@ password = "$argon2id$v=19$m=16,t=2,p=1$MTIzNDU2Nzg$lurg6dYCXXrJP3zaFwu35w" # te
 # [auth.oidc.generic]
 # provider = "generic"
 # issuer = "https://auth.example.com"
-# discovery_url = "https://auth.example.com/.well-known/openid-configuration"
+# jwks_uri = "https://auth.example.com/.well-known/jwks.json"  # discovered from the issuer when omitted
 
 # Event webhooks -- notify external systems on registry operations
 # Define webhooks with [event_webhook.<name>], then reference them in global or repository config.
