@@ -234,15 +234,42 @@ async fn list_all_children_returns_all_entries() {
     assert_eq!(objects, vec!["z".to_string()]);
 }
 
+/// The flag only decides whether writes are fsynced, so the two settings have
+/// to agree on everything a caller can observe. Exercising one of them alone
+/// says nothing about the other.
 #[tokio::test]
 async fn sync_to_disk_flag_does_not_change_observable_behaviour() {
-    let dir = TempDir::new().unwrap();
-    let store = Backend::builder(dir.path()).sync_to_disk(true).build();
-    store
-        .put("k", Bytes::from_static(b"durable"))
-        .await
-        .unwrap();
-    assert_eq!(store.get("k").await.unwrap(), b"durable");
+    let mut observed = Vec::new();
+    for sync_to_disk in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let store = Backend::builder(dir.path())
+            .sync_to_disk(sync_to_disk)
+            .build();
+
+        store
+            .put("dir/k", Bytes::from_static(b"durable"))
+            .await
+            .unwrap();
+        store
+            .put("dir/j", Bytes::from_static(b"other"))
+            .await
+            .unwrap();
+        let body = store.get("dir/k").await.unwrap();
+        let listed = store.list("dir", 10, None).await.unwrap().items;
+        store.delete("dir/k").await.unwrap();
+        let after_delete = store.get("dir/k").await.is_err();
+
+        observed.push((body, listed, after_delete));
+    }
+
+    assert_eq!(
+        observed[0], observed[1],
+        "sync_to_disk must not change what a caller can observe"
+    );
+    let (body, listed, after_delete) = &observed[0];
+    assert_eq!(body, b"durable");
+    assert_eq!(listed, &vec!["j".to_string(), "k".to_string()]);
+    assert!(after_delete, "a deleted key must not be readable");
 }
 
 /// A stray atomic-write temporary sitting in a directory must never be

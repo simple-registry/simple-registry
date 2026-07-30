@@ -74,7 +74,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_store_and_retrieve() {
         let cache = Backend::new();
 
@@ -89,18 +89,23 @@ mod tests {
         assert_eq!(cache.retrieve_value("key").await, Ok(None));
     }
 
-    #[tokio::test]
+    /// `maybe_cleanup` sweeps the map every 1000th operation. Retrieval already
+    /// filters expired entries, so only the map's own length shows that the
+    /// sweep evicted anything rather than the read hiding it.
+    #[tokio::test(start_paused = true)]
     async fn test_cleanup_on_counter() {
-        let cache = Backend::new();
+        const SWEEP_INTERVAL: usize = 1000;
+        const SHORT: usize = 500;
+        const LONG: usize = 5;
 
-        for i in 0..500 {
+        let cache = Backend::new();
+        for i in 0..SHORT {
             cache
                 .store_value(&format!("short_{i}"), "value", 1)
                 .await
                 .unwrap();
         }
-
-        for i in 0..5 {
+        for i in 0..LONG {
             cache
                 .store_value(&format!("long_{i}"), "value", 100)
                 .await
@@ -108,16 +113,32 @@ mod tests {
         }
 
         time::sleep(Duration::from_millis(1100)).await;
+        assert_eq!(
+            cache.store.read().await.len(),
+            SHORT + LONG,
+            "expired entries stay in the map until a sweep runs"
+        );
 
-        for i in 0..495 {
+        // Operations so far, one per store; drive the counter to the sweep.
+        for i in 0..(SWEEP_INTERVAL - SHORT - LONG) {
             let _ = cache.retrieve_value(&format!("nonexistent_{i}")).await;
         }
+        assert_eq!(
+            cache.store.read().await.len(),
+            SHORT + LONG,
+            "no sweep before the interval elapses"
+        );
 
+        // The next operation is the interval-th, so it sweeps before reading.
         assert_eq!(
             cache.retrieve_value("long_0").await,
             Ok(Some("value".to_string()))
         );
-        assert_eq!(cache.retrieve_value("short_0").await, Ok(None));
+        assert_eq!(
+            cache.store.read().await.len(),
+            LONG,
+            "the sweep must evict every expired entry, not just hide it on read"
+        );
     }
 
     /// Deleting a key that was never stored must return `Ok(())` without panicking.
@@ -207,11 +228,10 @@ mod tests {
     }
 
     /// Verifies the TTL boundary: the entry is present before expiry and absent
-    /// after.  The implementation stores `tokio::time::Instant` values; because
-    /// the `test-util` tokio feature is not enabled in this workspace, the test
-    /// uses real wall-clock sleeps with a short TTL (2 s) and generous margins
-    /// (1 s before, 3 s after) to avoid timer precision issues on CI.
-    #[tokio::test]
+    /// after. The implementation stores `tokio::time::Instant` values, so the
+    /// paused clock advances past the boundary exactly rather than sleeping on
+    /// it with a margin for timer precision.
+    #[tokio::test(start_paused = true)]
     async fn test_ttl_boundary() {
         const TTL_SECS: u64 = 2;
         let cache = Backend::new();

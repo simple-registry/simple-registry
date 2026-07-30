@@ -151,13 +151,17 @@ async fn crash_before_intent() {
 
 /// Crash after the intent is written but before the first Apply write.
 ///
-/// Recovery should replay the transaction and the canonical key must exist.
+/// No mutation reached `Applied`, so the transaction is uncommitted and
+/// recovery rolls it back: bodies and intent are deleted and the canonical key
+/// must stay absent.
 #[tokio::test(flavor = "multi_thread")]
 async fn crash_after_intent_before_apply() {
     let inner = Arc::new(MemoryObjectStore::new());
     // Write 0 = body staging; write 1 = intent PUT; write 2 = first apply.
-    // Crash on write 2.
-    let crashing = crashing_store(inner.clone(), 2);
+    // The crash is permanent: a process that dies mid-Apply cannot run the
+    // rollback writes either, which is what leaves the intent behind for
+    // recovery to find.
+    let crashing = crashing_store_permanent(inner.clone(), 2);
 
     let lock = test_util::memory_lock();
     let executor = test_util::locked_executor(crashing.clone(), lock);
@@ -172,17 +176,24 @@ async fn crash_after_intent_before_apply() {
 
     // The intent lands (write 1) but Apply crashes (write 2).
     let result = executor.execute(tx).await;
-    // This may succeed or fail depending on whether the stamp write (also a PUT)
-    // is hit. In this test the apply PUT itself is write 2 so it will error.
-    let _ = result; // Outcome is indeterminate; recovery is what we test.
+    assert!(result.is_err(), "execute must fail on injected crash");
+    assert!(
+        inner.get("apply/canonical").await.is_err(),
+        "the interrupted Apply must not have landed"
+    );
 
     // Force a stale intent by backdating created_at.
     backdate_intents(&inner).await;
 
     test_util::sweep_once(inner.clone(), test_util::memory_lock()).await;
 
-    // After recovery: no orphans.
+    // Rollback removes the staged body and the intent, and leaves no trace of
+    // the mutation: an uncommitted transaction must never become visible.
     test_util::assert_no_orphans(&*inner).await;
+    assert!(
+        inner.get("apply/canonical").await.is_err(),
+        "an intent with no Applied slot must be rolled back, not replayed"
+    );
 }
 
 /// Injecting a crash during Reap (after all mutations are applied) does not
@@ -193,8 +204,9 @@ async fn crash_during_reap() {
     let inner = Arc::new(MemoryObjectStore::new());
     // We want the transaction to complete Apply but crash on the first Reap write
     // (delete_prefix for bodies). Count: body_staging=0, intent=1, apply=2,
-    // stamp=3, reap bodies delete_prefix=4.
-    let crashing = crashing_store(inner.clone(), 4);
+    // stamp=3, reap bodies delete_prefix=4. Permanent, so the reap cannot
+    // resume on its own and recovery is what finishes it.
+    let crashing = crashing_store_permanent(inner.clone(), 4);
 
     let lock = test_util::memory_lock();
     let executor = test_util::locked_executor(crashing.clone(), lock);
@@ -215,7 +227,14 @@ async fn crash_during_reap() {
 
     test_util::sweep_once(inner.clone(), test_util::memory_lock()).await;
 
+    // Apply completed before the crash, so finishing the reap must leave the
+    // committed value in place rather than roll it back.
     test_util::assert_no_orphans(&*inner).await;
+    let body = inner
+        .get("reap/canonical")
+        .await
+        .expect("a transaction that finished Apply must keep its canonical key");
+    assert_eq!(body, b"reap-body");
 }
 
 /// An intent with at least one `Applied` progress slot is fully committed;
@@ -300,7 +319,7 @@ async fn manifest_push_crash_mid_apply_recovery_converges() {
     //   write 11: Reap intent delete
     for crash_on in 0usize..=11 {
         let inner = Arc::new(MemoryObjectStore::new());
-        let crashing = crashing_store(inner.clone(), crash_on);
+        let crashing = crashing_store_permanent(inner.clone(), crash_on);
 
         let lock = test_util::memory_lock();
         let executor = test_util::locked_executor(crashing.clone(), lock);
