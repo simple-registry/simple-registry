@@ -39,7 +39,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt as _},
     try_join,
 };
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use angos_storage::paginated;
 use angos_tx_engine::StorageError;
@@ -427,12 +427,17 @@ impl BlobStore {
     /// a crash after promotion is short-circuited; a crash after the marker is
     /// consumed but before promotion makes the client re-push, and scrub
     /// reclaims the leftover session dir.
+    ///
+    /// `hashed_size` is the byte count the session hashed. The assembled object
+    /// must be exactly that long, or its bytes do not hash to `digest` and it is
+    /// rejected instead of promoted.
     #[instrument(skip(self))]
     pub async fn complete_upload(
         &self,
         namespace: &Namespace,
         uuid: &str,
         digest: &Digest,
+        hashed_size: u64,
     ) -> Result<Digest, Error> {
         // Confirm the session is live, then consume its liveness marker so any
         // re-run fails at the check above instead of re-finalizing.
@@ -442,6 +447,17 @@ impl BlobStore {
 
         let upload_key = path_builder::upload_path(namespace, uuid);
         self.object.complete_upload(&upload_key).await?;
+
+        // An append that fails after durably writing bytes leaves staged data
+        // the checkpoint never recorded, and the resume that follows hashes
+        // only its own bytes, so the digest alone cannot show the divergence.
+        let staged_size = self.object.head(&upload_key).await?.size;
+        if staged_size != hashed_size {
+            warn!("Staged {staged_size} bytes but hashed {hashed_size}, refusing to promote");
+            let container = path_builder::upload_container_path(namespace, uuid);
+            let _ = self.object.delete_prefix(&container).await;
+            return Err(Error::DigestInvalid);
+        }
 
         let blob_key = path_builder::blob_path(digest);
         self.object.move_object(&upload_key, &blob_key).await?;

@@ -20,6 +20,7 @@ pub async fn promote_and_grant(
     namespace: &Namespace,
     session_key: &str,
     digest: &Digest,
+    hashed_size: u64,
 ) -> Result<(), Error> {
     metadata_store
         .with_blob_data_lock(digest, async {
@@ -27,7 +28,7 @@ pub async fn promote_and_grant(
                 Ok(_) => {}
                 Err(Error::BlobUnknown | Error::NotFound) => {
                     blob_store
-                        .complete_upload(namespace, session_key, digest)
+                        .complete_upload(namespace, session_key, digest, hashed_size)
                         .await?;
                 }
                 Err(error) => return Err(error),
