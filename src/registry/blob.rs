@@ -166,7 +166,7 @@ async fn fill_cache_session(
     session_key: &str,
 ) -> Result<(), Error> {
     // A single-shot copy of a known blob: hash only the target algorithm.
-    let (computed_digest, _) = blob_store
+    let (computed_digest, hashed_size) = blob_store
         .write_monolithic_upload(
             namespace,
             session_key,
@@ -185,7 +185,15 @@ async fn fill_cache_session(
     }
     // Promotion and grant share the coarse lock `delete_blob` holds while
     // reclaiming, mirroring the manifest path's bytes-then-link order.
-    promote_and_grant(blob_store, metadata_store, namespace, session_key, digest).await
+    promote_and_grant(
+        blob_store,
+        metadata_store,
+        namespace,
+        session_key,
+        digest,
+        hashed_size,
+    )
+    .await
 }
 
 impl Registry {

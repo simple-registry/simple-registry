@@ -504,6 +504,7 @@ impl Registry {
             namespace,
             &session_key,
             digest,
+            new_total,
         )
         .await?;
 

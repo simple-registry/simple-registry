@@ -5,6 +5,8 @@ use futures_util::TryStreamExt;
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
+use angos_storage::test_util::frame;
+
 use super::*;
 use crate::{
     oci::{Algorithm, Digest, Namespace},
@@ -42,7 +44,12 @@ pub async fn test_datastore_stream_uploads(store: &BlobStore) {
     let completed_digest =
         Digest::sha256_of_bytes(format!("Content for upload {upload_to_complete}").as_bytes());
     store
-        .complete_upload(namespace, upload_to_complete, &completed_digest)
+        .complete_upload(
+            namespace,
+            upload_to_complete,
+            &completed_digest,
+            format!("Content for upload {upload_to_complete}").len() as u64,
+        )
         .await
         .unwrap();
 
@@ -72,7 +79,7 @@ async fn seed_blob_with(store: &BlobStore, content: &[u8], algorithm: Algorithm)
         .unwrap();
     let expected = Digest::from_bytes(algorithm, content);
     store
-        .complete_upload(&namespace, &uuid, &expected)
+        .complete_upload(&namespace, &uuid, &expected, len)
         .await
         .unwrap()
 }
@@ -185,7 +192,12 @@ pub async fn test_datastore_upload_operations(store: &BlobStore) {
     assert!(Utc::now().signed_duration_since(summary.started_at) < Duration::hours(1));
 
     let final_digest = store
-        .complete_upload(namespace, &uuid, &expected_digest)
+        .complete_upload(
+            namespace,
+            &uuid,
+            &expected_digest,
+            test_content.len() as u64,
+        )
         .await
         .unwrap();
     assert_eq!(final_digest, expected_digest);
@@ -244,11 +256,13 @@ pub async fn test_complete_upload_fails_on_rerun(store: &BlobStore) {
         .unwrap();
     let digest = Digest::sha256_of_bytes(content);
     store
-        .complete_upload(&namespace, &uuid, &digest)
+        .complete_upload(&namespace, &uuid, &digest, content.len() as u64)
         .await
         .unwrap();
 
-    let rerun = store.complete_upload(&namespace, &uuid, &digest).await;
+    let rerun = store
+        .complete_upload(&namespace, &uuid, &digest, content.len() as u64)
+        .await;
     assert!(
         matches!(rerun, Err(Error::BlobUploadUnknown)),
         "re-run of a completed session must fail: {rerun:?}"
@@ -334,4 +348,57 @@ async fn complete_upload_fails_on_rerun() {
         test_complete_upload_fails_on_rerun(tc.blob_store().as_ref()).await;
     })
     .await;
+}
+
+#[tokio::test]
+async fn complete_upload_rejects_size_divergence() {
+    for_each_backend(async |tc| {
+        test_complete_upload_rejects_size_divergence(tc.blob_store().as_ref()).await;
+    })
+    .await;
+}
+
+/// An append that fails after durably writing bytes leaves the staging object
+/// longer than the checkpoint records, and the resume that follows hashes only
+/// its own bytes, so the digest matches while the stored bytes do not. The
+/// orphaned tail is written directly here because no backend error is needed to
+/// reach the state, only the size divergence it leaves behind.
+pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
+    let tail = b"orphaned tail".to_vec();
+    let namespace = Namespace::new("test/divergence").unwrap();
+    let uuid = Uuid::new_v4().to_string();
+    let content = b"hashed prefix";
+    store.create_upload(&namespace, &uuid).await.unwrap();
+    store
+        .write_upload(
+            &namespace,
+            &uuid,
+            Box::new(Cursor::new(content.to_vec())),
+            Some(content.len() as u64),
+            Algorithm::Sha256,
+        )
+        .await
+        .unwrap();
+
+    // Bytes the session hashed, then a tail it never did.
+    let upload_key = path_builder::upload_path(&namespace, &uuid);
+    store
+        .object
+        .write_upload(&upload_key, frame(tail.clone()), Some(tail.len() as u64))
+        .await
+        .unwrap();
+
+    let digest = Digest::sha256_of_bytes(content);
+    let result = store
+        .complete_upload(&namespace, &uuid, &digest, content.len() as u64)
+        .await;
+
+    assert!(
+        matches!(result, Err(Error::DigestInvalid)),
+        "a staged object longer than the hashed size must not be promoted: {result:?}"
+    );
+    assert!(
+        matches!(store.read(&digest).await, Err(Error::BlobUnknown)),
+        "the diverged bytes must never reach the canonical blob path"
+    );
 }

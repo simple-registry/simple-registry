@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.4.4 - UNRELEASED
+
+- A completed upload is now promoted only when the assembled object is exactly as long as the bytes the session hashed, so an append that failed after durably writing bytes can no longer leave a resumed upload serving a blob whose content does not hash to its digest.
+
 ## 1.4.3
 
 ### Added
