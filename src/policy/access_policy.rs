@@ -166,7 +166,7 @@ impl AccessPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oci::{Digest, Namespace};
+    use crate::oci::{Digest, Namespace, Reference, Tag};
 
     fn rule(s: &str) -> CelRule {
         CelRule::compile(s).unwrap()
@@ -535,5 +535,24 @@ mod tests {
             rules: vec![rule("false"), rule("false")],
         });
         assert!(is_deny(&policy_deny.evaluate(&action, &identity)));
+    }
+
+    /// `request.reference` is documented as a string, so a rule comparing it to
+    /// one has to match. A tagged-object serialization would make it a map and
+    /// every such policy would silently never fire.
+    #[test]
+    fn reference_is_a_string_in_the_policy_context() {
+        let policy = AccessPolicy::new(AccessPolicyConfig {
+            default: AccessMode::Deny,
+            rules: vec![rule("request.reference == 'latest'")],
+        });
+        let action = Action::GetManifest {
+            namespace: Namespace::new("team/app").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+        };
+
+        assert!(is_allow(
+            &policy.evaluate(&action, &ClientIdentity::default())
+        ));
     }
 }

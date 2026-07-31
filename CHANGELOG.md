@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A completed upload is now promoted only when the assembled object is exactly as long as the bytes the session hashed, so an append that failed after durably writing bytes can no longer leave a resumed upload serving a blob whose content does not hash to its digest.
 - A `[server.tls]` section that does not parse now fails startup instead of falling through to a plaintext listener, so a malformed TLS configuration can no longer silently downgrade the registry to HTTP.
+- `request.reference` reaches CEL access policies as the documented string rather than a tagged object, so a rule such as `request.reference == "latest"` now matches instead of never firing.
 
 ## 1.4.3
 
