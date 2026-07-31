@@ -19,14 +19,20 @@
 	let loading = $state(true);
 	let error: string | null = $state(null);
 
+	// Monotonic token: each load claims the next value, so a slow response from
+	// a superseded load is discarded instead of overwriting the current view.
+	let loadToken = 0;
+
 	$effect(() => {
 		loadData(data.repository);
 	});
 
 	async function loadData(repository: string) {
+		const token = ++loadToken;
 		loading = true;
 		error = null;
 		const result = await fetchNamespaces(repository);
+		if (token !== loadToken) return;
 		if (result.error) {
 			error = result.error;
 		} else if (result.data) {
@@ -91,7 +97,11 @@
 			{:else}
 				{#each namespaces as namespace}
 					<tr class="clickable" onclick={() => goto(namespaceUrl(data.repository, displayNamespace(namespace.name, data.repository)))}>
-						<td>{displayNamespace(namespace.name, data.repository)}</td>
+						<td>
+							<a class="row-link" href={namespaceUrl(data.repository, displayNamespace(namespace.name, data.repository))}>
+								{displayNamespace(namespace.name, data.repository)}
+							</a>
+						</td>
 						<td>{namespace.manifest_count > 0 ? namespace.manifest_count : '-'}</td>
 						<td>{namespace.upload_count > 0 ? namespace.upload_count : '-'}</td>
 					</tr>

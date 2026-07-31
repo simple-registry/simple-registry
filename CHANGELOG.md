@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A `[server.tls]` section that does not parse now fails startup instead of falling through to a plaintext listener, so a malformed TLS configuration can no longer silently downgrade the registry to HTTP.
 - Repository names accept the full distribution-spec separator set, so a name using a double underscore or a run of dashes such as `a__b` or `a--b` is no longer rejected on push, pull, and pull-through mirroring.
 - `request.reference` reaches CEL access policies as the documented string rather than a tagged object, so a rule such as `request.reference == "latest"` now matches instead of never firing.
+- The web UI discards responses from a superseded load and guards `Load more` while a page is in flight, so navigating or paging quickly no longer shows stale data or appends a page twice.
+- A failed action in the web UI is reported in a banner above the view it was taken on instead of replacing the page, and deleting the tag being viewed navigates to the digest rather than stranding the user on a 404.
+- The web UI downloads a layer through a plain link, so the browser streams it to disk instead of holding a blob that is routinely multiple gigabytes in tab memory.
+- Repository, namespace and manifest rows in the web UI carry a real link, so the primary drill-down is reachable by keyboard.
 
 ## 1.4.3
 

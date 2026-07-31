@@ -1,8 +1,9 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import { getRegistryName } from '$lib/config.svelte';
-	import { fetchRevisions, fetchUploads, fetchManifest, deleteManifest as apiDeleteManifest, cancelUpload as apiCancelUpload, downloadBlob as apiDownloadBlob, type UploadEntry, type ParentRef, type Manifest, type ReferrerInfo } from '$lib/api';
-	import { displayNamespace as displayNs, buildTree, buildTreeRows, repoUrl, namespaceUrl, type TreeRowNode } from '$lib/utils';
+	import { fetchRevisions, fetchUploads, fetchManifest, deleteManifest as apiDeleteManifest, cancelUpload as apiCancelUpload, blobUrl, type UploadEntry, type ParentRef, type Manifest, type ReferrerInfo } from '$lib/api';
+	import { displayNamespace as displayNs, buildTree, buildTreeRows, repoUrl, namespaceUrl, manifestUrl, type TreeRowNode } from '$lib/utils';
 	import LoadingState from '$lib/components/LoadingState.svelte';
 	import ErrorState from '$lib/components/ErrorState.svelte';
 	import Breadcrumb from '$lib/components/Breadcrumb.svelte';
@@ -27,6 +28,10 @@
 
 	let loading = $state(true);
 	let error: string | null = $state(null);
+	// Failures of an action taken on the current view, shown as a banner so the
+	// view itself survives; `error` stays reserved for a load that produced no
+	// view at all.
+	let actionError: string | null = $state(null);
 	let deleteConfirm: string | null = $state(null);
 	let deleting = $state(false);
 	let expanded: Set<string> = $state(new Set());
@@ -47,6 +52,7 @@
 	}
 
 	$effect(() => {
+		actionError = null;
 		if (data.reference !== null) {
 			loadManifest(fullNamespace, data.reference);
 		} else {
@@ -68,10 +74,9 @@
 		} else if (revisionsResult.data) {
 			rows = buildTreeRows(buildTree(revisionsResult.data.manifests ?? []));
 		}
-		if (uploadsResult.data) {
-			uploads = uploadsResult.data.uploads ?? [];
-		} else {
-			uploads = [];
+		uploads = uploadsResult.data?.uploads ?? [];
+		if (uploadsResult.error) {
+			actionError = `Could not list uploads (${uploadsResult.error}).`;
 		}
 		selectedUploads = new Set();
 		loading = false;
@@ -117,36 +122,31 @@
 		loading = false;
 	}
 
-	async function deleteManifestByRef(reference: string) {
-		deleting = true;
-		error = null;
-		const err = await apiDeleteManifest(fullNamespace, reference);
-		if (err) {
-			error = err;
+	// Refresh the view a delete was taken from. Reloading by a reference that
+	// was just deleted would 404 and strand the user on an error page although
+	// the delete succeeded, so leave for the digest when it still resolves and
+	// for the namespace otherwise.
+	async function reloadAfterDelete(deletedReference: string) {
+		if (data.reference === null) {
+			await loadNamespace(fullNamespace);
+		} else if (data.reference !== deletedReference) {
+			await loadManifest(fullNamespace, data.reference);
+		} else if (digest && digest !== deletedReference) {
+			await goto(manifestUrl(data.repository, data.namespace, digest));
 		} else {
-			deleteConfirm = null;
-			if (data.reference !== null) {
-				await loadManifest(fullNamespace, data.reference);
-			} else {
-				await loadNamespace(fullNamespace);
-			}
+			await goto(namespaceUrl(data.repository, data.namespace));
 		}
-		deleting = false;
 	}
 
-	async function deleteTag(tag: string) {
+	async function deleteByReference(reference: string) {
 		deleting = true;
-		error = null;
-		const err = await apiDeleteManifest(fullNamespace, tag);
+		actionError = null;
+		const err = await apiDeleteManifest(fullNamespace, reference);
 		if (err) {
-			error = err;
+			actionError = `Delete failed (${err}).`;
 		} else {
 			deleteConfirm = null;
-			if (data.reference !== null) {
-				await loadManifest(fullNamespace, data.reference);
-			} else {
-				await loadNamespace(fullNamespace);
-			}
+			await reloadAfterDelete(reference);
 		}
 		deleting = false;
 	}
@@ -154,10 +154,10 @@
 	async function deleteByHash() {
 		if (!digest) return;
 		deleting = true;
-		error = null;
+		actionError = null;
 		const err = await apiDeleteManifest(fullNamespace, digest);
 		if (err) {
-			error = err;
+			actionError = `Delete failed (${err}).`;
 			deleting = false;
 		} else {
 			window.location.href = namespaceUrl(data.repository, data.namespace);
@@ -166,10 +166,10 @@
 
 	async function cancelUpload(uuid: string) {
 		deleting = true;
-		error = null;
+		actionError = null;
 		const err = await apiCancelUpload(fullNamespace, uuid);
 		if (err) {
-			error = err;
+			actionError = `Cancel failed (${err}).`;
 		} else {
 			deleteConfirm = null;
 			await loadNamespace(fullNamespace);
@@ -179,7 +179,7 @@
 
 	async function cancelSelectedUploads() {
 		deleting = true;
-		error = null;
+		actionError = null;
 		const uuids = [...selectedUploads];
 		const results = await Promise.all(
 			uuids.map((uuid) => apiCancelUpload(fullNamespace, uuid))
@@ -188,16 +188,9 @@
 		await loadNamespace(fullNamespace);
 		const failed = results.filter((err) => err !== null).length;
 		if (failed > 0) {
-			error = `Failed to cancel ${failed} of ${uuids.length} uploads`;
+			actionError = `Failed to cancel ${failed} of ${uuids.length} uploads.`;
 		}
 		deleting = false;
-	}
-
-	async function downloadBlob(blobDigest: string, filename: string | null) {
-		const err = await apiDownloadBlob(fullNamespace, blobDigest, filename);
-		if (err) {
-			error = err;
-		}
 	}
 </script>
 
@@ -224,6 +217,10 @@
 	]} />
 {/if}
 
+{#if actionError}
+	<div class="action-error">{actionError}</div>
+{/if}
+
 {#if loading}
 	<LoadingState message={isManifestView ? 'Loading manifest' : 'Loading'} />
 {:else if error}
@@ -239,10 +236,10 @@
 		{childReferrers}
 		{deleteConfirm}
 		{deleting}
-		ondeletetag={deleteTag}
+		ondeletetag={deleteByReference}
 		ondeletebyhash={deleteByHash}
 		onconfirmchange={(value) => deleteConfirm = value}
-		ondownloadblob={downloadBlob}
+		getbloburl={(blobDigest) => blobUrl(fullNamespace, blobDigest)}
 	/>
 {:else}
 	<RepositoryTree
@@ -256,8 +253,8 @@
 		{expanded}
 		ontoggleexpand={toggleExpand}
 		onconfirmchange={(value) => deleteConfirm = value}
-		ondeletemanifest={deleteManifestByRef}
-		ondeletetag={deleteTag}
+		ondeletemanifest={deleteByReference}
+		ondeletetag={deleteByReference}
 		oncancelupload={cancelUpload}
 		onuploadselectionchange={(selected) => selectedUploads = selected}
 		oncancelselecteduploads={cancelSelectedUploads}

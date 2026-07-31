@@ -51,7 +51,7 @@
 			{:else}
 				{#each repositories as repo}
 					<tr class="clickable" onclick={() => goto(repoUrl(repo.name))}>
-						<td>{repo.name}</td>
+						<td><a class="row-link" href={repoUrl(repo.name)}>{repo.name}</a></td>
 						<td>
 							{#if repo.pull_through_cache}
 								<span class="badge pull-through">Cache</span>

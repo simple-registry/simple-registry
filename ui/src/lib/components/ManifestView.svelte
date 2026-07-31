@@ -33,7 +33,7 @@
 		ondeletetag: (tag: string) => void;
 		ondeletebyhash: () => void;
 		onconfirmchange: (value: string | null) => void;
-		ondownloadblob: (blobDigest: string, filename: string | null) => void;
+		getbloburl: (blobDigest: string) => string;
 	}
 
 	let {
@@ -49,7 +49,7 @@
 		ondeletetag,
 		ondeletebyhash,
 		onconfirmchange,
-		ondownloadblob
+		getbloburl
 	}: Props = $props();
 
 	let expandedAnnotations: Set<string> = $state(new Set());
@@ -206,7 +206,7 @@
 							<td>{layer.mediaType}</td>
 							<td>{formatSize(layer.size)}</td>
 							<td>
-								<button class="download-link" onclick={() => ondownloadblob(layer.digest, getFileName(layer))}>Download</button>
+								<a class="download-link" href={getbloburl(layer.digest)} download={getFileName(layer) ?? layer.digest}>Download</a>
 							</td>
 						</tr>
 					{/each}

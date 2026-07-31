@@ -9,7 +9,6 @@
 	interface Props {
 		node: TreeRowNode;
 		depth: number;
-		/** Whether the parent row has a following sibling (drives the nested parent line). */
 		parentHasNext?: boolean;
 		expanded: Set<string>;
 		deleteConfirm: string | null;
@@ -20,6 +19,7 @@
 		ondeletetag: (tag: string) => void;
 		onconfirmchange: (value: string | null) => void;
 		gettaghref: (tag: string) => string;
+		getdigesthref: (digest: string) => string;
 	}
 
 	let {
@@ -34,7 +34,8 @@
 		ondeletemanifest,
 		ondeletetag,
 		onconfirmchange,
-		gettaghref
+		gettaghref,
+		getdigesthref
 	}: Props = $props();
 
 	const isExpanded = $derived(expanded.has(node.digest));
@@ -50,7 +51,7 @@
 		class:expanded={depth === 0 && isExpanded}
 		class:has-next={depth > 0 && node.hasNext}
 		class:has-attestations={depth === 1 && node.canExpand && isExpanded}
-	>{#if depth === 2 && parentHasNext}<span class="parent-line"></span>{/if}{#if node.canExpand}<button class="tree-toggle" onclick={(e) => ontoggleexpand(node.digest, e)}><span class="toggle-icon">{isExpanded ? '−' : '+'}</span></button>{#if depth === 1 && isExpanded}<span class="branch-line"></span>{/if}{:else}<span class="tree-toggle leaf"></span>{/if}<code>{node.digest}</code></td>
+	>{#if depth === 2 && parentHasNext}<span class="parent-line"></span>{/if}{#if node.canExpand}<button class="tree-toggle" onclick={(e) => ontoggleexpand(node.digest, e)}><span class="toggle-icon">{isExpanded ? '−' : '+'}</span></button>{#if depth === 1 && isExpanded}<span class="branch-line"></span>{/if}{:else}<span class="tree-toggle leaf"></span>{/if}<a class="row-link" href={getdigesthref(node.digest)}><code>{node.digest}</code></a></td>
 	<td>
 		{#if node.kind === 'root'}
 			<TagList
@@ -94,6 +95,7 @@
 			{ondeletetag}
 			{onconfirmchange}
 			{gettaghref}
+			{getdigesthref}
 		/>
 	{/each}
 {/if}

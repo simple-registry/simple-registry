@@ -169,6 +169,7 @@
 					{ondeletetag}
 					{onconfirmchange}
 					gettaghref={(tag) => manifestUrl(repository, namespace, tag)}
+					getdigesthref={(rowDigest) => manifestUrl(repository, namespace, rowDigest)}
 				/>
 			{/each}
 		{/if}

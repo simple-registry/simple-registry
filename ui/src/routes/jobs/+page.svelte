@@ -32,13 +32,19 @@
 	let error: string | null = $state(null);
 	let actionError: string | null = $state(null);
 
+	let loadToken = 0;
+	let pendingMore = $state(false);
+	let failedMore = $state(false);
+
 	// storage_key currently being mutated (disables its row controls).
 	let busyKey: string | null = $state(null);
 	// storage_key whose delete is awaiting confirmation.
 	let confirmKey: string | null = $state(null);
 
 	async function loadPending(reset: boolean): Promise<void> {
+		const token = loadToken;
 		const result = await fetchJobs(queue, PAGE, reset ? undefined : pendingNext);
+		if (token !== loadToken) return;
 		if (result.error) {
 			error = result.error;
 		} else if (result.data) {
@@ -48,7 +54,9 @@
 	}
 
 	async function loadFailed(reset: boolean): Promise<void> {
+		const token = loadToken;
 		const result = await fetchFailedJobs(queue, PAGE, reset ? undefined : failedNext);
+		if (token !== loadToken) return;
 		if (result.error) {
 			error = result.error;
 		} else if (result.data) {
@@ -58,6 +66,7 @@
 	}
 
 	async function refresh(): Promise<void> {
+		loadToken += 1;
 		loading = true;
 		error = null;
 		actionError = null;
@@ -96,6 +105,18 @@
 			actionError = `Delete failed (${err}); list refreshed.`;
 		}
 		await refresh();
+	}
+
+	async function loadMorePending(): Promise<void> {
+		pendingMore = true;
+		await loadPending(false);
+		pendingMore = false;
+	}
+
+	async function loadMoreFailed(): Promise<void> {
+		failedMore = true;
+		await loadFailed(false);
+		failedMore = false;
 	}
 
 	function backoffPending(job: JobEntry): boolean {
@@ -182,7 +203,7 @@
 		</table>
 		{#if pendingNext}
 			<div class="load-more">
-				<button onclick={() => loadPending(false)} disabled={loading}>Load more</button>
+				<button onclick={loadMorePending} disabled={loading || pendingMore}>Load more</button>
 			</div>
 		{/if}
 	</Card>
@@ -235,7 +256,7 @@
 		</table>
 		{#if failedNext}
 			<div class="load-more">
-				<button onclick={() => loadFailed(false)} disabled={loading}>Load more</button>
+				<button onclick={loadMoreFailed} disabled={loading || failedMore}>Load more</button>
 			</div>
 		{/if}
 	</Card>
@@ -260,15 +281,6 @@
 
 	.refresh:hover:not(:disabled) {
 		background: var(--color-surface-hover, var(--color-surface));
-	}
-
-	.action-error {
-		margin-bottom: 1rem;
-		padding: 0.6rem 0.9rem;
-		border: 1px solid var(--color-warning, #b45309);
-		border-radius: 6px;
-		color: var(--color-warning, #b45309);
-		font-size: 0.9rem;
 	}
 
 	.mono {
