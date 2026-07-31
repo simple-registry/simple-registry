@@ -253,25 +253,6 @@ export async function cancelUpload(namespace: string, uuid: string): Promise<str
 	return deleteResource(`/v2/${namespace}/blobs/uploads/${uuid}`);
 }
 
-export async function downloadBlob(namespace: string, digest: string, filename: string | null): Promise<string | null> {
-	try {
-		const response = await fetch(`/v2/${namespace}/blobs/${digest}`, {
-			headers: { 'X-Angos-No-Redirect': '1' }
-		});
-		if (!response.ok) {
-			return `HTTP ${response.status}`;
-		}
-		const blob = await response.blob();
-		const url = URL.createObjectURL(blob);
-		const a = document.createElement('a');
-		a.href = url;
-		a.download = filename ?? digest;
-		document.body.appendChild(a);
-		a.click();
-		document.body.removeChild(a);
-		URL.revokeObjectURL(url);
-		return null;
-	} catch (e) {
-		return e instanceof Error ? e.message : 'Download failed';
-	}
+export function blobUrl(namespace: string, digest: string): string {
+	return `/v2/${namespace}/blobs/${digest}`;
 }
