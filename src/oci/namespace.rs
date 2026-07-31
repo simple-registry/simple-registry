@@ -11,8 +11,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::oci::Error;
 
+/// The distribution-spec repository-name grammar, anchored:
+/// `[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*(/[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*)*`.
+/// A separator is a dot, one or two underscores, or a run of dashes, and always
+/// sits between alphanumerics.
 static NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$").unwrap()
+    Regex::new(
+        r"^[a-z0-9]+(?:(?:__|[._]|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:__|[._]|-+)[a-z0-9]+)*)*$",
+    )
+    .unwrap()
 });
 
 /// OCI/Docker repository-name cap (Docker `reference.NameTotalLengthMax`).
@@ -570,5 +577,41 @@ mod tests {
         assert!(!namespace_belongs_to("myrepo", "myrepo/"));
         assert!(!namespace_belongs_to("myrepo2", "myrepo"));
         assert!(!namespace_belongs_to("myrepo", "myrepo2"));
+    }
+
+    /// The distribution-spec separator is `.`, `_`, `__`, or a run of dashes,
+    /// so a double underscore and repeated dashes are legal in a path
+    /// component.
+    #[test]
+    fn accepts_the_spec_separators() {
+        for name in [
+            "a__b",
+            "a--b",
+            "a---b",
+            "ubuntu--test",
+            "my__repo/sub--component",
+            "a.b",
+            "a_b",
+            "a-b",
+        ] {
+            assert!(
+                Namespace::new(name).is_ok(),
+                "{name} is legal under the distribution-spec name grammar"
+            );
+        }
+    }
+
+    /// A separator must sit between alphanumerics and must be one of the four
+    /// the grammar lists, so three underscores and a mixed run stay invalid.
+    #[test]
+    fn rejects_separators_the_spec_does_not_allow() {
+        for name in [
+            "a___b", "a._b", "a..b", "a-_b", "-ab", "ab-", "_ab", "ab_", "a//b", "A--B",
+        ] {
+            assert!(
+                Namespace::new(name).is_err(),
+                "{name} is not legal under the distribution-spec name grammar"
+            );
+        }
     }
 }
