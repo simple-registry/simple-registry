@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "angos"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "angos-backoff",
  "angos-s3-client",
@@ -449,9 +449,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "bytesize"
-version = "2.4.2"
+version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d7c8918969267b2932ffd5655509bbbea0833823058c378876953217f5fc50e"
+checksum = "351a3e803ee3c6eaeee6b00076b767514b37c32a73d326c3ec7abddb7d6c3493"
 dependencies = [
  "serde_core",
 ]
