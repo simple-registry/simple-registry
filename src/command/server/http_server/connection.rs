@@ -24,7 +24,7 @@ use crate::{
         response_body::ResponseBody,
         router,
     },
-    identity::Action,
+    identity::{Action, RequestScheme},
     metrics_provider::{InFlightGuard, metrics_provider},
     timing::elapsed_ms,
 };
@@ -41,6 +41,7 @@ pub async fn serve_request<S>(
     peer_certificate: Option<Vec<u8>>,
     timeouts: Arc<RequestTimeouts>,
     remote_address: SocketAddr,
+    scheme: RequestScheme,
 ) where
     S: Unpin + AsyncWrite + AsyncRead + Send + Debug + 'static,
 {
@@ -49,6 +50,7 @@ pub async fn serve_request<S>(
         service_fn(move |mut request| {
             inject_peer_certificate(&mut request, peer_certificate.as_deref());
             request.extensions_mut().insert(remote_address);
+            request.extensions_mut().insert(scheme);
             handle_request(Arc::clone(&context), request)
         }),
     );

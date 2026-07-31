@@ -12,6 +12,7 @@ use tracing::{debug, info};
 use crate::{
     command::server::{ServerContext, error::Error, serve_request},
     configuration::listeners::ListenerBaseConfig,
+    identity::RequestScheme,
 };
 
 pub mod insecure;
@@ -51,6 +52,8 @@ pub trait Connector: Send + Sync {
     ) -> Option<HandshakeResult<Self::Stream>>;
 
     fn label(&self) -> &'static str;
+
+    fn scheme(&self) -> RequestScheme;
 }
 
 /// The shared listener shell: a bound address plus a hot-swappable context and
@@ -140,6 +143,7 @@ pub async fn accept_loop<C: Connector>(
             handshake.peer_certificate,
             timeouts,
             remote_address,
+            connector.scheme(),
         ));
     }
 }

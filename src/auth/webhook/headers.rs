@@ -8,7 +8,7 @@ use hyper::{
 use crate::{
     auth::Error,
     auth::sha256_hex,
-    identity::{Action, ClientIdentity},
+    identity::{Action, ClientIdentity, RequestScheme},
 };
 
 static X_FORWARDED_METHOD: &str = "X-Forwarded-Method";
@@ -58,10 +58,10 @@ pub fn build_headers(
         X_FORWARDED_METHOD,
         build_header_value(parts.method.as_str())?,
     );
-    let proto = if parts.uri.scheme_str() == Some("https") {
-        "https"
-    } else {
-        "http"
+    let proto = match parts.extensions.get::<RequestScheme>() {
+        Some(scheme) => scheme.as_str(),
+        None if parts.uri.scheme_str() == Some("https") => "https",
+        None => "http",
     };
     headers.insert(X_FORWARDED_PROTO, build_header_value(proto)?);
     if let Some(host) = parts.headers.get("Host") {

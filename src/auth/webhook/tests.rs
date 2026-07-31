@@ -18,7 +18,7 @@ use crate::{
     },
     cache::{self, Cache},
     http_client::apply_tls_files,
-    identity::{Action, ClientIdentity},
+    identity::{Action, ClientIdentity, RequestScheme},
     oci::{Namespace, Reference, Tag},
     secret::Secret,
     test_fixtures::{
@@ -826,4 +826,45 @@ async fn test_authorize_cache_entry_expires_and_refetches() {
         !webhook.authorize(&action, &identity, &parts).await.unwrap(),
         "after TTL expiry authorization must fetch fresh from network and get deny"
     );
+}
+
+/// HTTP/1.1 sends origin-form targets, so the URI carries no scheme and only
+/// the listener's own record can report TLS.
+#[test]
+fn build_headers_reports_the_listener_scheme_for_an_origin_form_target() {
+    let request = Builder::new()
+        .method(Method::GET)
+        .uri("/v2/test-namespace/manifests/latest")
+        .header("Host", "example.com")
+        .body(())
+        .unwrap();
+    let (mut parts, ()) = request.into_parts();
+    parts.extensions.insert(RequestScheme::Https);
+
+    let action = Action::GetManifest {
+        namespace: Namespace::new("test-namespace").unwrap(),
+        reference: Reference::Tag(Tag::new("latest").unwrap()),
+    };
+    let headers = build_headers(&[], &action, &ClientIdentity::new(None), &parts).unwrap();
+
+    assert_eq!(headers.get("X-Forwarded-Proto").unwrap(), "https");
+}
+
+#[test]
+fn build_headers_reports_http_without_a_listener_scheme() {
+    let request = Builder::new()
+        .method(Method::GET)
+        .uri("/v2/test-namespace/manifests/latest")
+        .header("Host", "example.com")
+        .body(())
+        .unwrap();
+    let (parts, ()) = request.into_parts();
+
+    let action = Action::GetManifest {
+        namespace: Namespace::new("test-namespace").unwrap(),
+        reference: Reference::Tag(Tag::new("latest").unwrap()),
+    };
+    let headers = build_headers(&[], &action, &ClientIdentity::new(None), &parts).unwrap();
+
+    assert_eq!(headers.get("X-Forwarded-Proto").unwrap(), "http");
 }
