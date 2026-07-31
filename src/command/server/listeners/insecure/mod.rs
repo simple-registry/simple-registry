@@ -8,6 +8,7 @@ use crate::command::server::{
     listeners::{Connector, HandshakeResult, Listener},
 };
 pub use crate::configuration::listeners::InsecureListenerConfig;
+use crate::identity::RequestScheme;
 
 /// A non-TLS listener: the shared shell over the pass-through connector.
 pub type InsecureListener = Listener<InsecureConnector>;
@@ -31,6 +32,10 @@ impl Connector for InsecureConnector {
 
     fn label(&self) -> &'static str {
         "non-TLS"
+    }
+
+    fn scheme(&self) -> RequestScheme {
+        RequestScheme::Http
     }
 }
 

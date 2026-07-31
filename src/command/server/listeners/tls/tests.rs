@@ -12,6 +12,7 @@ use super::*;
 use crate::{
     command::server::server_context::tests::create_test_server_context,
     configuration::listeners::{ClientAuth, ListenerBaseConfig},
+    identity::RequestScheme,
     test_fixtures::tls::{server_cert_pem, server_key_pem},
 };
 
@@ -473,4 +474,15 @@ fn test_build_tls_acceptor_with_client_auth_required() {
 
     let result = build_tls_acceptor(&tls_config);
     assert!(result.is_ok(), "build failed: {:?}", result.err());
+}
+
+/// The TLS listener is the only thing that knows a request arrived over TLS,
+/// so it has to say so.
+#[test]
+fn tls_connector_reports_https() {
+    init_crypto_provider();
+    let (tls_config, _tmp_files) = build_config(false);
+    let connector = TlsConnector::new(&tls_config).unwrap();
+
+    assert_eq!(connector.scheme(), RequestScheme::Https);
 }

@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - The configuration watcher now matches events against every spelling of a watched path, so hot reload and certificate rotation keep working on Linux when the path is reached through a symlink, as it is under a Kubernetes Secret or ConfigMap mount.
+- The `X-Forwarded-Proto` header sent to authorization webhooks now reports the scheme the listener served the request on, so a TLS listener reports `https` instead of always `http`.
 
 ## 1.4.2
 

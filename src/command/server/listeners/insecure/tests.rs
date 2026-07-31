@@ -13,13 +13,17 @@ use wiremock::{
 use crate::{
     command::server::{
         ServerContext,
-        listeners::insecure::{InsecureListener, InsecureListenerConfig},
+        listeners::{
+            Connector,
+            insecure::{InsecureConnector, InsecureListener, InsecureListenerConfig},
+        },
         server_context::tests::{
             TestConfigOptions, TestWebhook, create_test_event, create_test_server_context,
             create_test_server_context_with,
         },
     },
     configuration::listeners::ListenerBaseConfig,
+    identity::RequestScheme,
 };
 
 #[test]
@@ -375,4 +379,9 @@ async fn test_hot_reload_in_flight_delivery_not_disrupted() {
         .dispatch_events(&[create_test_event()])
         .await
         .unwrap();
+}
+
+#[test]
+fn insecure_connector_reports_http() {
+    assert_eq!(InsecureConnector.scheme(), RequestScheme::Http);
 }

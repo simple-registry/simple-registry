@@ -17,6 +17,7 @@ use crate::command::server::{
     listeners::{Connector, HandshakeResult, Listener},
 };
 use crate::configuration::listeners::{ClientAuth, ServerTlsConfig, TlsListenerConfig};
+use crate::identity::RequestScheme;
 
 fn load_certificate_bundle(
     path: &Path,
@@ -155,6 +156,10 @@ impl Connector for TlsConnector {
 
     fn label(&self) -> &'static str {
         "mTLS"
+    }
+
+    fn scheme(&self) -> RequestScheme {
+        RequestScheme::Https
     }
 }
 
