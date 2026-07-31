@@ -86,7 +86,9 @@ Timeout values must be greater than zero.
 
 ### TLS (`server.tls`)
 
-When omitted, the server runs without TLS (insecure).
+When omitted, the server runs without TLS (insecure). A section that is present
+but incomplete or invalid fails startup rather than falling back to a plaintext
+listener.
 
 | Option                      | Type   | Default      | Description                       |
 |-----------------------------|--------|--------------|-----------------------------------|

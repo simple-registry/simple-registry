@@ -1107,3 +1107,66 @@ fn event_webhook_empty_events_list_fails_load() {
         "Error must identify the offending webhook by name: {err}"
     );
 }
+
+/// A `[server.tls]` section that does not parse must fail the load. Falling
+/// back to a plaintext listener would silently downgrade a registry the
+/// operator asked to serve TLS.
+#[test]
+fn incomplete_tls_section_is_rejected_rather_than_downgraded() {
+    let config = r#"
+    [server]
+    bind_address = "0.0.0.0"
+
+    [server.tls]
+    server_certificate_bundle = "server.pem"
+    "#;
+
+    let result = Configuration::load_from_str(config);
+
+    assert!(
+        matches!(result, Err(Error::InvalidFormat(_))),
+        "a partial TLS section must be an error, got {result:?}"
+    );
+}
+
+/// The `client_auth` cross-check is only reachable if a failed TLS parse is an
+/// error rather than a fallback.
+#[test]
+fn required_client_auth_without_a_ca_bundle_is_rejected() {
+    let config = r#"
+    [server]
+    bind_address = "0.0.0.0"
+
+    [server.tls]
+    server_certificate_bundle = "server.pem"
+    server_private_key = "server.key"
+    client_auth = "required"
+    "#;
+
+    let result = Configuration::load_from_str(config);
+
+    let Err(Error::InvalidFormat(message)) = result else {
+        panic!("expected a format error, got {result:?}");
+    };
+    assert!(
+        message.contains("client_ca_bundle"),
+        "the error must name the missing key: {message}"
+    );
+}
+
+/// A server section with no TLS keys is still a plaintext listener.
+#[test]
+fn a_server_section_without_tls_stays_insecure() {
+    let config = r#"
+    [server]
+    bind_address = "0.0.0.0"
+    port = 8000
+    "#;
+
+    let config = Configuration::load_from_str(config).unwrap();
+
+    assert!(
+        matches!(config.server, ServerConfig::Insecure(_)),
+        "no TLS keys means a plaintext listener"
+    );
+}
