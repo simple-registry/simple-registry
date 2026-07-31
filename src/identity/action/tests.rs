@@ -282,7 +282,7 @@ fn test_get_manifest_includes_namespace_and_reference() {
     let json = serde_json::to_value(&action).unwrap();
     assert_eq!(json["action"], "get-manifest");
     assert_eq!(json["namespace"], "library/nginx");
-    assert!(json.get("reference").is_some());
+    assert_eq!(json["reference"], "v1.0.0");
     assert!(json.get("digest").is_none());
 }
 
@@ -420,8 +420,10 @@ fn test_manifest_actions_serialize_reference_for_cel() {
     for action in actions {
         let value = serde_json::to_value(&action).unwrap();
         assert!(
-            value.get("reference").is_some(),
-            "action {value} must expose `reference` to CEL"
+            value
+                .get("reference")
+                .is_some_and(serde_json::Value::is_string),
+            "action {value} must expose `reference` to CEL as a string"
         );
     }
 }
