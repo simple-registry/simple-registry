@@ -143,17 +143,18 @@ export function getAttestationType(referrer: ReferrerInfo): AttestationType {
 	return 'artifact';
 }
 
-export function repoUrl(name: string): string {
-	return `${base}/${name}`;
+/**
+ * A browse URL is the full registry path, with no marker separating the
+ * repository from the namespace under it: a repository name may contain
+ * slashes, so only the configured names can tell them apart.
+ */
+export function pathUrl(path: string): string {
+	return `${base}/${path}`;
 }
 
-export function namespaceUrl(repo: string, namespace: string): string {
-	return `${base}/${repo}/${namespace}`;
-}
-
-export function manifestUrl(repo: string, namespace: string, reference: string): string {
+export function manifestUrl(path: string, reference: string): string {
 	const separator = reference.startsWith('sha256:') || reference.startsWith('sha512:') ? '@' : ':';
-	return `${base}/${repo}/${namespace}${separator}${reference}`;
+	return `${base}/${path}${separator}${reference}`;
 }
 
 export function digestConfirmKey(digest: string): string {
@@ -318,4 +319,56 @@ export function isOrasArtifact(m: Manifest): boolean {
 
 export function getFileName(layer: Descriptor): string | null {
 	return layer.annotations?.['org.opencontainers.image.title'] ?? null;
+}
+
+/**
+ * The namespaces sitting under `namespace`, named relative to it.
+ *
+ * A registry name such as `repo/team/app` creates no object at `repo/team`, so
+ * an intermediate level holds no manifests of its own and would otherwise be a
+ * dead end with nothing to click through to.
+ */
+export interface NamespaceDescendant {
+	path: string;
+	label: string;
+	tag_count?: number;
+	manifest_count?: number;
+	upload_count?: number;
+}
+
+export function descendantNamespaces(
+	entries: { name: string; tag_count?: number; manifest_count?: number; upload_count?: number }[],
+	namespace: string
+): NamespaceDescendant[] {
+	const prefix = `${namespace}/`;
+	return entries
+		.filter((entry) => entry.name.startsWith(prefix))
+		.map((entry) => ({
+			path: entry.name,
+			label: entry.name.slice(prefix.length),
+			tag_count: entry.tag_count,
+			manifest_count: entry.manifest_count,
+			upload_count: entry.upload_count
+		}))
+		.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/**
+ * The repository owning `path`, which is the longest configured name that is
+ * `path` itself or a prefix of it. A repository name may contain slashes, so a
+ * browse path cannot be split into repository and namespace without this.
+ * `null` when the path lies outside every repository, as an intermediate
+ * segment does.
+ */
+export function resolveRepository(names: string[], path: string): string | null {
+	let owner: string | null = null;
+	for (const name of names) {
+		if (path !== name && !path.startsWith(`${name}/`)) {
+			continue;
+		}
+		if (owner === null || name.length > owner.length) {
+			owner = name;
+		}
+	}
+	return owner;
 }

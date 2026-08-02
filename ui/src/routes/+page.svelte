@@ -4,7 +4,7 @@
 	import { base } from '$app/paths';
 	import { getRegistryName } from '$lib/config.svelte';
 	import { fetchRepositories, type RepositoryInfo } from '$lib/api';
-	import { repoUrl } from '$lib/utils';
+	import { isInteractiveTarget, pathUrl } from '$lib/utils';
 	import LoadingState from '$lib/components/LoadingState.svelte';
 	import ErrorState from '$lib/components/ErrorState.svelte';
 	import Breadcrumb from '$lib/components/Breadcrumb.svelte';
@@ -50,8 +50,8 @@
 				</tr>
 			{:else}
 				{#each repositories as repo}
-					<tr class="clickable" onclick={() => goto(repoUrl(repo.name))}>
-						<td><a class="row-link" href={repoUrl(repo.name)}>{repo.name}</a></td>
+					<tr class="clickable" onclick={(event) => { if (!isInteractiveTarget(event)) goto(pathUrl(repo.name)); }}>
+						<td><a class="row-link" href={pathUrl(repo.name)}>{repo.name}</a></td>
 						<td>
 							{#if repo.pull_through_cache}
 								<span class="badge pull-through">Cache</span>

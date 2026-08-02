@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## 1.4.4 - UNRELEASED
 
+### Added
+
+- The namespace listing reports a `tag_count` alongside the manifest and upload counts, which the web UI shows as a column.
+
 ### Fixed
 
 - A completed upload is now promoted only when the assembled object is exactly as long as the bytes the session hashed, so an append that failed after durably writing bytes can no longer leave a resumed upload serving a blob whose content does not hash to its digest.
@@ -16,6 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A failed action in the web UI is reported in a banner above the view it was taken on instead of replacing the page, and deleting the tag being viewed navigates to the digest rather than stranding the user on a 404.
 - The web UI downloads a layer through a plain link, so the browser streams it to disk instead of holding a blob that is routinely multiple gigabytes in tab memory.
 - Repository, namespace and manifest rows in the web UI carry a real link, so the primary drill-down is reachable by keyboard.
+- The web UI resolves a browse path against the configured repository names, so a repository whose name contains a slash such as `team/website` opens its own listing instead of being read as the repository `team` and reporting 404.
+- The web UI lists the namespaces nested under the path being browsed, so an intermediate level of a name such as `team/website/backend` shows what lives below it instead of an empty manifest list.
+- A browse URL with a trailing or doubled slash now names the same path as one without, instead of resolving to an invalid namespace and reporting 404.
+- Deleting a tag or cancelling an upload in the web UI no longer refetches the namespace listing, which costs a store walk and three backend listings per namespace, so an action on a repository holding many namespaces completes without that delay.
 
 ## 1.4.3
 

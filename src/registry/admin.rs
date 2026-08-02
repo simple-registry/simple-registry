@@ -51,6 +51,7 @@ pub struct RepositoriesBody {
 #[derive(Serialize, Debug)]
 pub struct NamespaceInfo {
     name: String,
+    tag_count: usize,
     manifest_count: usize,
     upload_count: usize,
 }
@@ -336,15 +337,17 @@ impl Registry {
     pub async fn get_namespaces_info(&self, repository: &str) -> Result<NamespacesBody, Error> {
         let namespace_names = self.list_repository_namespaces(repository).await?;
 
-        // Each namespace's counts are two independent backend listings; fan them
-        // out rather than walking the namespaces one at a time.
+        // Each namespace's counts are three independent backend listings; fan
+        // them out rather than walking the namespaces one at a time.
         let mut namespaces: Vec<NamespaceInfo> = stream::iter(namespace_names)
             .map(|name_str| async move {
                 let name = Namespace::new(&name_str).map_err(|_| Error::NameInvalid)?;
+                let tag_count = self.metadata_store.count_tags(&name).await?;
                 let manifest_count = self.metadata_store.count_manifests(&name).await?;
                 let upload_count = self.count_uploads(&name).await?;
                 Ok::<_, Error>(NamespaceInfo {
                     name: name_str,
+                    tag_count,
                     manifest_count,
                     upload_count,
                 })
@@ -758,8 +761,9 @@ mod tests {
             DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
             Namespace, Platform as OciPlatform, Tag, UploadSessionId,
         },
-        registry::test_utils::{
-            FSRegistryTestCase, create_test_blob, for_each_backend, media_type,
+        registry::{
+            metadata_store::{LinkKind, LinkOperation},
+            test_utils::{FSRegistryTestCase, create_test_blob, for_each_backend, media_type},
         },
     };
 
@@ -1184,6 +1188,46 @@ mod tests {
             assert_eq!(
                 count, 2,
                 "the repository namespace count must include the upload-only namespace"
+            );
+        })
+        .await;
+    }
+
+    /// Tags are counted from the tag directory, not derived from revisions: the
+    /// seeded namespace carries two tags and no revision, so a count taken from
+    /// the wrong source reports zero.
+    #[tokio::test]
+    async fn namespaces_info_counts_tags_not_manifests() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+
+            let namespace = Namespace::new("test-repo/multi-tag").unwrap();
+            let (digest, _) = create_test_blob(registry, &namespace, b"multi tag content").await;
+            registry
+                .metadata_store
+                .update_links(
+                    &namespace,
+                    &[LinkOperation::create(
+                        LinkKind::Tag(Tag::new("v1.0").unwrap()),
+                        digest.clone(),
+                    )],
+                )
+                .await
+                .unwrap();
+
+            let response = registry.get_namespaces_info("test-repo").await.unwrap();
+            let body = serde_json::to_value(&response).unwrap();
+            let entry = body["namespaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|ns| ns["name"] == "test-repo/multi-tag")
+                .expect("the seeded namespace must be listed");
+
+            assert_eq!(entry["tag_count"], 2, "both tags must be counted: {entry}");
+            assert_eq!(
+                entry["manifest_count"], 0,
+                "the counts come from different sources: {entry}"
             );
         })
         .await;

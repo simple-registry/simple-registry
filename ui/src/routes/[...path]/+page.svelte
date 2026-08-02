@@ -1,0 +1,351 @@
+<script lang="ts">
+	import { goto } from '$app/navigation';
+	import { base } from '$app/paths';
+	import { getRegistryName } from '$lib/config.svelte';
+	import { fetchRevisions, fetchUploads, fetchManifest, fetchNamespaces, deleteManifest as apiDeleteManifest, cancelUpload as apiCancelUpload, blobUrl, type UploadEntry, type ParentRef, type Manifest, type ReferrerInfo } from '$lib/api';
+	import { buildTree, buildTreeRows, descendantNamespaces, isInteractiveTarget, pathUrl, manifestUrl, type NamespaceDescendant, type TreeRowNode } from '$lib/utils';
+	import LoadingState from '$lib/components/LoadingState.svelte';
+	import ErrorState from '$lib/components/ErrorState.svelte';
+	import Breadcrumb from '$lib/components/Breadcrumb.svelte';
+	import ManifestView from '$lib/components/ManifestView.svelte';
+	import RepositoryTree from '$lib/components/RepositoryTree.svelte';
+	import Card from '$lib/components/Card.svelte';
+	import type { BrowseParams } from './+page';
+
+	let { data }: { data: BrowseParams } = $props();
+
+	const isManifestView = $derived(data.reference !== null);
+	// The path below the owning repository, which is what the breadcrumb splits on.
+	const relativePath = $derived(
+		data.repository !== null && data.path.length > data.repository.length
+			? data.path.slice(data.repository.length + 1)
+			: ''
+	);
+
+	let rows: TreeRowNode[] = $state([]);
+	// Namespaces nested under this path, named relative to it. Counts are absent
+	// above a repository, where only the repository names are known.
+	let children: NamespaceDescendant[] = $state([]);
+	let pullThroughCache = $state(false);
+	let upstreamUrls: string[] = $state([]);
+	let immutableTags = $state(false);
+	let immutableTagsExclusions: string[] = $state([]);
+	let uploads: UploadEntry[] = $state([]);
+	let selectedUploads: Set<string> = $state(new Set());
+
+	let manifest: Manifest | null = $state(null);
+	let digest: string | null = $state(null);
+	let tags: string[] = $state([]);
+	let referencedBy: ParentRef[] = $state([]);
+	let childReferrers: Map<string, ReferrerInfo[]> = $state(new Map());
+
+	let loading = $state(true);
+	let error: string | null = $state(null);
+	// Failures of an action taken on the current view, shown as a banner so the
+	// view itself survives; `error` stays reserved for a load that produced no
+	// view at all.
+	let actionError: string | null = $state(null);
+	let deleteConfirm: string | null = $state(null);
+	let deleting = $state(false);
+	let expanded: Set<string> = $state(new Set());
+
+	// Monotonic token: each load claims the next value, so a slow response from
+	// a superseded load is discarded instead of overwriting the current view.
+	let loadToken = 0;
+
+	function toggleExpand(digest: string, event: MouseEvent) {
+		event.stopPropagation();
+		const newExpanded = new Set(expanded);
+		if (newExpanded.has(digest)) {
+			newExpanded.delete(digest);
+		} else {
+			newExpanded.add(digest);
+		}
+		expanded = newExpanded;
+	}
+
+	$effect(() => {
+		actionError = null;
+		if (data.reference !== null) {
+			loadManifest(data.path, data.reference);
+		} else {
+			loadBrowse(data.path);
+		}
+	});
+
+	// `background` refreshes without blanking the view, which is what an action
+	// taken on that view wants: swapping it for a spinner reads as the whole
+	// page reloading when only one row changed.
+	async function loadBrowse(namespace: string, background = false) {
+		const token = ++loadToken;
+		loading = !background;
+		error = null;
+		// Clearing keeps a navigation from showing the previous path's content
+		// behind the spinner. A background refresh has no spinner, so it holds
+		// what is on screen until the new data replaces it.
+		if (!background) {
+			children = [];
+			pullThroughCache = false;
+			immutableTags = false;
+		}
+		// Above every repository there is nothing to list but the repository
+		// names, which the route already resolved. A background refresh skips the
+		// listing entirely: it is by far the most expensive of the three calls, at
+		// one store walk plus three backend listings per namespace, and the action
+		// that triggered it touched this namespace, whose descendants it lists are
+		// all unaffected.
+		const [revisionsResult, uploadsResult, namespacesResult] = await Promise.all([
+			fetchRevisions(namespace),
+			fetchUploads(namespace),
+			background || data.repository === null
+				? Promise.resolve(null)
+				: fetchNamespaces(data.repository)
+		]);
+		if (token !== loadToken) return;
+		if (revisionsResult.error) {
+			error = revisionsResult.error;
+		} else if (revisionsResult.data) {
+			rows = buildTreeRows(buildTree(revisionsResult.data.manifests ?? []));
+		}
+		uploads = uploadsResult.data?.uploads ?? [];
+		if (uploadsResult.error) {
+			actionError = `Could not list uploads (${uploadsResult.error}).`;
+		}
+		if (!background) {
+			children = descendantNamespaces(
+				namespacesResult
+					? (namespacesResult.data?.namespaces ?? [])
+					: data.repositoryNames.map((name) => ({ name })),
+				namespace
+			);
+		}
+		if (namespacesResult?.data) {
+			pullThroughCache = namespacesResult.data.pull_through_cache;
+			upstreamUrls = namespacesResult.data.upstream_urls;
+			immutableTags = namespacesResult.data.immutable_tags;
+			immutableTagsExclusions = namespacesResult.data.immutable_tags_exclusions;
+		}
+		selectedUploads = new Set();
+		loading = false;
+	}
+
+	async function loadManifest(namespace: string, reference: string, background = false) {
+		const token = ++loadToken;
+		loading = !background;
+		error = null;
+		if (!background) {
+			tags = [];
+			referencedBy = [];
+			childReferrers = new Map();
+		}
+
+		const result = await fetchManifest(namespace, reference);
+		if (token !== loadToken) return;
+		if (result.error) {
+			error = result.error;
+			loading = false;
+			return;
+		}
+
+		manifest = result.manifest;
+		digest = result.digest;
+
+		if (digest) {
+			const revisionsResult = await fetchRevisions(namespace);
+			if (token !== loadToken) return;
+			if (revisionsResult.data) {
+				const entry = revisionsResult.data.manifests.find(m => m.digest === digest);
+				if (entry) {
+					tags = entry.tags;
+					referencedBy = entry.parents ?? [];
+				}
+				const newChildReferrers = new Map<string, ReferrerInfo[]>();
+				for (const m of revisionsResult.data.manifests) {
+					if (m.referrers && m.referrers.length > 0) {
+						newChildReferrers.set(m.digest, m.referrers);
+					}
+				}
+				childReferrers = newChildReferrers;
+			}
+		}
+		loading = false;
+	}
+
+	// Refresh the view a delete was taken from. Reloading by a reference that
+	// was just deleted would 404 and strand the user on an error page although
+	// the delete succeeded, so leave for the digest when it still resolves and
+	// for the namespace otherwise.
+	async function reloadAfterDelete(deletedReference: string) {
+		if (data.reference === null) {
+			await loadBrowse(data.path, true);
+		} else if (data.reference !== deletedReference) {
+			await loadManifest(data.path, data.reference, true);
+		} else if (digest && digest !== deletedReference) {
+			await goto(manifestUrl(data.path, digest));
+		} else {
+			await goto(pathUrl(data.path));
+		}
+	}
+
+	async function deleteByReference(reference: string) {
+		deleting = true;
+		actionError = null;
+		const err = await apiDeleteManifest(data.path, reference);
+		if (err) {
+			actionError = `Delete failed (${err}).`;
+		} else {
+			deleteConfirm = null;
+			await reloadAfterDelete(reference);
+		}
+		deleting = false;
+	}
+
+	// Deleting by digest removes the manifest and every tag pointing at it, so
+	// there is nothing left to reload here and the view always leaves for the
+	// namespace.
+	async function deleteByHash() {
+		if (!digest) return;
+		deleting = true;
+		actionError = null;
+		const err = await apiDeleteManifest(data.path, digest);
+		if (err) {
+			actionError = `Delete failed (${err}).`;
+		} else {
+			await goto(pathUrl(data.path));
+		}
+		deleting = false;
+	}
+
+	async function cancelUpload(uuid: string) {
+		deleting = true;
+		actionError = null;
+		const err = await apiCancelUpload(data.path, uuid);
+		if (err) {
+			actionError = `Cancel failed (${err}).`;
+		} else {
+			deleteConfirm = null;
+			await loadBrowse(data.path, true);
+		}
+		deleting = false;
+	}
+
+	async function cancelSelectedUploads() {
+		deleting = true;
+		actionError = null;
+		const uuids = [...selectedUploads];
+		const results = await Promise.all(
+			uuids.map((uuid) => apiCancelUpload(data.path, uuid))
+		);
+		deleteConfirm = null;
+		await loadBrowse(data.path, true);
+		const failed = results.filter((err) => err !== null).length;
+		if (failed > 0) {
+			actionError = `Failed to cancel ${failed} of ${uuids.length} uploads.`;
+		}
+		deleting = false;
+	}
+</script>
+
+<svelte:head>
+	<title>{getRegistryName()} &gt; {data.path}{isManifestView ? ` > ${data.reference}` : ''}</title>
+</svelte:head>
+
+<Breadcrumb items={[
+	{ label: 'Repositories', href: `${base}/` },
+	...(data.repository === null
+		? [{ label: data.path, href: pathUrl(data.path) }]
+		: [
+			{ label: data.repository, href: pathUrl(data.repository) },
+			...(relativePath === '' ? [] : [{ label: relativePath, href: pathUrl(data.path) }])
+		]),
+	...(isManifestView ? [{ label: data.reference ?? '' }] : [])
+]} />
+
+{#if actionError}
+	<div class="action-error">{actionError}</div>
+{/if}
+
+{#if loading}
+	<LoadingState message={isManifestView ? 'Loading manifest' : 'Loading'} />
+{:else if error}
+	<ErrorState message={error} />
+{:else if isManifestView && manifest}
+	<ManifestView
+		path={data.path}
+		{manifest}
+		{digest}
+		{tags}
+		{referencedBy}
+		{childReferrers}
+		{deleteConfirm}
+		{deleting}
+		ondeletetag={deleteByReference}
+		ondeletebyhash={deleteByHash}
+		onconfirmchange={(value) => deleteConfirm = value}
+		getbloburl={(blobDigest) => blobUrl(data.path, blobDigest)}
+	/>
+{:else}
+	{#if pullThroughCache || immutableTags}
+		<div class="config-panel">
+			{#if pullThroughCache}
+				<div class="config-item">
+					<span class="config-label">Upstream</span>
+					<span class="config-value">{upstreamUrls.join(', ')}</span>
+				</div>
+			{/if}
+			{#if immutableTags}
+				<div class="config-item">
+					<span class="config-label">Immutable tags</span>
+					{#if immutableTagsExclusions.length > 0}
+						<span class="config-value">except: {immutableTagsExclusions.join(', ')}</span>
+					{:else}
+						<span class="config-value enabled">Enabled</span>
+					{/if}
+				</div>
+			{/if}
+		</div>
+	{/if}
+
+	{#if children.length > 0}
+		<Card title="Namespaces" count={children.length}>
+			<table>
+				<thead>
+					<tr>
+						<th>Namespace</th>
+						<th class="col-medium">Tags</th>
+						<th class="col-medium">Manifests</th>
+						<th class="col-medium">Uploads</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each children as child (child.path)}
+						{@const href = pathUrl(child.path)}
+						<tr class="clickable" onclick={(event) => { if (!isInteractiveTarget(event)) goto(href); }}>
+							<td><a class="row-link" {href}>{child.label}</a></td>
+							<td>{child.tag_count ? child.tag_count : '-'}</td>
+							<td>{child.manifest_count ? child.manifest_count : '-'}</td>
+							<td>{child.upload_count ? child.upload_count : '-'}</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</Card>
+	{/if}
+
+	<RepositoryTree
+		path={data.path}
+		{rows}
+		{uploads}
+		{selectedUploads}
+		{deleteConfirm}
+		{deleting}
+		{expanded}
+		ontoggleexpand={toggleExpand}
+		onconfirmchange={(value) => deleteConfirm = value}
+		ondeletemanifest={deleteByReference}
+		ondeletetag={deleteByReference}
+		oncancelupload={cancelUpload}
+		onuploadselectionchange={(selected) => selectedUploads = selected}
+		oncancelselecteduploads={cancelSelectedUploads}
+	/>
+{/if}

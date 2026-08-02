@@ -245,6 +245,12 @@ impl MetadataStore {
             .await
     }
 
+    pub async fn count_tags(&self, namespace: &Namespace) -> Result<usize, Error> {
+        self.stream_tags(namespace)
+            .try_fold(0, |count, _| async move { Ok(count + 1) })
+            .await
+    }
+
     /// Delete an entire tag directory by prefix. Used by scrub for an invalid
     /// tag name, which cannot form a typed `LinkKind::Tag` for a link delete.
     ///
