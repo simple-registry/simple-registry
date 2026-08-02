@@ -13,13 +13,13 @@ use reqwest::{
 };
 use tokio::io::AsyncRead;
 use tokio_util::io::ReaderStream;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 use crate::{
     oci::Digest,
     registry::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT},
     registry_client::{
-        Error, REPLICATION_SUPERSEDED_CODE, RegistryClient, X_ANGOS_SOURCE_TIMESTAMP,
+        Error, REPLICATION_SUPERSEDED_CODE, RegistryClient, X_ANGOS_SOURCE_TIMESTAMP, parse_header,
     },
 };
 
@@ -83,6 +83,18 @@ async fn parse_oci_error_code(response: Response) -> Option<String> {
 fn append_query(base: &str, query: &str) -> String {
     let separator = if base.contains('?') { '&' } else { '?' };
     format!("{base}{separator}{query}")
+}
+
+/// The digest a write response advertises. `Ok(None)` means the remote sent no
+/// `Docker-Content-Digest`, which the OCI spec states as optional. A header
+/// that is present but not a digest is a protocol fault the caller reports,
+/// never an absent one, so the checks fed by this value cannot be skipped by
+/// sending garbage.
+fn advertised_digest(response: &Response) -> Result<Option<Digest>, Error> {
+    if !response.headers().contains_key(DOCKER_CONTENT_DIGEST) {
+        return Ok(None);
+    }
+    parse_header(response, DOCKER_CONTENT_DIGEST).map(Some)
 }
 
 /// Classifies a failed (non-2xx) write response. A `403` is a terminal
@@ -292,11 +304,7 @@ impl RegistryClient {
         // A 201 means mounted; an advertised digest must match the request or
         // the blob would be falsely marked converged.
         if response.status() == StatusCode::CREATED {
-            let advertised = response
-                .headers()
-                .get(DOCKER_CONTENT_DIGEST)
-                .and_then(|h| h.to_str().ok())
-                .and_then(|s| Digest::try_from(s).ok());
+            let advertised = advertised_digest(&response)?;
             if let Some(advertised) = advertised
                 && &advertised != mount
             {
@@ -450,11 +458,12 @@ impl RegistryClient {
             return Err(write_failure("put_manifest", response.status()));
         }
 
-        let digest = response
-            .headers()
-            .get(DOCKER_CONTENT_DIGEST)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| Digest::try_from(s).ok());
+        // Unlike a mount, a bad echo here costs only the divergence check, so
+        // it is logged rather than failing a manifest the downstream accepted.
+        let digest = advertised_digest(&response).unwrap_or_else(|e| {
+            warn!("put_manifest: {e}");
+            None
+        });
         let subject = response
             .headers()
             .get(OCI_SUBJECT)
