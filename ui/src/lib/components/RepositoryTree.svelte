@@ -15,8 +15,7 @@
 	import TreeRow from './TreeRow.svelte';
 
 	interface Props {
-		repository: string;
-		namespace: string;
+		path: string;
 		rows: TreeRowNode[];
 		uploads: UploadEntry[];
 		selectedUploads: Set<string>;
@@ -33,8 +32,7 @@
 	}
 
 	let {
-		repository,
-		namespace,
+		path,
 		rows,
 		uploads,
 		selectedUploads,
@@ -72,7 +70,7 @@
 
 	function handleRowClick(event: MouseEvent, targetDigest: string) {
 		if (isInteractiveTarget(event)) return;
-		goto(manifestUrl(repository, namespace, targetDigest));
+		goto(manifestUrl(path, targetDigest));
 	}
 </script>
 
@@ -168,8 +166,8 @@
 					{ondeletemanifest}
 					{ondeletetag}
 					{onconfirmchange}
-					gettaghref={(tag) => manifestUrl(repository, namespace, tag)}
-					getdigesthref={(rowDigest) => manifestUrl(repository, namespace, rowDigest)}
+					gettaghref={(tag) => manifestUrl(path, tag)}
+					getdigesthref={(rowDigest) => manifestUrl(path, rowDigest)}
 				/>
 			{/each}
 		{/if}

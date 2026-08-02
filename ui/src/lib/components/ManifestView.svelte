@@ -21,8 +21,7 @@
 	import DigestLink from './DigestLink.svelte';
 
 	interface Props {
-		repository: string;
-		namespace: string;
+		path: string;
 		manifest: Manifest;
 		digest: string | null;
 		tags: string[];
@@ -37,8 +36,7 @@
 	}
 
 	let {
-		repository,
-		namespace,
+		path,
 		manifest,
 		digest,
 		tags,
@@ -74,7 +72,7 @@
 
 	function handleRowClick(event: MouseEvent, targetDigest: string) {
 		if (isInteractiveTarget(event)) return;
-		goto(manifestUrl(repository, namespace, targetDigest));
+		goto(manifestUrl(path, targetDigest));
 	}
 </script>
 
@@ -86,7 +84,7 @@
 				<td>
 					<DigestLink
 						digest={digest ?? ''}
-						href={digest ? manifestUrl(repository, namespace, digest) : undefined}
+						href={digest ? manifestUrl(path, digest) : undefined}
 					/>
 				</td>
 			</tr>
@@ -99,7 +97,7 @@
 						disabled={deleting}
 						ondelete={ondeletetag}
 						onconfirmchange={(tag) => onconfirmchange(tag ? tagConfirmKey(tag) : null)}
-						getHref={(tag) => manifestUrl(repository, namespace, tag)}
+						getHref={(tag) => manifestUrl(path, tag)}
 					/>
 				</td>
 			</tr>
@@ -127,7 +125,7 @@
 					<td>
 						<DigestLink
 							digest={manifest.subject.digest}
-							href={manifestUrl(repository, namespace, manifest.subject.digest)}
+							href={manifestUrl(path, manifest.subject.digest)}
 						/>
 						<span class="subject-meta">({manifest.subject.mediaType}, {formatSize(manifest.subject.size)})</span>
 					</td>
@@ -285,7 +283,7 @@
 							<span class="tree-toggle leaf"></span>
 							<DigestLink
 								digest={m.digest}
-								href={manifestUrl(repository, namespace, m.digest)}
+								href={manifestUrl(path, m.digest)}
 								annotations={m.annotations}
 								expanded={expandedAnnotations.has(`manifest:${m.digest}`)}
 								ontoggle={() => toggleAnnotations(`manifest:${m.digest}`)}
@@ -311,7 +309,7 @@
 								<span class="tree-toggle leaf"></span>
 								<DigestLink
 									digest={ref.digest}
-									href={manifestUrl(repository, namespace, ref.digest)}
+									href={manifestUrl(path, ref.digest)}
 								/>
 							</td>
 							<td><AttestationBadge type={getAttestationType(ref)} /></td>
@@ -342,7 +340,7 @@
 						<td>
 							<DigestLink
 								digest={parent.digest}
-								href={manifestUrl(repository, namespace, parent.digest)}
+								href={manifestUrl(path, parent.digest)}
 							/>
 						</td>
 						<td>

@@ -58,6 +58,7 @@ export interface RepositoryInfo {
 
 export interface NamespaceInfo {
 	name: string;
+	tag_count: number;
 	manifest_count: number;
 	upload_count: number;
 }
