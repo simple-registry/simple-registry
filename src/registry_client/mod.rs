@@ -150,6 +150,11 @@ impl RegistryClientConfig {
 /// Resolved basic-auth credentials: `(username, password)`.
 type BasicAuth = (String, Secret<String>);
 
+/// A fetched manifest: `(media type, digest, body)`. The digest is absent when
+/// the upstream omits `Docker-Content-Digest`, which the OCI spec states as
+/// optional.
+pub type FetchedManifest = (Option<MediaType>, Option<Digest>, Vec<u8>);
+
 #[derive(Debug)]
 pub struct RegistryClient {
     pub url: String,
@@ -577,7 +582,10 @@ impl RegistryClient {
         Ok((total_length, Box::new(reader)))
     }
 
-    /// Sends a HEAD request for a manifest and returns its metadata.
+    /// Sends a HEAD request for a manifest and returns its metadata. The digest
+    /// is absent when the upstream omits `Docker-Content-Digest`, which the OCI
+    /// spec states as optional; with no body there is nothing to recompute it
+    /// from, so callers decide what an unknown digest means.
     ///
     /// # Errors
     ///
@@ -587,7 +595,7 @@ impl RegistryClient {
         &self,
         accepted_types: &[String],
         location: &str,
-    ) -> Result<(Option<MediaType>, Digest, u64), Error> {
+    ) -> Result<(Option<MediaType>, Option<Digest>, u64), Error> {
         let response = self.query(&Method::HEAD, accepted_types, location).await?;
 
         if !response.status().is_success() {
@@ -599,13 +607,16 @@ impl RegistryClient {
         }
 
         let media_type = parse_header(&response, CONTENT_TYPE).ok();
-        let digest = parse_header(&response, DOCKER_CONTENT_DIGEST)?;
+        let digest = parse_header(&response, DOCKER_CONTENT_DIGEST).ok();
         let size = parse_header(&response, CONTENT_LENGTH)?;
 
         Ok((media_type, digest, size))
     }
 
-    /// Fetches a manifest body from the upstream registry.
+    /// Fetches a manifest body from the upstream registry. The digest is absent
+    /// when the upstream omits `Docker-Content-Digest`, which the OCI spec
+    /// states as optional; the body is authoritative, so the caller recomputes
+    /// it under the algorithm its reference asked for.
     ///
     /// # Errors
     ///
@@ -615,7 +626,7 @@ impl RegistryClient {
         &self,
         accepted_types: &[String],
         location: &str,
-    ) -> Result<(Option<MediaType>, Digest, Vec<u8>), Error> {
+    ) -> Result<FetchedManifest, Error> {
         let response = self.query(&Method::GET, accepted_types, location).await?;
 
         if !response.status().is_success() {
@@ -627,7 +638,7 @@ impl RegistryClient {
         }
 
         let media_type = parse_header(&response, CONTENT_TYPE).ok();
-        let digest = parse_header(&response, DOCKER_CONTENT_DIGEST)?;
+        let digest = parse_header(&response, DOCKER_CONTENT_DIGEST).ok();
 
         let limit = self.max_manifest_size_bytes;
         let known_size = response.content_length();

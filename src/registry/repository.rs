@@ -12,7 +12,7 @@ use crate::{
     oci::{Digest, Error as OciError, MediaType, Namespace, Reference},
     policy::{AccessPolicyConfig, RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::{Error, blob_store::BoxedReader},
-    registry_client::RegistryClient,
+    registry_client::{FetchedManifest, RegistryClient},
     replication::{ReplicationDownstream, ReplicationDownstreamConfig},
 };
 
@@ -290,6 +290,9 @@ impl Repository {
     }
 
     /// Checks whether the upstream still has the same digest for the given tag.
+    /// An upstream that omits `Docker-Content-Digest` reads as a mismatch, so
+    /// the caller refetches the body rather than serving a copy it cannot show
+    /// to be current.
     pub async fn is_upstream_digest_match(
         &self,
         accepted_types: &[String],
@@ -300,7 +303,7 @@ impl Repository {
         let (_, upstream_digest, _) = self
             .head_manifest(accepted_types, namespace, reference)
             .await?;
-        Ok(upstream_digest == *local_digest)
+        Ok(upstream_digest.is_some_and(|digest| digest == *local_digest))
     }
 
     #[instrument(skip(self))]
@@ -345,7 +348,7 @@ impl Repository {
         accepted_types: &[String],
         namespace: &Namespace,
         reference: &Reference,
-    ) -> Result<(Option<MediaType>, Digest, u64), Error> {
+    ) -> Result<(Option<MediaType>, Option<Digest>, u64), Error> {
         self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
             Box::pin(async move {
                 let location = upstream
@@ -366,7 +369,7 @@ impl Repository {
         accepted_types: &[String],
         namespace: &Namespace,
         reference: &Reference,
-    ) -> Result<(Option<MediaType>, Digest, Vec<u8>), Error> {
+    ) -> Result<FetchedManifest, Error> {
         self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
             Box::pin(async move {
                 let location = upstream
@@ -648,10 +651,39 @@ mod tests {
         assert_eq!(size, 1234);
         assert_eq!(
             digest,
-            Digest::try_from(
-                "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+            Some(
+                Digest::try_from(
+                    "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                )
+                .unwrap()
             )
-            .unwrap()
+        );
+    }
+
+    /// An upstream that omits `Docker-Content-Digest` leaves the freshness
+    /// probe unable to prove the cached copy is current, so the tag reads as a
+    /// mismatch and the caller refetches instead of the whole pull failing.
+    #[tokio::test]
+    async fn upstream_omitting_the_digest_header_reads_as_a_mismatch() {
+        let reference = Reference::Tag(Tag::new("latest").unwrap());
+        let namespace = Namespace::new("local/repo").unwrap();
+        let local_digest = Digest::try_from(FALLBACK_DIGEST).unwrap();
+
+        let (repo, _first, _second) = fallback_repository(
+            "HEAD",
+            MANIFEST_PATH,
+            ResponseTemplate::new(200).insert_header("Content-Length", "5678"),
+        )
+        .await;
+
+        let matched = repo
+            .is_upstream_digest_match(&[], &namespace, &reference, &local_digest)
+            .await
+            .expect("a missing Docker-Content-Digest must not fail the freshness probe");
+
+        assert!(
+            !matched,
+            "an unknown upstream digest cannot confirm the cached copy is current"
         );
     }
 
@@ -673,7 +705,7 @@ mod tests {
 
         let (_content_type, digest, size) = result.unwrap();
         assert_eq!(size, 5678);
-        assert_eq!(digest, Digest::try_from(FALLBACK_DIGEST).unwrap());
+        assert_eq!(digest, Some(Digest::try_from(FALLBACK_DIGEST).unwrap()));
 
         let manifest_content = b"{\"schemaVersion\":2}";
         let (repo, _first, _second) = fallback_repository(

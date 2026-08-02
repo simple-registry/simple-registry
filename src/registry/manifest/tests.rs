@@ -3,9 +3,14 @@ use std::{collections::HashSet, io::Cursor, time::Duration};
 use futures_util::future::join_all;
 use serde_json::json;
 use tokio::time::sleep;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
+};
 
 use super::*;
 use crate::{
+    cache,
     command::server::Error as ServerError,
     oci::{Algorithm, MediaType, Namespace, Tag},
     registry::{
@@ -13,12 +18,14 @@ use crate::{
         blob_ownership::BlobOwnership,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation},
         path_builder::blob_path,
+        repository::Config as RepositoryConfig,
         test_utils::{
             FSRegistryTestCase, RegistryTestCase, for_each_backend, get_blob, put_link_raw,
             upload_blob,
         },
     },
     registry_client::REPLICATION_SUPERSEDED_CODE,
+    test_fixtures::client::test_client_config,
 };
 
 const IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.docker.distribution.manifest.v2+json";
@@ -767,6 +774,100 @@ async fn permissive_push_of_owned_references_yields_a_pullable_manifest() {
     )
     .await
     .expect("the owned layer blob must be pullable");
+}
+
+/// Build a pull-through repository whose sole upstream is `server`.
+async fn pull_through_repository(server: &MockServer) -> Repository {
+    let cache = cache::Config::Memory.to_backend().unwrap();
+    let config = RepositoryConfig {
+        upstream: vec![test_client_config(server.uri())],
+        ..Default::default()
+    };
+    Repository::new(
+        "test-repo",
+        &config,
+        &cache,
+        DEFAULT_MAX_MANIFEST_SIZE_BYTES,
+    )
+    .await
+    .unwrap()
+}
+
+/// Mount a manifest GET on `server` that answers without the SHOULD-level
+/// `Docker-Content-Digest` header.
+async fn mount_manifest_without_digest_header(server: &MockServer, reference: &str, body: &[u8]) {
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/test-repo/manifests/{reference}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(body)
+                .insert_header("Content-Type", IMAGE_MANIFEST_MEDIA_TYPE),
+        )
+        .mount(server)
+        .await;
+}
+
+/// A pull-through fill from an upstream that omits `Docker-Content-Digest`
+/// must succeed, hashing the body it received rather than failing the pull.
+#[tokio::test]
+async fn pull_through_computes_the_digest_when_the_upstream_omits_the_header() {
+    let case = FSRegistryTestCase::new();
+    let namespace = Namespace::new("test-repo").unwrap();
+    let (content, _) = create_raw_test_manifest();
+
+    let upstream = MockServer::start().await;
+    mount_manifest_without_digest_header(&upstream, "latest", &content).await;
+    let repository = pull_through_repository(&upstream).await;
+
+    let manifest = case
+        .registry()
+        .get_manifest(
+            &repository,
+            &[IMAGE_MANIFEST_MEDIA_TYPE.to_string()],
+            &namespace,
+            Reference::Tag(Tag::new("latest").unwrap()),
+            false,
+        )
+        .await
+        .expect("an upstream omitting Docker-Content-Digest must not fail the pull");
+
+    assert_eq!(manifest.content, content);
+    assert_eq!(
+        manifest.digest,
+        Digest::sha256_of_bytes(&content),
+        "a tag names no algorithm, so the body hashes under the spec's mandatory one"
+    );
+}
+
+/// The recomputed digest follows the algorithm the reference asked for, so a
+/// by-digest pull of a sha512 manifest is not answered with a sha256 digest.
+#[tokio::test]
+async fn pull_through_recomputes_under_the_requested_digest_algorithm() {
+    let case = FSRegistryTestCase::new();
+    let namespace = Namespace::new("test-repo").unwrap();
+    let (content, _) = create_raw_test_manifest();
+    let requested = Digest::from_bytes(Algorithm::Sha512, &content);
+
+    let upstream = MockServer::start().await;
+    mount_manifest_without_digest_header(&upstream, &requested.to_string(), &content).await;
+    let repository = pull_through_repository(&upstream).await;
+
+    let manifest = case
+        .registry()
+        .get_manifest(
+            &repository,
+            &[IMAGE_MANIFEST_MEDIA_TYPE.to_string()],
+            &namespace,
+            Reference::Digest(requested.clone()),
+            false,
+        )
+        .await
+        .expect("a by-digest pull must survive a missing Docker-Content-Digest");
+
+    assert_eq!(
+        manifest.digest, requested,
+        "the recomputed digest must use the requested algorithm, not a sha256 default"
+    );
 }
 
 #[tokio::test]
