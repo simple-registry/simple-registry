@@ -1,6 +1,7 @@
 use std::{io::Cursor, time::Duration};
 
 use futures_util::future::join_all;
+use tracing::Level;
 use url::Url;
 use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
@@ -17,7 +18,7 @@ use crate::{
         auth::{token_cache_key, token_index_cache_key},
     },
     secret::Secret,
-    test_fixtures::client::test_client_config,
+    test_fixtures::{client::test_client_config, logging::LogCapture},
 };
 
 /// Builds a no-auth client pointed at `mock_server`.
@@ -285,8 +286,76 @@ async fn test_head_manifest_success() {
         media_type,
         Some(MediaType::new("application/vnd.docker.distribution.manifest.v2+json").unwrap())
     );
-    assert_eq!(digest, Digest::try_from(test_digest).unwrap());
+    assert_eq!(digest, Some(Digest::try_from(test_digest).unwrap()));
     assert_eq!(size, 5678);
+}
+
+/// `Docker-Content-Digest` is a SHOULD, so a conformant upstream may omit it.
+/// A HEAD carries no body to recompute it from, so the digest reads as unknown
+/// instead of failing the whole probe.
+#[tokio::test]
+async fn head_manifest_without_content_digest_reports_an_unknown_digest() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("HEAD"))
+        .and(path("/v2/test/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "Content-Type",
+                    "application/vnd.docker.distribution.manifest.v2+json",
+                )
+                .insert_header("Content-Length", "5678"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let (media_type, digest, size) = client_for(&mock_server)
+        .head_manifest(
+            &[],
+            &format!("{}/v2/test/manifests/latest", mock_server.uri()),
+        )
+        .await
+        .expect("a manifest HEAD without Docker-Content-Digest must still succeed");
+
+    assert_eq!(digest, None);
+    assert_eq!(
+        media_type,
+        Some(MediaType::new("application/vnd.docker.distribution.manifest.v2+json").unwrap())
+    );
+    assert_eq!(size, 5678);
+}
+
+/// The GET counterpart: the digest is unknown to the client, and the body it
+/// returns is what the caller hashes to recover it.
+#[tokio::test]
+async fn get_manifest_without_content_digest_still_returns_the_body() {
+    let mock_server = MockServer::start().await;
+    let manifest_body = b"{\"schemaVersion\":2}";
+
+    Mock::given(method("GET"))
+        .and(path("/v2/test/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(manifest_body)
+                .insert_header(
+                    "Content-Type",
+                    "application/vnd.docker.distribution.manifest.v2+json",
+                ),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let (_, digest, body) = client_for(&mock_server)
+        .get_manifest(
+            &[],
+            &format!("{}/v2/test/manifests/latest", mock_server.uri()),
+        )
+        .await
+        .expect("a manifest GET without Docker-Content-Digest must still succeed");
+
+    assert_eq!(digest, None);
+    assert_eq!(body, manifest_body);
 }
 
 #[tokio::test]
@@ -324,7 +393,7 @@ async fn test_get_manifest_success() {
         media_type,
         Some(MediaType::new("application/vnd.docker.distribution.manifest.v2+json").unwrap())
     );
-    assert_eq!(digest, Digest::try_from(test_digest).unwrap());
+    assert_eq!(digest, Some(Digest::try_from(test_digest).unwrap()));
     assert_eq!(body, manifest_body);
 }
 
@@ -1263,6 +1332,42 @@ async fn test_mount_blob_rejects_mismatched_201_digest() {
     drop(mock_server);
 }
 
+/// A garbage digest header must not read as an absent one: doing so would skip
+/// the mismatch rejection entirely, letting any unparseable value pass a blob
+/// off as mounted.
+#[tokio::test]
+async fn mount_blob_rejects_an_unparseable_201_digest() {
+    let mock_server = MockServer::start().await;
+    let digest = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+
+    Mock::given(method("POST"))
+        .and(path("/v2/target/blobs/uploads/"))
+        .and(query_param("mount", digest))
+        .and(query_param("from", "source"))
+        .respond_with(
+            ResponseTemplate::new(201).insert_header(DOCKER_CONTENT_DIGEST, "not-a-digest"),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let client = client_for(&mock_server);
+    let start_url = client.get_uploads_start_path("target");
+    let outcome = client
+        .mount_blob(
+            &start_url,
+            &Digest::try_from(digest).unwrap(),
+            Some("source"),
+        )
+        .await;
+
+    assert!(
+        outcome.is_err(),
+        "a 201 advertising an unparseable digest must be rejected, not accepted as a mount"
+    );
+    drop(mock_server);
+}
+
 #[tokio::test]
 async fn test_mount_blob_accepts_matching_201_digest() {
     let mock_server = MockServer::start().await;
@@ -1327,6 +1432,50 @@ async fn test_put_manifest_with_oci_subject() {
     assert_eq!(result.digest, Some(Digest::try_from(digest).unwrap()));
     assert_eq!(result.subject, Some(subject.to_string()));
     assert!(!result.superseded);
+}
+
+/// A push the downstream accepted must not fail over a bad echo, but the echo
+/// is what the divergence check reads, so dropping it has to be visible rather
+/// than silently reported as no digest at all.
+#[tokio::test]
+async fn put_manifest_warns_on_an_unparseable_advertised_digest() {
+    let mock_server = MockServer::start().await;
+    let manifest = br#"{"schemaVersion":2}"#;
+    let media_type = "application/vnd.oci.image.manifest.v1+json";
+
+    Mock::given(method("PUT"))
+        .and(path("/v2/test/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(201).insert_header(DOCKER_CONTENT_DIGEST, "not-a-digest"),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let client = client_for(&mock_server);
+    let location = client.get_manifest_path("test", &Reference::Tag(Tag::new("latest").unwrap()));
+
+    let log_capture = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(Level::WARN)
+        .with_writer(log_capture.clone())
+        .with_ansi(false)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+
+    let result = client
+        .put_manifest(&location, Some(media_type), manifest.to_vec(), None)
+        .await
+        .expect("an unparseable echo must not fail a push the downstream accepted");
+
+    drop(guard);
+
+    assert_eq!(result.digest, None);
+    let logs = log_capture.contents();
+    assert!(
+        logs.contains("put_manifest") && logs.contains(DOCKER_CONTENT_DIGEST),
+        "the dropped digest echo must be logged, logs were: {logs}"
+    );
 }
 
 #[tokio::test]

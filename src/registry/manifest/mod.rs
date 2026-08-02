@@ -304,9 +304,21 @@ impl Registry {
             return Ok(manifest);
         }
 
-        let (media_type, digest, content) = repository
+        let (media_type, upstream_digest, content) = repository
             .get_manifest(accepted_types, namespace, &reference)
             .await?;
+
+        // `Docker-Content-Digest` may be omitted.
+        // The body is what the digest describes, so hash it under the algorithm the
+        // reference asked for; a tag names none and takes the spec's mandatory
+        // one.
+        let digest = match upstream_digest {
+            Some(digest) => digest,
+            None => match &reference {
+                Reference::Digest(requested) => Digest::from_bytes(requested.algorithm(), &content),
+                Reference::Tag(_) => Digest::sha256_of_bytes(&content),
+            },
+        };
 
         // The registry is about to gain upstream content, so webhook
         // consumers see the intent like any other write. Best effort: the

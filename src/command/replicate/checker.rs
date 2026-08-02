@@ -213,7 +213,7 @@ async fn reconcile_push_step(
                 .head_manifest(&manifest_accept_types(), &location)
                 .await
             {
-                Ok((_, digest, _)) if digest == local => {
+                Ok((_, Some(digest), _)) if digest == local => {
                     debug!(
                         "Tag '{namespace}:{tag}' already converged on downstream '{}'",
                         downstream.name

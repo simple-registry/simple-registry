@@ -110,14 +110,15 @@ pub async fn push_manifest(
     // (each recursed child still gets its own skip). A subject-bearing
     // manifest must always PUT: only the PUT's `OCI-Subject` response reveals
     // whether the downstream needs the referrers fallback, and a converged
-    // primary does not imply the fallback landed.
+    // primary does not imply the fallback landed. A downstream that omits
+    // `Docker-Content-Digest` never converges and is pushed to instead.
     if parsed.subject.is_none()
         && ctx
             .downstream
             .registry_client
             .head_manifest(&manifest_accept_types(), &location)
             .await
-            .is_ok_and(|(_, downstream_digest, _)| &downstream_digest == digest)
+            .is_ok_and(|(_, downstream_digest, _)| downstream_digest.as_ref() == Some(digest))
     {
         info!(
             namespace = %ctx.namespace,

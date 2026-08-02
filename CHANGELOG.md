@@ -24,6 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The web UI lists the namespaces nested under the path being browsed, so an intermediate level of a name such as `team/website/backend` shows what lives below it instead of an empty manifest list.
 - A browse URL with a trailing or doubled slash now names the same path as one without, instead of resolving to an invalid namespace and reporting 404.
 - Deleting a tag or cancelling an upload in the web UI no longer refetches the namespace listing, which costs a store walk and three backend listings per namespace, so an action on a repository holding many namespaces completes without that delay.
+- A remote that omits the SHOULD-level `Docker-Content-Digest` header no longer breaks pull-through or replication: a manifest GET recovers the digest by hashing the body, and a HEAD that cannot report one refetches or pushes instead of failing.
+- A `Docker-Content-Digest` that is present but unparseable is no longer read as an absent one, so a blob mount advertising garbage is rejected instead of being accepted as converged, and a manifest push whose echo cannot be parsed logs a warning rather than silently skipping the divergence check.
 
 ## 1.4.3
 
