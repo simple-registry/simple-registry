@@ -31,3 +31,4 @@ bytesize = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "sync", "macros", "rt", "rt-multi-thread"] }
 uuid = { workspace = true }
+wiremock = { workspace = true }

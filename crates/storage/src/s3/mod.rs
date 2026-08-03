@@ -222,9 +222,16 @@ impl Backend {
                 break;
             }
             for u in pending {
-                self.client
+                // A peer that aborted the same upload between the listing and
+                // this call leaves nothing to abort, which is success here.
+                match self
+                    .client
                     .abort_multipart_upload(&u.key, &u.upload_id)
-                    .await?;
+                    .await
+                {
+                    Ok(()) | Err(S3Error::NotFound(_)) => {}
+                    Err(e) => return Err(Error::from(e)),
+                }
                 aborted.insert(u.upload_id);
             }
         }

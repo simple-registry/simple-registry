@@ -13,12 +13,13 @@ use std::{sync::Arc, time::Duration};
 
 use angos_s3_client::{
     Backend as S3Backend, BackendConfig as S3Config, Error as S3Error,
-    test_util::integration_config,
+    test_util::{integration_config, mock_config},
 };
 use bytes::Bytes;
 use bytesize::ByteSize;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use uuid::Uuid;
+use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
 use super::staged_key;
 use crate::test_util::frame;
@@ -812,4 +813,52 @@ async fn presign_get_returns_a_url() {
         url.contains("blob/x") && url.contains("X-Amz-Signature"),
         "expected a SigV4 presigned URL, got: {url}",
     );
+}
+
+/// A peer aborting the same upload between this replica's listing and its
+/// abort makes S3 answer `NoSuchUpload`; `abort_upload` is documented
+/// idempotent, so that must not surface as a failure. Two prune runs sharing a
+/// bucket hit this in normal operation.
+#[tokio::test]
+async fn abort_upload_tolerates_an_upload_a_peer_already_aborted() {
+    let server = MockServer::start().await;
+    let key = "blob/pending";
+    let config = S3Config {
+        key_prefix: "abort-race".to_string(),
+        ..mock_config(server.uri())
+    };
+
+    // The listing keeps reporting the upload, so the abort is always attempted.
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListMultipartUploadsResult>
+              <IsTruncated>false</IsTruncated>
+              <Upload>
+                <Key>{}/{key}</Key>
+                <UploadId>upload-1</UploadId>
+                <Initiated>2026-01-01T00:00:00Z</Initiated>
+              </Upload>
+            </ListMultipartUploadsResult>"#,
+            config.key_prefix
+        )))
+        .mount(&server)
+        .await;
+
+    // The peer got there first.
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(404).set_body_string(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error><Code>NoSuchUpload</Code></Error>"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(S3Backend::new(&config).expect("s3 client"));
+    let backend = Backend::builder(client).build();
+
+    backend
+        .abort_upload(key)
+        .await
+        .expect("an upload a peer already aborted must count as aborted");
 }
