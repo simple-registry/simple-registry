@@ -375,6 +375,23 @@ macro_rules! object_store_conformance {
             }
 
             #[tokio::test]
+            async fn upload_rejects_a_body_longer_than_declared() {
+                // `Some(len)` declares an exact count, so a longer body is an
+                // error on every backend rather than a silent truncation.
+                let (store, _guard) = $fixture;
+                store.create_upload("up/long").await.unwrap();
+                let error = store
+                    .write_upload("up/long", frame("hello world"), Some(5))
+                    .await
+                    .expect_err("a body longer than declared must be rejected");
+                let message = error.to_string();
+                assert!(
+                    message.contains("body") && message.contains('5'),
+                    "the error must name the declared length, got: {message}"
+                );
+            }
+
+            #[tokio::test]
             async fn upload_abort_leaves_no_object() {
                 let (store, _guard) = $fixture;
                 store.create_upload("up/abort").await.unwrap();

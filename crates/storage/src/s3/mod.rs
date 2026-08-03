@@ -480,14 +480,25 @@ impl ObjectStore for Backend {
         // bytes to restage at the new committed offset.
         let remainder = match len {
             Some(len) => {
-                self.emit_known_length_parts(
-                    key,
-                    &mut upload_id,
-                    &mut parts,
-                    &mut reader,
-                    staged_len + len,
-                )
-                .await?
+                let remainder = self
+                    .emit_known_length_parts(
+                        key,
+                        &mut upload_id,
+                        &mut parts,
+                        &mut reader,
+                        staged_len + len,
+                    )
+                    .await?;
+                // `len` is exact, so anything still readable is a longer body
+                // than declared: reject it rather than silently truncate, as
+                // the other backends do.
+                let mut beyond = [0u8; 1];
+                if reader.read(&mut beyond).await? > 0 {
+                    return Err(Error::Backend(format!(
+                        "s3 upload long body: expected {len} bytes, stream had more",
+                    )));
+                }
+                remainder
             }
             None => {
                 self.drain_chunked_parts(key, &mut upload_id, &mut parts, &mut reader)
