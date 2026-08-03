@@ -289,12 +289,16 @@ impl EventDispatcher {
                 self.spawn_async(delivery).await;
                 Ok(())
             }
-            DeliveryPolicy::Required => {
-                let result = delivery.send_and_record().await;
-                result.map_err(|e| {
-                    Error::Dispatch(format!("Webhook '{}' failed: {e}", delivery.name))
-                })
-            }
+            DeliveryPolicy::Required => match delivery.send_and_record().await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    // `dispatch` returns only the first required failure, so a
+                    // later one would otherwise reach metrics alone.
+                    let message = format!("Webhook '{}' failed: {e}", delivery.name);
+                    warn!("Required {message}");
+                    Err(Error::Dispatch(message))
+                }
+            },
             DeliveryPolicy::Optional => {
                 if let Err(e) = delivery.send_and_record().await {
                     warn!("Optional webhook '{}' failed: {e}", delivery.name);
