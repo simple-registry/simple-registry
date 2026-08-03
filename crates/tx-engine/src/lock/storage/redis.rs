@@ -63,7 +63,8 @@ mod backend {
 
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
-    use redis::{Client, Script};
+    use redis::{Client, Script, aio::ConnectionManager};
+    use tokio::sync::OnceCell;
 
     use super::RedisLockStorageConfig;
     use crate::lock::{
@@ -108,10 +109,13 @@ return 1
 
     /// Redis-backed lock storage.
     ///
-    /// Safe to clone; all clones share the same [`Client`].
+    /// Safe to clone; all clones share the same [`Client`] and connection.
     #[derive(Clone)]
     pub struct RedisLockStorage {
         client: Arc<Client>,
+        /// Opened once and reused; a per-call connection storms Redis at
+        /// heartbeat rates. Reconnects on its own.
+        connection: Arc<OnceCell<ConnectionManager>>,
         ttl_secs: usize,
         key_prefix: String,
     }
@@ -135,6 +139,7 @@ return 1
             let client = Client::open(config.url.clone())?;
             Ok(Self {
                 client: Arc::new(client),
+                connection: Arc::new(OnceCell::new()),
                 ttl_secs: config.ttl,
                 key_prefix: config.key_prefix.clone(),
             })
@@ -142,6 +147,18 @@ return 1
 
         fn full_key(&self, key: &str) -> String {
             format!("{}{}", self.key_prefix, key)
+        }
+
+        async fn connection(&self) -> Result<ConnectionManager, Error> {
+            self.connection
+                .get_or_try_init(|| async {
+                    self.client
+                        .get_connection_manager()
+                        .await
+                        .map_err(|e| Error::StorageBackend(format!("Redis connect: {e}")))
+                })
+                .await
+                .cloned()
         }
     }
 
@@ -155,11 +172,7 @@ return 1
             let full_key = self.full_key(key);
             let value = lock_value(body)?;
 
-            let mut conn = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|e| Error::StorageBackend(format!("Redis connect: {e}")))?;
+            let mut conn = self.connection().await?;
 
             let result: Option<String> = Script::new(SET_NX_SCRIPT)
                 .key(&full_key)
@@ -186,11 +199,7 @@ return 1
             let full_key = self.full_key(key);
             let new_value = lock_value(body)?;
 
-            let mut conn = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|e| Error::StorageBackend(format!("Redis connect: {e}")))?;
+            let mut conn = self.connection().await?;
 
             let result: i32 = Script::new(REFRESH_SCRIPT)
                 .key(&full_key)
@@ -213,11 +222,7 @@ return 1
             key: &str,
         ) -> Result<(Vec<u8>, String, Option<DateTime<Utc>>), Error> {
             let full_key = self.full_key(key);
-            let mut conn = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|e| Error::StorageBackend(format!("Redis connect: {e}")))?;
+            let mut conn = self.connection().await?;
 
             let value: Option<String> = redis::cmd("GET")
                 .arg(&full_key)
@@ -240,11 +245,7 @@ return 1
             expected_etag: &str,
         ) -> Result<DeleteIfMatchOutcome, Error> {
             let full_key = self.full_key(key);
-            let mut conn = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|e| Error::StorageBackend(format!("Redis connect: {e}")))?;
+            let mut conn = self.connection().await?;
 
             let result: i32 = Script::new(DELETE_IF_MATCH_SCRIPT)
                 .key(&full_key)

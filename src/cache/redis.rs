@@ -31,7 +31,8 @@ where
 
 pub struct Backend {
     client: redis::Client,
-    connection: OnceCell<redis::aio::MultiplexedConnection>,
+    /// Reconnects on its own, so a Redis restart does not disable the cache.
+    connection: OnceCell<redis::aio::ConnectionManager>,
     key_prefix: String,
 }
 
@@ -54,11 +55,11 @@ impl Backend {
         })
     }
 
-    async fn connection(&self) -> Result<redis::aio::MultiplexedConnection, Error> {
+    async fn connection(&self) -> Result<redis::aio::ConnectionManager, Error> {
         self.connection
             .get_or_try_init(|| async {
                 self.client
-                    .get_multiplexed_async_connection()
+                    .get_connection_manager()
                     .await
                     .map_err(Error::from)
             })

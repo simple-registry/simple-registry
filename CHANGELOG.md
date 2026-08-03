@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The cross-namespace blob-reference check now reads shard contents rather than presence alone, so a legacy or corrupt empty shard in another namespace no longer blocks a blob's reclamation forever.
 - The Redis cache URL is held in the redacting `Secret` wrapper, so a password carried in its userinfo no longer reaches logs when the loaded configuration is debug-formatted.
 - Every failing required event webhook is now logged, so when several fail in one dispatch the ones after the first are no longer visible in metrics alone.
+- Redis connections are managed rather than per-call: the lock backend opens one connection instead of one per operation, and both it and the cache backend reconnect on their own, so a Redis restart no longer disables the authorization, JWKS, and upstream-token caches until angos is restarted.
 
 ## 1.4.4
 
