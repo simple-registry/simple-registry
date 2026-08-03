@@ -10,7 +10,8 @@ use crate::{
     registry::{
         Error,
         metadata_store::{
-            BlobIndexOperation, LinkKind, LinkOperation, blob_index::shard::read_shard,
+            BlobIndexOperation, LinkKind, LinkOperation,
+            blob_index::shard::{any_other_namespace_references_blob, read_shard},
         },
         path_builder,
         test_utils::fs_test_stack,
@@ -325,6 +326,78 @@ async fn test_has_blob_references_ignores_empty_cas_shards() {
         .delete_prefix(&config.connection.key_prefix)
         .await
         .unwrap();
+}
+
+/// The cross-namespace check must read empty shards the way
+/// `has_blob_references` does: an emptied shard is deleted, so an empty one is
+/// an artifact and must not pin the blob in another namespace forever.
+#[tokio::test]
+async fn empty_foreign_shard_does_not_block_reclaim() {
+    let stack = fs_test_stack();
+    let store = stack.store.as_ref();
+    let ours = Namespace::new("ours").unwrap();
+    let theirs = Namespace::new("theirs").unwrap();
+    let digest =
+        Digest::from_str("sha256:ff00000000000000000000000000000000000000000000000000000000000002")
+            .unwrap();
+    let theirs_shard = path_builder::blob_index_shard_path(&digest, &theirs);
+
+    store
+        .object_store()
+        .put(&theirs_shard, Bytes::from_static(b"[]"))
+        .await
+        .unwrap();
+    assert!(
+        !any_other_namespace_references_blob(store, &ours, &digest)
+            .await
+            .unwrap(),
+        "an empty foreign shard must not count as a live reference"
+    );
+
+    // The negative case above only means something if a populated foreign shard
+    // reports the opposite.
+    let links = serde_json::to_vec(&[LinkKind::Blob(digest.clone())]).unwrap();
+    store
+        .object_store()
+        .put(&theirs_shard, Bytes::from(links))
+        .await
+        .unwrap();
+    assert!(
+        any_other_namespace_references_blob(store, &ours, &digest)
+            .await
+            .unwrap(),
+        "a foreign shard holding a link must keep the blob alive"
+    );
+}
+
+/// A shard whose filename no longer decodes to a valid namespace has no
+/// canonical path, so it is joined verbatim and still read. Skipping it would
+/// report the blob unreferenced and reclaim bytes another namespace holds.
+#[tokio::test]
+async fn foreign_shard_with_an_undecodable_name_still_counts() {
+    let stack = fs_test_stack();
+    let store = stack.store.as_ref();
+    let ours = Namespace::new("ours").unwrap();
+    let digest =
+        Digest::from_str("sha256:ff00000000000000000000000000000000000000000000000000000000000003")
+            .unwrap();
+
+    // Uppercase is outside the namespace grammar, so this name cannot round
+    // trip through `Namespace::new`.
+    let refs_dir = path_builder::blob_index_refs_dir(&digest);
+    let links = serde_json::to_vec(&[LinkKind::Blob(digest.clone())]).unwrap();
+    store
+        .object_store()
+        .put(&format!("{refs_dir}/BAD.json"), Bytes::from(links))
+        .await
+        .unwrap();
+
+    assert!(
+        any_other_namespace_references_blob(store, &ours, &digest)
+            .await
+            .unwrap(),
+        "a shard that cannot be addressed canonically must still pin the blob"
+    );
 }
 
 // A corrupt shard must fail the reclaim read instead of parsing as an empty

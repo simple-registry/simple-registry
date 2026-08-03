@@ -165,22 +165,42 @@ pub async fn append_shard_for_digest(
 }
 
 /// Return `true` when any namespace other than `our_namespace` has a live
-/// shard entry in the refs directory.
+/// shard entry in the refs directory. A shard holding an empty link set is not
+/// a reference, matching [`MetadataStore::has_blob_references`]: emptying a
+/// shard deletes it, so an empty one is a legacy or corrupt artifact and must
+/// not pin the blob forever.
 pub async fn any_other_namespace_references_blob(
     store: &Store,
     our_namespace: &Namespace,
-    refs_prefix: &str,
+    digest: &Digest,
 ) -> Result<bool, Error> {
+    let refs_prefix = path_builder::blob_index_refs_dir(digest);
     let mut continuation = None;
     loop {
         let page = store
             .object_store()
-            .list(refs_prefix, 100, continuation)
+            .list(&refs_prefix, 100, continuation)
             .await
             .map_err(Error::from)?;
         for key in &page.items {
             let ns = decode_blob_index_shard_namespace(key);
-            if ns != our_namespace.as_ref() {
+            if ns == our_namespace.as_ref() {
+                continue;
+            }
+            // Address the shard the way it was written whenever its filename
+            // still decodes to a namespace; a name that no longer parses is
+            // joined verbatim so a legacy shard is still read, not skipped.
+            let shard_path = Namespace::new(&ns).map_or_else(
+                |_| format!("{refs_prefix}/{key}"),
+                |namespace| path_builder::blob_index_shard_path(digest, &namespace),
+            );
+            // A shard deleted between the listing and this read is gone, so it
+            // holds nothing; a corrupt one errors rather than reading as empty.
+            if read_shard(store, &shard_path)
+                .await
+                .map_err(Error::from)?
+                .is_some_and(|(_, links)| !links.is_empty())
+            {
                 return Ok(true);
             }
         }

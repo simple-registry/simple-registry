@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A blob PUT naming a session the registry does not hold is refused at the upload endpoint rather than relying on the storage layer to reject the write.
 - A job's `lock_key` is now a validating type that rejects the `%` reserved by the dedup-index encoding, so two distinct lock keys can no longer encode to one index path and falsely coalesce.
 - The namespace listing skips a directory whose name is not a valid namespace instead of failing the whole request, so one stray directory no longer breaks the web UI's view of a repository.
+- The cross-namespace blob-reference check now reads shard contents rather than presence alone, so a legacy or corrupt empty shard in another namespace no longer blocks a blob's reclamation forever.
 
 ## 1.4.4
 
