@@ -99,6 +99,13 @@ redis.call('DEL', KEYS[1])
 return 1
 ";
 
+    /// The Redis value for a lock body, which doubles as its `ETag`, so an
+    /// undecodable body is rejected rather than sharing a placeholder.
+    fn lock_value(body: Vec<u8>) -> Result<String, Error> {
+        String::from_utf8(body)
+            .map_err(|_| Error::InvalidData("lock body is not valid UTF-8".to_string()))
+    }
+
     /// Redis-backed lock storage.
     ///
     /// Safe to clone; all clones share the same [`Client`].
@@ -146,11 +153,7 @@ return 1
             body: Vec<u8>,
         ) -> Result<PutIfAbsentOutcome, Error> {
             let full_key = self.full_key(key);
-            // `body` is a JSON `LockBody`; we store its bytes verbatim as the Redis
-            // value. If decoding fails we substitute a sentinel string. The ETag
-            // comparison later will still work because we round-trip the same
-            // bytes.
-            let value = String::from_utf8(body).unwrap_or_else(|_| "unknown".to_string());
+            let value = lock_value(body)?;
 
             let mut conn = self
                 .client
@@ -181,7 +184,7 @@ return 1
             body: Vec<u8>,
         ) -> Result<PutIfMatchOutcome, Error> {
             let full_key = self.full_key(key);
-            let new_value = String::from_utf8(body).unwrap_or_else(|_| "unknown".to_string());
+            let new_value = lock_value(body)?;
 
             let mut conn = self
                 .client
@@ -263,6 +266,20 @@ return 1
 
         fn is_process_shared(&self) -> bool {
             true
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_non_utf8_lock_body_is_rejected_rather_than_given_a_shared_value() {
+            let error = lock_value(vec![0xff, 0xfe]).expect_err("no UTF-8 form, no Redis value");
+            assert!(
+                matches!(error, Error::InvalidData(_)),
+                "expected InvalidData, got {error:?}"
+            );
         }
     }
 }
