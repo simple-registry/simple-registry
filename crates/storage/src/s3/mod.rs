@@ -76,6 +76,10 @@ const FRAME_BUFFER_CAPACITY: usize = 8;
 /// S3 protocol floor for non-final multipart parts: a part must be at least
 /// 5 MiB before it can be flushed as an `UploadPart`.
 const MIN_PART_SIZE: u64 = 5 * 1024 * 1024;
+/// S3 protocol ceiling for a single part.
+const MAX_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
+/// S3 protocol ceiling on the parts one multipart upload may hold.
+const MAX_PARTS: usize = 10_000;
 
 /// Builder for [`Backend`]. The S3 HTTP client is required and supplied to
 /// [`Backend::builder`]; `part_size` and `uniform_parts` are optional fluent
@@ -107,10 +111,11 @@ impl Builder {
 
     /// Target part size for upload sessions (uniform mode) or minimum part
     /// size before flushing (non-uniform mode). Defaults to 5 MiB, the
-    /// S3 minimum.
+    /// S3 minimum, and is raised to it: a smaller non-final part is rejected
+    /// at `CompleteMultipartUpload`, long after the bytes were written.
     #[must_use]
     pub fn part_size(mut self, size: u64) -> Self {
-        self.part_size = size;
+        self.part_size = size.max(MIN_PART_SIZE);
         self
     }
 
@@ -242,8 +247,8 @@ impl Backend {
     /// `available` bytes, returning the trailing sub-part remainder. Uniform
     /// mode flushes `part_size` parts; non-uniform mode flushes everything as
     /// one part once `available` reaches the operator-configured `part_size`,
-    /// but never below the S3 5 MiB floor (a smaller non-final `UploadPart`
-    /// would be rejected).
+    /// splitting only to stay under the per-part ceiling. See
+    /// [`plan_known_length_parts`].
     async fn emit_known_length_parts<R>(
         &self,
         key: &str,
@@ -255,16 +260,8 @@ impl Backend {
     where
         R: AsyncRead + Unpin + Send,
     {
-        let nonuniform_threshold = self.part_size.max(MIN_PART_SIZE);
-        let (parts_to_emit, emit_size, restaged) = if self.uniform_parts {
-            let part_size = self.part_size;
-            let full = available / part_size;
-            (full, part_size, available - full * part_size)
-        } else if available >= nonuniform_threshold {
-            (1u64, available, 0u64)
-        } else {
-            (0u64, 0u64, available)
-        };
+        let (parts_to_emit, emit_size, restaged) =
+            plan_known_length_parts(self.uniform_parts, self.part_size, available);
 
         for _ in 0..parts_to_emit {
             let part_number = next_part_number(parts)?;
@@ -662,7 +659,32 @@ impl PresignedStore for Backend {
     }
 }
 
+/// Split a known-length append of `available` bytes into `(count, emit_size,
+/// restaged)`: `count` parts of exactly `emit_size` to flush now, and the
+/// trailing bytes to restage. Every emitted size stays within the S3 part
+/// bounds, so a part is never rejected for being too small or too large.
+fn plan_known_length_parts(uniform: bool, part_size: u64, available: u64) -> (u64, u64, u64) {
+    if uniform {
+        let full = available / part_size;
+        return (full, part_size, available - full * part_size);
+    }
+    if available < part_size.max(MIN_PART_SIZE) {
+        return (0, 0, available);
+    }
+    // One part per call, unless that would breach the per-part ceiling: then
+    // the fewest equal parts that fit under it, which leaves at most `count`
+    // bytes to restage rather than a second huge part to hold in memory.
+    let count = available.div_ceil(MAX_PART_SIZE);
+    let emit_size = available / count;
+    (count, emit_size, available - count * emit_size)
+}
+
 fn next_part_number(parts: &[UploadedPart]) -> Result<u32, Error> {
+    if parts.len() >= MAX_PARTS {
+        return Err(Error::Backend(format!(
+            "multipart upload would exceed the S3 {MAX_PARTS}-part limit"
+        )));
+    }
     u32::try_from(parts.len() + 1).map_err(|e| Error::Backend(e.to_string()))
 }
 
