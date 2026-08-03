@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - An upload write whose body is longer than its declared length is rejected on the S3 backend as it already was on the others, instead of silently discarding the excess.
 - A chunked upload now keeps one hasher checkpoint instead of one per chunk, so the listing every append and finalize performs no longer grows with the number of chunks, and completing an upload probes its liveness marker rather than reading the whole session.
 - Cached upstream bearer tokens are scoped to the credential that obtained them, so two clients configured against the same registry with different usernames no longer serve each other's tokens and act as the wrong identity.
+- Upstream request logging moved to debug and no longer includes the query string, keeping the signed state in a server-assigned upload-session URL out of the logs and pull-through probe traffic out of info-level output.
 
 ## 1.4.4
 

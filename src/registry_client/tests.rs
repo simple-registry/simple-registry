@@ -16,6 +16,7 @@ use crate::{
         DeleteManifestOutcome, Error, REPLICATION_SUPERSEDED_CODE, RegistryClient,
         RegistryClientConfig, X_ANGOS_SOURCE_TIMESTAMP,
         auth::{token_cache_key, token_index_cache_key},
+        without_query,
     },
     secret::Secret,
     test_fixtures::{client::test_client_config, logging::LogCapture},
@@ -1892,5 +1893,19 @@ async fn list_tags_breaks_on_cyclic_next_link() {
             Tag::new("a").unwrap(),
             Tag::new("b").unwrap(),
         ]
+    );
+}
+
+/// A server-assigned upload-session URL carries signed state in its query, so
+/// the logged form must drop it while leaving a plain location untouched.
+#[test]
+fn logged_locations_drop_the_query_string() {
+    assert_eq!(
+        without_query("https://up.example.com/v2/ns/blobs/uploads/s1?_state=SIGNED&sig=abc"),
+        "https://up.example.com/v2/ns/blobs/uploads/s1"
+    );
+    assert_eq!(
+        without_query("https://up.example.com/v2/ns/manifests/latest"),
+        "https://up.example.com/v2/ns/manifests/latest"
     );
 }

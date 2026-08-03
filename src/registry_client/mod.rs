@@ -20,7 +20,7 @@ use reqwest::{
 use serde::Deserialize;
 use tokio::{io::AsyncReadExt, sync::Mutex};
 use tokio_util::io::StreamReader;
-use tracing::{info, instrument, warn};
+use tracing::{debug, instrument, warn};
 use url::Url;
 
 pub use crate::registry_client::{
@@ -56,6 +56,15 @@ fn classify_read_failure(status: StatusCode, op: &str, not_found: Error) -> Erro
         StatusCode::NOT_FOUND => not_found,
         StatusCode::METHOD_NOT_ALLOWED => Error::Unsupported,
         _ => Error::Internal(format!("{op}: downstream returned status {status}")),
+    }
+}
+
+/// The location without its query string, which on an upload-session URL
+/// carries signed state that must not reach the logs.
+fn without_query(location: &str) -> &str {
+    match location.split_once('?') {
+        Some((base, _)) => base,
+        None => location,
     }
 }
 
@@ -284,7 +293,7 @@ impl RegistryClient {
         accepted_types: &[String],
         location: &str,
     ) -> Result<Response, Error> {
-        info!("Requesting from upstream: {location}");
+        debug!("Requesting from upstream: {}", without_query(location));
 
         self.send_with_auth_retry(location, |auth| async move {
             self.send(method, accepted_types, location, auth.as_deref())
