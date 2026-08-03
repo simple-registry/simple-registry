@@ -338,23 +338,29 @@ impl Registry {
         let namespace_names = self.list_repository_namespaces(repository).await?;
 
         // Each namespace's counts are three independent backend listings; fan
-        // them out rather than walking the namespaces one at a time.
-        let mut namespaces: Vec<NamespaceInfo> = stream::iter(namespace_names)
-            .map(|name_str| async move {
-                let name = Namespace::new(&name_str).map_err(|_| Error::NameInvalid)?;
-                let tag_count = self.metadata_store.count_tags(&name).await?;
-                let manifest_count = self.metadata_store.count_manifests(&name).await?;
-                let upload_count = self.count_uploads(&name).await?;
-                Ok::<_, Error>(NamespaceInfo {
-                    name: name_str,
-                    tag_count,
-                    manifest_count,
-                    upload_count,
-                })
+        // them out rather than walking the namespaces one at a time. A directory
+        // whose name is not a valid namespace is a storage artifact and is
+        // dropped rather than failing the whole listing, as `stream_tags` does
+        // (scrub reports and removes such directories).
+        let mut namespaces: Vec<NamespaceInfo> = stream::iter(
+            namespace_names
+                .into_iter()
+                .filter_map(|name| Namespace::new(&name).ok()),
+        )
+        .map(|name| async move {
+            let tag_count = self.metadata_store.count_tags(&name).await?;
+            let manifest_count = self.metadata_store.count_manifests(&name).await?;
+            let upload_count = self.count_uploads(&name).await?;
+            Ok::<_, Error>(NamespaceInfo {
+                name: name.to_string(),
+                tag_count,
+                manifest_count,
+                upload_count,
             })
-            .buffer_unordered(NAMESPACE_STAT_CONCURRENCY)
-            .try_collect()
-            .await?;
+        })
+        .buffer_unordered(NAMESPACE_STAT_CONCURRENCY)
+        .try_collect()
+        .await?;
 
         namespaces.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -763,9 +769,13 @@ mod tests {
         },
         registry::{
             metadata_store::{LinkKind, LinkOperation},
-            test_utils::{FSRegistryTestCase, create_test_blob, for_each_backend, media_type},
+            test_utils::{
+                FSRegistryTestCase, RegistryTestCase, create_test_blob, for_each_backend,
+                media_type,
+            },
         },
     };
+    use bytes::Bytes;
 
     fn digest(hex_suffix: &str) -> Digest {
         // Pad to 64 hex chars with the suffix at the end.
@@ -1289,5 +1299,42 @@ mod tests {
             );
         })
         .await;
+    }
+
+    /// A directory whose name is not a valid namespace is a storage artifact
+    /// scrub reports and removes. It must not take the whole listing down with
+    /// it, which a 500 here would do to the web UI's repository view.
+    #[tokio::test]
+    async fn namespaces_info_skips_an_invalid_namespace_directory() {
+        let test_case = FSRegistryTestCase::new();
+        let registry = test_case.registry();
+
+        let valid = Namespace::new("test-repo/valid").unwrap();
+        create_test_blob(registry, &valid, b"valid content").await;
+
+        // Uppercase is outside the namespace grammar, so this directory can only
+        // have arrived from outside the write paths.
+        test_case
+            .metadata_store()
+            .store()
+            .object_store()
+            .put(
+                "v2/repositories/test-repo/BAD/_manifests/tags/v1/current/link",
+                Bytes::from_static(b"{}"),
+            )
+            .await
+            .unwrap();
+
+        let response = registry
+            .get_namespaces_info("test-repo")
+            .await
+            .expect("one invalid directory must not fail the listing");
+        let names: Vec<&str> = response
+            .namespaces
+            .iter()
+            .map(|ns| ns.name.as_str())
+            .collect();
+
+        assert_eq!(names, ["test-repo/valid"]);
     }
 }
