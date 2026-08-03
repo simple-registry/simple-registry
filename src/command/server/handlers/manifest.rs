@@ -223,6 +223,7 @@ mod tests {
         Request, StatusCode,
         header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION},
     };
+    use tempfile::TempDir;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
     use crate::{
@@ -323,7 +324,7 @@ mod tests {
 
     // A context whose resolver matches "test/*", required for the read-back path
     // (the default test config declares no [repository.*] so it would resolve none).
-    async fn context_with_test_repo() -> ServerContext {
+    async fn context_with_test_repo() -> (ServerContext, TempDir) {
         create_test_repo_context(None).await
     }
 
@@ -357,7 +358,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let context = create_test_repo_context(Some(&server.uri())).await;
+        let (context, _root) = create_test_repo_context(Some(&server.uri())).await;
         let namespace = Namespace::new("test/repo").unwrap();
         let identity = ClientIdentity::new(None);
 
@@ -406,7 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn backdated_source_ts_loses_to_newer_local_tag() {
-        let context = context_with_test_repo().await;
+        let (context, _root) = context_with_test_repo().await;
         let namespace = Namespace::new("test/repo").unwrap();
         let identity = ClientIdentity::new(None);
         let tag = || Reference::Tag(Tag::new("latest").unwrap());

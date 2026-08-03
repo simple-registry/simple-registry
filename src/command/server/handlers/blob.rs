@@ -204,7 +204,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let context = create_test_repo_context(Some(&server.uri())).await;
+        let (context, _root) = create_test_repo_context(Some(&server.uri())).await;
         let namespace = Namespace::new("test/repo").unwrap();
         let identity = ClientIdentity::new(None);
         let digest = upload_blob(&context.registry, &namespace, b"pull event blob").await;

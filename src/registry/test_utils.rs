@@ -229,6 +229,19 @@ pub async fn upload_blob(registry: &Registry, namespace: &Namespace, content: &[
     digest
 }
 
+/// Seed `content` at the canonical blob path through the **blob** store, the
+/// one production reads bodies from. Seeding through the metadata store's
+/// object store instead only resolves when both share a root, which hides a
+/// split-backend bug.
+pub async fn put_blob_body(blob_store: &BlobStore, content: &[u8]) -> Digest {
+    let digest = Digest::sha256_of_bytes(content);
+    blob_store
+        .put_blob(&digest, Bytes::copy_from_slice(content))
+        .await
+        .unwrap();
+    digest
+}
+
 /// Test-only helper that writes `content` directly at the canonical blob path
 /// via the underlying `ObjectStore` (no upload state machine, no namespace),
 /// returning its SHA-256 digest.
@@ -277,7 +290,7 @@ pub async fn create_test_blob(
     namespace: &Namespace,
     content: &[u8],
 ) -> (Digest, Repository) {
-    let digest = put_blob_direct(registry.metadata_store.store(), content).await;
+    let digest = put_blob_body(registry.blob_store.as_ref(), content).await;
 
     let tag_link = LinkKind::Tag(Tag::new("latest").unwrap());
     let layer_link = LinkKind::Layer(digest.clone());
