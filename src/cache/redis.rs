@@ -5,25 +5,28 @@ use serde::{Deserialize, Deserializer};
 use tokio::sync::OnceCell;
 use tracing::info;
 
-use crate::cache::Error;
+use crate::{cache::Error, secret::Secret};
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct BackendConfig {
+    /// Secret as a whole: a Redis URL conventionally carries its password in
+    /// the userinfo, and this config is `Debug`-formatted wherever the loaded
+    /// configuration is.
     #[serde(deserialize_with = "validate_redis_url")]
-    pub url: String,
+    pub url: Secret<String>,
     pub key_prefix: String,
 }
 
 /// Rejects URLs that the `redis` client would refuse at `Client::open` time.
 /// Catching the error here surfaces it at config-load instead of at first connect.
-fn validate_redis_url<'de, D>(deserializer: D) -> Result<String, D::Error>
+fn validate_redis_url<'de, D>(deserializer: D) -> Result<Secret<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
     redis::Client::open(s.as_str())
         .map_err(|e| serde::de::Error::custom(format!("invalid Redis URL: {e}")))?;
-    Ok(s)
+    Ok(Secret::new(s))
 }
 
 pub struct Backend {
@@ -43,7 +46,7 @@ impl fmt::Debug for Backend {
 impl Backend {
     pub fn new(config: &BackendConfig) -> Result<Self, Error> {
         info!("Using Redis cache store");
-        let client = redis::Client::open(config.url.as_str())?;
+        let client = redis::Client::open(config.url.expose().as_str())?;
         Ok(Backend {
             client,
             connection: OnceCell::new(),
@@ -99,7 +102,7 @@ mod tests {
 
     fn make_backend(db: u8) -> Backend {
         let config = BackendConfig {
-            url: format!("redis://localhost:6379/{db}"),
+            url: Secret::new(format!("redis://localhost:6379/{db}")),
             key_prefix: String::new(),
         };
         Backend::new(&config).unwrap()
@@ -108,7 +111,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_and_retrieve() {
         let config = BackendConfig {
-            url: "redis://localhost:6379/0".to_string(),
+            url: Secret::new("redis://localhost:6379/0".to_string()),
             key_prefix: "test_acquire_write_lock".to_owned(),
         };
         let cache = Backend::new(&config).unwrap();
@@ -174,7 +177,7 @@ mod tests {
         "#;
         let result = toml::from_str::<BackendConfig>(toml);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
-        assert_eq!(result.unwrap().url, "redis://localhost:6379");
+        assert_eq!(result.unwrap().url.expose(), "redis://localhost:6379");
     }
 
     /// A `redis://` URL that selects a non-default database deserializes
@@ -187,7 +190,25 @@ mod tests {
         "#;
         let result = toml::from_str::<BackendConfig>(toml);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
-        assert_eq!(result.unwrap().url, "redis://localhost:6380/3");
+        assert_eq!(result.unwrap().url.expose(), "redis://localhost:6380/3");
+    }
+
+    /// The loaded configuration is `Debug`-formatted in logs and errors, so a
+    /// password carried in the URL's userinfo must not appear there.
+    #[test]
+    fn debug_output_redacts_a_password_carried_in_the_url() {
+        let toml = r#"
+            url = "redis://user:hunter2@localhost:6379"
+            key_prefix = "test:"
+        "#;
+        let config = toml::from_str::<BackendConfig>(toml).expect("valid URL");
+
+        let debug = format!("{config:?}");
+        assert!(
+            !debug.contains("hunter2"),
+            "Debug leaked the password: {debug}"
+        );
+        assert!(debug.contains("[REDACTED]"));
     }
 
     /// A URL that the redis client rejects must produce a deserialization error

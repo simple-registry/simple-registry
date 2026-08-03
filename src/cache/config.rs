@@ -31,7 +31,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::redis::BackendConfig;
+    use crate::{cache::redis::BackendConfig, secret::Secret};
 
     #[tokio::test]
     async fn test_memory_backend() {
@@ -45,7 +45,7 @@ mod tests {
     #[tokio::test]
     async fn test_redis_backend() {
         let backend = Config::Redis(BackendConfig {
-            url: "redis://localhost:6379/0".to_string(),
+            url: Secret::new("redis://localhost:6379/0".to_string()),
             key_prefix: "test_cache_config".to_string(),
         })
         .to_backend()
@@ -61,7 +61,7 @@ mod tests {
     #[test]
     fn redis_config_to_backend_constructs_without_connecting() {
         let result = Config::Redis(BackendConfig {
-            url: "redis://localhost:6379/0".to_string(),
+            url: Secret::new("redis://localhost:6379/0".to_string()),
             key_prefix: "test:".to_string(),
         })
         .to_backend();
