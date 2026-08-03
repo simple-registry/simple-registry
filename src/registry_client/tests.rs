@@ -503,6 +503,7 @@ async fn test_cached_bearer_token_is_used() {
         "https://auth.example.com/token",
         Some("registry"),
         Some("repository:test:pull"),
+        None,
     )
     .unwrap();
     cache
@@ -510,7 +511,11 @@ async fn test_cached_bearer_token_is_used() {
         .await
         .unwrap();
     cache
-        .store_value(&token_index_cache_key(&url).unwrap(), &cache_key, 3600)
+        .store_value(
+            &token_index_cache_key(&url, None).unwrap(),
+            &cache_key,
+            3600,
+        )
         .await
         .unwrap();
 
@@ -649,6 +654,7 @@ async fn test_expired_bearer_token_is_refetched() {
         &format!("{}/token", auth_server.uri()),
         Some("registry"),
         Some("repository:test:pull"),
+        None,
     )
     .unwrap();
     cache
@@ -656,7 +662,11 @@ async fn test_expired_bearer_token_is_refetched() {
         .await
         .unwrap();
     cache
-        .store_value(&token_index_cache_key(&url).unwrap(), &cache_key, 3600)
+        .store_value(
+            &token_index_cache_key(&url, None).unwrap(),
+            &cache_key,
+            3600,
+        )
         .await
         .unwrap();
 

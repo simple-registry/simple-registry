@@ -173,6 +173,12 @@ struct TagsListBody {
 }
 
 impl RegistryClient {
+    /// Configured basic-auth username, `None` when the client is anonymous.
+    /// Scopes cached bearer tokens so clients never share across identities.
+    fn auth_username(&self) -> Option<&str> {
+        self.basic_auth.as_ref().map(|(user, _)| user.as_str())
+    }
+
     /// Starts building a registry client from individual resolved fields. The
     /// base `url`, the pre-built HTTP `client` (carrying the resolved
     /// TLS/redirect/timeout policy) and the shared token/auth `cache` are
@@ -368,7 +374,7 @@ impl RegistryClient {
     }
 
     async fn cached_auth_header_for_url(&self, url: &Url) -> Option<String> {
-        let index_key = match token_index_cache_key(url) {
+        let index_key = match token_index_cache_key(url, self.auth_username()) {
             Ok(key) => key,
             Err(e) => {
                 warn!("Unable to build auth cache key: {e}");
