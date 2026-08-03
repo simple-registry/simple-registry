@@ -276,7 +276,7 @@ pub async fn test_complete_upload_fails_on_rerun(store: &BlobStore) {
 
 // Test entry points: run each helper against every backend fixture
 
-use crate::registry::test_utils::for_each_backend;
+use crate::registry::test_utils::{FSRegistryTestCase, RegistryTestCase, for_each_backend};
 
 #[tokio::test]
 async fn stream_uploads() {
@@ -350,6 +350,14 @@ async fn complete_upload_fails_on_rerun() {
     .await;
 }
 
+/// FS-only: the assertion is about object count under one prefix, which the
+/// shared backends agree on, and this keeps the check independent of a live S3.
+#[tokio::test]
+async fn checkpoints_supersede_rather_than_accumulate() {
+    let tc = FSRegistryTestCase::new();
+    test_checkpoints_supersede_rather_than_accumulate(tc.blob_store().as_ref()).await;
+}
+
 #[tokio::test]
 async fn complete_upload_rejects_size_divergence() {
     for_each_backend(async |tc| {
@@ -400,5 +408,39 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
     assert!(
         matches!(store.read(&digest).await, Err(Error::BlobUnknown)),
         "the diverged bytes must never reach the canonical blob path"
+    );
+}
+
+/// Each PATCH replaces the checkpoint rather than adding one: they are read by
+/// listing the whole set, so accumulating them makes every later PATCH and the
+/// finalize progressively more expensive.
+pub async fn test_checkpoints_supersede_rather_than_accumulate(store: &BlobStore) {
+    let namespace = &Namespace::new("checkpoint-supersede").unwrap();
+    let uuid = &Uuid::new_v4().to_string();
+    store.create_upload(namespace, uuid).await.unwrap();
+
+    for chunk in ["one", "two", "three", "four"] {
+        store
+            .write_upload(
+                namespace,
+                uuid,
+                Box::new(Cursor::new(chunk.as_bytes().to_vec())),
+                Some(chunk.len() as u64),
+                Algorithm::Sha256,
+            )
+            .await
+            .unwrap();
+    }
+
+    let dir = format!(
+        "{}/",
+        path_builder::upload_hash_context_dir(namespace, uuid)
+    );
+    let page = store.object.list(&dir, 100, None).await.unwrap();
+    assert_eq!(
+        page.items.len(),
+        1,
+        "one live checkpoint expected, got: {:?}",
+        page.items
     );
 }

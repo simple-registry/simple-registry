@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Aborting an upload another replica already aborted now counts as done rather than failing, so two prune runs sharing a bucket no longer report a spurious error.
 - S3 multipart uploads respect the protocol's part limits: a large append is split to stay under the 5 GiB per-part ceiling instead of failing the push, a configured part size below the 5 MiB floor is raised to it rather than failing at completion, and an upload past 10,000 parts is refused before its bytes are streamed.
 - An upload write whose body is longer than its declared length is rejected on the S3 backend as it already was on the others, instead of silently discarding the excess.
+- A chunked upload now keeps one hasher checkpoint instead of one per chunk, so the listing every append and finalize performs no longer grows with the number of chunks, and completing an upload probes its liveness marker rather than reading the whole session.
 
 ## 1.4.4
 

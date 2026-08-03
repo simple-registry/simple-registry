@@ -120,8 +120,13 @@ impl BlobStore {
 
     /// Persist the activity timestamp and the hasher-state checkpoint for
     /// `record` to their respective per-file artifacts under the upload
-    /// container.
-    async fn write_session(&self, record: &UploadSessionRecord) -> Result<(), Error> {
+    /// container. `supersedes` is the offset of the checkpoint this one
+    /// replaces, dropped once the new one is durable.
+    async fn write_session(
+        &self,
+        record: &UploadSessionRecord,
+        supersedes: Option<u64>,
+    ) -> Result<(), Error> {
         let namespace = &record.namespace;
         let uuid = &record.session_id;
 
@@ -132,6 +137,16 @@ impl BlobStore {
             self.write_start_date(namespace, uuid, record.started_at),
             self.write_hash_context(namespace, uuid, record.uploaded_size, &record.hash_context),
         )?;
+
+        // Only after the replacement is durable, so a crash in between leaves
+        // the older checkpoint to resume from. Best effort: a survivor is
+        // ignored by `read_hash_context`, which takes the highest offset.
+        if let Some(previous) = supersedes
+            && previous != record.uploaded_size
+        {
+            let key = path_builder::upload_hash_context_path(namespace, uuid, previous);
+            let _ = self.object.delete(&key).await;
+        }
         Ok(())
     }
 
@@ -273,7 +288,7 @@ impl BlobStore {
             hash_context,
             uploaded_size: 0,
         };
-        self.write_session(&record).await?;
+        self.write_session(&record, None).await?;
         Ok(())
     }
 
@@ -395,10 +410,11 @@ impl BlobStore {
             (Err(e), Ok(_)) => return Err(e.into()),
         };
 
+        let superseded = record.uploaded_size;
         record.hash_context = hasher.state().to_bytes()?;
         record.uploaded_size = new_size;
         record.started_at = Utc::now();
-        self.write_session(&record).await?;
+        self.write_session(&record, Some(superseded)).await?;
 
         Ok((hasher, new_size))
     }
@@ -440,9 +456,15 @@ impl BlobStore {
         hashed_size: u64,
     ) -> Result<Digest, Error> {
         // Confirm the session is live, then consume its liveness marker so any
-        // re-run fails at the check above instead of re-finalizing.
-        self.read_session(namespace, uuid).await?;
+        // re-run fails at the check above instead of re-finalizing. The marker
+        // alone answers liveness, so this is a HEAD rather than a full session
+        // read (a LIST plus two GETs).
         let started_at = path_builder::upload_start_date_path(namespace, uuid);
+        match self.object.head(&started_at).await {
+            Ok(_) => {}
+            Err(StorageError::NotFound) => return Err(Error::BlobUploadUnknown),
+            Err(e) => return Err(e.into()),
+        }
         self.object.delete(&started_at).await?;
 
         let upload_key = path_builder::upload_path(namespace, uuid);
