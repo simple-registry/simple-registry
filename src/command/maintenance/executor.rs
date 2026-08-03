@@ -140,7 +140,7 @@ impl Executor {
     /// runs coalesce and never merge with a timestamped event-path delete.
     async fn enqueue_replication(
         &self,
-        envelope: Result<JobEnvelope, serde_json::Error>,
+        envelope: Result<JobEnvelope, JobStoreError>,
     ) -> Result<(), Error> {
         let envelope = envelope.map_err(|e| {
             record_reconcile_outcome("failed");

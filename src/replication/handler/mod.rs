@@ -138,8 +138,9 @@ fn replication_lock_key(payload: &ReplicationPushPayload) -> String {
 ///
 /// # Errors
 ///
-/// Returns a [`serde_json::Error`] when the payload cannot be serialized.
-pub fn build_envelope(payload: &ReplicationPushPayload) -> Result<JobEnvelope, serde_json::Error> {
+/// Returns an [`Error`] when the lock key is invalid or the payload cannot be
+/// serialized.
+pub fn build_envelope(payload: &ReplicationPushPayload) -> Result<JobEnvelope, Error> {
     JobEnvelope::new(
         Queue::Replication,
         payload.kind.clone(),
@@ -157,10 +158,9 @@ pub fn build_envelope(payload: &ReplicationPushPayload) -> Result<JobEnvelope, s
 ///
 /// # Errors
 ///
-/// Returns a [`serde_json::Error`] when the payload cannot be serialized.
-pub fn build_prune_delete_envelope(
-    payload: &ReplicationPushPayload,
-) -> Result<JobEnvelope, serde_json::Error> {
+/// Returns an [`Error`] when the lock key is invalid or the payload cannot be
+/// serialized.
+pub fn build_prune_delete_envelope(payload: &ReplicationPushPayload) -> Result<JobEnvelope, Error> {
     JobEnvelope::new(
         Queue::Replication,
         payload.kind.clone(),

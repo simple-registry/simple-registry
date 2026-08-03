@@ -317,7 +317,7 @@ fn parse_digest(algorithm: &str, hash: &str) -> Option<Digest> {
 mod tests {
     use super::*;
     use crate::{
-        jobs::store::{job_failed_path, job_lock_key_index_path, job_pending_path},
+        jobs::store::{LockKey, job_failed_path, job_lock_key_index_path, job_pending_path},
         oci::{Namespace, Tag},
         registry::{
             metadata_store::LinkKind,
@@ -453,7 +453,10 @@ mod tests {
             }
         );
         assert_eq!(
-            categorize(&job_lock_key_index_path("cache", "a/b:c")),
+            categorize(&job_lock_key_index_path(
+                "cache",
+                &LockKey::new("a/b:c").expect("lock key")
+            )),
             KeyCategory::JobIndex {
                 queue: Queue::Cache,
             }

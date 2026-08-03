@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A multipart part upload whose response carries no `ETag` now fails at that part, naming it, instead of defaulting to an empty string that the S3 backend rejects later at `CompleteMultipartUpload` with no clue which part was at fault.
 - `angos migrate` now rewrites each link inside a transaction that reads it, so a tag push landing mid-run is kept instead of being silently reverted to its pre-push target.
 - A blob PUT naming a session the registry does not hold is refused at the upload endpoint rather than relying on the storage layer to reject the write.
+- A job's `lock_key` is now a validating type that rejects the `%` reserved by the dedup-index encoding, so two distinct lock keys can no longer encode to one index path and falsely coalesce.
 
 ## 1.4.4
 
