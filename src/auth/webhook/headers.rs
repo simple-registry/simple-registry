@@ -101,10 +101,11 @@ pub fn build_headers(
         headers.append(X_REGISTRY_CERTIFICATE_O, build_header_value(org)?);
     }
 
-    // Operator-selected client headers, forwarded verbatim.
+    // Operator-selected client headers, forwarded verbatim. A repeated header
+    // carries every one of its values, which the cache key then covers.
     for name in forward_headers {
-        if let Some(value) = parts.headers.get(name) {
-            headers.insert(build_header_name(name)?, value.clone());
+        for value in parts.headers.get_all(name) {
+            headers.append(build_header_name(name)?, value.clone());
         }
     }
 
@@ -320,6 +321,52 @@ mod tests {
                 &parts_with_headers(&[("X-Tenant", "tenant-b")])
             ),
             "a cached allow must not replay across a different forwarded header"
+        );
+    }
+
+    #[test]
+    fn every_value_of_a_repeated_forwarded_header_is_kept() {
+        let headers = build_headers(
+            &["X-Tenant".to_string()],
+            &Action::ApiVersion,
+            &anonymous(),
+            &parts_with_headers(&[("X-Tenant", "tenant-a"), ("X-Tenant", "tenant-b")]),
+        )
+        .unwrap();
+
+        let values: Vec<&str> = headers
+            .get_all("X-Tenant")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            values,
+            ["tenant-a", "tenant-b"],
+            "the webhook must decide on every value the client sent"
+        );
+    }
+
+    #[test]
+    fn an_extra_value_on_a_forwarded_header_produces_a_different_key() {
+        let action = Action::ApiVersion;
+        let identity = anonymous();
+        let forward = ["X-Tenant".to_string()];
+        assert_ne!(
+            key_for(
+                "wh",
+                &forward,
+                &action,
+                &identity,
+                &parts_with_headers(&[("X-Tenant", "tenant-a")])
+            ),
+            key_for(
+                "wh",
+                &forward,
+                &action,
+                &identity,
+                &parts_with_headers(&[("X-Tenant", "tenant-a"), ("X-Tenant", "tenant-b")])
+            ),
+            "a cached allow must not replay onto a request carrying an extra value"
         );
     }
 

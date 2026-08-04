@@ -32,6 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Multipart cleanup now treats only a genuinely absent session marker as proof that an upload was abandoned, so a transient backend failure during a prune pass no longer aborts an in-progress upload and destroys the parts it had already committed.
 - An upstream that refuses a request after angos refreshes its token now reports a denial rather than an opaque failure, so a replication job whose credential lacks the scope dead-letters immediately instead of retrying to its attempt limit, and reads classify it the same way writes already did.
 - Raising `angos prune --concurrency` no longer multiplies into that many in-flight metadata reads squared, since the per-namespace tag reads keep their own fixed fan-out instead of borrowing the knob that already bounds the namespace walk.
+- A client header listed in an authorization webhook's `forward_headers` now reaches the webhook with every one of its values instead of just the first, and the extra values are part of the decision cache key.
 
 ## 1.4.4
 
