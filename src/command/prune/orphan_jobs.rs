@@ -15,7 +15,7 @@ use crate::{
     jobs::store::{Error as JobStoreError, JobStore},
     jobs::{JobState, Queue},
     registry::{Repository, repository_resolver::RepositoryResolver},
-    replication::ReplicationPushPayload,
+    replication::ReplicationJob,
 };
 
 /// Keyset page size for the pending and failed scans; pages are looped to
@@ -58,19 +58,20 @@ impl OrphanQueue {
             // A downstream whose mode changed still resolves, so it is not an
             // orphan.
             OrphanQueue::Replication => {
-                let payload: ReplicationPushPayload = serde_json::from_value(payload)?;
+                let job: ReplicationJob = serde_json::from_value(payload)?;
+                let target = job.target();
                 let configured = resolver
-                    .resolve(&payload.namespace)
+                    .resolve(&target.namespace)
                     .is_some_and(|repository| {
                         repository
                             .replication
                             .iter()
-                            .any(|d| d.name == payload.downstream)
+                            .any(|d| d.name == target.downstream)
                     });
                 Ok((!configured).then(|| {
                     format!(
                         "downstream '{}' is not configured for '{}'",
-                        payload.downstream, payload.namespace
+                        target.downstream, target.namespace
                     )
                 }))
             }
@@ -288,8 +289,8 @@ mod tests {
         },
         registry_client::RegistryClient,
         replication::{
-            REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream, ReplicationMode,
-            ReplicationPushPayload, build_envelope,
+            REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream, ReplicationJob, ReplicationMode,
+            ReplicationTarget, build_envelope,
         },
     };
 
@@ -366,15 +367,15 @@ mod tests {
         OrphanJobChecker::new(job_store, resolver(), queue)
     }
 
-    fn push_payload(downstream: &str, namespace: &str) -> ReplicationPushPayload {
-        ReplicationPushPayload {
-            downstream: downstream.to_string(),
-            namespace: Namespace::new(namespace).unwrap(),
-            tag: Some(Tag::new("v1").unwrap()),
-            digest: None,
-            kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
-            source_ts: None,
-            subject: None,
+    fn push_payload(downstream: &str, namespace: &str) -> ReplicationJob {
+        ReplicationJob::Push {
+            target: ReplicationTarget {
+                downstream: downstream.to_string(),
+                namespace: Namespace::new(namespace).unwrap(),
+                tag: Some(Tag::new("v1").unwrap()),
+                digest: None,
+                source_ts: None,
+            },
         }
     }
 
@@ -617,9 +618,10 @@ mod tests {
             .read_pending(Queue::Replication, &keys[0])
             .await
             .unwrap();
-        let payload: ReplicationPushPayload = serde_json::from_value(survivor.payload).unwrap();
+        let payload: ReplicationJob = serde_json::from_value(survivor.payload).unwrap();
         assert_eq!(
-            payload.downstream, DOWNSTREAM,
+            payload.target().downstream,
+            DOWNSTREAM,
             "the configured downstream's job must survive"
         );
     }

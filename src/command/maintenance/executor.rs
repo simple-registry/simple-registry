@@ -24,8 +24,8 @@ use crate::{
         path_builder,
     },
     replication::{
-        REPLICATION_DELETE_MANIFEST_KIND, REPLICATION_PUSH_MANIFEST_KIND, ReplicationPushPayload,
-        build_envelope, build_prune_delete_envelope, record_reconcile_outcome,
+        ReplicationJob, ReplicationTarget, build_envelope, build_prune_delete_envelope,
+        record_reconcile_outcome,
     },
 };
 
@@ -450,19 +450,19 @@ impl Executor {
         tag: Tag,
         digest: Digest,
     ) -> Result<(), Error> {
-        let payload = ReplicationPushPayload {
-            downstream,
-            namespace,
-            tag: Some(tag),
-            digest: Some(digest.to_string()),
-            kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
-            // The handler stamps source_ts from the tag's created_at at execute
-            // time, so the push carries the same last-writer-wins version as the
-            // event path.
-            source_ts: None,
-            subject: None,
+        // The handler stamps source_ts from the tag's created_at at execute
+        // time, so the push carries the same last-writer-wins version as the
+        // event path.
+        let job = ReplicationJob::Push {
+            target: ReplicationTarget {
+                downstream,
+                namespace,
+                tag: Some(tag),
+                digest: Some(digest),
+                source_ts: None,
+            },
         };
-        self.enqueue_replication(build_envelope(&payload)).await
+        self.enqueue_replication(build_envelope(&job)).await
     }
 
     async fn enqueue_replication_delete(
@@ -476,18 +476,19 @@ impl Executor {
         // decision (clock skew, or a push racing the listing). That does NOT
         // make prune active-active safe: a peer's newer tag created before this
         // run is still deleted, so `prune = true` is one-way-mirror-only.
-        let payload = ReplicationPushPayload {
-            downstream,
-            namespace,
-            tag: Some(tag),
-            digest: None,
-            kind: REPLICATION_DELETE_MANIFEST_KIND.to_string(),
-            source_ts: Some(Utc::now().to_rfc3339()),
+        let job = ReplicationJob::Delete {
+            target: ReplicationTarget {
+                downstream,
+                namespace,
+                tag: Some(tag),
+                digest: None,
+                source_ts: Some(Utc::now()),
+            },
             subject: None,
         };
         // The prune envelope keys on the bare reference so repeated runs
         // coalesce instead of stacking one fresh-ts job per run.
-        self.enqueue_replication(build_prune_delete_envelope(&payload))
+        self.enqueue_replication(build_prune_delete_envelope(&job))
             .await
     }
 
@@ -1289,16 +1290,16 @@ mod tests {
 
     /// Builds an orphan-shaped replication push envelope.
     fn orphan_push_envelope() -> JobEnvelope {
-        let payload = ReplicationPushPayload {
-            downstream: "removed".to_string(),
-            namespace: Namespace::new("ns/app").unwrap(),
-            tag: Some(Tag::new("v1").unwrap()),
-            digest: None,
-            kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
-            source_ts: None,
-            subject: None,
+        let job = ReplicationJob::Push {
+            target: ReplicationTarget {
+                downstream: "removed".to_string(),
+                namespace: Namespace::new("ns/app").unwrap(),
+                tag: Some(Tag::new("v1").unwrap()),
+                digest: None,
+                source_ts: None,
+            },
         };
-        build_envelope(&payload).unwrap()
+        build_envelope(&job).unwrap()
     }
 
     /// Builds an orphan-shaped pull-through cache-fill envelope.

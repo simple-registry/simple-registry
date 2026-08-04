@@ -25,7 +25,8 @@ use crate::{
     },
     registry_client::Error as RegistryClientError,
     replication::{
-        Error as ReplicationError, ReplicationDownstream,
+        Error as ReplicationError, REPLICATION_DELETE_MANIFEST_KIND,
+        REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream,
         pipeline::{self, PushContext, PushOutcome},
     },
 };
@@ -49,48 +50,79 @@ pub fn record_reconcile_outcome(outcome: &str) {
         .inc();
 }
 
-/// Single queue carrying every replication job; the downstream is encoded in the
-/// `lock_key` and payload.
-/// Push a manifest (and everything it references) to a downstream.
-pub const REPLICATION_PUSH_MANIFEST_KIND: &str = "replication.push_manifest";
-/// Delete a manifest on a downstream.
-pub const REPLICATION_DELETE_MANIFEST_KIND: &str = "replication.delete_manifest";
-
-/// JSON payload for a replication job on [`Queue::Replication`]. The handler
+/// What a replication job acts on, shared by both operations. The handler
 /// re-resolves the current local `tag -> digest` at execute time and the queue
-/// only coalesces not-yet-claimed jobs, so a write landing mid-push enqueues
-/// its own job instead of being dropped.
+/// only coalesces not-yet-claimed jobs, so a write landing mid-push enqueues its
+/// own job instead of being dropped.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplicationPushPayload {
+pub struct ReplicationTarget {
     /// Local identifier of the target downstream (selects the `RegistryClient`).
     pub downstream: String,
     pub namespace: Namespace,
     /// Tag bound to the digest, when the change is tag-scoped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<Tag>,
-    /// Serialized OCI digest: informational for pushes, authoritative for
-    /// digest deletes and tag-less pushes, absent for a tag delete.
+    /// Informational for a tag-scoped job, authoritative for a tag-less one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub digest: Option<String>,
-    /// Mirrors the envelope `kind` so a payload is self-describing for the
-    /// scrub-side builder.
-    pub kind: String,
-    /// Event timestamp (RFC 3339) carried for receiver-side last-writer-wins.
+    pub digest: Option<Digest>,
+    /// Event instant carried for receiver-side last-writer-wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_ts: Option<String>,
-    /// Serialized subject digest of a referrer manifest, captured before the
-    /// delete so a retry can still prune the downstream fallback index.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subject: Option<String>,
+    pub source_ts: Option<DateTime<Utc>>,
+}
+
+/// JSON payload for a replication job on [`Queue::Replication`], keyed by the
+/// operation it performs. The operation is the discriminant, so a delete's
+/// subject can no longer ride along on a push and the stored `kind` can no
+/// longer disagree with the work the payload describes.
+///
+/// Serialized with `kind` as an internal tag, which is the shape the queue has
+/// always stored: the operation name under `kind` beside the flat target fields.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind")]
+pub enum ReplicationJob {
+    #[serde(rename = "replication.push_manifest")]
+    Push {
+        #[serde(flatten)]
+        target: ReplicationTarget,
+    },
+    #[serde(rename = "replication.delete_manifest")]
+    Delete {
+        #[serde(flatten)]
+        target: ReplicationTarget,
+        /// Subject digest of a referrer manifest, captured before the delete so
+        /// a retry can still prune the downstream fallback index.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<Digest>,
+    },
+}
+
+impl ReplicationJob {
+    /// The envelope kind this job is queued under.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ReplicationJob::Push { .. } => REPLICATION_PUSH_MANIFEST_KIND,
+            ReplicationJob::Delete { .. } => REPLICATION_DELETE_MANIFEST_KIND,
+        }
+    }
+
+    /// What the job acts on, whichever operation it is.
+    #[must_use]
+    pub fn target(&self) -> &ReplicationTarget {
+        match self {
+            ReplicationJob::Push { target } | ReplicationJob::Delete { target, .. } => target,
+        }
+    }
 }
 
 /// Tag-or-digest segment shared by every replication `lock_key`.
-fn lock_key_reference(payload: &ReplicationPushPayload) -> &str {
-    payload
+fn lock_key_reference(target: &ReplicationTarget) -> String {
+    target
         .tag
-        .as_deref()
-        .or(payload.digest.as_deref())
-        .unwrap_or("")
+        .as_ref()
+        .map(ToString::to_string)
+        .or_else(|| target.digest.as_ref().map(ToString::to_string))
+        .unwrap_or_default()
 }
 
 /// Base delete `lock_key`,
@@ -98,13 +130,13 @@ fn lock_key_reference(payload: &ReplicationPushPayload) -> &str {
 /// by the event-path delete (which appends `@{source_ts}`) and the scrub prune
 /// delete (which keys on this bare base). Defining it once keeps the invariant
 /// "the prune key is the event delete key minus the timestamp suffix" in code.
-fn delete_lock_key_base(payload: &ReplicationPushPayload) -> String {
+fn delete_lock_key_base(target: &ReplicationTarget) -> String {
     format!(
         "{}.delete.{}:{}:{}",
         Queue::Replication,
-        payload.downstream,
-        payload.namespace,
-        lock_key_reference(payload)
+        target.downstream,
+        target.namespace,
+        lock_key_reference(target)
     )
 }
 
@@ -118,38 +150,41 @@ fn delete_lock_key_base(payload: &ReplicationPushPayload) -> String {
 /// digest and timestamp, so they safely coalesce on the bare reference). Scrub
 /// prune deletes coalesce differently; see [`build_prune_delete_envelope`].
 #[must_use]
-fn replication_lock_key(payload: &ReplicationPushPayload) -> String {
-    if payload.kind == REPLICATION_DELETE_MANIFEST_KIND {
+fn replication_lock_key(job: &ReplicationJob) -> String {
+    let target = job.target();
+    match job {
         // The event-path delete is the bare base plus the `@{source_ts}` suffix.
-        format!(
+        ReplicationJob::Delete { .. } => format!(
             "{}@{}",
-            delete_lock_key_base(payload),
-            payload.source_ts.as_deref().unwrap_or("")
-        )
-    } else {
-        format!(
+            delete_lock_key_base(target),
+            target
+                .source_ts
+                .map(|ts| ts.to_rfc3339())
+                .unwrap_or_default()
+        ),
+        ReplicationJob::Push { .. } => format!(
             "{}.push.{}:{}:{}",
             Queue::Replication,
-            payload.downstream,
-            payload.namespace,
-            lock_key_reference(payload)
-        )
+            target.downstream,
+            target.namespace,
+            lock_key_reference(target)
+        ),
     }
 }
 
-/// Builds a [`JobEnvelope`] from a [`ReplicationPushPayload`]; exposed so the
-/// scrub checker enqueues the same envelope shape as the event path.
+/// Builds a [`JobEnvelope`] from a [`ReplicationJob`]; exposed so the scrub
+/// checker enqueues the same envelope shape as the event path.
 ///
 /// # Errors
 ///
 /// Returns an [`Error`] when the lock key is invalid or the payload cannot be
 /// serialized.
-pub fn build_envelope(payload: &ReplicationPushPayload) -> Result<JobEnvelope, Error> {
+pub fn build_envelope(job: &ReplicationJob) -> Result<JobEnvelope, Error> {
     JobEnvelope::new(
         Queue::Replication,
-        payload.kind.clone(),
-        replication_lock_key(payload),
-        payload,
+        job.kind(),
+        replication_lock_key(job),
+        job,
     )
 }
 
@@ -164,12 +199,12 @@ pub fn build_envelope(payload: &ReplicationPushPayload) -> Result<JobEnvelope, E
 ///
 /// Returns an [`Error`] when the lock key is invalid or the payload cannot be
 /// serialized.
-pub fn build_prune_delete_envelope(payload: &ReplicationPushPayload) -> Result<JobEnvelope, Error> {
+pub fn build_prune_delete_envelope(job: &ReplicationJob) -> Result<JobEnvelope, Error> {
     JobEnvelope::new(
         Queue::Replication,
-        payload.kind.clone(),
-        delete_lock_key_base(payload),
-        payload,
+        job.kind(),
+        delete_lock_key_base(job.target()),
+        job,
     )
 }
 
@@ -267,12 +302,12 @@ impl ReplicationJobHandler {
     async fn resolve_current_digest(
         &self,
         namespace: &Namespace,
-        payload: &ReplicationPushPayload,
+        target: &ReplicationTarget,
     ) -> Result<Option<(Digest, Option<DateTime<Utc>>)>, Error> {
         // Reads bypass the per-process link cache: a worker's cache can lag a
         // sibling process's write, and a stale resolve would replicate the old
         // digest and complete the job.
-        if let Some(tag) = &payload.tag {
+        if let Some(tag) = &target.tag {
             match self
                 .metadata_store
                 .read_link_reference(namespace, &LinkKind::Tag(tag.clone()))
@@ -285,14 +320,11 @@ impl ReplicationJobHandler {
                 ))),
             }
         } else {
-            let digest_str = payload.digest.as_deref().ok_or_else(|| {
+            let digest = target.digest.clone().ok_or_else(|| {
                 Error::Execution(format!(
                     "tag-less push for '{namespace}' has no digest to resolve"
                 ))
             })?;
-            let digest: Digest = digest_str
-                .parse()
-                .map_err(|e| Error::Execution(format!("invalid digest '{digest_str}': {e}")))?;
             // A content-addressed digest carries no local version timestamp.
             match self
                 .metadata_store
@@ -311,13 +343,10 @@ impl ReplicationJobHandler {
     /// Runs the push/delete attempt for a validated payload and records the
     /// success metric. It must NOT record `failed` itself: every `Err` is
     /// counted once by the `inspect_err` in [`Self::execute`].
-    async fn attempt(
-        &self,
-        envelope: &JobEnvelope,
-        payload: &ReplicationPushPayload,
-    ) -> Result<(), Error> {
-        let namespace = &payload.namespace;
-        let downstream = self.resolve_downstream(namespace, &payload.downstream)?;
+    async fn attempt(&self, job: &ReplicationJob) -> Result<(), Error> {
+        let target = job.target();
+        let namespace = &target.namespace;
+        let downstream = self.resolve_downstream(namespace, &target.downstream)?;
         // `Err` is unreachable for a routed namespace; the map stays defensive.
         let downstream_namespace = downstream.remote(namespace).map_err(|e| {
             Error::Execution(format!(
@@ -325,74 +354,67 @@ impl ReplicationJobHandler {
             ))
         })?;
 
-        if envelope.kind == REPLICATION_DELETE_MANIFEST_KIND {
-            self.attempt_delete(payload, downstream, &downstream_namespace)
-                .await
-        } else {
-            self.attempt_push(payload, downstream, &downstream_namespace)
-                .await
+        match job {
+            ReplicationJob::Delete { target, subject } => {
+                self.attempt_delete(target, subject.as_ref(), downstream, &downstream_namespace)
+                    .await
+            }
+            ReplicationJob::Push { target } => {
+                self.attempt_push(target, downstream, &downstream_namespace)
+                    .await
+            }
         }
     }
 
     async fn attempt_delete(
         &self,
-        payload: &ReplicationPushPayload,
+        target: &ReplicationTarget,
+        subject: Option<&Digest>,
         downstream: &ReplicationDownstream,
         downstream_namespace: &Namespace,
     ) -> Result<(), Error> {
-        let namespace = &payload.namespace;
-        let reference = if let Some(tag) = &payload.tag {
+        let namespace = &target.namespace;
+        let reference = if let Some(tag) = &target.tag {
             Reference::Tag(tag.clone())
         } else {
-            let digest = payload.digest.as_deref().ok_or_else(|| {
+            let digest = target.digest.clone().ok_or_else(|| {
                 Error::Execution(format!(
                     "tag-less delete for '{namespace}' has no digest reference"
                 ))
             })?;
-            Reference::Digest(
-                digest
-                    .parse()
-                    .map_err(|e| Error::Execution(format!("invalid digest '{digest}': {e}")))?,
-            )
+            Reference::Digest(digest)
         };
-        let subject = payload
-            .subject
-            .as_deref()
-            .map(str::parse::<Digest>)
-            .transpose()
-            .map_err(|e| {
-                Error::Execution(format!("invalid subject on delete for '{namespace}': {e}"))
-            })?;
+        let source_ts = target.source_ts.map(|ts| ts.to_rfc3339());
         let outcome = pipeline::delete_manifest(
             &downstream.registry_client,
             &self.metadata_store,
             namespace,
             downstream_namespace.as_ref(),
             &reference,
-            subject.as_ref(),
-            payload.source_ts.as_deref(),
+            subject,
+            source_ts.as_deref(),
         )
         .await
         .map_err(job_error)?;
-        Self::record_success(&payload.downstream, outcome);
+        Self::record_success(&target.downstream, outcome);
         Ok(())
     }
 
     async fn attempt_push(
         &self,
-        payload: &ReplicationPushPayload,
+        target: &ReplicationTarget,
         downstream: &ReplicationDownstream,
         downstream_namespace: &Namespace,
     ) -> Result<(), Error> {
-        let namespace = &payload.namespace;
+        let namespace = &target.namespace;
         // Re-resolving the digest at execute time gives latest-wins for a
         // coalesced job.
-        let Some((digest, created_at)) = self.resolve_current_digest(namespace, payload).await?
+        let Some((digest, created_at)) = self.resolve_current_digest(namespace, target).await?
         else {
             debug!(
                 namespace = %namespace,
-                tag = ?payload.tag,
-                digest = ?payload.digest,
+                tag = ?target.tag,
+                digest = ?target.digest,
                 "Push target no longer exists locally; treating as converged no-op"
             );
             return Ok(());
@@ -402,9 +424,7 @@ impl ReplicationJobHandler {
         // digest actually sent, for coalesced and reconcile pushes alike.
         // A tag-less push has no local timestamp, so the payload value
         // carries through (the receiver skips LWW for it).
-        let source_ts = created_at
-            .map(|ts| ts.to_rfc3339())
-            .or_else(|| payload.source_ts.clone());
+        let source_ts = created_at.or(target.source_ts).map(|ts| ts.to_rfc3339());
         let body = self.blob_store.read(&digest).await.map_err(|e| {
             Error::Execution(format!("failed to read local manifest '{digest}': {e}"))
         })?;
@@ -416,10 +436,10 @@ impl ReplicationJobHandler {
             downstream_namespace,
             source_ts: source_ts.as_deref(),
         };
-        let outcome = pipeline::push_manifest(&ctx, &digest, None, payload.tag.as_deref(), body)
+        let outcome = pipeline::push_manifest(&ctx, &digest, None, target.tag.as_deref(), body)
             .await
             .map_err(job_error)?;
-        Self::record_success(&payload.downstream, outcome);
+        Self::record_success(&target.downstream, outcome);
         Ok(())
     }
 }
@@ -437,7 +457,7 @@ impl JobHandler for ReplicationJobHandler {
             )));
         }
 
-        let payload: ReplicationPushPayload = serde_json::from_value(envelope.payload.clone())
+        let job: ReplicationJob = serde_json::from_value(envelope.payload.clone())
             .map_err(|e| Error::Execution(format!("failed to deserialize job payload: {e}")))?;
 
         // Loop prevention is no-op suppression at the mutation boundary: mutation
@@ -449,9 +469,9 @@ impl JobHandler for ReplicationJobHandler {
         // inside the attempt. The boxing is load-bearing: the concrete future
         // chain below `attempt` overflows rustc's layout query depth in
         // release builds.
-        Box::pin(self.attempt(envelope, &payload))
+        Box::pin(self.attempt(&job))
             .await
-            .inspect_err(|_| Self::record_failure(&payload.downstream))?;
+            .inspect_err(|_| Self::record_failure(&job.target().downstream))?;
 
         // Empty transaction: the HTTP push is the side effect.
         Ok(Transaction::builder().build())

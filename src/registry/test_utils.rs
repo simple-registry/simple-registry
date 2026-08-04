@@ -26,7 +26,7 @@ use crate::{
         s3_connection::S3ConnectionConfig,
     },
     registry_client::RegistryClient,
-    replication::{ReplicationDownstream, ReplicationMode, ReplicationPushPayload},
+    replication::{ReplicationDownstream, ReplicationJob, ReplicationMode},
     secret::Secret,
 };
 use angos_s3_client::Backend as S3HttpBackend;
@@ -558,7 +558,7 @@ pub fn repository_with_downstream(name: &str, client: Arc<RegistryClient>) -> Re
 
 /// Decode the payload of the sole pending replication job, panicking unless
 /// exactly one is pending.
-pub async fn sole_pending_payload(job_store: &JobStore) -> ReplicationPushPayload {
+pub async fn sole_pending_payload(job_store: &JobStore) -> ReplicationJob {
     let keys = job_store
         .list_pending(Queue::Replication, 16)
         .await
@@ -573,7 +573,7 @@ pub async fn sole_pending_payload(job_store: &JobStore) -> ReplicationPushPayloa
         .await
         .unwrap();
     assert_eq!(envelope.queue, Queue::Replication);
-    serde_json::from_value(envelope.payload).expect("decode ReplicationPushPayload")
+    serde_json::from_value(envelope.payload).expect("decode ReplicationJob")
 }
 
 /// Seed a config blob, a layer blob, a manifest referencing both, and a `v1`

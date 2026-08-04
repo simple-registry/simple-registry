@@ -22,10 +22,7 @@ use crate::{
         Error, Registry, Repository,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, ReferencePolicy},
     },
-    replication::{
-        REPLICATION_DELETE_MANIFEST_KIND, REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream,
-        ReplicationPushPayload, build_envelope,
-    },
+    replication::{ReplicationDownstream, ReplicationJob, ReplicationTarget, build_envelope},
 };
 
 pub const DEFAULT_MAX_MANIFEST_SIZE_BYTES: usize = 5 * 1024 * 1024;
@@ -1137,20 +1134,13 @@ impl Registry {
         // stale. An inbound replicated delete passes its author timestamp so it
         // propagates verbatim: re-stamping `now()` would let the bounced delete
         // outrank (and destroy) a recreate that landed in between.
-        let source_ts = source_ts.unwrap_or_else(Utc::now).to_rfc3339();
-        let (kind, tag, digest, subject) = match target {
-            DispatchTarget::Push { tag, digest } => {
-                (REPLICATION_PUSH_MANIFEST_KIND, tag, Some(digest), None)
+        let source_ts = source_ts.unwrap_or_else(Utc::now);
+        let (is_push, tag, digest, subject) = match target {
+            DispatchTarget::Push { tag, digest } => (true, tag, Some(digest), None),
+            DispatchTarget::TagDelete { tag } => (false, Some(tag), None, None),
+            DispatchTarget::DigestDelete { digest, subject } => {
+                (false, None, Some(digest), subject)
             }
-            DispatchTarget::TagDelete { tag } => {
-                (REPLICATION_DELETE_MANIFEST_KIND, Some(tag), None, None)
-            }
-            DispatchTarget::DigestDelete { digest, subject } => (
-                REPLICATION_DELETE_MANIFEST_KIND,
-                None,
-                Some(digest),
-                subject,
-            ),
         };
 
         // The per-downstream enqueues run concurrently: each one is an index
@@ -1159,14 +1149,20 @@ impl Registry {
         let dispatches = downstreams
             .filter(|downstream| downstream.enqueues_for(namespace.as_ref()))
             .map(|downstream| {
-                let payload = ReplicationPushPayload {
+                let job_target = ReplicationTarget {
                     downstream: downstream.name.clone(),
                     namespace: namespace.clone(),
                     tag: tag.cloned(),
-                    digest: digest.map(ToString::to_string),
-                    kind: kind.to_string(),
-                    source_ts: Some(source_ts.clone()),
-                    subject: subject.map(ToString::to_string),
+                    digest: digest.cloned(),
+                    source_ts: Some(source_ts),
+                };
+                let payload = if is_push {
+                    ReplicationJob::Push { target: job_target }
+                } else {
+                    ReplicationJob::Delete {
+                        target: job_target,
+                        subject: subject.cloned(),
+                    }
                 };
                 async move {
                     // Build + enqueue as one fallible step so failures share the warn + metric path.

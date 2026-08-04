@@ -3900,10 +3900,10 @@ mod noop_suppression_tests {
             .expect("replicated delete newer than the tag must proceed");
 
         let payload = sole_pending_payload(&job_store).await;
-        assert_eq!(payload.kind, REPLICATION_DELETE_MANIFEST_KIND);
+        assert_eq!(payload.kind(), REPLICATION_DELETE_MANIFEST_KIND);
         assert_eq!(
-            payload.source_ts.as_deref(),
-            Some(delete_ts.to_rfc3339().as_str()),
+            payload.target().source_ts,
+            Some(delete_ts),
             "the delete job must carry the author timestamp verbatim, \
              not a re-stamped now()"
         );
@@ -4062,7 +4062,7 @@ mod dispatch_replication_tests {
 
     use tempfile::TempDir;
 
-    use chrono::{DateTime, Duration, Utc};
+    use chrono::{Duration, Utc};
     use regex::Regex;
 
     use super::{DispatchTarget, MISSING_SUBJECT_DIGEST, create_test_manifest_with_subject};
@@ -4078,7 +4078,7 @@ mod dispatch_replication_tests {
         },
         replication::{
             REPLICATION_DELETE_MANIFEST_KIND, REPLICATION_PUSH_MANIFEST_KIND,
-            ReplicationDownstream, ReplicationMode, ReplicationPushPayload,
+            ReplicationDownstream, ReplicationJob, ReplicationMode,
         },
     };
 
@@ -4200,15 +4200,18 @@ mod dispatch_replication_tests {
             .await;
 
         let payload = sole_pending_payload(&job_store).await;
-        assert_eq!(payload.downstream, DOWNSTREAM);
-        assert_eq!(payload.namespace, NAMESPACE);
-        assert_eq!(payload.tag.as_deref(), Some("v1"));
-        assert_eq!(payload.digest.as_deref(), Some(SAMPLE_DIGEST));
-        assert_eq!(payload.kind, REPLICATION_PUSH_MANIFEST_KIND);
-        let source_ts = payload.source_ts.expect("source_ts must be present");
+        let target = payload.target();
+        assert_eq!(target.downstream, DOWNSTREAM);
+        assert_eq!(target.namespace, NAMESPACE);
+        assert_eq!(target.tag.as_deref(), Some("v1"));
+        assert_eq!(
+            target.digest.as_ref().map(ToString::to_string).as_deref(),
+            Some(SAMPLE_DIGEST)
+        );
+        assert_eq!(payload.kind(), REPLICATION_PUSH_MANIFEST_KIND);
         assert!(
-            DateTime::parse_from_rfc3339(&source_ts).is_ok(),
-            "source_ts must be a valid RFC 3339 timestamp; got {source_ts}"
+            target.source_ts.is_some(),
+            "source_ts must be present for receiver-side LWW"
         );
     }
 
@@ -4254,9 +4257,9 @@ mod dispatch_replication_tests {
                 .read_pending(Queue::Replication, key)
                 .await
                 .unwrap();
-            let payload: ReplicationPushPayload =
-                serde_json::from_value(envelope.payload).expect("decode ReplicationPushPayload");
-            downstreams.push(payload.downstream);
+            let payload: ReplicationJob =
+                serde_json::from_value(envelope.payload).expect("decode ReplicationJob");
+            downstreams.push(payload.target().downstream.clone());
         }
         downstreams.sort();
         assert_eq!(
@@ -4302,10 +4305,10 @@ mod dispatch_replication_tests {
                 .read_pending(Queue::Replication, &key)
                 .await
                 .unwrap();
-            let payload: ReplicationPushPayload =
+            let payload: ReplicationJob =
                 serde_json::from_value(envelope.payload).expect("decode payload");
-            if payload.kind == REPLICATION_DELETE_MANIFEST_KIND {
-                deletes.push(payload.subject);
+            if let ReplicationJob::Delete { subject, .. } = payload {
+                deletes.push(subject.map(|digest| digest.to_string()));
             }
         }
         assert_eq!(
@@ -4338,10 +4341,10 @@ mod dispatch_replication_tests {
             .await;
 
         let payload = sole_pending_payload(&job_store).await;
-        assert_eq!(payload.kind, REPLICATION_DELETE_MANIFEST_KIND);
+        assert_eq!(payload.kind(), REPLICATION_DELETE_MANIFEST_KIND);
         assert_eq!(
-            payload.source_ts.as_deref(),
-            Some(author_ts.to_rfc3339().as_str()),
+            payload.target().source_ts,
+            Some(author_ts),
             "a provided source_ts must propagate verbatim, not be re-stamped"
         );
     }

@@ -792,12 +792,13 @@ async fn fresh_local_tag_push_enqueues_replication_job() {
     // Proves the accept_put_manifest -> dispatch_replication -> envelope path
     // threads the right fields.
     let payload = sole_pending_payload(&fixture.job_store).await;
-    assert_eq!(payload.downstream, "eu-region");
-    assert_eq!(payload.namespace, REPLICATION_REPO);
-    assert_eq!(payload.tag.as_deref(), Some("latest"));
-    assert_eq!(payload.kind, REPLICATION_PUSH_MANIFEST_KIND);
+    let target = payload.target();
+    assert_eq!(target.downstream, "eu-region");
+    assert_eq!(target.namespace, REPLICATION_REPO);
+    assert_eq!(target.tag.as_deref(), Some("latest"));
+    assert_eq!(payload.kind(), REPLICATION_PUSH_MANIFEST_KIND);
     assert!(
-        payload.source_ts.is_some(),
+        target.source_ts.is_some(),
         "the payload must carry a source_ts for receiver-side LWW"
     );
 }
@@ -852,9 +853,9 @@ async fn tag_delete_enqueues_replication_delete_job() {
     );
 
     let payload = sole_pending_payload(&fixture.job_store).await;
-    assert_eq!(payload.kind, REPLICATION_DELETE_MANIFEST_KIND);
-    assert_eq!(payload.tag.as_deref(), Some("doomed"));
-    assert_eq!(payload.namespace, REPLICATION_REPO);
+    assert_eq!(payload.kind(), REPLICATION_DELETE_MANIFEST_KIND);
+    assert_eq!(payload.target().tag.as_deref(), Some("doomed"));
+    assert_eq!(payload.target().namespace, REPLICATION_REPO);
 }
 
 /// A retention-initiated delete (internal actor) mirrors only to the
@@ -901,9 +902,9 @@ async fn retention_delete_mirrors_only_to_prune_downstreams() {
         "a retention delete must enqueue for the prune = true downstream only"
     );
     let payload = sole_pending_payload(&fixture.job_store).await;
-    assert_eq!(payload.downstream, "mirror");
-    assert_eq!(payload.kind, REPLICATION_DELETE_MANIFEST_KIND);
-    assert_eq!(payload.tag.as_deref(), Some("expired"));
+    assert_eq!(payload.target().downstream, "mirror");
+    assert_eq!(payload.kind(), REPLICATION_DELETE_MANIFEST_KIND);
+    assert_eq!(payload.target().tag.as_deref(), Some("expired"));
 }
 
 /// A client-initiated delete fans out to every matching downstream.

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
+
 use serde_json::json;
 use tempfile::TempDir;
 use wiremock::{
@@ -30,7 +32,7 @@ use crate::{
     replication::{
         REPLICATION_DELETE_MANIFEST_KIND, REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream,
         handler::{
-            ReplicationJobHandler, ReplicationPushPayload, build_envelope,
+            ReplicationJob, ReplicationJobHandler, ReplicationTarget, build_envelope,
             build_prune_delete_envelope, replication_lock_key,
         },
     },
@@ -41,16 +43,43 @@ const NAMESPACE: &str = "nginx";
 const REPO: &str = "nginx";
 const DOWNSTREAM: &str = "eu-region";
 
-fn sample_payload() -> ReplicationPushPayload {
-    ReplicationPushPayload {
+fn sample_target() -> ReplicationTarget {
+    ReplicationTarget {
         downstream: DOWNSTREAM.to_string(),
         namespace: Namespace::new(NAMESPACE).unwrap(),
         tag: Some(Tag::new("v1").unwrap()),
         digest: Some(
-            "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
+            "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                .parse()
+                .unwrap(),
         ),
-        kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
-        source_ts: Some("2026-06-03T00:00:00Z".to_string()),
+        source_ts: Some(
+            DateTime::parse_from_rfc3339("2026-06-03T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        ),
+    }
+}
+
+fn sample_payload() -> ReplicationJob {
+    ReplicationJob::Push {
+        target: sample_target(),
+    }
+}
+
+fn instant(rfc3339: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(rfc3339)
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+/// A delete of the sample target, stamped at `source_ts`.
+fn sample_delete(source_ts: &str) -> ReplicationJob {
+    ReplicationJob::Delete {
+        target: ReplicationTarget {
+            source_ts: Some(instant(source_ts)),
+            ..sample_target()
+        },
         subject: None,
     }
 }
@@ -84,14 +113,13 @@ fn lock_key_uses_tag_when_set() {
 
 #[test]
 fn lock_key_falls_back_to_digest_without_tag() {
-    let mut payload = sample_payload();
-    payload.tag = None;
+    let mut target = sample_target();
+    target.tag = None;
+    let digest = target.digest.clone().unwrap();
+    let payload = ReplicationJob::Push { target };
     assert_eq!(
         replication_lock_key(&payload),
-        format!(
-            "replication.push.eu-region:nginx:{}",
-            payload.digest.as_deref().unwrap()
-        )
+        format!("replication.push.eu-region:nginx:{digest}")
     );
 }
 
@@ -99,15 +127,17 @@ fn lock_key_falls_back_to_digest_without_tag() {
 #[test]
 fn lock_key_distinguishes_push_from_delete() {
     let push = sample_payload();
-    let mut delete = sample_payload();
-    delete.kind = REPLICATION_DELETE_MANIFEST_KIND.to_string();
+    let delete = sample_delete("2026-06-03T00:00:00Z");
     assert_eq!(
         replication_lock_key(&push),
         "replication.push.eu-region:nginx:v1"
     );
     assert_eq!(
         replication_lock_key(&delete),
-        "replication.delete.eu-region:nginx:v1@2026-06-03T00:00:00Z"
+        format!(
+            "replication.delete.eu-region:nginx:v1@{}",
+            instant("2026-06-03T00:00:00Z").to_rfc3339()
+        )
     );
 }
 
@@ -115,10 +145,8 @@ fn lock_key_distinguishes_push_from_delete() {
 /// coalesce (the stale timestamp would lose receiver-side LWW).
 #[test]
 fn lock_key_separates_distinct_delete_events() {
-    let mut first = sample_payload();
-    first.kind = REPLICATION_DELETE_MANIFEST_KIND.to_string();
-    let mut second = first.clone();
-    second.source_ts = Some("2026-06-03T00:01:00Z".to_string());
+    let first = sample_delete("2026-06-03T00:00:00Z");
+    let second = sample_delete("2026-06-03T00:01:00Z");
 
     assert_ne!(
         replication_lock_key(&first),
@@ -132,10 +160,8 @@ fn lock_key_separates_distinct_delete_events() {
 /// and must never coalesce with a timestamped event-path delete.
 #[test]
 fn prune_delete_envelope_coalesces_on_bare_reference() {
-    let mut payload = sample_payload();
-    payload.kind = REPLICATION_DELETE_MANIFEST_KIND.to_string();
-    let mut later = payload.clone();
-    later.source_ts = Some("2026-06-03T00:01:00Z".to_string());
+    let payload = sample_delete("2026-06-03T00:00:00Z");
+    let later = sample_delete("2026-06-03T00:01:00Z");
 
     let first = build_prune_delete_envelope(&payload).unwrap();
     let second = build_prune_delete_envelope(&later).unwrap();
@@ -156,9 +182,13 @@ fn prune_delete_envelope_coalesces_on_bare_reference() {
 
 #[test]
 fn lock_key_handles_missing_tag_and_digest() {
-    let mut payload = sample_payload();
-    payload.tag = None;
-    payload.digest = None;
+    let payload = ReplicationJob::Push {
+        target: ReplicationTarget {
+            tag: None,
+            digest: None,
+            ..sample_target()
+        },
+    };
     assert_eq!(
         replication_lock_key(&payload),
         "replication.push.eu-region:nginx:"
@@ -175,7 +205,7 @@ fn build_envelope_sets_queue_kind_and_lock_key() {
         envelope.lock_key.as_str(),
         "replication.push.eu-region:nginx:v1"
     );
-    let round_trip: ReplicationPushPayload = serde_json::from_value(envelope.payload).unwrap();
+    let round_trip: ReplicationJob = serde_json::from_value(envelope.payload).unwrap();
     assert_eq!(round_trip, payload);
 }
 
@@ -249,8 +279,12 @@ async fn execute_errors_on_removed_downstream() {
 
     let handler = ReplicationJobHandler::new(resolver, blob_store, metadata_store);
 
-    let mut payload = sample_payload();
-    payload.downstream = "removed-region".to_string();
+    let payload = ReplicationJob::Push {
+        target: ReplicationTarget {
+            downstream: "removed-region".to_string(),
+            ..sample_target()
+        },
+    };
     let envelope = build_envelope(&payload).unwrap();
     let result = handler.execute(&envelope).await;
     assert!(
@@ -394,8 +428,12 @@ async fn execute_pushes_prefixed_downstream_to_mapped_namespace() {
 
     let handler = ReplicationJobHandler::new(resolver, blob_store, metadata_store);
 
-    let mut payload = sample_payload();
-    payload.namespace = local_namespace;
+    let payload = ReplicationJob::Push {
+        target: ReplicationTarget {
+            namespace: local_namespace,
+            ..sample_target()
+        },
+    };
     let envelope = build_envelope(&payload).unwrap();
     let tx = handler.execute(&envelope).await.unwrap();
     assert!(tx.mutations.is_empty(), "push returns an empty transaction");
@@ -511,14 +549,11 @@ async fn execute_push_resolves_tag_past_the_link_cache() {
 
     let handler = ReplicationJobHandler::new(resolver, blob_store, metadata_store);
 
-    let payload = ReplicationPushPayload {
-        downstream: DOWNSTREAM.to_string(),
-        namespace: Namespace::new(NAMESPACE).unwrap(),
-        tag: Some(Tag::new("v1").unwrap()),
-        digest: Some(stale_digest.to_string()),
-        kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
-        source_ts: Some("2026-06-03T00:00:00Z".to_string()),
-        subject: None,
+    let payload = ReplicationJob::Push {
+        target: ReplicationTarget {
+            digest: Some(stale_digest.clone()),
+            ..sample_target()
+        },
     };
     let envelope = build_envelope(&payload).unwrap();
     handler.execute(&envelope).await.unwrap();
@@ -683,8 +718,12 @@ async fn execute_reconcile_push_derives_source_timestamp_from_local_tag() {
 
     let handler = ReplicationJobHandler::new(resolver, blob_store, metadata_store);
 
-    let mut payload = sample_payload();
-    payload.source_ts = None;
+    let payload = ReplicationJob::Push {
+        target: ReplicationTarget {
+            source_ts: None,
+            ..sample_target()
+        },
+    };
     let envelope = build_envelope(&payload).unwrap();
     handler.execute(&envelope).await.unwrap();
     drop(mock_server);
@@ -803,8 +842,7 @@ async fn execute_delete_manifest_calls_downstream_delete() {
 
     let handler = ReplicationJobHandler::new(resolver, blob_store, metadata_store);
 
-    let mut payload = sample_payload();
-    payload.kind = REPLICATION_DELETE_MANIFEST_KIND.to_string();
+    let payload = sample_delete("2026-06-03T00:00:00Z");
     let envelope = build_envelope(&payload).unwrap();
     handler.execute(&envelope).await.unwrap();
 }
@@ -855,8 +893,12 @@ async fn execute_push_records_pushed_metric_and_last_success() {
 
     let pushed_before = push_total(downstream, "pushed");
 
-    let mut payload = sample_payload();
-    payload.downstream = downstream.to_string();
+    let payload = ReplicationJob::Push {
+        target: ReplicationTarget {
+            downstream: downstream.to_string(),
+            ..sample_target()
+        },
+    };
     let envelope = build_envelope(&payload).unwrap();
     handler.execute(&envelope).await.unwrap();
 
@@ -901,8 +943,12 @@ async fn execute_push_records_superseded_metric_and_last_success() {
     let superseded_before = push_total(downstream, "superseded");
     let pushed_before = push_total(downstream, "pushed");
 
-    let mut payload = sample_payload();
-    payload.downstream = downstream.to_string();
+    let payload = ReplicationJob::Push {
+        target: ReplicationTarget {
+            downstream: downstream.to_string(),
+            ..sample_target()
+        },
+    };
     let envelope = build_envelope(&payload).unwrap();
     handler.execute(&envelope).await.unwrap();
 
@@ -945,8 +991,12 @@ async fn execute_push_records_failed_metric_on_error() {
     let pushed_before = push_total(downstream, "pushed");
     let last_before = last_success(downstream);
 
-    let mut payload = sample_payload();
-    payload.downstream = downstream.to_string();
+    let payload = ReplicationJob::Push {
+        target: ReplicationTarget {
+            downstream: downstream.to_string(),
+            ..sample_target()
+        },
+    };
     let envelope = build_envelope(&payload).unwrap();
     let result = handler.execute(&envelope).await;
 
@@ -994,8 +1044,12 @@ async fn execute_push_with_deleted_tag_is_noop_success_records_no_failed() {
     let failed_before = push_total(downstream, "failed");
     let pushed_before = push_total(downstream, "pushed");
 
-    let mut payload = sample_payload();
-    payload.downstream = downstream.to_string();
+    let payload = ReplicationJob::Push {
+        target: ReplicationTarget {
+            downstream: downstream.to_string(),
+            ..sample_target()
+        },
+    };
     let envelope = build_envelope(&payload).unwrap();
     let tx = handler
         .execute(&envelope)
@@ -1041,9 +1095,13 @@ async fn execute_tagless_push_with_deleted_revision_is_noop_success() {
     let failed_before = push_total(downstream, "failed");
     let pushed_before = push_total(downstream, "pushed");
 
-    let mut payload = sample_payload();
-    payload.downstream = downstream.to_string();
-    payload.tag = None;
+    let payload = ReplicationJob::Push {
+        target: ReplicationTarget {
+            downstream: downstream.to_string(),
+            tag: None,
+            ..sample_target()
+        },
+    };
     let envelope = build_envelope(&payload).unwrap();
     let tx = handler
         .execute(&envelope)
@@ -1062,5 +1120,88 @@ async fn execute_tagless_push_with_deleted_revision_is_noop_success() {
         push_total(downstream, "pushed"),
         pushed_before,
         "a converged no-op must NOT increment the pushed counter"
+    );
+}
+
+/// The durable queue stores this payload, so its JSON is a stored format: a job
+/// enqueued before the push/delete split must still decode and still address the
+/// same work. These are the exact bodies an earlier angos wrote.
+#[test]
+fn a_queued_job_written_before_the_split_still_decodes() {
+    let hash_a = "a".repeat(64);
+    let hash_b = "b".repeat(64);
+    let stored_push = format!(
+        r#"{{"downstream":"eu","namespace":"ns/app","tag":"v1","digest":"sha256:{hash_a}",
+             "kind":"replication.push_manifest","source_ts":"2024-01-01T00:00:00.123456789+00:00"}}"#
+    );
+    let stored_delete = format!(
+        r#"{{"downstream":"eu","namespace":"ns/app","digest":"sha256:{hash_b}",
+             "kind":"replication.delete_manifest","subject":"sha256:{hash_a}"}}"#
+    );
+
+    let push: ReplicationJob = serde_json::from_str(&stored_push).expect("stored push must decode");
+    let ReplicationJob::Push { target } = &push else {
+        panic!("a stored push must decode as a push, got {push:?}");
+    };
+    assert_eq!(target.downstream, "eu");
+    assert_eq!(target.tag.as_deref(), Some("v1"));
+    assert_eq!(
+        target.digest.as_ref().map(ToString::to_string),
+        Some(format!("sha256:{hash_a}"))
+    );
+    assert_eq!(
+        target.source_ts,
+        Some(instant("2024-01-01T00:00:00.123456789+00:00"))
+    );
+    assert_eq!(push.kind(), REPLICATION_PUSH_MANIFEST_KIND);
+
+    let delete: ReplicationJob =
+        serde_json::from_str(&stored_delete).expect("stored delete must decode");
+    let ReplicationJob::Delete { target, subject } = &delete else {
+        panic!("a stored delete must decode as a delete, got {delete:?}");
+    };
+    assert!(target.tag.is_none());
+    assert_eq!(
+        subject.as_ref().map(ToString::to_string),
+        Some(format!("sha256:{hash_a}"))
+    );
+    assert_eq!(delete.kind(), REPLICATION_DELETE_MANIFEST_KIND);
+}
+
+/// A job this angos writes must still be the shape the queue has always held:
+/// `kind` beside the flat target fields, so a peer replica on the older build
+/// keeps draining it during a rolling upgrade.
+#[test]
+fn a_written_job_keeps_the_stored_layout() {
+    let json = serde_json::to_value(sample_delete("2024-01-01T00:00:00+00:00")).unwrap();
+    let object = json.as_object().expect("a job serializes to an object");
+
+    assert_eq!(object["kind"], REPLICATION_DELETE_MANIFEST_KIND);
+    assert_eq!(object["downstream"], "eu-region");
+    assert_eq!(object["namespace"], "nginx");
+    assert_eq!(object["tag"], "v1");
+    assert!(
+        object["digest"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("sha256:")),
+        "the digest stays a plain digest string: {json}"
+    );
+    assert!(
+        !object.contains_key("subject"),
+        "an absent subject stays absent rather than serializing as null: {json}"
+    );
+}
+
+/// The delete `lock_key` embeds the source instant, and the dedup index keys off
+/// that string. Typing the field must not shift it, or an upgraded replica would
+/// stop coalescing with a job a peer already queued for the same event.
+#[test]
+fn a_delete_lock_key_is_unchanged_by_typing_the_instant() {
+    let legacy_source_ts = "2024-01-01T00:00:00.123456789+00:00";
+    let delete = sample_delete(legacy_source_ts);
+    assert_eq!(
+        replication_lock_key(&delete),
+        format!("replication.delete.eu-region:nginx:v1@{legacy_source_ts}"),
+        "the key must still spell the instant exactly as the stored payload did"
     );
 }
