@@ -10,7 +10,7 @@ pub use parse::{ParsedManifestDigests, parse_manifest_digests, recover_media_typ
 pub use response::{GetManifestResponse, HeadManifestResponse, PutManifestResponse};
 use response::{ManifestBody, ManifestMeta};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tracing::{error, instrument, warn};
+use tracing::{debug, error, instrument, warn};
 
 use crate::{
     cache_fill::CACHE_ACTOR,
@@ -259,10 +259,21 @@ impl Registry {
         let blob_link = LinkKind::from_reference(reference);
         let link = self.read_manifest_link(namespace, &blob_link).await?;
 
-        let size = self.blob_store.size(&link.target).await.map_err(|error| {
-            error!("Failed to get blob size: {error}");
-            Error::ManifestUnknown
-        })?;
+        // A missing body is a genuine 404; a backend fault is not, and must not
+        // reach the client as a deleted manifest.
+        let size = self
+            .blob_store
+            .size(&link.target)
+            .await
+            .map_err(|error| match error {
+                Error::NotFound | Error::BlobUnknown => Error::ManifestUnknown,
+                other => {
+                    error!(
+                        "Failed to read manifest body size for {namespace}:{reference}: {other}"
+                    );
+                    other
+                }
+            })?;
 
         Ok(ManifestMeta {
             media_type: link.media_type,
@@ -369,9 +380,17 @@ impl Registry {
         needs_upstream: impl AsyncFnOnce(&T) -> Result<bool, Error>,
     ) -> Result<Option<T>, Error> {
         if !pull_through {
-            return local.map(Some).map_err(|_| {
-                error!("Failed to read local manifest: {namespace}:{reference}");
-                Error::ManifestUnknown
+            // Only a genuine miss is a 404. Collapsing a backend fault into one
+            // makes a storage outage look like deleted images.
+            return local.map(Some).map_err(|error| match error {
+                Error::NotFound | Error::ManifestUnknown => {
+                    debug!("No local manifest for {namespace}:{reference}");
+                    Error::ManifestUnknown
+                }
+                other => {
+                    error!("Failed to read local manifest {namespace}:{reference}: {other}");
+                    other
+                }
             });
         }
         if let Ok(value) = local

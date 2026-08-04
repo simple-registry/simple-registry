@@ -889,6 +889,32 @@ async fn test_get_blob_success() {
 }
 
 #[tokio::test]
+async fn get_blob_reports_an_upstream_outage_as_transient_not_missing() {
+    let mock_server = MockServer::start().await;
+    let test_digest = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/test/blobs/{test_digest}")))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&mock_server)
+        .await;
+
+    let error = client_for(&mock_server)
+        .get_blob(
+            &[],
+            &format!("{}/v2/test/blobs/{test_digest}", mock_server.uri()),
+        )
+        .await
+        .err()
+        .expect("a 503 must not read as a successful fetch");
+
+    assert!(
+        matches!(error, Error::Internal(_)),
+        "an upstream outage must not be served as a missing blob, got: {error:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_get_blob_not_found() {
     let mock_server = MockServer::start().await;
     let test_digest = "sha256:notfound1234567890abcdef1234567890abcdef1234567890abcdef12345678";

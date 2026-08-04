@@ -587,7 +587,11 @@ impl RegistryClient {
         let response = self.query(&Method::GET, accepted_types, location).await?;
 
         if !response.status().is_success() {
-            return Err(Error::BlobUnknown);
+            return Err(classify_read_failure(
+                response.status(),
+                "get_blob",
+                Error::BlobUnknown,
+            ));
         }
 
         let total_length = parse_header(&response, CONTENT_LENGTH)?;
