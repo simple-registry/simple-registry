@@ -11,7 +11,7 @@
 //! or delete for a given manifest, eliminating divergence between them.
 
 use crate::{
-    oci::{Digest, Manifest, MediaType, Reference, Tag},
+    oci::{Content, Digest, Manifest, MediaType, Reference, Tag},
     registry::metadata_store::{LinkKind, LinkOperation},
 };
 
@@ -76,28 +76,32 @@ pub fn push(
         }
     }
 
-    if let Some(config) = &manifest.config {
-        ops.push(LinkOperation::create_with_referrer(
-            LinkKind::Config(config.digest.clone()),
-            config.digest.clone(),
-            digest.clone(),
-        ));
-    }
-
-    for layer in &manifest.layers {
-        ops.push(LinkOperation::create_with_referrer(
-            LinkKind::Layer(layer.digest.clone()),
-            layer.digest.clone(),
-            digest.clone(),
-        ));
-    }
-
-    for child in &manifest.manifests {
-        ops.push(LinkOperation::create_with_referrer(
-            LinkKind::Manifest(digest.clone(), child.digest.clone()),
-            child.digest.clone(),
-            digest.clone(),
-        ));
+    match &manifest.content {
+        Content::Image { config, layers } => {
+            if let Some(config) = config {
+                ops.push(LinkOperation::create_with_referrer(
+                    LinkKind::Config(config.digest.clone()),
+                    config.digest.clone(),
+                    digest.clone(),
+                ));
+            }
+            for layer in layers {
+                ops.push(LinkOperation::create_with_referrer(
+                    LinkKind::Layer(layer.digest.clone()),
+                    layer.digest.clone(),
+                    digest.clone(),
+                ));
+            }
+        }
+        Content::Index { manifests } => {
+            for child in manifests {
+                ops.push(LinkOperation::create_with_referrer(
+                    LinkKind::Manifest(digest.clone(), child.digest.clone()),
+                    child.digest.clone(),
+                    digest.clone(),
+                ));
+            }
+        }
     }
 
     ops
@@ -139,25 +143,29 @@ pub fn delete(
                     )));
                 }
 
-                if let Some(config) = &m.config {
-                    ops.push(LinkOperation::delete_with_referrer(
-                        LinkKind::Config(config.digest.clone()),
-                        digest.clone(),
-                    ));
-                }
-
-                for layer in &m.layers {
-                    ops.push(LinkOperation::delete_with_referrer(
-                        LinkKind::Layer(layer.digest.clone()),
-                        digest.clone(),
-                    ));
-                }
-
-                for child in &m.manifests {
-                    ops.push(LinkOperation::delete_with_referrer(
-                        LinkKind::Manifest(digest.clone(), child.digest.clone()),
-                        digest.clone(),
-                    ));
+                match &m.content {
+                    Content::Image { config, layers } => {
+                        if let Some(config) = config {
+                            ops.push(LinkOperation::delete_with_referrer(
+                                LinkKind::Config(config.digest.clone()),
+                                digest.clone(),
+                            ));
+                        }
+                        for layer in layers {
+                            ops.push(LinkOperation::delete_with_referrer(
+                                LinkKind::Layer(layer.digest.clone()),
+                                digest.clone(),
+                            ));
+                        }
+                    }
+                    Content::Index { manifests } => {
+                        for child in manifests {
+                            ops.push(LinkOperation::delete_with_referrer(
+                                LinkKind::Manifest(digest.clone(), child.digest.clone()),
+                                digest.clone(),
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -197,11 +205,7 @@ mod tests {
     }
 
     fn manifest_with_config_and_layer(config: Digest, layer: Digest) -> Manifest {
-        Manifest {
-            config: Some(descriptor(config)),
-            layers: vec![descriptor(layer)],
-            ..Manifest::default()
-        }
+        Manifest::image(Some(descriptor(config)), vec![descriptor(layer)])
     }
 
     fn manifest_with_subject(subject: Digest) -> Manifest {
@@ -213,10 +217,7 @@ mod tests {
     }
 
     fn manifest_with_child(child: Digest) -> Manifest {
-        Manifest {
-            manifests: vec![descriptor(child)],
-            ..Manifest::default()
-        }
+        Manifest::index(vec![descriptor(child)])
     }
 
     // push
@@ -422,9 +423,7 @@ mod tests {
         let media_type = media_type("application/vnd.oci.image.manifest.v1+json");
         let mut m = Manifest {
             media_type: Some(media_type.clone()),
-            config: Some(descriptor(config)),
-            layers: vec![descriptor(layer)],
-            ..Manifest::default()
+            ..Manifest::image(Some(descriptor(config)), vec![descriptor(layer)])
         };
 
         let ops = push(

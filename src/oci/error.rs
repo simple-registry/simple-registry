@@ -13,6 +13,8 @@ pub enum Error {
     InvalidReference(String),
     #[error("invalid manifest JSON: {0}")]
     InvalidManifestJson(#[from] serde_json::Error),
+    #[error("invalid manifest: {0}")]
+    InvalidManifest(String),
     #[error("invalid media type: {0}")]
     InvalidMediaType(String),
     #[error("invalid upload session id: {0}")]

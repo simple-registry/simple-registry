@@ -9,7 +9,10 @@ use crate::{
         response::{APPLICATION_JSON, HeaderMap, OCI_FILTERS_APPLIED, ResponseHeaders},
         response_body::ResponseBody,
     },
-    oci::{Descriptor, Digest, Namespace, OCI_INDEX_MEDIA_TYPE, OCI_MANIFEST_SCHEMA_VERSION, Tag},
+    oci::{
+        Descriptor, Digest, MediaType, Namespace, OCI_INDEX_MEDIA_TYPE,
+        OCI_MANIFEST_SCHEMA_VERSION, Tag,
+    },
     registry::content_discovery::DEFAULT_PAGE_SIZE,
 };
 
@@ -69,7 +72,7 @@ pub async fn handle_get_referrers(
     context: &ServerContext,
     namespace: &Namespace,
     digest: &Digest,
-    artifact_type: Option<String>,
+    artifact_type: Option<MediaType>,
 ) -> Result<Response<ResponseBody>, Error> {
     let (manifests, filtered) = context
         .registry

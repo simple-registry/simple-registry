@@ -344,7 +344,7 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
         .list_referrers(
             namespace,
             &base_digest,
-            Some("application/vnd.example.test-artifact".to_string()),
+            Some(media_type("application/vnd.example.test-artifact")),
         )
         .await
         .unwrap();
@@ -355,7 +355,7 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
         .list_referrers(
             namespace,
             &base_digest,
-            Some("application/vnd.non-existent".to_string()),
+            Some(media_type("application/vnd.non-existent")),
         )
         .await
         .unwrap();
@@ -971,7 +971,7 @@ pub async fn test_datastore_list_referrers_with_artifact_type_filter(registry: &
         .list_referrers(
             namespace,
             &subject_digest,
-            Some("application/vnd.example.sbom".to_string()),
+            Some(media_type("application/vnd.example.sbom")),
         )
         .await
         .unwrap();
@@ -2000,7 +2000,7 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
         .list_referrers(
             namespace,
             &base_digest,
-            Some("application/vnd.example.test-artifact".to_string()),
+            Some(media_type("application/vnd.example.test-artifact")),
         )
         .await
         .unwrap();
@@ -2011,7 +2011,7 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
         .list_referrers(
             namespace,
             &base_digest,
-            Some("application/vnd.non-existent".to_string()),
+            Some(media_type("application/vnd.non-existent")),
         )
         .await
         .unwrap();

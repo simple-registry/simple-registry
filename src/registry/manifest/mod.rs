@@ -17,7 +17,7 @@ use crate::{
     event_webhook::event::{Event, EventActor, EventKind},
     jobs::Queue,
     metrics_provider::metrics_provider,
-    oci::{Digest, Manifest, MediaType, Namespace, Reference, Tag},
+    oci::{Content, Digest, Manifest, MediaType, Namespace, Reference, Tag},
     registry::{
         Error, Registry, Repository,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, ReferencePolicy},
@@ -577,16 +577,20 @@ impl Registry {
     /// Verifies each referenced blob's bytes exist; ownership is checked by
     /// the link transaction, where the read is commit-validated.
     async fn validate_manifest_references(&self, manifest: &Manifest) -> Result<(), Error> {
-        if let Some(config) = &manifest.config {
-            self.validate_manifest_reference(&config.digest).await?;
-        }
-
-        for layer in &manifest.layers {
-            self.validate_manifest_reference(&layer.digest).await?;
-        }
-
-        for child in &manifest.manifests {
-            self.validate_manifest_reference(&child.digest).await?;
+        match &manifest.content {
+            Content::Image { config, layers } => {
+                if let Some(config) = config {
+                    self.validate_manifest_reference(&config.digest).await?;
+                }
+                for layer in layers {
+                    self.validate_manifest_reference(&layer.digest).await?;
+                }
+            }
+            Content::Index { manifests } => {
+                for child in manifests {
+                    self.validate_manifest_reference(&child.digest).await?;
+                }
+            }
         }
 
         Ok(())

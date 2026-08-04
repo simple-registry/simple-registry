@@ -15,8 +15,8 @@ use crate::{
     jobs::store as job_store,
     jobs::{JobState, Queue},
     oci::{
-        DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest, MediaType,
-        Namespace, Platform as OciPlatform, Tag, namespace_belongs_to,
+        Content, DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
+        MediaType, Namespace, Platform as OciPlatform, Tag, namespace_belongs_to,
     },
     registry::{Error, Registry, metadata_store::LinkKind},
 };
@@ -230,8 +230,10 @@ fn extract_docker_referrer(descriptor: &Descriptor) -> Option<DockerReferrerCand
 /// Returns the in-toto predicate type annotation value from the first
 /// layer that carries it, if any. Pure, no I/O.
 fn extract_in_toto_predicate(child_manifest: &Manifest) -> Option<String> {
-    child_manifest
-        .layers
+    let Content::Image { layers, .. } = &child_manifest.content else {
+        return None;
+    };
+    layers
         .iter()
         .find_map(|layer| layer.annotations.get(IN_TOTO_PREDICATE_TYPE).cloned())
 }
@@ -252,14 +254,16 @@ struct ManifestAnalysis {
 fn analyze_manifest(manifest: &Manifest) -> ManifestAnalysis {
     let mut parent_links = Vec::new();
     let mut referrer_candidates = Vec::new();
-    for child in &manifest.manifests {
-        if let Some(referrer) = extract_docker_referrer(child) {
-            referrer_candidates.push(referrer);
-        } else {
-            parent_links.push((
-                child.digest.clone(),
-                child.platform.clone().map(ExtPlatform::from),
-            ));
+    if let Content::Index { manifests } = &manifest.content {
+        for child in manifests {
+            if let Some(referrer) = extract_docker_referrer(child) {
+                referrer_candidates.push(referrer);
+            } else {
+                parent_links.push((
+                    child.digest.clone(),
+                    child.platform.clone().map(ExtPlatform::from),
+                ));
+            }
         }
     }
     ManifestAnalysis {
@@ -810,10 +814,7 @@ mod tests {
                 platform: None,
             })
             .collect();
-        Manifest {
-            layers,
-            ..Manifest::default()
-        }
+        Manifest::image(None, layers)
     }
 
     // extract_in_toto_predicate
@@ -937,8 +938,7 @@ mod tests {
             platform: Some(platform),
         };
         let manifest = Manifest {
-            manifests: vec![child],
-            ..Manifest::default()
+            ..Manifest::index(vec![child])
         };
 
         let analysis = analyze_manifest(&manifest);
@@ -967,8 +967,7 @@ mod tests {
             platform: None,
         };
         let manifest = Manifest {
-            manifests: vec![child],
-            ..Manifest::default()
+            ..Manifest::index(vec![child])
         };
 
         let analysis = analyze_manifest(&manifest);
@@ -1004,8 +1003,7 @@ mod tests {
             platform: None,
         };
         let manifest = Manifest {
-            manifests: vec![referrer_child, index_child],
-            ..Manifest::default()
+            ..Manifest::index(vec![referrer_child, index_child])
         };
 
         let analysis = analyze_manifest(&manifest);

@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A manifest declaring both image content (`config`/`layers`) and index content (`manifests`) is refused on push, since the image spec makes the two mutually exclusive; one already stored stays readable as the index it lists.
+- A malformed `?artifactType=` on the referrers endpoint is rejected rather than silently dropped, which used to turn a bad filter into an unfiltered listing of every referrer.
 - A transaction read that recorded a key as absent now conflicts when a zero-length object appears at that key, instead of mistaking it for the absence it recorded and writing over another writer's fresh entry.
 - A multipart part upload whose response carries no `ETag` now fails at that part, naming it, instead of defaulting to an empty string that the S3 backend rejects later at `CompleteMultipartUpload` with no clue which part was at fault.
 - `angos migrate` now rewrites each link inside a transaction that reads it, so a tag push landing mid-run is kept instead of being silently reverted to its pre-push target.

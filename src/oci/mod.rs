@@ -17,7 +17,7 @@ pub use constants::{
 pub use descriptor::{Descriptor, Platform};
 pub use digest::{Algorithm, Digest};
 pub use error::Error;
-pub use manifest::{Manifest, OCI_MANIFEST_SCHEMA_VERSION};
+pub use manifest::{Content, Manifest, OCI_MANIFEST_SCHEMA_VERSION};
 pub use media_type::MediaType;
 pub use namespace::{Namespace, namespace_belongs_to};
 pub use reference::Reference;

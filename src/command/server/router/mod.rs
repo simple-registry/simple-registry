@@ -6,7 +6,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use crate::{
     identity::{Action, ManifestPutTarget},
     jobs::{JobState, Queue},
-    oci::{Digest, Namespace, Reference, Tag, UploadSessionId},
+    oci::{Digest, MediaType, Namespace, Reference, Tag, UploadSessionId},
 };
 
 /// Deserializes a query string, returning `None` when a value fails to
@@ -94,10 +94,13 @@ struct MountQuery {
     digest: Option<Digest>,
 }
 
+/// The referrers `?artifactType=` filter. The value is a media type per the
+/// image spec, so it deserializes through [`MediaType`] and a malformed one
+/// rejects the route instead of silently filtering nothing.
 #[derive(Deserialize, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 struct ArtifactTypeQuery {
-    artifact_type: Option<String>,
+    artifact_type: Option<MediaType>,
 }
 
 #[derive(Deserialize, Default)]
@@ -338,9 +341,12 @@ fn try_find_referrers(method: &Method, path: &str, params: Option<&str>) -> Opti
         let namespace = Namespace::new(namespace_str).ok()?;
         let digest = Digest::from_str(digest).ok()?;
 
-        let artifact_type = params
-            .and_then(parse_query::<ArtifactTypeQuery>)
-            .and_then(|f| f.artifact_type);
+        // Strict parse: a malformed `?artifactType=` is a bad filter, not an
+        // absent one, so it must not degrade into an unfiltered listing.
+        let artifact_type = match params {
+            Some(params) => parse_query::<ArtifactTypeQuery>(params)?.artifact_type,
+            None => None,
+        };
 
         if *method == Method::GET {
             return Some(Action::GetReferrer {

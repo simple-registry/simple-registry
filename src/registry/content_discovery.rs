@@ -2,7 +2,7 @@ use futures_util::stream::TryStreamExt;
 use tracing::{instrument, warn};
 
 use crate::{
-    oci::{Descriptor, Digest, Manifest, Namespace, Tag},
+    oci::{Descriptor, Digest, Manifest, MediaType, Namespace, Tag},
     registry::{Error, Registry, metadata_store::LinkKind},
 };
 
@@ -50,7 +50,7 @@ impl Registry {
         &self,
         namespace: &Namespace,
         digest: &Digest,
-        artifact_type: Option<String>,
+        artifact_type: Option<MediaType>,
     ) -> Result<(Vec<Descriptor>, bool), Error> {
         let filtered = artifact_type.is_some();
         let manifests = self
@@ -67,7 +67,7 @@ impl Registry {
         &self,
         namespace: &Namespace,
         digest: &Digest,
-        artifact_type: Option<String>,
+        artifact_type: Option<MediaType>,
     ) -> Result<Vec<Descriptor>, Error> {
         let artifact_type = artifact_type.as_ref();
 
@@ -106,7 +106,7 @@ impl Registry {
         namespace: &Namespace,
         subject_digest: &Digest,
         manifest_digest: Digest,
-        artifact_type: Option<&String>,
+        artifact_type: Option<&MediaType>,
     ) -> Option<Descriptor> {
         let referrer_link = LinkKind::Referrer(subject_digest.clone(), manifest_digest.clone());
 
@@ -117,7 +117,7 @@ impl Registry {
             && let Some(desc) = metadata.descriptor
         {
             match artifact_type {
-                Some(at) if desc.artifact_type.as_deref() == Some(at.as_str()) => {
+                Some(at) if desc.artifact_type.as_ref() == Some(at) => {
                     return Some(desc);
                 }
                 None => return Some(desc),
@@ -517,7 +517,7 @@ mod tests {
         let case = FSRegistryTestCase::with_split_backends();
         let registry = case.registry();
         let manifest_digest = upload_blob(registry, &referrer_namespace(), b"not json").await;
-        let at = "application/vnd.foo".to_string();
+        let at = media_type("application/vnd.foo");
         let desc = descriptor_with(Some(&at), &manifest_digest);
         create_referrer_link(
             &registry.metadata_store,
@@ -546,7 +546,7 @@ mod tests {
         let desc = descriptor_with(Some("application/vnd.foo"), &manifest_digest);
         create_referrer_link(&registry.metadata_store, &manifest_digest, Some(desc)).await;
 
-        let filter = "application/vnd.bar".to_string();
+        let filter = media_type("application/vnd.bar");
         let result = registry
             .resolve_referrer_descriptor(
                 &referrer_namespace(),
@@ -568,7 +568,7 @@ mod tests {
         let desc = descriptor_with(None, &manifest_digest);
         create_referrer_link(&registry.metadata_store, &manifest_digest, Some(desc)).await;
 
-        let at = "application/vnd.foo".to_string();
+        let at = media_type("application/vnd.foo");
         let result = registry
             .resolve_referrer_descriptor(
                 &referrer_namespace(),
@@ -608,7 +608,7 @@ mod tests {
         let (case, manifest_digest) = split_case_with_blob(Some("application/vnd.foo")).await;
         let registry = case.registry();
 
-        let at = "application/vnd.foo".to_string();
+        let at = media_type("application/vnd.foo");
         let result = registry
             .resolve_referrer_descriptor(
                 &referrer_namespace(),
@@ -629,7 +629,7 @@ mod tests {
         let (case, manifest_digest) = split_case_with_blob(Some("application/vnd.foo")).await;
         let registry = case.registry();
 
-        let filter = "application/vnd.bar".to_string();
+        let filter = media_type("application/vnd.bar");
         let result = registry
             .resolve_referrer_descriptor(
                 &referrer_namespace(),
