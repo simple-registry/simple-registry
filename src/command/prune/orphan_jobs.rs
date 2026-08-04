@@ -417,6 +417,25 @@ mod tests {
         assert!(matches!(outcome, FailOutcome::MovedToDeadLetter));
     }
 
+    /// The conformance gate seeds this payload by hand; decoding it here keeps
+    /// the fixture honest about what the queue actually stores.
+    #[test]
+    fn the_gate_orphan_fixture_decodes_and_classifies() {
+        let payload = json!({
+            "downstream": "gate-ghost-downstream",
+            "namespace": "conformance/gate",
+            "tag": "gate",
+            "kind": "replication.push_manifest",
+        });
+        let reason = OrphanQueue::Replication
+            .classify(&resolver(), payload)
+            .expect("the seeded payload must decode");
+        assert!(
+            reason.is_some_and(|r| r.contains("gate-ghost-downstream")),
+            "an unconfigured downstream must classify as an orphan"
+        );
+    }
+
     #[tokio::test]
     async fn orphan_pending_replication_job_emits_delete_action() {
         let FsTestStack {

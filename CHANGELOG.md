@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A transaction intent record that no longer decodes is reclaimed by the engine janitor once it ages out, instead of sitting in the log forever and holding off every scrub repair as though a transaction were still in flight.
 - A manifest declaring both image content (`config`/`layers`) and index content (`manifests`) is refused on push, since the image spec makes the two mutually exclusive; one already stored stays readable as the index it lists.
 - A malformed `?artifactType=` on the referrers endpoint is rejected rather than silently dropped, which used to turn a bad filter into an unfiltered listing of every referrer.
 - A transaction read that recorded a key as absent now conflicts when a zero-length object appears at that key, instead of mistaking it for the absence it recorded and writing over another writer's fresh entry.
