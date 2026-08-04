@@ -24,7 +24,10 @@ impl ParsedManifestDigests {
 
         if let Some(subject) = &self.subject {
             links.push((
-                LinkKind::Referrer(subject.clone(), revision.clone()),
+                LinkKind::Referrer {
+                    subject: subject.clone(),
+                    referrer: revision.clone(),
+                },
                 revision.clone(),
             ));
         }
@@ -43,7 +46,10 @@ impl ParsedManifestDigests {
             .map(|digest| (LinkKind::Layer(digest.clone()), digest.clone()));
         let manifests = self.manifests.iter().map(|digest| {
             (
-                LinkKind::Manifest(revision.clone(), digest.clone()),
+                LinkKind::Manifest {
+                    index: revision.clone(),
+                    child: digest.clone(),
+                },
                 digest.clone(),
             )
         });

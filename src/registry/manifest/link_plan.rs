@@ -64,7 +64,10 @@ pub fn push(
     }
 
     if let Some(subject) = &manifest.subject {
-        let referrer_link = LinkKind::Referrer(subject.digest.clone(), digest.clone());
+        let referrer_link = LinkKind::Referrer {
+            subject: subject.digest.clone(),
+            referrer: digest.clone(),
+        };
         if let Some(descriptor) = manifest.take_descriptor(digest.clone(), body_len) {
             ops.push(LinkOperation::create_with_descriptor(
                 referrer_link,
@@ -96,7 +99,10 @@ pub fn push(
         Content::Index { manifests } => {
             for child in manifests {
                 ops.push(LinkOperation::create_with_referrer(
-                    LinkKind::Manifest(digest.clone(), child.digest.clone()),
+                    LinkKind::Manifest {
+                        index: digest.clone(),
+                        child: child.digest.clone(),
+                    },
                     child.digest.clone(),
                     digest.clone(),
                 ));
@@ -137,10 +143,10 @@ pub fn delete(
 
             if let Some(m) = manifest {
                 if let Some(subject) = &m.subject {
-                    ops.push(LinkOperation::delete(LinkKind::Referrer(
-                        subject.digest.clone(),
-                        digest.clone(),
-                    )));
+                    ops.push(LinkOperation::delete(LinkKind::Referrer {
+                        subject: subject.digest.clone(),
+                        referrer: digest.clone(),
+                    }));
                 }
 
                 match &m.content {
@@ -161,7 +167,10 @@ pub fn delete(
                     Content::Index { manifests } => {
                         for child in manifests {
                             ops.push(LinkOperation::delete_with_referrer(
-                                LinkKind::Manifest(digest.clone(), child.digest.clone()),
+                                LinkKind::Manifest {
+                                    index: digest.clone(),
+                                    child: child.digest.clone(),
+                                },
                                 digest.clone(),
                             ));
                         }
@@ -407,7 +416,7 @@ mod tests {
         );
 
         let Some(LinkOperation::Create { referrer, .. }) = ops.iter().find(|op| {
-            matches!(op, LinkOperation::Create { link: LinkKind::Manifest(p, c), .. } if p == &parent && c == &child)
+            matches!(op, LinkOperation::Create { link: LinkKind::Manifest { index: p, child: c }, .. } if p == &parent && c == &child)
         }) else {
             panic!("child manifest Create op must be present");
         };
@@ -454,7 +463,7 @@ mod tests {
         );
 
         let Some(LinkOperation::Create { descriptor, .. }) = ops.iter().find(|op| {
-            matches!(op, LinkOperation::Create { link: LinkKind::Referrer(s, r), .. } if s == &subject && r == &parent)
+            matches!(op, LinkOperation::Create { link: LinkKind::Referrer { subject: s, referrer: r }, .. } if s == &subject && r == &parent)
         }) else {
             panic!("referrer Create op must be present");
         };
@@ -554,7 +563,7 @@ mod tests {
         let ops = delete(&Reference::Digest(parent.clone()), Some(&m), &[]);
 
         let referrer_op = ops.iter().find(|op| {
-            matches!(op, LinkOperation::Delete { link: LinkKind::Referrer(s, r), .. } if s == &subject && r == &parent)
+            matches!(op, LinkOperation::Delete { link: LinkKind::Referrer { subject: s, referrer: r }, .. } if s == &subject && r == &parent)
         });
         assert!(
             referrer_op.is_some(),
@@ -571,7 +580,7 @@ mod tests {
         let ops = delete(&Reference::Digest(parent.clone()), Some(&m), &[]);
 
         let Some(LinkOperation::Delete { referrer, .. }) = ops.iter().find(|op| {
-            matches!(op, LinkOperation::Delete { link: LinkKind::Manifest(p, c), referrer: Some(_) } if p == &parent && c == &child)
+            matches!(op, LinkOperation::Delete { link: LinkKind::Manifest { index: p, child: c }, referrer: Some(_) } if p == &parent && c == &child)
         }) else {
             panic!("child manifest Delete op with referrer must be present");
         };

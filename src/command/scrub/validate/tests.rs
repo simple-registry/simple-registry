@@ -557,7 +557,10 @@ async fn orphan_referrer_link_is_deleted() {
 
         // A referrer entry whose referrer manifest is not a current revision.
         let ghost_referrer = Digest::sha256_of_bytes(b"gone-referrer");
-        let link = LinkKind::Referrer(manifest_digest.clone(), ghost_referrer.clone());
+        let link = LinkKind::Referrer {
+            subject: manifest_digest.clone(),
+            referrer: ghost_referrer.clone(),
+        };
         let body = serde_json::to_vec(&LinkMetadata::from_digest(ghost_referrer.clone())).unwrap();
         put_link_raw(metadata_store.store(), namespace, &link, &body).await;
 

@@ -743,8 +743,14 @@ mod tests {
                 LinkKind::Tag(Tag::new("latest").unwrap()),
                 LinkKind::Layer(Digest::sha256_of_bytes(b"layer reference")),
                 LinkKind::Config(Digest::sha256_of_bytes(b"config reference")),
-                LinkKind::Manifest(parent.clone(), Digest::sha256_of_bytes(b"child manifest")),
-                LinkKind::Referrer(subject, Digest::sha256_of_bytes(b"referrer manifest")),
+                LinkKind::Manifest {
+                    index: parent.clone(),
+                    child: Digest::sha256_of_bytes(b"child manifest"),
+                },
+                LinkKind::Referrer {
+                    subject,
+                    referrer: Digest::sha256_of_bytes(b"referrer manifest"),
+                },
             ];
 
             for link in cases {
@@ -757,7 +763,11 @@ mod tests {
                     .unwrap();
 
                 let retargeted = retarget_link(&link, &digest);
-                let op = if let LinkKind::Manifest(parent, _) = &link {
+                let op = if let LinkKind::Manifest {
+                    index: parent,
+                    child: _,
+                } = &link
+                {
                     LinkOperation::create_with_referrer(retargeted, digest.clone(), parent.clone())
                 } else {
                     LinkOperation::create(retargeted, digest.clone())
@@ -781,8 +791,20 @@ mod tests {
             LinkKind::Digest(_) => LinkKind::Digest(digest.clone()),
             LinkKind::Layer(_) => LinkKind::Layer(digest.clone()),
             LinkKind::Config(_) => LinkKind::Config(digest.clone()),
-            LinkKind::Manifest(parent, _) => LinkKind::Manifest(parent.clone(), digest.clone()),
-            LinkKind::Referrer(subject, _) => LinkKind::Referrer(subject.clone(), digest.clone()),
+            LinkKind::Manifest {
+                index: parent,
+                child: _,
+            } => LinkKind::Manifest {
+                index: parent.clone(),
+                child: digest.clone(),
+            },
+            LinkKind::Referrer {
+                subject,
+                referrer: _,
+            } => LinkKind::Referrer {
+                subject: subject.clone(),
+                referrer: digest.clone(),
+            },
             LinkKind::Blob(_) | LinkKind::Tag(_) => link.clone(),
         }
     }

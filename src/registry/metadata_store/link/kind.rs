@@ -5,7 +5,31 @@ use serde::{Deserialize, Serialize};
 use crate::oci::{Digest, Reference, Tag};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(from = "StoredLinkKind", into = "StoredLinkKind")]
 pub enum LinkKind {
+    Blob(Digest),
+    Tag(Tag),
+    Digest(Digest),
+    Layer(Digest),
+    Config(Digest),
+    /// A referrer back-link: the manifest `referrer` names `subject` in its
+    /// `subject` field.
+    Referrer {
+        subject: Digest,
+        referrer: Digest,
+    },
+    /// An index child link: the index `index` lists `child` among its manifests.
+    Manifest {
+        index: Digest,
+        child: Digest,
+    },
+}
+
+/// The shape [`LinkKind`] has always had inside a blob-index shard, where the
+/// two-digest kinds are positional arrays. Named fields on the live type would
+/// otherwise re-encode those as objects and strand every stored shard.
+#[derive(Serialize, Deserialize)]
+enum StoredLinkKind {
     Blob(Digest),
     Tag(Tag),
     Digest(Digest),
@@ -15,11 +39,39 @@ pub enum LinkKind {
     Manifest(Digest, Digest),
 }
 
+impl From<StoredLinkKind> for LinkKind {
+    fn from(stored: StoredLinkKind) -> Self {
+        match stored {
+            StoredLinkKind::Blob(digest) => LinkKind::Blob(digest),
+            StoredLinkKind::Tag(tag) => LinkKind::Tag(tag),
+            StoredLinkKind::Digest(digest) => LinkKind::Digest(digest),
+            StoredLinkKind::Layer(digest) => LinkKind::Layer(digest),
+            StoredLinkKind::Config(digest) => LinkKind::Config(digest),
+            StoredLinkKind::Referrer(subject, referrer) => LinkKind::Referrer { subject, referrer },
+            StoredLinkKind::Manifest(index, child) => LinkKind::Manifest { index, child },
+        }
+    }
+}
+
+impl From<LinkKind> for StoredLinkKind {
+    fn from(link: LinkKind) -> Self {
+        match link {
+            LinkKind::Blob(digest) => StoredLinkKind::Blob(digest),
+            LinkKind::Tag(tag) => StoredLinkKind::Tag(tag),
+            LinkKind::Digest(digest) => StoredLinkKind::Digest(digest),
+            LinkKind::Layer(digest) => StoredLinkKind::Layer(digest),
+            LinkKind::Config(digest) => StoredLinkKind::Config(digest),
+            LinkKind::Referrer { subject, referrer } => StoredLinkKind::Referrer(subject, referrer),
+            LinkKind::Manifest { index, child } => StoredLinkKind::Manifest(index, child),
+        }
+    }
+}
+
 impl LinkKind {
     pub fn is_tracked(&self) -> bool {
         matches!(
             self,
-            LinkKind::Layer(_) | LinkKind::Config(_) | LinkKind::Manifest(_, _)
+            LinkKind::Layer(_) | LinkKind::Config(_) | LinkKind::Manifest { .. }
         )
     }
 
@@ -39,8 +91,10 @@ impl Display for LinkKind {
             LinkKind::Digest(d) => write!(f, "digest:{d}"),
             LinkKind::Layer(d) => write!(f, "layer:{d}"),
             LinkKind::Config(d) => write!(f, "config:{d}"),
-            LinkKind::Referrer(l, r) => write!(f, "referrer:{l}-{r}"),
-            LinkKind::Manifest(index, child) => write!(f, "manifest:{index}-{child}"),
+            LinkKind::Referrer { subject, referrer } => {
+                write!(f, "referrer:{subject}-{referrer}")
+            }
+            LinkKind::Manifest { index, child } => write!(f, "manifest:{index}-{child}"),
         }
     }
 }
@@ -58,18 +112,75 @@ mod tests {
         Digest::sha256(hash).unwrap()
     }
 
+    /// The blob-index shards hold this enum, so its JSON is a stored format:
+    /// the two-digest kinds are positional arrays and must stay that way now
+    /// that the live type names its digests. Both directions, so a shard
+    /// written by any earlier angos still reads and still round-trips.
     #[test]
-    fn tmp_probe_wire_form() {
-        let all = vec![
-            LinkKind::Blob(sha(HASH_A)),
-            LinkKind::Tag(Tag::new("v1").unwrap()),
-            LinkKind::Digest(sha(HASH_A)),
-            LinkKind::Layer(sha(HASH_A)),
-            LinkKind::Config(sha(HASH_A)),
-            LinkKind::Referrer(sha(HASH_A), sha(HASH_B)),
-            LinkKind::Manifest(sha(HASH_A), sha(HASH_B)),
+    fn the_stored_form_is_unchanged_by_the_named_fields() {
+        let cases = [
+            (
+                LinkKind::Blob(sha(HASH_A)),
+                format!(r#"{{"Blob":"sha256:{HASH_A}"}}"#),
+            ),
+            (
+                LinkKind::Tag(Tag::new("v1").unwrap()),
+                r#"{"Tag":"v1"}"#.to_string(),
+            ),
+            (
+                LinkKind::Digest(sha(HASH_A)),
+                format!(r#"{{"Digest":"sha256:{HASH_A}"}}"#),
+            ),
+            (
+                LinkKind::Layer(sha(HASH_A)),
+                format!(r#"{{"Layer":"sha256:{HASH_A}"}}"#),
+            ),
+            (
+                LinkKind::Config(sha(HASH_A)),
+                format!(r#"{{"Config":"sha256:{HASH_A}"}}"#),
+            ),
+            (
+                LinkKind::Referrer {
+                    subject: sha(HASH_A),
+                    referrer: sha(HASH_B),
+                },
+                format!(r#"{{"Referrer":["sha256:{HASH_A}","sha256:{HASH_B}"]}}"#),
+            ),
+            (
+                LinkKind::Manifest {
+                    index: sha(HASH_A),
+                    child: sha(HASH_B),
+                },
+                format!(r#"{{"Manifest":["sha256:{HASH_A}","sha256:{HASH_B}"]}}"#),
+            ),
         ];
-        println!("PROBE {}", serde_json::to_string(&all).unwrap());
+
+        for (link, stored) in cases {
+            assert_eq!(
+                serde_json::to_string(&link).unwrap(),
+                stored,
+                "{link} must serialize to the shape the shards already carry"
+            );
+            assert_eq!(
+                serde_json::from_str::<LinkKind>(&stored).unwrap(),
+                link,
+                "a stored {link} must read back unchanged"
+            );
+        }
+    }
+
+    /// The order inside a stored pair is load-bearing: the first digest is the
+    /// subject, the second the referrer.
+    #[test]
+    fn a_stored_pair_keeps_its_positions() {
+        let stored = format!(r#"{{"Referrer":["sha256:{HASH_A}","sha256:{HASH_B}"]}}"#);
+        let LinkKind::Referrer { subject, referrer } =
+            serde_json::from_str::<LinkKind>(&stored).unwrap()
+        else {
+            panic!("a referrer entry must read back as a referrer");
+        };
+        assert_eq!(subject, sha(HASH_A), "the first digest is the subject");
+        assert_eq!(referrer, sha(HASH_B), "the second is the referrer");
     }
 
     #[test]
@@ -95,7 +206,13 @@ mod tests {
 
     #[test]
     fn is_tracked_returns_true_for_manifest() {
-        assert!(LinkKind::Manifest(sha(HASH_A), sha(HASH_B)).is_tracked());
+        assert!(
+            LinkKind::Manifest {
+                index: sha(HASH_A),
+                child: sha(HASH_B)
+            }
+            .is_tracked()
+        );
     }
 
     #[test]
@@ -115,7 +232,13 @@ mod tests {
 
     #[test]
     fn is_tracked_returns_false_for_referrer() {
-        assert!(!LinkKind::Referrer(sha(HASH_A), sha(HASH_B)).is_tracked());
+        assert!(
+            !LinkKind::Referrer {
+                subject: sha(HASH_A),
+                referrer: sha(HASH_B)
+            }
+            .is_tracked()
+        );
     }
 
     #[test]
@@ -139,11 +262,17 @@ mod tests {
                 format!("config:sha256:{HASH_A}"),
             ),
             (
-                LinkKind::Referrer(sha(HASH_A), sha(HASH_B)),
+                LinkKind::Referrer {
+                    subject: sha(HASH_A),
+                    referrer: sha(HASH_B),
+                },
                 format!("referrer:sha256:{HASH_A}-sha256:{HASH_B}"),
             ),
             (
-                LinkKind::Manifest(sha(HASH_A), sha(HASH_B)),
+                LinkKind::Manifest {
+                    index: sha(HASH_A),
+                    child: sha(HASH_B),
+                },
                 format!("manifest:sha256:{HASH_A}-sha256:{HASH_B}"),
             ),
         ];

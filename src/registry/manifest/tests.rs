@@ -526,7 +526,10 @@ async fn put_manifest_allows_missing_subject_reference() {
 
         let subject = MISSING_SUBJECT_DIGEST.parse().unwrap();
         let digest = response.digest.clone();
-        let link = LinkKind::Referrer(subject, digest.clone());
+        let link = LinkKind::Referrer {
+            subject,
+            referrer: digest.clone(),
+        };
         let metadata = registry
             .metadata_store
             .read_link(namespace, &link)

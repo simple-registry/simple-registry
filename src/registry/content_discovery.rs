@@ -108,7 +108,10 @@ impl Registry {
         manifest_digest: Digest,
         artifact_type: Option<&MediaType>,
     ) -> Option<Descriptor> {
-        let referrer_link = LinkKind::Referrer(subject_digest.clone(), manifest_digest.clone());
+        let referrer_link = LinkKind::Referrer {
+            subject: subject_digest.clone(),
+            referrer: manifest_digest.clone(),
+        };
 
         if let Ok(metadata) = self
             .metadata_store
@@ -396,10 +399,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let referrer_link = LinkKind::Referrer(
-                base_manifest_digest.clone(),
-                referrer_manifest_digest.clone(),
-            );
+            let referrer_link = LinkKind::Referrer { subject: base_manifest_digest.clone(), referrer: referrer_manifest_digest.clone(), };
             registry
                 .metadata_store
                 .update_links(
@@ -482,7 +482,10 @@ mod tests {
         descriptor: Option<Descriptor>,
     ) {
         let ops = vec![LinkOperation::Create {
-            link: LinkKind::Referrer(subject(), manifest.clone()),
+            link: LinkKind::Referrer {
+                subject: subject(),
+                referrer: manifest.clone(),
+            },
             target: manifest.clone(),
             referrer: None,
             media_type: None,

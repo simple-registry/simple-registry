@@ -412,7 +412,10 @@ impl Executor {
         self.metadata_store
             .update_links(
                 &namespace,
-                &[LinkOperation::delete(LinkKind::Referrer(subject, referrer))],
+                &[LinkOperation::delete(LinkKind::Referrer {
+                    subject,
+                    referrer,
+                })],
             )
             .await?;
         Ok(())
@@ -1092,7 +1095,10 @@ mod tests {
                             subject_digest.clone(),
                         ),
                         LinkOperation::create(
-                            LinkKind::Referrer(subject_digest.clone(), referrer_digest.clone()),
+                            LinkKind::Referrer {
+                                subject: subject_digest.clone(),
+                                referrer: referrer_digest.clone(),
+                            },
                             referrer_digest.clone(),
                         ),
                     ],
@@ -1104,7 +1110,10 @@ mod tests {
                 metadata_store
                     .read_link(
                         &namespace,
-                        &LinkKind::Referrer(subject_digest.clone(), referrer_digest.clone())
+                        &LinkKind::Referrer {
+                            subject: subject_digest.clone(),
+                            referrer: referrer_digest.clone()
+                        }
                     )
                     .await
                     .is_ok(),
@@ -1126,7 +1135,10 @@ mod tests {
                 metadata_store
                     .read_link(
                         &namespace,
-                        &LinkKind::Referrer(subject_digest.clone(), referrer_digest.clone())
+                        &LinkKind::Referrer {
+                            subject: subject_digest.clone(),
+                            referrer: referrer_digest.clone()
+                        }
                     )
                     .await
                     .is_err(),

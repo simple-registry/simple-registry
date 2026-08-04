@@ -323,7 +323,10 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
     create_link(&m, namespace, &link, &referrer_digest).await;
 
     // Also add it to the referrers index
-    let referrers_link = LinkKind::Referrer(base_digest.clone(), referrer_digest.clone());
+    let referrers_link = LinkKind::Referrer {
+        subject: base_digest.clone(),
+        referrer: referrer_digest.clone(),
+    };
 
     create_link(&m, namespace, &referrers_link, &referrer_digest).await;
 
@@ -874,7 +877,10 @@ pub async fn test_datastore_list_referrers_parallel_correctness(registry: &Regis
         let digest_link = LinkKind::Digest(referrer_digest.clone());
         create_link(&m, namespace, &digest_link, &referrer_digest).await;
 
-        let referrer_link = LinkKind::Referrer(subject_digest.clone(), referrer_digest.clone());
+        let referrer_link = LinkKind::Referrer {
+            subject: subject_digest.clone(),
+            referrer: referrer_digest.clone(),
+        };
         create_link(&m, namespace, &referrer_link, &referrer_digest).await;
 
         referrer_digests.push(referrer_digest);
@@ -934,7 +940,10 @@ pub async fn test_datastore_list_referrers_with_artifact_type_filter(registry: &
         let digest_link = LinkKind::Digest(referrer_digest.clone());
         create_link(&m, namespace, &digest_link, &referrer_digest).await;
 
-        let referrer_link = LinkKind::Referrer(subject_digest.clone(), referrer_digest.clone());
+        let referrer_link = LinkKind::Referrer {
+            subject: subject_digest.clone(),
+            referrer: referrer_digest.clone(),
+        };
         create_link(&m, namespace, &referrer_link, &referrer_digest).await;
     }
 
@@ -963,7 +972,10 @@ pub async fn test_datastore_list_referrers_with_artifact_type_filter(registry: &
         let digest_link = LinkKind::Digest(referrer_digest.clone());
         create_link(&m, namespace, &digest_link, &referrer_digest).await;
 
-        let referrer_link = LinkKind::Referrer(subject_digest.clone(), referrer_digest.clone());
+        let referrer_link = LinkKind::Referrer {
+            subject: subject_digest.clone(),
+            referrer: referrer_digest.clone(),
+        };
         create_link(&m, namespace, &referrer_link, &referrer_digest).await;
     }
 
@@ -1024,7 +1036,10 @@ pub async fn test_datastore_list_referrers_deterministic_order(registry: &Regist
         let digest_link = LinkKind::Digest(referrer_digest.clone());
         create_link(&m, namespace, &digest_link, &referrer_digest).await;
 
-        let referrer_link = LinkKind::Referrer(subject_digest.clone(), referrer_digest.clone());
+        let referrer_link = LinkKind::Referrer {
+            subject: subject_digest.clone(),
+            referrer: referrer_digest.clone(),
+        };
         create_link(&m, namespace, &referrer_link, &referrer_digest).await;
     }
 
@@ -1975,7 +1990,10 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
         platform: None,
     };
 
-    let referrer_link = LinkKind::Referrer(base_digest.clone(), referrer_digest.clone());
+    let referrer_link = LinkKind::Referrer {
+        subject: base_digest.clone(),
+        referrer: referrer_digest.clone(),
+    };
     m.update_links(
         namespace,
         &[LinkOperation::create_with_descriptor(

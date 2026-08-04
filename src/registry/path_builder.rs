@@ -151,7 +151,7 @@ pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> String {
                 digest.hash()
             )
         }
-        LinkKind::Referrer(subject, referrer) => {
+        LinkKind::Referrer { subject, referrer } => {
             format!(
                 "{REPOS_ROOT}/{namespace}/_manifests/referrers/{}/{}/{}/{}",
                 subject.algorithm(),
@@ -160,7 +160,7 @@ pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> String {
                 referrer.hash()
             )
         }
-        LinkKind::Manifest(index, child) => {
+        LinkKind::Manifest { index, child } => {
             format!(
                 "{REPOS_ROOT}/{namespace}/_manifests/index/{}/{}/{}/{}",
                 index.algorithm(),
@@ -316,7 +316,7 @@ mod tests {
 
         let subject = Digest::sha256(HASH_A).unwrap();
         let referrer = Digest::sha256(HASH_B).unwrap();
-        let referrer_link = LinkKind::Referrer(subject, referrer);
+        let referrer_link = LinkKind::Referrer { subject, referrer };
         assert_eq!(
             link_path(&referrer_link, &ns),
             format!("v2/repositories/ns/_manifests/referrers/sha256/{HASH_A}/sha256/{HASH_B}/link")
@@ -328,7 +328,7 @@ mod tests {
 
         let index = Digest::sha256(HASH_A).unwrap();
         let child = Digest::sha256(HASH_B).unwrap();
-        let manifest_link = LinkKind::Manifest(index, child);
+        let manifest_link = LinkKind::Manifest { index, child };
         assert_eq!(
             link_path(&manifest_link, &ns),
             format!("v2/repositories/ns/_manifests/index/sha256/{HASH_A}/sha256/{HASH_B}/link")

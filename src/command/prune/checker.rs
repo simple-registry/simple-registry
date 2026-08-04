@@ -528,7 +528,7 @@ impl RetentionChecker {
     ) -> Result<bool, Error> {
         if blob_index.is_some_and(|index| {
             has_link_kind(index, namespace, |link| {
-                matches!(link, LinkKind::Manifest(_, _))
+                matches!(link, LinkKind::Manifest { index: _, child: _ })
             })
         }) {
             return Ok(true);
@@ -632,7 +632,10 @@ mod tests {
                         index_digest.clone(),
                     ),
                     LinkOperation::create(
-                        LinkKind::Manifest(index_digest.clone(), child_digest.clone()),
+                        LinkKind::Manifest {
+                            index: index_digest.clone(),
+                            child: child_digest.clone(),
+                        },
                         child_digest.clone(),
                     ),
                 ],
@@ -652,10 +655,10 @@ mod tests {
                 namespace,
                 &[
                     LinkOperation::delete(LinkKind::Tag(Tag::new("latest").unwrap())),
-                    LinkOperation::delete(LinkKind::Manifest(
-                        index_digest.clone(),
-                        child_digest.clone(),
-                    )),
+                    LinkOperation::delete(LinkKind::Manifest {
+                        index: index_digest.clone(),
+                        child: child_digest.clone(),
+                    }),
                     LinkOperation::delete(LinkKind::Digest(index_digest)),
                 ],
             )

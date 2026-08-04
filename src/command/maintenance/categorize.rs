@@ -379,14 +379,20 @@ mod tests {
             (LinkKind::Layer(digest_a()), ParsedLink::Layer(digest_a())),
             (LinkKind::Config(digest_a()), ParsedLink::Config(digest_a())),
             (
-                LinkKind::Referrer(digest_a(), digest_b()),
+                LinkKind::Referrer {
+                    subject: digest_a(),
+                    referrer: digest_b(),
+                },
                 ParsedLink::Referrer {
                     subject: digest_a(),
                     referrer: digest_b(),
                 },
             ),
             (
-                LinkKind::Manifest(digest_a(), digest_b()),
+                LinkKind::Manifest {
+                    index: digest_a(),
+                    child: digest_b(),
+                },
                 ParsedLink::ManifestIndex {
                     index: digest_a(),
                     child: digest_b(),
