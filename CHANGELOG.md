@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A chunked upload now keeps one hasher checkpoint instead of one per chunk, so the listing every append and finalize performs no longer grows with the number of chunks, and completing an upload probes its liveness marker rather than reading the whole session.
 - Cached upstream bearer tokens are scoped to the credential that obtained them, so two clients configured against the same registry with different usernames no longer serve each other's tokens and act as the wrong identity.
 - Upstream request logging moved to debug and no longer includes the query string, keeping the signed state in a server-assigned upload-session URL out of the logs and pull-through probe traffic out of info-level output.
+- `angos migrate` now warns past a link it cannot read or rewrite and reports the count in its summary, instead of one defective object aborting the whole run.
 
 ## 1.4.4
 

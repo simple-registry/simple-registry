@@ -59,6 +59,7 @@ struct Report {
     backfilled: u64,
     unrecognized: u64,
     vanished: u64,
+    failed: u64,
 }
 
 /// What a scan decided for one link, which is both the counter it belongs to
@@ -224,7 +225,14 @@ async fn migrate_links(
         // touching the object.
         if key.ends_with("/link") {
             let full_key = format!("{root}/{key}");
-            migrate_one(store, blob_store, &full_key, dry_run, &mut report).await?;
+            // Mirrors scrub: one defective object is warned and counted rather
+            // than stranding a sweep that is re-runnable and idempotent.
+            if let Err(error) =
+                migrate_one(store, blob_store, &full_key, dry_run, &mut report).await
+            {
+                report.failed += 1;
+                warn!("Cannot migrate link {full_key}: {error}");
+            }
         }
     }
     Ok(report)
@@ -301,14 +309,22 @@ fn log_summary(report: &Report, dry_run: bool) {
         "backfilled"
     };
     info!(
-        "Link migration complete: scanned {}, {verb} {}, {backfill_verb} media type on {}, already current {}, unrecognized {}, deleted mid-run {}",
+        "Link migration complete: scanned {}, {verb} {}, {backfill_verb} media type on {}, already current {}, unrecognized {}, deleted mid-run {}, failed {}",
         report.scanned,
         report.migrated,
         report.backfilled,
         report.current,
         report.unrecognized,
-        report.vanished
+        report.vanished,
+        report.failed
     );
+    if report.failed > 0 {
+        warn!(
+            "{} link file(s) could not be read or rewritten and were skipped; \
+             re-run migrate once the cause is resolved",
+            report.failed
+        );
+    }
     if report.unrecognized > 0 {
         warn!(
             "{} link file(s) were neither JSON nor a bare digest and were left untouched; \
@@ -534,6 +550,65 @@ mod tests {
         assert_eq!(report.migrated, 0);
         assert_eq!(report.backfilled, 0);
         assert_eq!(report.current, 1);
+    }
+
+    /// Fails every read of `key`, standing in for a permanently unreadable
+    /// link object.
+    struct FailReadsOf {
+        key: String,
+    }
+
+    #[async_trait::async_trait]
+    impl StoreHook for FailReadsOf {
+        async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+            match op {
+                StoreOp::Get { key } if key == self.key => {
+                    Err(StorageError::Backend("unreadable".to_string()))
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// One defective object must not strand the sweep: the run completes, the
+    /// healthy link is still migrated, and the failure is counted.
+    #[tokio::test]
+    async fn an_unreadable_link_is_counted_and_the_run_continues() {
+        let test_case = FSRegistryTestCase::new();
+        let blob_store = test_case.blob_store();
+        let namespace = Namespace::new("migrate-repo").unwrap();
+        let broken = LinkKind::Tag(Tag::new("broken").unwrap());
+        let healthy = LinkKind::Tag(Tag::new("healthy").unwrap());
+
+        for link in [&broken, &healthy] {
+            put_link_raw(
+                test_case.metadata_store().store(),
+                &namespace,
+                link,
+                digest().to_string().as_bytes(),
+            )
+            .await;
+        }
+
+        let inner: Arc<dyn ObjectStore> = test_case.metadata_store().store().object_store().clone();
+        let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+            inner,
+            FailReadsOf {
+                key: path_builder::link_path(&broken, &namespace),
+            },
+        ));
+        let metadata_store = metadata_store_over_cached(hooked, 0);
+
+        let report = migrate_links(metadata_store.store(), &blob_store, false)
+            .await
+            .expect("one unreadable link must not fail the run");
+
+        assert_eq!(report.failed, 1, "the unreadable link must be counted");
+        assert_eq!(report.migrated, 1, "the healthy link must still migrate");
+        assert!(
+            metadata_store.read_link(&namespace, &healthy).await.is_ok(),
+            "the healthy link must be readable after the run"
+        );
     }
 
     /// Writes `body` to `key` the first time the locked executor re-reads that
