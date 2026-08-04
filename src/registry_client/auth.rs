@@ -21,6 +21,11 @@ fn authority_for_cache_key(url: &Url) -> Result<&str, Error> {
 /// The credential a cached token was minted for. Clients share one cache, so
 /// without this two of them configured against the same registry and scope
 /// would serve each other's bearer tokens and act as the wrong identity.
+/// TTL for a URL index entry written on a scope-cache hit, where the token's
+/// own remaining lifetime is not observable. Overshooting is harmless: a
+/// dangling entry costs one cache read before the normal challenge path.
+const CACHED_TOKEN_INDEX_TTL_SECS: u64 = 3600;
+
 fn credential_component(username: Option<&str>) -> String {
     match username {
         Some(name) => format!("user={name}"),
@@ -150,6 +155,10 @@ impl RegistryClient {
             if let Some(auth_header) = self.cached_auth_header_for_key(&cache_key).await
                 && Some(auth_header.as_str()) != attempted_auth
             {
+                // Only the exchange indexes the URL, so without this every
+                // other URL sharing the scope eats a 401 on every request.
+                self.index_token_url(response.url(), &cache_key, CACHED_TOKEN_INDEX_TTL_SECS)
+                    .await;
                 return Ok(auth_header);
             }
             self.exchange_bearer_token(challenge, response.url(), &cache_key)
@@ -195,16 +204,19 @@ impl RegistryClient {
         let ttl = bearer.expires_in;
 
         let _ = self.cache.store_value(cache_key, &token, ttl).await;
-        let _ = self
-            .cache
-            .store_value(
-                &token_index_cache_key(response_url, self.auth_username())?,
-                cache_key,
-                ttl,
-            )
-            .await;
+        self.index_token_url(response_url, cache_key, ttl).await;
 
         Ok(token)
+    }
+
+    /// Point `url` at the token `cache_key` so the next request to it sends the
+    /// token instead of discovering it through a 401. Best effort: an unusable
+    /// index must not fail a token the caller already holds.
+    async fn index_token_url(&self, url: &Url, cache_key: &str, ttl: u64) {
+        let Ok(index_key) = token_index_cache_key(url, self.auth_username()) else {
+            return;
+        };
+        let _ = self.cache.store_value(&index_key, cache_key, ttl).await;
     }
 
     fn build_basic_auth_header(&self) -> Result<String, Error> {

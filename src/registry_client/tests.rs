@@ -492,6 +492,65 @@ async fn test_bearer_authentication() {
     assert!(result.is_ok());
 }
 
+/// A scope-cache hit must index the URL it served. Only the token exchange
+/// wrote that entry, so every other URL sharing the scope re-discovered the
+/// token through a 401 on every single request.
+#[tokio::test]
+async fn a_scope_cache_hit_indexes_the_url_it_served() {
+    let mock_server = MockServer::start().await;
+    let registry_url = mock_server.uri();
+    let location = format!("{registry_url}/v2/test/blobs/sha256:abc");
+    let url = Url::parse(&location).unwrap();
+    let cache = cache::Config::Memory.to_backend().unwrap();
+
+    // The scope token is cached, but this URL has never been indexed: the
+    // state left behind when some other URL triggered the exchange.
+    let cache_key = token_cache_key(
+        &url,
+        &format!("{registry_url}/token"),
+        Some("registry"),
+        Some("repository:test:pull"),
+        None,
+    )
+    .unwrap();
+    cache
+        .store_value(&cache_key, "Bearer scope-token", 3600)
+        .await
+        .unwrap();
+    let index_key = token_index_cache_key(&url, None).unwrap();
+    assert!(cache.retrieve_value(&index_key).await.unwrap().is_none());
+
+    Mock::given(method("GET"))
+        .and(path("/v2/test/blobs/sha256:abc"))
+        .and(header("Authorization", "Bearer scope-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"blob"))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/test/blobs/sha256:abc"))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "WWW-Authenticate",
+            format!(
+                r#"Bearer realm="{registry_url}/token",service="registry",scope="repository:test:pull""#
+            )
+            .as_str(),
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let config = test_client_config(registry_url);
+    let client =
+        RegistryClient::from_config(&config, cache.clone(), DEFAULT_MAX_MANIFEST_SIZE_BYTES)
+            .unwrap();
+    client.get_blob(&[], &location).await.expect("blob fetch");
+
+    assert_eq!(
+        cache.retrieve_value(&index_key).await.unwrap().as_deref(),
+        Some(cache_key.as_str()),
+        "the served URL must be indexed so the next request skips the 401"
+    );
+}
+
 #[tokio::test]
 async fn test_cached_bearer_token_is_used() {
     let mock_server = MockServer::start().await;
