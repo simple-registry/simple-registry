@@ -48,7 +48,7 @@ pub struct Options {
     pub uploads: HumanDuration,
     #[argh(option, default = "default_concurrency()")]
     /// number of namespaces, uploads, blobs, or shards checked concurrently
-    /// per sweep
+    /// per sweep; each namespace adds a small fixed tag-read fan-out of its own
     pub concurrency: usize,
 }
 
@@ -112,8 +112,7 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
         metadata_store.clone(),
         repositories.clone(),
         global_policy.clone(),
-    )
-    .with_concurrency(options.concurrency);
+    );
     let mut registry = None;
     let sink: Box<dyn ActionSink> = if options.dry_run {
         info!("Dry-run mode: no changes will be made to the storage");

@@ -278,6 +278,10 @@ impl S3Client {
         let http = Client::builder()
             .use_rustls_tls()
             .pool_idle_timeout(Duration::from_secs(90))
+            // Resets on every read, so it bounds a stalled transfer without
+            // bounding a slow one. This is what guards a streamed download,
+            // which carries no whole-request deadline.
+            .read_timeout(Duration::from_secs(config.operation_attempt_timeout_secs))
             .build()
             .map_err(|e| S3Error::configuration(format!("failed to create S3 HTTP client: {e}")))?;
 
@@ -327,6 +331,7 @@ impl S3Client {
                     &query,
                     headers.clone(),
                     RequestBody::<ByteStream>::Bytes(body.clone()),
+                    Some(self.operation_attempt_timeout),
                 )
                 .await?;
             let response = collect_full_response(response).await?;
@@ -379,6 +384,7 @@ impl S3Client {
                         content_length,
                         stream,
                     },
+                    Some(self.operation_attempt_timeout),
                 )
                 .await?;
             let status = response.status();
@@ -408,6 +414,7 @@ impl S3Client {
                     &query,
                     headers.clone(),
                     RequestBody::<ByteStream>::Empty,
+                    None,
                 )
                 .await?;
             if response.status().is_success() {
@@ -514,6 +521,7 @@ impl S3Client {
         query: &[QueryParam],
         mut headers: HeaderMap,
         body: RequestBody<S>,
+        request_timeout: Option<Duration>,
     ) -> Result<Response, S3Error>
     where
         S: Stream<Item = Result<Bytes, io::Error>> + Send + 'static,
@@ -558,11 +566,10 @@ impl S3Client {
         )?;
         insert_header(&mut headers, AUTHORIZATION, &authorization)?;
 
-        let mut request = self
-            .http
-            .request(method, &target.url)
-            .headers(headers)
-            .timeout(self.operation_attempt_timeout);
+        let mut request = self.http.request(method, &target.url).headers(headers);
+        if let Some(timeout) = request_timeout {
+            request = request.timeout(timeout);
+        }
         request = match body {
             RequestBody::Empty => request,
             RequestBody::Bytes(b) if b.is_empty() => request,

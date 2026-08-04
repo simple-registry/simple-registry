@@ -20,7 +20,7 @@ use reqwest::{
 use serde::Deserialize;
 use tokio::{io::AsyncReadExt, sync::Mutex};
 use tokio_util::io::StreamReader;
-use tracing::{info, instrument, warn};
+use tracing::{debug, instrument, warn};
 use url::Url;
 
 pub use crate::registry_client::{
@@ -57,6 +57,25 @@ fn classify_read_failure(status: StatusCode, op: &str, not_found: Error) -> Erro
         StatusCode::METHOD_NOT_ALLOWED => Error::Unsupported,
         _ => Error::Internal(format!("{op}: downstream returned status {status}")),
     }
+}
+
+/// The location without its query string, which on an upload-session URL
+/// carries signed state that must not reach the logs.
+fn without_query(location: &str) -> &str {
+    match location.split_once('?') {
+        Some((base, _)) => base,
+        None => location,
+    }
+}
+
+/// A `403` is terminal: the credential is valid and simply lacks the scope, so
+/// no retry can clear it. Applied to the refreshed attempt as well, which is
+/// the normal scope-denied token flow.
+fn denied_if_forbidden(response: &Response) -> Result<(), Error> {
+    if response.status() == StatusCode::FORBIDDEN {
+        return Err(Error::Denied("Access forbidden".to_string()));
+    }
+    Ok(())
 }
 
 /// Reads and parses a required response header, naming it in an `Internal` error
@@ -173,6 +192,12 @@ struct TagsListBody {
 }
 
 impl RegistryClient {
+    /// Configured basic-auth username, `None` when the client is anonymous.
+    /// Scopes cached bearer tokens so clients never share across identities.
+    fn auth_username(&self) -> Option<&str> {
+        self.basic_auth.as_ref().map(|(user, _)| user.as_str())
+    }
+
     /// Starts building a registry client from individual resolved fields. The
     /// base `url`, the pre-built HTTP `client` (carrying the resolved
     /// TLS/redirect/timeout policy) and the shared token/auth `cache` are
@@ -278,7 +303,7 @@ impl RegistryClient {
         accepted_types: &[String],
         location: &str,
     ) -> Result<Response, Error> {
-        info!("Requesting from upstream: {location}");
+        debug!("Requesting from upstream: {}", without_query(location));
 
         self.send_with_auth_retry(location, |auth| async move {
             self.send(method, accepted_types, location, auth.as_deref())
@@ -329,13 +354,18 @@ impl RegistryClient {
                 .refresh_auth_header(&response, cached_auth.as_deref())
                 .await?;
             let response = send_once(Some(token.clone())).await?;
+            // A token that was just obtained will not become valid on another
+            // attempt, so this is terminal rather than a response to hand back.
+            if response.status() == StatusCode::UNAUTHORIZED {
+                return Err(Error::Unauthorized(
+                    "Upstream rejected a freshly obtained token".to_string(),
+                ));
+            }
+            denied_if_forbidden(&response)?;
             return Ok((response, Some(token)));
         }
 
-        if response.status() == StatusCode::FORBIDDEN {
-            return Err(Error::Denied("Access forbidden".to_string()));
-        }
-
+        denied_if_forbidden(&response)?;
         Ok((response, cached_auth))
     }
 
@@ -368,7 +398,7 @@ impl RegistryClient {
     }
 
     async fn cached_auth_header_for_url(&self, url: &Url) -> Option<String> {
-        let index_key = match token_index_cache_key(url) {
+        let index_key = match token_index_cache_key(url, self.auth_username()) {
             Ok(key) => key,
             Err(e) => {
                 warn!("Unable to build auth cache key: {e}");
@@ -572,7 +602,11 @@ impl RegistryClient {
         let response = self.query(&Method::GET, accepted_types, location).await?;
 
         if !response.status().is_success() {
-            return Err(Error::BlobUnknown);
+            return Err(classify_read_failure(
+                response.status(),
+                "get_blob",
+                Error::BlobUnknown,
+            ));
         }
 
         let total_length = parse_header(&response, CONTENT_LENGTH)?;

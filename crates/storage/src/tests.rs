@@ -257,6 +257,30 @@ macro_rules! object_store_conformance {
             }
 
             #[tokio::test]
+            async fn list_children_start_after_spans_directory_children() {
+                // `start_after` names a directory child, and `v1.2`/`v1.5` sort
+                // between `v1` and `v1/`: a raw-key bound re-emits `v1` forever
+                // and skips the two siblings.
+                let (store, _guard) = $fixture;
+                for key in ["sa2/v1/leaf", "sa2/v1.2/leaf"] {
+                    store.put(key, Bytes::from_static(b"x")).await.unwrap();
+                }
+                for key in ["sa2/v1.5", "sa2/v2"] {
+                    store.put(key, Bytes::from_static(b"x")).await.unwrap();
+                }
+
+                let page = store
+                    .list_children("sa2/", 10, None, Some("v1".to_string()))
+                    .await
+                    .unwrap();
+
+                let mut children = page.sub_prefixes;
+                children.extend(page.objects);
+                children.sort();
+                assert_eq!(children, vec!["v1.2", "v1.5", "v2"]);
+            }
+
+            #[tokio::test]
             async fn list_all_children_is_complete_across_prefix_families() {
                 let (store, _guard) = $fixture;
                 // Names where one is a prefix of another continuing with a
@@ -372,6 +396,23 @@ macro_rules! object_store_conformance {
 
                 store.complete_upload("up/rerun").await.unwrap();
                 assert_eq!(store.get("up/rerun").await.unwrap(), b"payload");
+            }
+
+            #[tokio::test]
+            async fn upload_rejects_a_body_longer_than_declared() {
+                // `Some(len)` declares an exact count, so a longer body is an
+                // error on every backend rather than a silent truncation.
+                let (store, _guard) = $fixture;
+                store.create_upload("up/long").await.unwrap();
+                let error = store
+                    .write_upload("up/long", frame("hello world"), Some(5))
+                    .await
+                    .expect_err("a body longer than declared must be rejected");
+                let message = error.to_string();
+                assert!(
+                    message.contains("body") && message.contains('5'),
+                    "the error must name the declared length, got: {message}"
+                );
             }
 
             #[tokio::test]

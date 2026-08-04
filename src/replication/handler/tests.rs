@@ -51,6 +51,7 @@ fn sample_payload() -> ReplicationPushPayload {
         ),
         kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
         source_ts: Some("2026-06-03T00:00:00Z".to_string()),
+        subject: None,
     }
 }
 
@@ -108,11 +109,6 @@ fn lock_key_distinguishes_push_from_delete() {
         replication_lock_key(&delete),
         "replication.delete.eu-region:nginx:v1@2026-06-03T00:00:00Z"
     );
-    assert_ne!(
-        replication_lock_key(&push),
-        replication_lock_key(&delete),
-        "a push and a delete for the same tag must not coalesce"
-    );
 }
 
 /// Deletes with different `source_ts` are distinct events and must not
@@ -143,13 +139,16 @@ fn prune_delete_envelope_coalesces_on_bare_reference() {
 
     let first = build_prune_delete_envelope(&payload).unwrap();
     let second = build_prune_delete_envelope(&later).unwrap();
-    assert_eq!(first.lock_key, "replication.delete.eu-region:nginx:v1");
+    assert_eq!(
+        first.lock_key.as_str(),
+        "replication.delete.eu-region:nginx:v1"
+    );
     assert_eq!(
         first.lock_key, second.lock_key,
         "prune deletes with different source_ts must coalesce on the bare reference"
     );
     assert_ne!(
-        first.lock_key,
+        first.lock_key.as_str(),
         replication_lock_key(&payload),
         "a prune delete must not coalesce with an event-path delete"
     );
@@ -172,7 +171,10 @@ fn build_envelope_sets_queue_kind_and_lock_key() {
     let envelope = build_envelope(&payload).unwrap();
     assert_eq!(envelope.queue, Queue::Replication);
     assert_eq!(envelope.kind, REPLICATION_PUSH_MANIFEST_KIND);
-    assert_eq!(envelope.lock_key, "replication.push.eu-region:nginx:v1");
+    assert_eq!(
+        envelope.lock_key.as_str(),
+        "replication.push.eu-region:nginx:v1"
+    );
     let round_trip: ReplicationPushPayload = serde_json::from_value(envelope.payload).unwrap();
     assert_eq!(round_trip, payload);
 }
@@ -516,6 +518,7 @@ async fn execute_push_resolves_tag_past_the_link_cache() {
         digest: Some(stale_digest.to_string()),
         kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
         source_ts: Some("2026-06-03T00:00:00Z".to_string()),
+        subject: None,
     };
     let envelope = build_envelope(&payload).unwrap();
     handler.execute(&envelope).await.unwrap();

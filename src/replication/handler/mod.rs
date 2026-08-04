@@ -78,6 +78,10 @@ pub struct ReplicationPushPayload {
     /// Event timestamp (RFC 3339) carried for receiver-side last-writer-wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ts: Option<String>,
+    /// Serialized subject digest of a referrer manifest, captured before the
+    /// delete so a retry can still prune the downstream fallback index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
 }
 
 /// Tag-or-digest segment shared by every replication `lock_key`.
@@ -138,8 +142,9 @@ fn replication_lock_key(payload: &ReplicationPushPayload) -> String {
 ///
 /// # Errors
 ///
-/// Returns a [`serde_json::Error`] when the payload cannot be serialized.
-pub fn build_envelope(payload: &ReplicationPushPayload) -> Result<JobEnvelope, serde_json::Error> {
+/// Returns an [`Error`] when the lock key is invalid or the payload cannot be
+/// serialized.
+pub fn build_envelope(payload: &ReplicationPushPayload) -> Result<JobEnvelope, Error> {
     JobEnvelope::new(
         Queue::Replication,
         payload.kind.clone(),
@@ -157,10 +162,9 @@ pub fn build_envelope(payload: &ReplicationPushPayload) -> Result<JobEnvelope, s
 ///
 /// # Errors
 ///
-/// Returns a [`serde_json::Error`] when the payload cannot be serialized.
-pub fn build_prune_delete_envelope(
-    payload: &ReplicationPushPayload,
-) -> Result<JobEnvelope, serde_json::Error> {
+/// Returns an [`Error`] when the lock key is invalid or the payload cannot be
+/// serialized.
+pub fn build_prune_delete_envelope(payload: &ReplicationPushPayload) -> Result<JobEnvelope, Error> {
     JobEnvelope::new(
         Queue::Replication,
         payload.kind.clone(),
@@ -351,12 +355,21 @@ impl ReplicationJobHandler {
                     .map_err(|e| Error::Execution(format!("invalid digest '{digest}': {e}")))?,
             )
         };
+        let subject = payload
+            .subject
+            .as_deref()
+            .map(str::parse::<Digest>)
+            .transpose()
+            .map_err(|e| {
+                Error::Execution(format!("invalid subject on delete for '{namespace}': {e}"))
+            })?;
         let outcome = pipeline::delete_manifest(
             &downstream.registry_client,
             &self.metadata_store,
             namespace,
             downstream_namespace.as_ref(),
             &reference,
+            subject.as_ref(),
             payload.source_ts.as_deref(),
         )
         .await

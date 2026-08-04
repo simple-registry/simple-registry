@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration as StdDuration,
 };
 
 use serde_json::{Value, json};
@@ -19,7 +22,7 @@ use crate::{
         OCI_INDEX_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, Reference, Tag,
     },
     registry::{
-        DOCKER_CONTENT_DIGEST, OCI_SUBJECT,
+        DOCKER_CONTENT_DIGEST, OCI_SUBJECT, ParsedManifestDigests,
         blob_store::BlobStore,
         metadata_store::{BlobIndexOperation, LinkKind, LinkOperation, MetadataStore},
         test_utils::{FsTestStack, downstream_client, fs_test_stack, media_type, put_blob_direct},
@@ -1663,6 +1666,7 @@ async fn delete_manifest_stamps_header_and_distinguishes_superseded() {
         &Namespace::new(NAMESPACE).unwrap(),
         NAMESPACE,
         &Reference::Tag(Tag::new("v1").unwrap()),
+        None,
         Some("2026-06-03T00:00:00Z"),
     )
     .await
@@ -1690,6 +1694,7 @@ async fn delete_manifest_of_absent_target_is_converged_not_pushed() {
         &Namespace::new(NAMESPACE).unwrap(),
         NAMESPACE,
         &Reference::Tag(Tag::new("gone").unwrap()),
+        None,
         None,
     )
     .await
@@ -1723,6 +1728,7 @@ async fn delete_manifest_of_unsupported_downstream_is_unsupported_not_error() {
         NAMESPACE,
         &Reference::Tag(Tag::new("v1").unwrap()),
         None,
+        None,
     )
     .await
     .expect("a 405 tag delete must complete, not error");
@@ -1749,6 +1755,7 @@ async fn delete_manifest_propagates_non_superseded_409_as_error() {
         &Namespace::new(NAMESPACE).unwrap(),
         NAMESPACE,
         &Reference::Tag(Tag::new("v1").unwrap()),
+        None,
         None,
     )
     .await;
@@ -1862,6 +1869,7 @@ async fn deleting_last_referrer_removes_the_fallback_tag() {
         NAMESPACE,
         &Reference::Digest(referrer.clone()),
         None,
+        None,
     )
     .await
     .expect("the digest delete must succeed");
@@ -1930,6 +1938,7 @@ async fn deleting_a_referrer_keeps_its_siblings_in_the_fallback_index() {
         NAMESPACE,
         &Reference::Digest(referrer.clone()),
         None,
+        None,
     )
     .await
     .expect("the digest delete must succeed");
@@ -1956,5 +1965,136 @@ async fn deleting_a_referrer_keeps_its_siblings_in_the_fallback_index() {
         "only the sibling must remain"
     );
 
+    drop(mock_server);
+}
+
+/// The retry case: the first attempt's DELETE already landed, so only the
+/// subject carried in the payload can still name the stale descriptor.
+#[tokio::test]
+async fn a_retried_delete_prunes_the_fallback_index_from_the_carried_subject() {
+    metrics_provider::init_for_tests();
+    let mock_server = MockServer::start().await;
+    let (_, metadata_store, _, _dir) = test_blob_store();
+
+    let subject = Digest::sha256_of_bytes(b"retried-subject");
+    let (_, referrer) = referrer_manifest(&subject);
+    let fallback_tag = format!("{}-{}", subject.algorithm(), subject.hash());
+
+    // Carrying the subject spares this round-trip, which could only ever 404.
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{NAMESPACE}/manifests/{referrer}")))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(0)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/v2/{NAMESPACE}/manifests/{referrer}")))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&mock_server)
+        .await;
+    let index = json!({
+        "schemaVersion": 2,
+        "mediaType": OCI_INDEX_MEDIA_TYPE,
+        "manifests": [{ "mediaType": OCI_MANIFEST_MEDIA_TYPE, "digest": referrer.to_string(), "size": 2 }],
+    });
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    DOCKER_CONTENT_DIGEST,
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                )
+                .set_body_json(index),
+        )
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    delete_manifest(
+        &downstream_client(&mock_server.uri()),
+        &metadata_store,
+        &Namespace::new(NAMESPACE).unwrap(),
+        NAMESPACE,
+        &Reference::Digest(referrer.clone()),
+        Some(&subject),
+        None,
+    )
+    .await
+    .expect("an already-absent delete must succeed");
+
+    // .expect(1) on the fallback DELETE verifies the stale descriptor was pruned.
+    drop(mock_server);
+}
+
+/// A dropped upload future never reaches its own cancel, so a sibling killed
+/// mid-transfer would leave its session open on the downstream until GC.
+#[tokio::test]
+async fn a_failing_blob_lets_its_siblings_finish_their_upload() {
+    metrics_provider::init_for_tests();
+    let mock_server = MockServer::start().await;
+    let (blob_store, metadata_store, store, _dir) = test_blob_store();
+
+    let failing = put_blob_direct(&store, b"fails").await;
+    let sibling = put_blob_direct(&store, b"transfers").await;
+
+    // The probe fails outright, so this blob errors before it opens a session.
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/{NAMESPACE}/blobs/{failing}")))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/{NAMESPACE}/blobs/{sibling}")))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v2/{NAMESPACE}/blobs/uploads/")))
+        .respond_with(
+            ResponseTemplate::new(202)
+                .insert_header("Location", format!("/v2/{NAMESPACE}/blobs/uploads/s1")),
+        )
+        .mount(&mock_server)
+        .await;
+    // Slow enough that the sibling is still mid-PATCH when the other blob fails.
+    Mock::given(method("PATCH"))
+        .and(path(format!("/v2/{NAMESPACE}/blobs/uploads/s1")))
+        .respond_with(
+            ResponseTemplate::new(202)
+                .insert_header("Location", format!("/v2/{NAMESPACE}/blobs/uploads/s1"))
+                .set_delay(StdDuration::from_millis(300)),
+        )
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(format!("/v2/{NAMESPACE}/blobs/uploads/s1")))
+        .respond_with(ResponseTemplate::new(201))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let parsed = ParsedManifestDigests {
+        media_type: None,
+        artifact_type: None,
+        subject: None,
+        config: Some(failing),
+        layers: vec![sibling],
+        manifests: vec![],
+    };
+    let downstream = test_downstream(downstream_client(&mock_server.uri()));
+    let namespace = Namespace::new(NAMESPACE).unwrap();
+    let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
+
+    super::push_blobs(&ctx, &parsed)
+        .await
+        .expect_err("a failing blob must fail the sweep");
+
+    // .expect(1) on the PUT verifies the sibling finished instead of being dropped.
     drop(mock_server);
 }

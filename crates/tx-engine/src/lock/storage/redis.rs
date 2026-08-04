@@ -63,7 +63,8 @@ mod backend {
 
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
-    use redis::{Client, Script};
+    use redis::{Client, Script, aio::ConnectionManager};
+    use tokio::sync::OnceCell;
 
     use super::RedisLockStorageConfig;
     use crate::lock::{
@@ -99,12 +100,22 @@ redis.call('DEL', KEYS[1])
 return 1
 ";
 
+    /// The Redis value for a lock body, which doubles as its `ETag`, so an
+    /// undecodable body is rejected rather than sharing a placeholder.
+    fn lock_value(body: Vec<u8>) -> Result<String, Error> {
+        String::from_utf8(body)
+            .map_err(|_| Error::InvalidData("lock body is not valid UTF-8".to_string()))
+    }
+
     /// Redis-backed lock storage.
     ///
-    /// Safe to clone; all clones share the same [`Client`].
+    /// Safe to clone; all clones share the same [`Client`] and connection.
     #[derive(Clone)]
     pub struct RedisLockStorage {
         client: Arc<Client>,
+        /// Opened once and reused; a per-call connection storms Redis at
+        /// heartbeat rates. Reconnects on its own.
+        connection: Arc<OnceCell<ConnectionManager>>,
         ttl_secs: usize,
         key_prefix: String,
     }
@@ -128,6 +139,7 @@ return 1
             let client = Client::open(config.url.clone())?;
             Ok(Self {
                 client: Arc::new(client),
+                connection: Arc::new(OnceCell::new()),
                 ttl_secs: config.ttl,
                 key_prefix: config.key_prefix.clone(),
             })
@@ -135,6 +147,18 @@ return 1
 
         fn full_key(&self, key: &str) -> String {
             format!("{}{}", self.key_prefix, key)
+        }
+
+        async fn connection(&self) -> Result<ConnectionManager, Error> {
+            self.connection
+                .get_or_try_init(|| async {
+                    self.client
+                        .get_connection_manager()
+                        .await
+                        .map_err(|e| Error::StorageBackend(format!("Redis connect: {e}")))
+                })
+                .await
+                .cloned()
         }
     }
 
@@ -146,17 +170,9 @@ return 1
             body: Vec<u8>,
         ) -> Result<PutIfAbsentOutcome, Error> {
             let full_key = self.full_key(key);
-            // `body` is a JSON `LockBody`; we store its bytes verbatim as the Redis
-            // value. If decoding fails we substitute a sentinel string. The ETag
-            // comparison later will still work because we round-trip the same
-            // bytes.
-            let value = String::from_utf8(body).unwrap_or_else(|_| "unknown".to_string());
+            let value = lock_value(body)?;
 
-            let mut conn = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|e| Error::StorageBackend(format!("Redis connect: {e}")))?;
+            let mut conn = self.connection().await?;
 
             let result: Option<String> = Script::new(SET_NX_SCRIPT)
                 .key(&full_key)
@@ -181,13 +197,9 @@ return 1
             body: Vec<u8>,
         ) -> Result<PutIfMatchOutcome, Error> {
             let full_key = self.full_key(key);
-            let new_value = String::from_utf8(body).unwrap_or_else(|_| "unknown".to_string());
+            let new_value = lock_value(body)?;
 
-            let mut conn = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|e| Error::StorageBackend(format!("Redis connect: {e}")))?;
+            let mut conn = self.connection().await?;
 
             let result: i32 = Script::new(REFRESH_SCRIPT)
                 .key(&full_key)
@@ -210,11 +222,7 @@ return 1
             key: &str,
         ) -> Result<(Vec<u8>, String, Option<DateTime<Utc>>), Error> {
             let full_key = self.full_key(key);
-            let mut conn = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|e| Error::StorageBackend(format!("Redis connect: {e}")))?;
+            let mut conn = self.connection().await?;
 
             let value: Option<String> = redis::cmd("GET")
                 .arg(&full_key)
@@ -237,11 +245,7 @@ return 1
             expected_etag: &str,
         ) -> Result<DeleteIfMatchOutcome, Error> {
             let full_key = self.full_key(key);
-            let mut conn = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|e| Error::StorageBackend(format!("Redis connect: {e}")))?;
+            let mut conn = self.connection().await?;
 
             let result: i32 = Script::new(DELETE_IF_MATCH_SCRIPT)
                 .key(&full_key)
@@ -263,6 +267,20 @@ return 1
 
         fn is_process_shared(&self) -> bool {
             true
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_non_utf8_lock_body_is_rejected_rather_than_given_a_shared_value() {
+            let error = lock_value(vec![0xff, 0xfe]).expect_err("no UTF-8 form, no Redis value");
+            assert!(
+                matches!(error, Error::InvalidData(_)),
+                "expected InvalidData, got {error:?}"
+            );
         }
     }
 }

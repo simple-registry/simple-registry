@@ -875,8 +875,7 @@ async fn append_shard_merges(
                 .unwrap_or_default();
             apply_blob_index_operations(&mut links, shard_ops);
             if links.is_empty() {
-                let refs_prefix = path_builder::blob_index_refs_dir(digest);
-                reclaim_blob = !any_other_namespace_references_blob(store, namespace, &refs_prefix)
+                reclaim_blob = !any_other_namespace_references_blob(store, namespace, digest)
                     .await
                     .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
             }

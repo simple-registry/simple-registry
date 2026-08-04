@@ -13,7 +13,7 @@ use crate::{
 /// session is consumed by `complete`/`fail` or dropped on the lock-lost
 /// branch.
 pub async fn execute_one(consumer: &JobStore, handler: &dyn JobHandler, claimed: ClaimedJob) {
-    let lock_key = claimed.envelope.lock_key.clone();
+    let lock_key = claimed.envelope.lock_key.to_string();
     let lock_lost = claimed.session.cancellation();
 
     let handler_result = select! {

@@ -4,29 +4,37 @@ use serde::{Deserialize, Serialize};
 
 use crate::oci::{Descriptor, Digest, Error, MediaType};
 
-/// OCI image-spec manifest `schemaVersion` (only version 2 is supported).
+/// OCI image-spec manifest `schemaVersion`. Enforced where a manifest enters
+/// the store, not on this DTO, so angos keeps reading what it once accepted.
 pub const OCI_MANIFEST_SCHEMA_VERSION: i32 = 2;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
     pub schema_version: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub media_type: Option<MediaType>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<Descriptor>,
+    /// Always serialized: the image spec requires `layers` on an image
+    /// manifest, so omitting it when empty would emit an invalid document.
     #[serde(default)]
     pub layers: Vec<Descriptor>,
+    /// Always serialized, for the same reason `manifests` is required on an
+    /// index.
     #[serde(default)]
     pub manifests: Vec<Descriptor>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<Descriptor>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub annotations: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_type: Option<MediaType>,
 }
 
 impl Manifest {
+    /// Deserializes leniently, like `media_type` being optional: angos must
+    /// keep reading manifests it once accepted. Ingress checks the strict rules.
     pub fn from_slice(s: &[u8]) -> Result<Self, Error> {
         Ok(serde_json::from_slice(s)?)
     }
@@ -90,6 +98,8 @@ impl Default for Manifest {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
     use crate::oci::Digest;
 
@@ -128,6 +138,39 @@ mod tests {
             artifact_type: Some(media_type(ARTIFACT_TYPE_INDEX)),
             ..Manifest::default()
         }
+    }
+
+    /// A `null` config or subject is not something a client would ever send,
+    /// and `layers` is required on an image manifest however empty it is.
+    #[test]
+    fn serializing_omits_absent_fields_but_keeps_the_required_arrays() {
+        let json = serde_json::to_value(Manifest::default()).unwrap();
+        let object = json
+            .as_object()
+            .expect("a manifest serializes to an object");
+
+        assert!(
+            !object.values().any(Value::is_null),
+            "no field may serialize as null: {json}"
+        );
+        assert!(
+            !object.contains_key("annotations"),
+            "an empty annotations map must be omitted: {json}"
+        );
+        assert!(
+            object.contains_key("layers") && object.contains_key("manifests"),
+            "the spec-required arrays must survive an empty manifest: {json}"
+        );
+    }
+
+    #[test]
+    fn serializing_keeps_the_fields_that_are_set() {
+        let json = serde_json::to_value(demo_manifest()).unwrap();
+
+        assert_eq!(json["mediaType"], MEDIA_TYPE_MANIFEST);
+        assert_eq!(json["artifactType"], ARTIFACT_TYPE_INDEX);
+        assert_eq!(json["config"]["size"], 1234);
+        assert_eq!(json["layers"].as_array().map(Vec::len), Some(1));
     }
 
     #[test]

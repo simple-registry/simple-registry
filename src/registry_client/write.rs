@@ -13,13 +13,14 @@ use reqwest::{
 };
 use tokio::io::AsyncRead;
 use tokio_util::io::ReaderStream;
-use tracing::{info, instrument, warn};
+use tracing::{debug, instrument, warn};
 
 use crate::{
     oci::Digest,
     registry::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT},
     registry_client::{
         Error, REPLICATION_SUPERSEDED_CODE, RegistryClient, X_ANGOS_SOURCE_TIMESTAMP, parse_header,
+        without_query,
     },
 };
 
@@ -137,7 +138,7 @@ impl RegistryClient {
         body: Vec<u8>,
         source_ts: Option<&str>,
     ) -> Result<(Response, Option<String>), Error> {
-        info!("Writing to upstream: {method} {location}");
+        debug!("Writing to upstream: {method} {}", without_query(location));
 
         // `Bytes` makes the per-attempt clone a refcount bump, not a deep copy.
         let body = Bytes::from(body);
@@ -202,7 +203,10 @@ impl RegistryClient {
     where
         S: AsyncRead + Unpin + Send + Sync + 'static,
     {
-        info!("Streaming to upstream: {method} {location}");
+        debug!(
+            "Streaming to upstream: {method} {}",
+            without_query(location)
+        );
 
         let auth = match auth_header {
             Some(header) => Some(header.to_string()),

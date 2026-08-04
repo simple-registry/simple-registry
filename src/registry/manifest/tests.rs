@@ -1,5 +1,9 @@
-use std::{collections::HashSet, io::Cursor, time::Duration};
+use std::{collections::HashSet, io::Cursor, sync::Arc, time::Duration};
 
+use angos_storage::{
+    Error as StorageError, ObjectStore,
+    test_util::{HookedStore, StoreHook, StoreOp},
+};
 use futures_util::future::join_all;
 use serde_json::json;
 use tokio::time::sleep;
@@ -17,11 +21,11 @@ use crate::{
         Error, Registry,
         blob_ownership::BlobOwnership,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation},
-        path_builder::blob_path,
+        path_builder::{self, blob_path},
         repository::Config as RepositoryConfig,
         test_utils::{
-            FSRegistryTestCase, RegistryTestCase, for_each_backend, get_blob, put_link_raw,
-            upload_blob,
+            FSRegistryTestCase, RegistryTestCase, create_test_registry, for_each_backend, get_blob,
+            metadata_store_over, put_link_raw, upload_blob,
         },
     },
     registry_client::REPLICATION_SUPERSEDED_CODE,
@@ -473,6 +477,36 @@ async fn put_manifest_rejects_references_owned_by_another_namespace() {
     .await;
 }
 
+/// The image spec pins `schemaVersion` to 2, and a manifest angos accepts
+/// without one links no layers, leaving its blobs to be reclaimed as orphans.
+#[tokio::test]
+async fn put_manifest_rejects_a_foreign_schema_version() {
+    let case = FSRegistryTestCase::new();
+    let namespace = Namespace::new("test-repo").unwrap();
+    let body = serde_json::to_vec(&json!({
+        "schemaVersion": 1,
+        "mediaType": IMAGE_MANIFEST_MEDIA_TYPE,
+    }))
+    .unwrap();
+
+    let error = case
+        .registry()
+        .put_manifest(
+            &namespace,
+            &Reference::Tag(Tag::new("legacy").unwrap()),
+            Some(&MediaType::new(IMAGE_MANIFEST_MEDIA_TYPE).unwrap()),
+            &body,
+        )
+        .await
+        .err()
+        .expect("a schemaVersion other than 2 must not be stored");
+
+    let Error::ManifestInvalid(message) = error else {
+        panic!("expected ManifestInvalid, got {error:?}");
+    };
+    assert!(message.contains("schemaVersion"), "message: {message}");
+}
+
 #[tokio::test]
 async fn put_manifest_allows_missing_subject_reference() {
     for_each_backend(async |test_case| {
@@ -867,6 +901,55 @@ async fn pull_through_recomputes_under_the_requested_digest_algorithm() {
     assert_eq!(
         manifest.digest, requested,
         "the recomputed digest must use the requested algorithm, not a sha256 default"
+    );
+}
+
+/// Fails every read of the link object, standing in for a metadata-store
+/// outage rather than a genuinely absent manifest.
+struct FailLinkReads {
+    key: String,
+}
+
+#[async_trait::async_trait]
+impl StoreHook for FailLinkReads {
+    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+        match op {
+            StoreOp::Get { key } if key == self.key => {
+                Err(StorageError::Backend("metadata store is down".to_string()))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// A storage outage must not reach the client as a deleted image: collapsing
+/// it into `ManifestUnknown` tells clients and CI the tag is gone.
+#[tokio::test]
+async fn a_backend_fault_is_not_reported_as_a_missing_manifest() {
+    let case = FSRegistryTestCase::new();
+    let namespace = Namespace::new("test-repo").unwrap();
+    let tag = Tag::new("latest").unwrap();
+    let link = LinkKind::Tag(tag.clone());
+
+    let inner: Arc<dyn ObjectStore> = case.metadata_store().store().object_store().clone();
+    let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+        inner,
+        FailLinkReads {
+            key: path_builder::link_path(&link, &namespace),
+        },
+    ));
+    let registry = create_test_registry(case.blob_store(), metadata_store_over(hooked));
+    let repository = registry.get_repository_for_namespace(&namespace).unwrap();
+
+    let error = registry
+        .get_manifest(repository, &[], &namespace, Reference::Tag(tag), false)
+        .await
+        .err()
+        .expect("a failing metadata store must not read as a successful lookup");
+
+    assert!(
+        !matches!(error, Error::ManifestUnknown),
+        "a backend fault must not be reported as a missing manifest, got: {error:?}"
     );
 }
 
@@ -3979,9 +4062,10 @@ mod dispatch_replication_tests {
     use chrono::{DateTime, Duration, Utc};
     use regex::Regex;
 
+    use super::{DispatchTarget, MISSING_SUBJECT_DIGEST, create_test_manifest_with_subject};
     use crate::{
         jobs::{Queue, store::JobStore},
-        oci::{Digest, Namespace, Tag},
+        oci::{Digest, Namespace, Reference, Tag},
         registry::{
             Registry, RegistryConfig, Repository,
             test_utils::{
@@ -4070,9 +4154,10 @@ mod dispatch_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_PUSH_MANIFEST_KIND,
-                Some(&tag),
-                Some(&digest),
+                DispatchTarget::Push {
+                    tag: Some(&tag),
+                    digest: &digest,
+                },
                 None,
             )
             .await;
@@ -4103,9 +4188,10 @@ mod dispatch_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_PUSH_MANIFEST_KIND,
-                Some(&tag),
-                Some(&digest),
+                DispatchTarget::Push {
+                    tag: Some(&tag),
+                    digest: &digest,
+                },
                 None,
             )
             .await;
@@ -4146,9 +4232,10 @@ mod dispatch_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_PUSH_MANIFEST_KIND,
-                Some(&tag),
-                Some(&digest),
+                DispatchTarget::Push {
+                    tag: Some(&tag),
+                    digest: &digest,
+                },
                 None,
             )
             .await;
@@ -4176,6 +4263,55 @@ mod dispatch_replication_tests {
         );
     }
 
+    /// Once the manifest is gone neither the job nor its retries can name the
+    /// subject still listing the referrer, so the job has to carry it.
+    #[tokio::test]
+    async fn a_digest_delete_carries_the_referrer_subject() {
+        init_for_tests();
+        let (registry, job_store, _dir) = build_registry();
+
+        let namespace = Namespace::new(NAMESPACE).unwrap();
+        let (body, media_type) = create_test_manifest_with_subject(&registry, &namespace).await;
+        let referrer = registry
+            .put_manifest(
+                &namespace,
+                &Reference::Tag(Tag::new("v1").unwrap()),
+                Some(&media_type),
+                &body,
+            )
+            .await
+            .expect("the referrer manifest must push")
+            .digest;
+
+        registry
+            .delete_manifest(None, None, &namespace, &Reference::Digest(referrer))
+            .await
+            .expect("the digest delete must succeed");
+
+        // The push enqueued by `put_manifest` is still pending alongside it.
+        let mut deletes = Vec::new();
+        for key in job_store
+            .list_pending(Queue::Replication, 16)
+            .await
+            .unwrap()
+        {
+            let envelope = job_store
+                .read_pending(Queue::Replication, &key)
+                .await
+                .unwrap();
+            let payload: ReplicationPushPayload =
+                serde_json::from_value(envelope.payload).expect("decode payload");
+            if payload.kind == REPLICATION_DELETE_MANIFEST_KIND {
+                deletes.push(payload.subject);
+            }
+        }
+        assert_eq!(
+            deletes,
+            vec![Some(MISSING_SUBJECT_DIGEST.to_string())],
+            "the delete job must carry the subject read before the manifest went away"
+        );
+    }
+
     /// A caller-provided timestamp (an inbound replicated delete's author
     /// time) propagates verbatim; a re-stamped `now()` would let the bounced
     /// delete outrank a recreate authored in between.
@@ -4193,9 +4329,7 @@ mod dispatch_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_DELETE_MANIFEST_KIND,
-                Some(&tag),
-                None,
+                DispatchTarget::TagDelete { tag: &tag },
                 Some(author_ts),
             )
             .await;
@@ -4224,9 +4358,10 @@ mod dispatch_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_PUSH_MANIFEST_KIND,
-                Some(&tag),
-                Some(&digest),
+                DispatchTarget::Push {
+                    tag: Some(&tag),
+                    digest: &digest,
+                },
                 None,
             )
             .await;
@@ -4258,9 +4393,10 @@ mod dispatch_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_PUSH_MANIFEST_KIND,
-                Some(&tag),
-                Some(&digest),
+                DispatchTarget::Push {
+                    tag: Some(&tag),
+                    digest: &digest,
+                },
                 None,
             )
             .await;

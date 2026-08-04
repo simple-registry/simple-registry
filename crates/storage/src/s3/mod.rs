@@ -76,6 +76,10 @@ const FRAME_BUFFER_CAPACITY: usize = 8;
 /// S3 protocol floor for non-final multipart parts: a part must be at least
 /// 5 MiB before it can be flushed as an `UploadPart`.
 const MIN_PART_SIZE: u64 = 5 * 1024 * 1024;
+/// S3 protocol ceiling for a single part.
+const MAX_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
+/// S3 protocol ceiling on the parts one multipart upload may hold.
+const MAX_PARTS: usize = 10_000;
 
 /// Builder for [`Backend`]. The S3 HTTP client is required and supplied to
 /// [`Backend::builder`]; `part_size` and `uniform_parts` are optional fluent
@@ -107,10 +111,11 @@ impl Builder {
 
     /// Target part size for upload sessions (uniform mode) or minimum part
     /// size before flushing (non-uniform mode). Defaults to 5 MiB, the
-    /// S3 minimum.
+    /// S3 minimum, and is raised to it: a smaller non-final part is rejected
+    /// at `CompleteMultipartUpload`, long after the bytes were written.
     #[must_use]
     pub fn part_size(mut self, size: u64) -> Self {
-        self.part_size = size;
+        self.part_size = size.max(MIN_PART_SIZE);
         self
     }
 
@@ -222,9 +227,16 @@ impl Backend {
                 break;
             }
             for u in pending {
-                self.client
+                // A peer that aborted the same upload between the listing and
+                // this call leaves nothing to abort, which is success here.
+                match self
+                    .client
                     .abort_multipart_upload(&u.key, &u.upload_id)
-                    .await?;
+                    .await
+                {
+                    Ok(()) | Err(S3Error::NotFound(_)) => {}
+                    Err(e) => return Err(Error::from(e)),
+                }
                 aborted.insert(u.upload_id);
             }
         }
@@ -235,8 +247,8 @@ impl Backend {
     /// `available` bytes, returning the trailing sub-part remainder. Uniform
     /// mode flushes `part_size` parts; non-uniform mode flushes everything as
     /// one part once `available` reaches the operator-configured `part_size`,
-    /// but never below the S3 5 MiB floor (a smaller non-final `UploadPart`
-    /// would be rejected).
+    /// splitting only to stay under the per-part ceiling. See
+    /// [`plan_known_length_parts`].
     async fn emit_known_length_parts<R>(
         &self,
         key: &str,
@@ -248,16 +260,8 @@ impl Backend {
     where
         R: AsyncRead + Unpin + Send,
     {
-        let nonuniform_threshold = self.part_size.max(MIN_PART_SIZE);
-        let (parts_to_emit, emit_size, restaged) = if self.uniform_parts {
-            let part_size = self.part_size;
-            let full = available / part_size;
-            (full, part_size, available - full * part_size)
-        } else if available >= nonuniform_threshold {
-            (1u64, available, 0u64)
-        } else {
-            (0u64, 0u64, available)
-        };
+        let (parts_to_emit, emit_size, restaged) =
+            plan_known_length_parts(self.uniform_parts, self.part_size, available);
 
         for _ in 0..parts_to_emit {
             let part_number = next_part_number(parts)?;
@@ -401,16 +405,18 @@ impl ObjectStore for Backend {
         token: Option<String>,
         start_after: Option<String>,
     ) -> Result<ChildrenPage, Error> {
-        // Appending the delimiter makes `start_after` exclusive of the named
-        // child itself: an object child's exact key sorts before `name/`.
-        let start_after = start_after.map(|name| format!("{name}/"));
+        // S3's start-after is an exclusive bound on raw keys, which cannot
+        // express "after this child name": a directory child's own keys sort
+        // after the bare name, and a sibling like `v1.2` sorts before `v1/`.
+        // So bound on the bare name and drop what the contract excludes.
         let (sub_prefixes, objects, next_token) = self
             .client
-            .list_prefixes(prefix, "/", n, token, start_after)
+            .list_prefixes(prefix, "/", n, token, start_after.clone())
             .await?;
+        let after = start_after.as_deref();
         Ok(ChildrenPage {
-            sub_prefixes,
-            objects,
+            sub_prefixes: children_after(sub_prefixes, after),
+            objects: children_after(objects, after),
             next_token,
         })
     }
@@ -476,14 +482,25 @@ impl ObjectStore for Backend {
         // bytes to restage at the new committed offset.
         let remainder = match len {
             Some(len) => {
-                self.emit_known_length_parts(
-                    key,
-                    &mut upload_id,
-                    &mut parts,
-                    &mut reader,
-                    staged_len + len,
-                )
-                .await?
+                let remainder = self
+                    .emit_known_length_parts(
+                        key,
+                        &mut upload_id,
+                        &mut parts,
+                        &mut reader,
+                        staged_len + len,
+                    )
+                    .await?;
+                // `len` is exact, so anything still readable is a longer body
+                // than declared: reject it rather than silently truncate, as
+                // the other backends do.
+                let mut beyond = [0u8; 1];
+                if reader.read(&mut beyond).await? > 0 {
+                    return Err(Error::Backend(format!(
+                        "s3 upload long body: expected {len} bytes, stream had more",
+                    )));
+                }
+                remainder
             }
             None => {
                 self.drain_chunked_parts(key, &mut upload_id, &mut parts, &mut reader)
@@ -655,7 +672,44 @@ impl PresignedStore for Backend {
     }
 }
 
+/// Split a known-length append of `available` bytes into `(count, emit_size,
+/// restaged)`: `count` parts of exactly `emit_size` to flush now, and the
+/// trailing bytes to restage. Every emitted size stays within the S3 part
+/// bounds, so a part is never rejected for being too small or too large.
+fn plan_known_length_parts(uniform: bool, part_size: u64, available: u64) -> (u64, u64, u64) {
+    if uniform {
+        let full = available / part_size;
+        return (full, part_size, available - full * part_size);
+    }
+    if available < part_size.max(MIN_PART_SIZE) {
+        return (0, 0, available);
+    }
+    // One part per call, unless that would breach the per-part ceiling: then
+    // the fewest equal parts that fit under it, which leaves at most `count`
+    // bytes to restage rather than a second huge part to hold in memory.
+    let count = available.div_ceil(MAX_PART_SIZE);
+    let emit_size = available / count;
+    (count, emit_size, available - count * emit_size)
+}
+
+/// Children strictly after `start_after` by bare name, matching the FS and
+/// memory backends.
+fn children_after(names: Vec<String>, start_after: Option<&str>) -> Vec<String> {
+    match start_after {
+        Some(after) => names
+            .into_iter()
+            .filter(|name| name.as_str() > after)
+            .collect(),
+        None => names,
+    }
+}
+
 fn next_part_number(parts: &[UploadedPart]) -> Result<u32, Error> {
+    if parts.len() >= MAX_PARTS {
+        return Err(Error::Backend(format!(
+            "multipart upload would exceed the S3 {MAX_PARTS}-part limit"
+        )));
+    }
     u32::try_from(parts.len() + 1).map_err(|e| Error::Backend(e.to_string()))
 }
 

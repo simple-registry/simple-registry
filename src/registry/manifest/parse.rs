@@ -1,7 +1,7 @@
 use tracing::warn;
 
 use crate::{
-    oci::{Digest, Manifest, MediaType},
+    oci::{Digest, Manifest, MediaType, OCI_MANIFEST_SCHEMA_VERSION},
     registry::{Error, metadata_store::LinkKind},
 };
 
@@ -87,6 +87,27 @@ pub fn parse_and_validate_manifest(
     Ok(manifest)
 }
 
+/// [`parse_and_validate_manifest`] for the ingress paths, additionally pinning
+/// `schemaVersion` to the one the image spec defines. Parsing and the check are
+/// one step so a write path cannot take the lenient door by accident.
+pub fn parse_pushed_manifest(
+    body: &[u8],
+    content_type: Option<&MediaType>,
+) -> Result<Manifest, Error> {
+    let manifest = parse_and_validate_manifest(body, content_type)?;
+    if manifest.schema_version != OCI_MANIFEST_SCHEMA_VERSION {
+        warn!(
+            "Rejecting manifest with schemaVersion {}",
+            manifest.schema_version
+        );
+        return Err(Error::ManifestInvalid(format!(
+            "unsupported schemaVersion {}, expected {OCI_MANIFEST_SCHEMA_VERSION}",
+            manifest.schema_version
+        )));
+    }
+    Ok(manifest)
+}
+
 /// Recovers the media type to serve for a stored manifest whose link carries no
 /// `media_type` (rebuilt by `angos migrate` from a pre-JSON layout, or filled
 /// from an upstream that sent no `Content-Type`). Prefers the body's own
@@ -141,11 +162,12 @@ pub fn parse_manifest_digests(
 mod tests {
     use serde_json::json;
 
-    use super::recover_media_type;
+    use super::{parse_manifest_digests, recover_media_type};
     use crate::oci::MediaType;
 
     const CHILD_DIGEST: &str =
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    const MEDIA_TYPE_V2: &str = "application/vnd.docker.distribution.manifest.v2+json";
 
     #[test]
     fn recover_media_type_prefers_the_body_media_type() {
@@ -178,6 +200,20 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(recover_media_type(&body), MediaType::oci_index());
+    }
+
+    /// Reads stay lenient so a scrub or a replication push never trips over an
+    /// object an older angos accepted; only the write paths reject it.
+    #[test]
+    fn a_stored_foreign_schema_version_is_still_parsed() {
+        let body = serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+        }))
+        .unwrap();
+        let parsed = parse_manifest_digests(&body, None)
+            .expect("a stored manifest must stay readable whatever its schemaVersion");
+        assert_eq!(parsed.media_type.as_deref(), Some(MEDIA_TYPE_V2));
     }
 
     #[test]

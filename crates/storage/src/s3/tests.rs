@@ -12,15 +12,19 @@
 use std::{sync::Arc, time::Duration};
 
 use angos_s3_client::{
-    Backend as S3Backend, BackendConfig as S3Config, Error as S3Error,
-    test_util::integration_config,
+    Backend as S3Backend, BackendConfig as S3Config, Error as S3Error, UploadedPart,
+    test_util::{integration_config, mock_config},
 };
 use bytes::Bytes;
 use bytesize::ByteSize;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use uuid::Uuid;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, query_param},
+};
 
-use super::staged_key;
+use super::{MAX_PART_SIZE, MIN_PART_SIZE, next_part_number, plan_known_length_parts, staged_key};
 use crate::test_util::frame;
 use crate::tests::{conditional_store_conformance, object_store_conformance};
 use crate::{ObjectStore, PresignedStore, s3::Backend};
@@ -812,4 +816,167 @@ async fn presign_get_returns_a_url() {
         url.contains("blob/x") && url.contains("X-Amz-Signature"),
         "expected a SigV4 presigned URL, got: {url}",
     );
+}
+
+/// A peer aborting the same upload between this replica's listing and its
+/// abort makes S3 answer `NoSuchUpload`; `abort_upload` is documented
+/// idempotent, so that must not surface as a failure. Two prune runs sharing a
+/// bucket hit this in normal operation.
+#[tokio::test]
+async fn abort_upload_tolerates_an_upload_a_peer_already_aborted() {
+    let server = MockServer::start().await;
+    let key = "blob/pending";
+    let config = S3Config {
+        key_prefix: "abort-race".to_string(),
+        ..mock_config(server.uri())
+    };
+
+    // The listing keeps reporting the upload, so the abort is always attempted.
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListMultipartUploadsResult>
+              <IsTruncated>false</IsTruncated>
+              <Upload>
+                <Key>{}/{key}</Key>
+                <UploadId>upload-1</UploadId>
+                <Initiated>2026-01-01T00:00:00Z</Initiated>
+              </Upload>
+            </ListMultipartUploadsResult>"#,
+            config.key_prefix
+        )))
+        .mount(&server)
+        .await;
+
+    // The peer got there first.
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(404).set_body_string(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error><Code>NoSuchUpload</Code></Error>"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(S3Backend::new(&config).expect("s3 client"));
+    let backend = Backend::builder(client).build();
+
+    backend
+        .abort_upload(key)
+        .await
+        .expect("an upload a peer already aborted must count as aborted");
+}
+
+/// Every emitted part must sit within the S3 bounds and no byte may be lost:
+/// an oversized part is rejected by S3 after the bytes were streamed.
+#[test]
+fn known_length_parts_stay_within_the_s3_part_bounds() {
+    let cases = [
+        // (uniform, part_size, available)
+        (false, MIN_PART_SIZE, 1024),
+        (false, MIN_PART_SIZE, MIN_PART_SIZE),
+        (false, MIN_PART_SIZE, MAX_PART_SIZE),
+        (false, MIN_PART_SIZE, MAX_PART_SIZE + 1),
+        (false, MIN_PART_SIZE, 100 * 1024 * 1024 * 1024),
+        (true, MIN_PART_SIZE, 100 * 1024 * 1024 * 1024),
+    ];
+
+    for (uniform, part_size, available) in cases {
+        let (count, emit_size, restaged) = plan_known_length_parts(uniform, part_size, available);
+        assert_eq!(
+            count * emit_size + restaged,
+            available,
+            "{uniform}/{part_size}/{available} must account for every byte"
+        );
+        if count > 0 {
+            assert!(
+                (MIN_PART_SIZE..=MAX_PART_SIZE).contains(&emit_size),
+                "{uniform}/{part_size}/{available} emitted a {emit_size}-byte part"
+            );
+        }
+    }
+}
+
+/// The remainder is buffered in memory before being restaged, so splitting a
+/// huge append must not leave most of it as the remainder.
+#[test]
+fn splitting_a_huge_append_leaves_a_small_remainder() {
+    let (count, _, restaged) =
+        plan_known_length_parts(false, MIN_PART_SIZE, 100 * 1024 * 1024 * 1024);
+    assert!(
+        restaged < count,
+        "restaging {restaged} bytes defeats the point of splitting"
+    );
+}
+
+#[test]
+fn part_size_below_the_s3_floor_is_raised_to_it() {
+    let client = Arc::new(S3Backend::new(&mock_config("http://127.0.0.1:1")).expect("s3 client"));
+    let backend = Backend::builder(client).part_size(1024).build();
+
+    let (_, emit_size, _) = plan_known_length_parts(true, backend.part_size, MIN_PART_SIZE * 3);
+    assert_eq!(emit_size, MIN_PART_SIZE);
+}
+
+/// S3 caps an upload at 10,000 parts. Without this guard the 10,001st part is
+/// streamed in full and only then rejected at `CompleteMultipartUpload`.
+#[test]
+fn part_number_past_the_s3_limit_is_refused() {
+    let part = |n: u32| UploadedPart {
+        part_number: n,
+        e_tag: String::new(),
+        size: MIN_PART_SIZE,
+    };
+    let mut parts: Vec<UploadedPart> = (1..=9_999).map(part).collect();
+
+    assert_eq!(
+        next_part_number(&parts).expect("10,000th part fits"),
+        10_000
+    );
+
+    parts.push(part(10_000));
+    let error = next_part_number(&parts).expect_err("the 10,001st part must be refused");
+    assert!(error.to_string().contains("10000"), "got: {error}");
+}
+
+/// S3's `start-after` is an exclusive bound on raw keys, so it cannot express
+/// "after this child name". The request must bound on the bare name, and the
+/// directory child of that exact name must be dropped from the response rather
+/// than re-emitted forever.
+#[tokio::test]
+async fn list_children_bounds_on_the_bare_name_and_drops_the_named_child() {
+    let server = MockServer::start().await;
+    let config = S3Config {
+        key_prefix: "kp".to_string(),
+        ..mock_config(server.uri())
+    };
+
+    Mock::given(method("GET"))
+        // Not `kp/sa/v1/`: that skips `v1.2`, which sorts before it.
+        .and(query_param("start-after", "kp/sa/v1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListBucketResult>
+              <IsTruncated>false</IsTruncated>
+              <CommonPrefixes><Prefix>kp/sa/v1/</Prefix></CommonPrefixes>
+              <CommonPrefixes><Prefix>kp/sa/v1.2/</Prefix></CommonPrefixes>
+              <Contents><Key>kp/sa/v2</Key></Contents>
+            </ListBucketResult>"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(S3Backend::new(&config).expect("s3 client"));
+    let page = Backend::builder(client)
+        .build()
+        .list_children("sa", 10, None, Some("v1".to_string()))
+        .await
+        .expect("listing must succeed");
+
+    assert_eq!(
+        page.sub_prefixes,
+        vec!["v1.2".to_string()],
+        "the directory named by start_after must not be re-emitted"
+    );
+    assert_eq!(page.objects, vec!["v2".to_string()]);
 }

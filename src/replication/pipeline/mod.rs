@@ -8,7 +8,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use futures_util::stream::{self, StreamExt, TryStreamExt};
+use futures_util::stream::{self, StreamExt};
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
@@ -212,7 +212,7 @@ async fn push_child_manifests(
     ctx: &PushContext<'_>,
     parsed: &ParsedManifestDigests,
 ) -> Result<(), Error> {
-    stream::iter(parsed.manifests.clone())
+    let results = stream::iter(parsed.manifests.clone())
         .map(|child| async move {
             let child_body = ctx.blob_store.read(&child).await.map_err(|e| {
                 Error::Internal(format!("failed to read local manifest blob '{child}': {e}"))
@@ -223,9 +223,10 @@ async fn push_child_manifests(
         })
         // Config rejects 0; the floor guards direct builder misuse.
         .buffer_unordered(ctx.downstream.max_concurrent_pushes.max(1))
-        .try_collect::<Vec<()>>()
-        .await
-        .map(|_| ())
+        .collect::<Vec<_>>()
+        .await;
+
+    first_error(results)
 }
 
 /// HEAD-before-PUT every referenced blob; transfer only the absent ones.
@@ -241,13 +242,22 @@ async fn push_blobs(ctx: &PushContext<'_>, parsed: &ParsedManifestDigests) -> Re
         .cloned()
         .collect();
 
-    stream::iter(blobs)
+    let results = stream::iter(blobs)
         .map(|blob| async move { push_one_blob(ctx, &blob).await })
         // Config rejects 0; the floor guards direct builder misuse.
         .buffer_unordered(ctx.downstream.max_concurrent_pushes.max(1))
-        .try_collect::<Vec<()>>()
-        .await?;
+        .collect::<Vec<_>>()
+        .await;
 
+    first_error(results)
+}
+
+/// Reduces a fully drained sweep to its first failure: returning early instead
+/// would drop the siblings mid-transfer and strand their open upload sessions.
+fn first_error(results: Vec<Result<(), Error>>) -> Result<(), Error> {
+    for result in results {
+        result?;
+    }
     Ok(())
 }
 
@@ -406,14 +416,16 @@ pub async fn delete_manifest(
     namespace: &Namespace,
     downstream_namespace: &str,
     reference: &Reference,
+    subject: Option<&Digest>,
     source_ts: Option<&str>,
 ) -> Result<PushOutcome, Error> {
-    // Capture the subject before the manifest is gone (a tag delete leaves it,
-    // so it has no fallback index to maintain).
+    // The carried subject is preferred because it survives a retry that finds
+    // the manifest already gone; the probe covers jobs enqueued without one.
     let fallback_subject = match reference {
-        Reference::Digest(digest) => {
-            deleted_referrer_subject(downstream, downstream_namespace, digest).await
-        }
+        Reference::Digest(digest) => match subject {
+            Some(subject) => Some(subject.clone()),
+            None => deleted_referrer_subject(downstream, downstream_namespace, digest).await,
+        },
         Reference::Tag(_) => None,
     };
 
@@ -452,8 +464,8 @@ pub async fn delete_manifest(
     };
 
     // Drop the gone manifest's descriptor from the subject's fallback index.
-    // Best-effort: a retry cannot re-derive the subject once the manifest is
-    // gone, so a failure warns rather than churning the whole delete.
+    // Best-effort: the delete itself already landed, so a failure warns rather
+    // than replaying the whole job.
     if matches!(push_outcome, PushOutcome::Pushed | PushOutcome::Converged)
         && let (Reference::Digest(digest), Some(subject)) = (reference, &fallback_subject)
         && let Err(e) = remove_referrers_fallback(

@@ -12,6 +12,7 @@
 //! between the GET and the delete.
 
 use std::{
+    fmt,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -69,26 +70,77 @@ pub fn job_failed_path(queue: &str, id: &str) -> String {
 /// Path to the `lock_key` → `storage_key` dedup index file. Each pending
 /// envelope has at most one such file alongside it; `find_pending_with_lock_key`
 /// reads it for an O(1) lookup instead of scanning all pending bodies.
-pub fn job_lock_key_index_path(queue: &str, lock_key: &str) -> String {
-    format!(
-        "{JOBS_ROOT}/index/{queue}/{}.json",
-        encode_job_lock_key(lock_key)
-    )
+pub fn job_lock_key_index_path(queue: &str, lock_key: &LockKey) -> String {
+    format!("{JOBS_ROOT}/index/{queue}/{}.json", lock_key.encode())
 }
 
-/// Percent-encode characters that are unsafe as a filesystem filename or as
-/// part of an S3 key path component, so a `lock_key` lands on the same path
-/// regardless of backend.
-fn encode_job_lock_key(lock_key: &str) -> String {
-    lock_key
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => {
-                format!("%{:02X}", c as u32)
-            }
-            c => c.to_string(),
-        })
-        .collect()
+/// A job's per-key serialization token: at most one worker executes a given
+/// lock key at a time, and one pending job per key is kept by the dedup index.
+///
+/// Valid keys are non-empty and free of `%`, which [`Self::encode`] reserves as
+/// its escape character; allowing it would let two distinct keys encode to one
+/// index path and falsely dedup.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+#[serde(try_from = "String")]
+pub struct LockKey(String);
+
+impl LockKey {
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidLockKey`] when `key` is empty or contains `%`.
+    pub fn new(key: impl Into<String>) -> Result<Self, Error> {
+        let key = key.into();
+        if key.is_empty() {
+            return Err(Error::InvalidLockKey("lock key is empty".to_string()));
+        }
+        if key.contains('%') {
+            return Err(Error::InvalidLockKey(format!(
+                "lock key '{key}' contains a reserved '%'"
+            )));
+        }
+        Ok(Self(key))
+    }
+
+    /// Percent-encode characters that are unsafe as a filesystem filename or as
+    /// part of an S3 key path component, so a key lands on the same path
+    /// regardless of backend. Injective: `%` cannot appear in a [`LockKey`], so
+    /// no escaped form is reachable by any other key.
+    fn encode(&self) -> String {
+        self.0
+            .chars()
+            .map(|c| match c {
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => {
+                    format!("%{:02X}", c as u32)
+                }
+                c => c.to_string(),
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for LockKey {
+    type Error = Error;
+
+    fn try_from(key: String) -> Result<Self, Error> {
+        Self::new(key)
+    }
+}
+
+impl Serialize for LockKey {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl fmt::Display for LockKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +158,8 @@ pub enum Error {
     /// fault does not dead-letter mislabelled as a queue storage error.
     #[error("job execution failed: {0}")]
     Execution(String),
+    #[error("invalid lock key: {0}")]
+    InvalidLockKey(String),
     #[error("not found")]
     NotFound,
     #[error("denied: {0}")]
@@ -267,9 +321,7 @@ pub struct JobEnvelope {
     /// Job type identifier (e.g. `"cache.fetch_blob"`). Handlers reject
     /// envelopes whose `kind` they do not recognize.
     pub kind: String,
-    /// Per-key serialization token: at most one worker holds the execution
-    /// lock per `lock_key`.
-    pub lock_key: String,
+    pub lock_key: LockKey,
     pub created_at: DateTime<Utc>,
     pub attempts: u32,
     pub max_attempts: u32,
@@ -278,25 +330,29 @@ pub struct JobEnvelope {
 
 impl JobEnvelope {
     /// Build an envelope with a new UUID v4, default retry budget, and a typed
-    /// payload that will be serialized to JSON. Returns `Err` only if the
+    /// payload that will be serialized to JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] when `lock_key` is not a valid [`LockKey`] or the
     /// payload type cannot be serialized.
     pub fn new<P: Serialize>(
         queue: Queue,
         kind: impl Into<String>,
         lock_key: impl Into<String>,
         payload: &P,
-    ) -> Result<Self, serde_json::Error> {
+    ) -> Result<Self, Error> {
         Ok(Self {
             id: Uuid::new_v4().to_string(),
             queue,
             kind: kind.into(),
-            lock_key: lock_key.into(),
+            lock_key: LockKey::new(lock_key)?,
             created_at: Utc::now(),
             attempts: 0,
             // 0 means "unset": `JobStore::enqueue` stamps the queue's configured
             // budget unless a caller set an explicit per-job value first.
             max_attempts: 0,
-            payload: serde_json::to_value(payload)?,
+            payload: serde_json::to_value(payload).map_err(|e| Error::Execution(e.to_string()))?,
         })
     }
 }
@@ -467,7 +523,7 @@ pub const MAX_REPORTED_PENDING: u64 = 10_000;
 /// Lock key used to serialise per-`lock_key` job execution. Prefixed so it
 /// shares a namespace with the rest of the job-store's locked operations
 /// (dedup index, etc.) without colliding.
-fn job_lock_key(lock_key: &str) -> String {
+fn job_lock_key(lock_key: &LockKey) -> String {
     format!("job:{lock_key}")
 }
 
@@ -774,7 +830,7 @@ impl JobStore {
     pub async fn find_pending_with_lock_key(
         &self,
         queue: Queue,
-        lock_key: &str,
+        lock_key: &LockKey,
     ) -> Result<bool, Error> {
         let index_path = job_lock_key_index_path(queue.as_str(), lock_key);
         let data = match self.store.object_store().get(&index_path).await {
@@ -813,7 +869,7 @@ impl JobStore {
                         // the caller's enqueue collide on `PutIfAbsent` and drop
                         // a distinct job as a false dedup hit.
                         warn!(
-                            lock_key,
+                            lock_key = %lock_key,
                             error = %e,
                             "Failed to remove orphan lock-key index via engine",
                         );
@@ -830,7 +886,7 @@ impl JobStore {
     pub async fn get_lock_key_index_raw(
         &self,
         queue: Queue,
-        lock_key: &str,
+        lock_key: &LockKey,
     ) -> Result<Option<(String, Vec<u8>)>, Error> {
         let index_path = job_lock_key_index_path(queue.as_str(), lock_key);
         match self.get_raw(&index_path).await {
@@ -895,7 +951,7 @@ impl JobStore {
         &self,
         tx: &mut Transaction,
         queue: Queue,
-        lock_key: &str,
+        lock_key: &LockKey,
         target_storage_key: &str,
     ) -> Result<(), Error> {
         let Some((index_storage_key, body)) = self.get_lock_key_index_raw(queue, lock_key).await?
@@ -928,13 +984,18 @@ impl JobStore {
     /// `Precondition`). `false` means the claim must not proceed, since a stale
     /// index left in place coalesces every same-`lock_key` enqueue into a job
     /// that is already running.
-    async fn retire_claimed_index(&self, queue: Queue, lock_key: &str, storage_key: &str) -> bool {
+    async fn retire_claimed_index(
+        &self,
+        queue: Queue,
+        lock_key: &LockKey,
+        storage_key: &str,
+    ) -> bool {
         let mut tx = Transaction::builder().build();
         if let Err(e) = self
             .fold_index_cleanup(&mut tx, queue, lock_key, storage_key)
             .await
         {
-            warn!(lock_key, error = %e, "Failed to read dedup index at claim");
+            warn!(%lock_key, error = %e, "Failed to read dedup index at claim");
             return false;
         }
         if tx.mutations.is_empty() {
@@ -943,7 +1004,7 @@ impl JobStore {
         match self.store.execute(tx).await {
             Ok(_) | Err(TxError::Conflict | TxError::Precondition) => true,
             Err(e) => {
-                warn!(lock_key, error = %tx_error_to_job(e), "Failed to retire dedup index at claim");
+                warn!(%lock_key, error = %tx_error_to_job(e), "Failed to retire dedup index at claim");
                 false
             }
         }

@@ -395,6 +395,7 @@ impl Drop for Registry {
 #[cfg(test)]
 mod in_process_replication_tests {
     use crate::metrics_provider::init_for_tests;
+    use crate::registry::manifest::DispatchTarget;
     use std::{sync::Arc, time::Duration};
 
     use tempfile::TempDir;
@@ -518,9 +519,10 @@ mod in_process_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_PUSH_MANIFEST_KIND,
-                Some(&tag),
-                Some(&manifest_digest),
+                DispatchTarget::Push {
+                    tag: Some(&tag),
+                    digest: &manifest_digest,
+                },
                 None,
             )
             .await;

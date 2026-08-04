@@ -16,7 +16,7 @@ use crate::{
         Error as RegistryError,
         blob_ownership::BlobOwnership,
         repository_resolver::RepositoryResolver,
-        test_utils::{FsTestStack, create_test_repositories, fs_test_stack, put_blob_direct},
+        test_utils::{FsTestStack, create_test_repositories, fs_test_stack, put_blob_body},
     },
 };
 
@@ -53,7 +53,7 @@ async fn cache_fill_grant_emits_blob_push_with_internal_actor() {
             .expect("test repositories must not have overlapping prefixes"),
     );
     let namespace = Namespace::new("test-repo/cached").unwrap();
-    let digest = put_blob_direct(metadata_store.store(), b"already cached bytes").await;
+    let digest = put_blob_body(blob_store.as_ref(), b"already cached bytes").await;
 
     let handler = CacheFillJobHandler::new(
         resolver,

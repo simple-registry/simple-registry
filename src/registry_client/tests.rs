@@ -1,6 +1,7 @@
 use std::{io::Cursor, time::Duration};
 
 use futures_util::future::join_all;
+use serde_json::json;
 use tracing::Level;
 use url::Url;
 use wiremock::{
@@ -16,6 +17,7 @@ use crate::{
         DeleteManifestOutcome, Error, REPLICATION_SUPERSEDED_CODE, RegistryClient,
         RegistryClientConfig, X_ANGOS_SOURCE_TIMESTAMP,
         auth::{token_cache_key, token_index_cache_key},
+        without_query,
     },
     secret::Secret,
     test_fixtures::{client::test_client_config, logging::LogCapture},
@@ -491,6 +493,65 @@ async fn test_bearer_authentication() {
     assert!(result.is_ok());
 }
 
+/// A scope-cache hit must index the URL it served. Only the token exchange
+/// wrote that entry, so every other URL sharing the scope re-discovered the
+/// token through a 401 on every single request.
+#[tokio::test]
+async fn a_scope_cache_hit_indexes_the_url_it_served() {
+    let mock_server = MockServer::start().await;
+    let registry_url = mock_server.uri();
+    let location = format!("{registry_url}/v2/test/blobs/sha256:abc");
+    let url = Url::parse(&location).unwrap();
+    let cache = cache::Config::Memory.to_backend().unwrap();
+
+    // The scope token is cached, but this URL has never been indexed: the
+    // state left behind when some other URL triggered the exchange.
+    let cache_key = token_cache_key(
+        &url,
+        &format!("{registry_url}/token"),
+        Some("registry"),
+        Some("repository:test:pull"),
+        None,
+    )
+    .unwrap();
+    cache
+        .store_value(&cache_key, "Bearer scope-token", 3600)
+        .await
+        .unwrap();
+    let index_key = token_index_cache_key(&url, None).unwrap();
+    assert!(cache.retrieve_value(&index_key).await.unwrap().is_none());
+
+    Mock::given(method("GET"))
+        .and(path("/v2/test/blobs/sha256:abc"))
+        .and(header("Authorization", "Bearer scope-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"blob"))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/test/blobs/sha256:abc"))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "WWW-Authenticate",
+            format!(
+                r#"Bearer realm="{registry_url}/token",service="registry",scope="repository:test:pull""#
+            )
+            .as_str(),
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let config = test_client_config(registry_url);
+    let client =
+        RegistryClient::from_config(&config, cache.clone(), DEFAULT_MAX_MANIFEST_SIZE_BYTES)
+            .unwrap();
+    client.get_blob(&[], &location).await.expect("blob fetch");
+
+    assert_eq!(
+        cache.retrieve_value(&index_key).await.unwrap().as_deref(),
+        Some(cache_key.as_str()),
+        "the served URL must be indexed so the next request skips the 401"
+    );
+}
+
 #[tokio::test]
 async fn test_cached_bearer_token_is_used() {
     let mock_server = MockServer::start().await;
@@ -503,6 +564,7 @@ async fn test_cached_bearer_token_is_used() {
         "https://auth.example.com/token",
         Some("registry"),
         Some("repository:test:pull"),
+        None,
     )
     .unwrap();
     cache
@@ -510,7 +572,11 @@ async fn test_cached_bearer_token_is_used() {
         .await
         .unwrap();
     cache
-        .store_value(&token_index_cache_key(&url).unwrap(), &cache_key, 3600)
+        .store_value(
+            &token_index_cache_key(&url, None).unwrap(),
+            &cache_key,
+            3600,
+        )
         .await
         .unwrap();
 
@@ -649,6 +715,7 @@ async fn test_expired_bearer_token_is_refetched() {
         &format!("{}/token", auth_server.uri()),
         Some("registry"),
         Some("repository:test:pull"),
+        None,
     )
     .unwrap();
     cache
@@ -656,7 +723,11 @@ async fn test_expired_bearer_token_is_refetched() {
         .await
         .unwrap();
     cache
-        .store_value(&token_index_cache_key(&url).unwrap(), &cache_key, 3600)
+        .store_value(
+            &token_index_cache_key(&url, None).unwrap(),
+            &cache_key,
+            3600,
+        )
         .await
         .unwrap();
 
@@ -822,6 +893,80 @@ async fn test_basic_authentication() {
     assert!(result.is_ok());
 }
 
+/// The normal scope-denied token flow: the first attempt 401s, the refreshed
+/// retry 403s. Returning that raw made reads report `Internal` while writes
+/// reported `Denied`, and replication retried to max attempts instead of
+/// dead-lettering on the `Denied` fast path.
+#[tokio::test]
+async fn a_forbidden_response_after_a_token_refresh_is_denied() {
+    let mock_server = MockServer::start().await;
+    let registry_url = mock_server.uri();
+
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "scoped" })))
+        .mount(&mock_server)
+        .await;
+    // Authenticated: the credential is valid but lacks the scope.
+    Mock::given(method("GET"))
+        .and(path("/v2/test/manifests/latest"))
+        .and(header("Authorization", "Bearer scoped"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/test/manifests/latest"))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "WWW-Authenticate",
+            format!(r#"Bearer realm="{registry_url}/token",service="registry""#).as_str(),
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let error = client_for(&mock_server)
+        .get_manifest(&[], &format!("{registry_url}/v2/test/manifests/latest"))
+        .await
+        .expect_err("a 403 must not read as a successful fetch");
+
+    assert!(
+        matches!(error, Error::Denied(_)),
+        "a scope denial must be terminal, got: {error:?}"
+    );
+}
+
+/// A token obtained moments ago will not become valid on another attempt, so a
+/// persistent 401 is terminal rather than a raw response for a read path to
+/// mislabel.
+#[tokio::test]
+async fn a_persistent_unauthorized_after_a_refresh_is_terminal() {
+    let mock_server = MockServer::start().await;
+    let registry_url = mock_server.uri();
+
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "scoped" })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/test/manifests/latest"))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "WWW-Authenticate",
+            format!(r#"Bearer realm="{registry_url}/token",service="registry""#).as_str(),
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let error = client_for(&mock_server)
+        .get_manifest(&[], &format!("{registry_url}/v2/test/manifests/latest"))
+        .await
+        .expect_err("a persistent 401 must not read as a successful fetch");
+
+    assert!(
+        matches!(error, Error::Unauthorized(_)),
+        "a rejected fresh token must be terminal, got: {error:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_forbidden_access() {
     let mock_server = MockServer::start().await;
@@ -875,6 +1020,32 @@ async fn test_get_blob_success() {
         .await
         .unwrap();
     assert_eq!(buffer, blob_data);
+}
+
+#[tokio::test]
+async fn get_blob_reports_an_upstream_outage_as_transient_not_missing() {
+    let mock_server = MockServer::start().await;
+    let test_digest = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/test/blobs/{test_digest}")))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&mock_server)
+        .await;
+
+    let error = client_for(&mock_server)
+        .get_blob(
+            &[],
+            &format!("{}/v2/test/blobs/{test_digest}", mock_server.uri()),
+        )
+        .await
+        .err()
+        .expect("a 503 must not read as a successful fetch");
+
+    assert!(
+        matches!(error, Error::Internal(_)),
+        "an upstream outage must not be served as a missing blob, got: {error:?}"
+    );
 }
 
 #[tokio::test]
@@ -1882,5 +2053,19 @@ async fn list_tags_breaks_on_cyclic_next_link() {
             Tag::new("a").unwrap(),
             Tag::new("b").unwrap(),
         ]
+    );
+}
+
+/// A server-assigned upload-session URL carries signed state in its query, so
+/// the logged form must drop it while leaving a plain location untouched.
+#[test]
+fn logged_locations_drop_the_query_string() {
+    assert_eq!(
+        without_query("https://up.example.com/v2/ns/blobs/uploads/s1?_state=SIGNED&sig=abc"),
+        "https://up.example.com/v2/ns/blobs/uploads/s1"
+    );
+    assert_eq!(
+        without_query("https://up.example.com/v2/ns/manifests/latest"),
+        "https://up.example.com/v2/ns/manifests/latest"
     );
 }

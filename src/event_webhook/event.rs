@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::{identity::ClientIdentity, oci::Namespace};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub enum EventKind {
     #[serde(rename = "manifest.push")]
     ManifestPush,
@@ -33,6 +33,15 @@ impl EventKind {
             EventKind::TagCreate => "tag.create",
             EventKind::TagDelete => "tag.delete",
         }
+    }
+}
+
+/// Serialized from [`EventKind::as_str`], the same string the
+/// `X-Registry-Event` header carries, so the header and the body cannot name
+/// one event differently.
+impl Serialize for EventKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -136,6 +145,8 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use crate::{
         event_webhook::event::{EventActor, EventKind},
         identity::ClientIdentity,
@@ -175,14 +186,28 @@ mod tests {
         assert_eq!(json, serde_json::json!({ "internal": "prune" }));
     }
 
+    /// Every variant must name itself identically in the `X-Registry-Event`
+    /// header (`as_str`), in the JSON body, and back through the `serde`
+    /// renames, so a subscriber filtering on one never disagrees with the other.
     #[test]
-    fn event_kind_as_str_covers_all_variants() {
-        assert_eq!(EventKind::ManifestPush.as_str(), "manifest.push");
-        assert_eq!(EventKind::ManifestPull.as_str(), "manifest.pull");
-        assert_eq!(EventKind::ManifestDelete.as_str(), "manifest.delete");
-        assert_eq!(EventKind::BlobPush.as_str(), "blob.push");
-        assert_eq!(EventKind::BlobPull.as_str(), "blob.pull");
-        assert_eq!(EventKind::TagCreate.as_str(), "tag.create");
-        assert_eq!(EventKind::TagDelete.as_str(), "tag.delete");
+    fn event_kind_names_itself_the_same_way_everywhere() {
+        let all = [
+            (EventKind::ManifestPush, "manifest.push"),
+            (EventKind::ManifestPull, "manifest.pull"),
+            (EventKind::ManifestDelete, "manifest.delete"),
+            (EventKind::BlobPush, "blob.push"),
+            (EventKind::BlobPull, "blob.pull"),
+            (EventKind::TagCreate, "tag.create"),
+            (EventKind::TagDelete, "tag.delete"),
+        ];
+
+        for (kind, wire) in all {
+            assert_eq!(kind.as_str(), wire);
+            assert_eq!(serde_json::to_value(&kind).unwrap(), json!(wire));
+            assert_eq!(
+                serde_json::from_value::<EventKind>(json!(wire)).unwrap(),
+                kind
+            );
+        }
     }
 }

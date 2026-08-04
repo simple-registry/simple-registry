@@ -327,7 +327,7 @@ After upgrading, run `angos migrate` to rewrite every bare-digest link as JSON:
 angos migrate
 ```
 
-Run it before serving the affected repositories. The command is idempotent, so it is safe to re-run and leaves already-JSON links untouched; pass `--dry-run` to report what it would rewrite without changing anything. A migrated link is written without a `created_at`, so it never wins replication last-writer-wins and retention treats it as oldest.
+Run it before serving the affected repositories. The command is idempotent, so it is safe to re-run and leaves already-JSON links untouched; pass `--dry-run` to report what it would rewrite without changing anything. Each rewrite is committed against the link body it read, so a push landing while the run is in progress is kept rather than reverted. A migrated link is written without a `created_at`, so it never wins replication last-writer-wins and retention treats it as oldest.
 
 ### Manifest Push Policy Input (Breaking Change)
 

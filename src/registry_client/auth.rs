@@ -18,23 +18,44 @@ fn authority_for_cache_key(url: &Url) -> Result<&str, Error> {
         .ok_or_else(|| Error::Internal("Response URL is missing host authority".to_string()))
 }
 
+/// The credential a cached token was minted for. Clients share one cache, so
+/// without this two of them configured against the same registry and scope
+/// would serve each other's bearer tokens and act as the wrong identity.
+/// TTL for a URL index entry written on a scope-cache hit, where the token's
+/// own remaining lifetime is not observable. Overshooting is harmless: a
+/// dangling entry costs one cache read before the normal challenge path.
+const CACHED_TOKEN_INDEX_TTL_SECS: u64 = 3600;
+
+fn credential_component(username: Option<&str>) -> String {
+    match username {
+        Some(name) => format!("user={name}"),
+        None => "anon".to_string(),
+    }
+}
+
 pub fn token_cache_key(
     url: &Url,
     realm: &str,
     service: Option<&str>,
     scope: Option<&str>,
+    username: Option<&str>,
 ) -> Result<String, Error> {
     let authority = authority_for_cache_key(url)?;
     let service = service.unwrap_or_default();
     let scope = scope.unwrap_or_default();
+    let credential = credential_component(username);
     Ok(format!(
-        "auth:{authority}:realm={realm}:service={service}:scope={scope}"
+        "auth:{authority}:realm={realm}:service={service}:scope={scope}:{credential}"
     ))
 }
 
-pub fn token_index_cache_key(url: &Url) -> Result<String, Error> {
+pub fn token_index_cache_key(url: &Url, username: Option<&str>) -> Result<String, Error> {
     let authority = authority_for_cache_key(url)?;
-    Ok(format!("auth-index:{authority}:{}", url.as_str()))
+    let credential = credential_component(username);
+    Ok(format!(
+        "auth-index:{authority}:{credential}:{}",
+        url.as_str()
+    ))
 }
 
 /// `None` only if the literal pattern were malformed; the challenge parser
@@ -76,12 +97,13 @@ impl BearerChallenge {
             .find_map(|(key, value)| (key == name).then_some(value.as_str()))
     }
 
-    fn cache_key(&self, response_url: &Url) -> Result<String, Error> {
+    fn cache_key(&self, response_url: &Url, username: Option<&str>) -> Result<String, Error> {
         token_cache_key(
             response_url,
             &self.realm,
             self.param("service"),
             self.param("scope"),
+            username,
         )
     }
 
@@ -129,10 +151,14 @@ impl RegistryClient {
             .map_err(|_| Error::Unauthorized("Missing WWW-Authenticate".to_string()))?;
 
         if let Some(challenge) = parse_bearer_challenge(&auth_header) {
-            let cache_key = challenge.cache_key(response.url())?;
+            let cache_key = challenge.cache_key(response.url(), self.auth_username())?;
             if let Some(auth_header) = self.cached_auth_header_for_key(&cache_key).await
                 && Some(auth_header.as_str()) != attempted_auth
             {
+                // Only the exchange indexes the URL, so without this every
+                // other URL sharing the scope eats a 401 on every request.
+                self.index_token_url(response.url(), &cache_key, CACHED_TOKEN_INDEX_TTL_SECS)
+                    .await;
                 return Ok(auth_header);
             }
             self.exchange_bearer_token(challenge, response.url(), &cache_key)
@@ -178,12 +204,19 @@ impl RegistryClient {
         let ttl = bearer.expires_in;
 
         let _ = self.cache.store_value(cache_key, &token, ttl).await;
-        let _ = self
-            .cache
-            .store_value(&token_index_cache_key(response_url)?, cache_key, ttl)
-            .await;
+        self.index_token_url(response_url, cache_key, ttl).await;
 
         Ok(token)
+    }
+
+    /// Point `url` at the token `cache_key` so the next request to it sends the
+    /// token instead of discovering it through a 401. Best effort: an unusable
+    /// index must not fail a token the caller already holds.
+    async fn index_token_url(&self, url: &Url, cache_key: &str, ttl: u64) {
+        let Ok(index_key) = token_index_cache_key(url, self.auth_username()) else {
+            return;
+        };
+        let _ = self.cache.store_value(&index_key, cache_key, ttl).await;
     }
 
     fn build_basic_auth_header(&self) -> Result<String, Error> {
@@ -201,7 +234,10 @@ mod tests {
 
     use crate::registry_client::{
         Error,
-        auth::{BearerToken, authority_for_cache_key, parse_bearer_challenge, token_cache_key},
+        auth::{
+            BearerToken, authority_for_cache_key, parse_bearer_challenge, token_cache_key,
+            token_index_cache_key,
+        },
     };
 
     #[test]
@@ -274,10 +310,43 @@ mod tests {
                 &url,
                 "https://auth.example.com/token",
                 Some("registry"),
-                Some("repository:foo:pull")
+                Some("repository:foo:pull"),
+                None
             )
             .unwrap(),
-            "auth:registry.example.com:realm=https://auth.example.com/token:service=registry:scope=repository:foo:pull"
+            "auth:registry.example.com:realm=https://auth.example.com/token:service=registry:scope=repository:foo:pull:anon"
+        );
+    }
+
+    /// Every client shares one cache, so a token minted for one identity must
+    /// never be served to another against the same registry and scope.
+    #[test]
+    fn token_cache_keys_separate_identities() {
+        let url = Url::parse("https://registry.example.com/v2/").unwrap();
+        let key_for = |username| {
+            token_cache_key(
+                &url,
+                "https://auth.example.com/token",
+                Some("registry"),
+                Some("repository:foo:pull"),
+                username,
+            )
+            .unwrap()
+        };
+
+        let alice = key_for(Some("alice"));
+        let bob = key_for(Some("bob"));
+        let anonymous = key_for(None);
+
+        assert_ne!(alice, bob, "two users must not share a cached token");
+        assert_ne!(
+            alice, anonymous,
+            "an authenticated client must not read the anonymous token"
+        );
+        // The index maps a URL onto the key above, so it needs the same split.
+        assert_ne!(
+            token_index_cache_key(&url, Some("alice")).unwrap(),
+            token_index_cache_key(&url, Some("bob")).unwrap()
         );
     }
 
@@ -289,6 +358,7 @@ mod tests {
             "https://auth.example.com/token",
             Some("registry"),
             Some("repository:foo:pull"),
+            None,
         )
         .unwrap();
         let bar = token_cache_key(
@@ -296,6 +366,7 @@ mod tests {
             "https://auth.example.com/token",
             Some("registry"),
             Some("repository:bar:pull"),
+            None,
         )
         .unwrap();
 

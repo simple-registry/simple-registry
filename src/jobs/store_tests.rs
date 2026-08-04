@@ -16,7 +16,7 @@ use angos_storage::{
 use angos_tx_engine::transaction::{Mutation, Transaction};
 
 use crate::jobs::store::{
-    CompleteOutcome, FailOutcome, JobEnvelope, JobQueueConfig, JobState, JobStore,
+    CompleteOutcome, FailOutcome, JobEnvelope, JobQueueConfig, JobState, JobStore, LockKey,
     MAX_REPORTED_PENDING, Queue, STORAGE_KEY_PREFIX_LEN, make_storage_key, parse_lock_key_index,
     parse_not_before, serialize_dead_letter, serialize_lock_key_index,
 };
@@ -48,8 +48,12 @@ fn build_harness(raw: Arc<dyn ObjectStore>) -> Harness {
     Harness { store, raw }
 }
 
-fn dummy_envelope(lock_key: &str) -> JobEnvelope {
-    JobEnvelope::new(Queue::Cache, "test.noop", lock_key, &()).expect("envelope")
+fn lock_key(value: &str) -> LockKey {
+    LockKey::new(value).expect("test lock key must be valid")
+}
+
+fn dummy_envelope(key: &str) -> JobEnvelope {
+    JobEnvelope::new(Queue::Cache, "test.noop", key, &()).expect("envelope")
 }
 
 /// Runs `test` once per job-store backend (FS over a fresh temp directory,
@@ -85,7 +89,7 @@ async fn run_enqueue_then_claim_succeeds(h: Harness) {
         .expect("claim_one")
         .claimed
         .expect("Some");
-    assert_eq!(claimed.envelope.lock_key, "cache.ns:sha256:aaa");
+    assert_eq!(claimed.envelope.lock_key, lock_key("cache.ns:sha256:aaa"));
     h.store
         .complete(claimed, Transaction::builder().build())
         .await
@@ -273,20 +277,19 @@ async fn run_future_storage_key_yields_next_ready_without_claiming(h: Harness) {
 }
 
 async fn run_orphan_index_is_self_healed_on_next_lookup(h: Harness) {
-    let lock_key = "cache.ns:sha256:orphan";
+    let lock_key = lock_key("cache.ns:sha256:orphan");
 
     let storage_key = make_storage_key(Utc::now(), "phantom-id");
     let index_data = serialize_lock_key_index(&storage_key).expect("serialize");
-    let index_path = crate::jobs::store::job_lock_key_index_path("cache", lock_key);
+    let index_path = crate::jobs::store::job_lock_key_index_path("cache", &lock_key);
     h.raw
         .put(&index_path, Bytes::from(index_data))
         .await
         .expect("seed index");
-    assert!(h.raw.head(&index_path).await.is_ok());
 
     let hit = h
         .store
-        .find_pending_with_lock_key(Queue::Cache, lock_key)
+        .find_pending_with_lock_key(Queue::Cache, &lock_key)
         .await
         .expect("lookup");
     assert!(!hit, "orphan index must not register as a hit");
@@ -298,9 +301,9 @@ async fn run_orphan_index_is_self_healed_on_next_lookup(h: Harness) {
 }
 
 async fn run_retry_updates_lock_key_index_to_new_storage_key(h: Harness) {
-    let lock_key = "cache.ns:sha256:retry-index";
+    let lock_key = lock_key("cache.ns:sha256:retry-index");
 
-    let mut env = dummy_envelope(lock_key);
+    let mut env = dummy_envelope(lock_key.as_str());
     env.max_attempts = 3;
     h.store.enqueue(env).await.expect("enqueue");
 
@@ -322,7 +325,7 @@ async fn run_retry_updates_lock_key_index_to_new_storage_key(h: Harness) {
     let new_storage_key = &pending[0];
     assert_ne!(new_storage_key, &old_storage_key);
 
-    let index_path = crate::jobs::store::job_lock_key_index_path("cache", lock_key);
+    let index_path = crate::jobs::store::job_lock_key_index_path("cache", &lock_key);
     let data = h.raw.get(&index_path).await.expect("read index");
     let index = parse_lock_key_index(&data).expect("parse");
     assert_eq!(&index.storage_key, new_storage_key);
@@ -352,9 +355,9 @@ async fn run_enqueue_dedup_skips_existing_lock_key(h: Harness) {
 }
 
 async fn run_enqueue_after_claim_creates_second_pending(h: Harness) {
-    let lock_key = "cache.ns:sha256:inflight";
+    let lock_key = lock_key("cache.ns:sha256:inflight");
     h.store
-        .enqueue(dummy_envelope(lock_key))
+        .enqueue(dummy_envelope(lock_key.as_str()))
         .await
         .expect("enqueue 1");
 
@@ -371,7 +374,7 @@ async fn run_enqueue_after_claim_creates_second_pending(h: Harness) {
     // A same-lock_key enqueue mid-execution must not coalesce into the
     // already-resolved job; it gets its own pending file.
     h.store
-        .enqueue(dummy_envelope(lock_key))
+        .enqueue(dummy_envelope(lock_key.as_str()))
         .await
         .expect("enqueue 2");
     assert_eq!(
@@ -503,8 +506,8 @@ impl StoreHook for FailIndexDelete {
 #[tokio::test]
 async fn orphan_index_transient_delete_failure_does_not_drop_enqueue() {
     metrics_provider::init_for_tests();
-    let lock_key = "cache.ns:sha256:orphan-transient";
-    let index_path = crate::jobs::store::job_lock_key_index_path("cache", lock_key);
+    let lock_key = lock_key("cache.ns:sha256:orphan-transient");
+    let index_path = crate::jobs::store::job_lock_key_index_path("cache", &lock_key);
 
     let inner: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
     let hook = FailIndexDelete {
@@ -526,7 +529,7 @@ async fn orphan_index_transient_delete_failure_does_not_drop_enqueue() {
     // rather than reporting a false miss.
     assert!(
         store
-            .find_pending_with_lock_key(Queue::Cache, lock_key)
+            .find_pending_with_lock_key(Queue::Cache, &lock_key)
             .await
             .is_err(),
         "a transient orphan-cleanup failure must surface as an error",
@@ -536,7 +539,10 @@ async fn orphan_index_transient_delete_failure_does_not_drop_enqueue() {
     // failure instead of colliding with the lingering index on `PutIfAbsent` and
     // returning a false dedup hit.
     assert!(
-        store.enqueue(dummy_envelope(lock_key)).await.is_err(),
+        store
+            .enqueue(dummy_envelope(lock_key.as_str()))
+            .await
+            .is_err(),
         "enqueue must not silently drop a job behind an un-retired orphan index",
     );
 }
@@ -594,8 +600,8 @@ async fn claim_rechecks_pending_under_lock_and_skips_a_vanished_job() {
 #[tokio::test]
 async fn claim_is_skipped_when_the_dedup_index_cannot_be_retired() {
     metrics_provider::init_for_tests();
-    let lock_key = "cache.ns:sha256:retire-fails";
-    let index_path = crate::jobs::store::job_lock_key_index_path("cache", lock_key);
+    let lock_key = lock_key("cache.ns:sha256:retire-fails");
+    let index_path = crate::jobs::store::job_lock_key_index_path("cache", &lock_key);
 
     let inner: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
     let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
@@ -607,7 +613,7 @@ async fn claim_is_skipped_when_the_dedup_index_cannot_be_retired() {
     let store = Arc::new(JobStore::new(build_store(hooked), "test-worker"));
 
     store
-        .enqueue(dummy_envelope(lock_key))
+        .enqueue(dummy_envelope(lock_key.as_str()))
         .await
         .expect("enqueue");
 
@@ -629,9 +635,9 @@ async fn claim_is_skipped_when_the_dedup_index_cannot_be_retired() {
 async fn retry_leaves_a_concurrent_producers_index_alone() {
     metrics_provider::init_for_tests();
     let h = harness_memory();
-    let lock_key = "cache.ns:sha256:retry-vs-producer";
+    let lock_key = lock_key("cache.ns:sha256:retry-vs-producer");
 
-    let mut env = dummy_envelope(lock_key);
+    let mut env = dummy_envelope(lock_key.as_str());
     env.max_attempts = 3;
     h.store.enqueue(env).await.expect("enqueue");
 
@@ -646,10 +652,10 @@ async fn retry_leaves_a_concurrent_producers_index_alone() {
     // The claim retired the index, so a producer enqueueing the same lock_key
     // mid-execution indexes its own fresh pending file.
     h.store
-        .enqueue(dummy_envelope(lock_key))
+        .enqueue(dummy_envelope(lock_key.as_str()))
         .await
         .expect("producer enqueue");
-    let index_path = crate::jobs::store::job_lock_key_index_path("cache", lock_key);
+    let index_path = crate::jobs::store::job_lock_key_index_path("cache", &lock_key);
     let produced = parse_lock_key_index(&h.raw.get(&index_path).await.expect("read index"))
         .expect("parse")
         .storage_key;
@@ -685,7 +691,7 @@ async fn enqueue_after_claim_creates_second_pending() {
 }
 
 async fn run_concurrent_enqueue_dedup(h: Harness) {
-    let lock_key = "cache.ns:sha256:concurrent";
+    let lock_key = lock_key("cache.ns:sha256:concurrent");
     let mut handles = Vec::with_capacity(8);
     for _ in 0..8 {
         let store = Arc::clone(&h.store);
@@ -880,7 +886,7 @@ async fn run_retry_failed_resets_attempts(h: Harness) {
         .await
         .expect("read pending");
     assert_eq!(restored.attempts, 0, "retry resets attempts to zero");
-    assert_eq!(restored.lock_key, "cache.ns:sha256:retry-failed");
+    assert_eq!(restored.lock_key, lock_key("cache.ns:sha256:retry-failed"));
 
     assert!(
         matches!(
@@ -923,14 +929,14 @@ async fn run_delete_failed_record(h: Harness) {
 }
 
 async fn run_delete_pending_removes_record_and_index(h: Harness) {
-    let lock_key = "cache.ns:sha256:del-pending";
+    let lock_key = lock_key("cache.ns:sha256:del-pending");
     h.store
-        .enqueue(dummy_envelope(lock_key))
+        .enqueue(dummy_envelope(lock_key.as_str()))
         .await
         .expect("enqueue");
     assert!(
         h.store
-            .find_pending_with_lock_key(Queue::Cache, lock_key)
+            .find_pending_with_lock_key(Queue::Cache, &lock_key)
             .await
             .expect("find"),
         "enqueue establishes the dedup index",
@@ -957,7 +963,7 @@ async fn run_delete_pending_removes_record_and_index(h: Harness) {
     assert!(after.is_empty(), "pending file removed");
     assert!(
         !h.store
-            .find_pending_with_lock_key(Queue::Cache, lock_key)
+            .find_pending_with_lock_key(Queue::Cache, &lock_key)
             .await
             .expect("find"),
         "dedup index is removed alongside the pending file",
@@ -1087,7 +1093,22 @@ fn test_job_paths() {
         "_jobs/failed/cache/01HABCDE.json"
     );
     assert_eq!(
-        job_lock_key_index_path("cache", "cache.ns:sha256:abc"),
+        job_lock_key_index_path("cache", &lock_key("cache.ns:sha256:abc")),
         "_jobs/index/cache/cache.ns%3Asha256%3Aabc.json"
     );
+}
+
+/// `%` is the escape character of the index-path encoding, so a key carrying
+/// one could encode onto another key's path and falsely dedup. The type makes
+/// that key unrepresentable rather than leaving the encoding non-injective.
+#[test]
+fn a_lock_key_containing_the_escape_character_is_rejected() {
+    assert!(matches!(
+        LockKey::new("a%3Ab"),
+        Err(crate::jobs::store::Error::InvalidLockKey(_))
+    ));
+    assert!(matches!(
+        LockKey::new(""),
+        Err(crate::jobs::store::Error::InvalidLockKey(_))
+    ));
 }

@@ -268,7 +268,7 @@ fn test_cache_config_redis() {
     let config = Configuration::load_from_str(config).unwrap();
     match config.cache {
         cache::Config::Redis(redis_config) => {
-            assert_eq!(redis_config.url, "redis://localhost:6379");
+            assert_eq!(redis_config.url.expose(), "redis://localhost:6379");
         }
         cache::Config::Memory => panic!("Expected Redis cache config"),
     }

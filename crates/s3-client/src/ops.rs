@@ -596,7 +596,7 @@ impl Backend {
 
     /// # Errors
     /// Forwards [`Error`] from the underlying `UploadPart` request or a
-    /// tripped circuit breaker.
+    /// tripped circuit breaker, and reports a response carrying no `ETag`.
     pub async fn upload_part(
         &self,
         path: &str,
@@ -610,7 +610,7 @@ impl Backend {
                 body,
                 ..S3Request::new(Method::PUT, self.full_key(path))
             },
-            |response| Ok(header_string(&response.headers, "etag").unwrap_or_default()),
+            |response| part_etag(&response.headers, part_number),
         )
         .await
     }
@@ -622,7 +622,8 @@ impl Backend {
     ///
     /// # Errors
     /// Forwards [`Error`] from the underlying streaming `UploadPart`
-    /// request or a tripped circuit breaker.
+    /// request or a tripped circuit breaker, and reports a response carrying
+    /// no `ETag`.
     pub async fn upload_part_streaming<S>(
         &self,
         path: &str,
@@ -646,8 +647,8 @@ impl Backend {
                     body,
                 )
                 .await
-                .map(|response| header_string(&response.headers, "etag").unwrap_or_default())
                 .map_err(|e| classify_error(&e))
+                .and_then(|response| part_etag(&response.headers, part_number))
         })
         .await
     }
@@ -953,6 +954,16 @@ fn part_query(upload_id: &str, part_number: u32) -> Vec<QueryParam> {
     ]
 }
 
+/// The `ETag` a part upload must report. `CompleteMultipartUpload` names every
+/// part by entity tag, so a backend that omits one has failed the upload at
+/// this part rather than later, where the completion carries no clue which
+/// part was at fault.
+fn part_etag(headers: &HeaderMap, part_number: u32) -> Result<String, Error> {
+    header_string(headers, "etag")
+        .filter(|etag| !etag.is_empty())
+        .ok_or_else(|| Error::Io(format!("UploadPart {part_number} returned no ETag header")))
+}
+
 fn ensure_trailing_slash(mut s: String) -> String {
     if !s.is_empty() && !s.ends_with('/') {
         s.push('/');
@@ -962,7 +973,10 @@ fn ensure_trailing_slash(mut s: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use bytesize::ByteSize;
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path, query_param},
@@ -1194,6 +1208,75 @@ mod tests {
         assert!(request.headers.get("authorization").is_some());
     }
 
+    /// `CompleteMultipartUpload` names every part by `ETag`, so a part upload
+    /// that reports none has to fail here. Defaulting to an empty string
+    /// deferred the rejection to the completion, which cannot say which part
+    /// was at fault.
+    #[tokio::test]
+    async fn upload_part_reports_a_response_without_an_etag() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/test-bucket/test/file.txt"))
+            .and(query_param("partNumber", "7"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let error = mock_backend(&server)
+            .upload_part("test/file.txt", "upload-id", 7, Bytes::from_static(b"body"))
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains('7'),
+            "the error must name the offending part, got: {error}"
+        );
+    }
+
+    /// An `ETag: ""` is the same defect reaching the completion, so it is
+    /// rejected alongside an absent header.
+    #[tokio::test]
+    async fn upload_part_reports_an_empty_etag() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/test-bucket/test/file.txt"))
+            .respond_with(ResponseTemplate::new(200).insert_header("etag", ""))
+            .mount(&server)
+            .await;
+
+        let error = mock_backend(&server)
+            .upload_part("test/file.txt", "upload-id", 1, Bytes::from_static(b"body"))
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("ETag"),
+            "an empty ETag must be reported as a missing one, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_part_streaming_reports_a_response_without_an_etag() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/test-bucket/test/file.txt"))
+            .and(query_param("partNumber", "4"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let body = stream::iter([Ok::<Bytes, io::Error>(Bytes::from_static(b"hello"))]);
+        let error = mock_backend(&server)
+            .upload_part_streaming("test/file.txt", "upload-id", 4, 5, body)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains('4'),
+            "the streaming path must name the offending part too, got: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn complete_multipart_upload_surfaces_embedded_success_error() {
         let server = MockServer::start().await;
@@ -1416,5 +1499,84 @@ mod tests {
             "an idempotent PUT must still retry on a transport error",
         )
         .await;
+    }
+
+    /// Serves one request: headers, then the body in chunks spaced under the
+    /// read timeout but totalling more than the per-attempt timeout. Returns
+    /// the address to point a backend at.
+    async fn trickling_body_server(body: &'static [u8]) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+            socket.write_all(head.as_bytes()).await.unwrap();
+            for byte in body {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                socket.write_all(&[*byte]).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+        });
+        addr
+    }
+
+    /// A streamed download carries no whole-request deadline: the body is
+    /// consumed by the caller, so bounding the request bounds the client's
+    /// download speed. A slow but progressing transfer must complete.
+    #[tokio::test]
+    async fn a_slow_streaming_download_outlives_the_attempt_timeout() {
+        let body: &[u8] = b"0123456789";
+        let addr = trickling_body_server(body).await;
+        let backend = Backend::new(&fast_retry_config(format!("http://{addr}"))).unwrap();
+
+        let mut result = backend
+            .get_object("slow/blob", None)
+            .await
+            .expect("headers");
+        let mut downloaded = Vec::new();
+        result
+            .body
+            .read_to_end(&mut downloaded)
+            .await
+            .expect("a body still flowing must not be severed by the per-attempt timeout");
+
+        assert_eq!(downloaded, body);
+    }
+
+    /// Dropping the whole-request deadline must not leave a stalled download
+    /// hanging: the client's read timeout resets per read, so a body that
+    /// stops arriving still fails.
+    #[tokio::test]
+    async fn a_stalled_streaming_download_still_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            // Never sends the body.
+            tokio::time::sleep(Duration::from_mins(1)).await;
+        });
+
+        let backend = Backend::new(&fast_retry_config(format!("http://{addr}"))).unwrap();
+        let mut result = backend
+            .get_object("stalled/blob", None)
+            .await
+            .expect("headers");
+        let mut downloaded = Vec::new();
+        let error = result
+            .body
+            .read_to_end(&mut downloaded)
+            .await
+            .expect_err("a stalled body must not hang forever");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other, "got: {error:?}");
     }
 }

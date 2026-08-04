@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.4.5 - UNRELEASED
+
+### Fixed
+
+- A multipart part upload whose response carries no `ETag` now fails at that part, naming it, instead of defaulting to an empty string that the S3 backend rejects later at `CompleteMultipartUpload` with no clue which part was at fault.
+- `angos migrate` now rewrites each link inside a transaction that reads it, so a tag push landing mid-run is kept instead of being silently reverted to its pre-push target.
+- A blob PUT naming a session the registry does not hold is refused at the upload endpoint rather than relying on the storage layer to reject the write.
+- A job's `lock_key` is now a validating type that rejects the `%` reserved by the dedup-index encoding, so two distinct lock keys can no longer encode to one index path and falsely coalesce.
+- The namespace listing skips a directory whose name is not a valid namespace instead of failing the whole request, so one stray directory no longer breaks the web UI's view of a repository.
+- The cross-namespace blob-reference check now reads shard contents rather than presence alone, so a legacy or corrupt empty shard in another namespace no longer blocks a blob's reclamation forever.
+- The Redis cache URL is held in the redacting `Secret` wrapper, so a password carried in its userinfo no longer reaches logs when the loaded configuration is debug-formatted.
+- Every failing required event webhook is now logged, so when several fail in one dispatch the ones after the first are no longer visible in metrics alone.
+- Redis connections are managed rather than per-call: the lock backend opens one connection instead of one per operation, and both it and the cache backend reconnect on their own, so a Redis restart no longer disables the authorization, JWKS, and upstream-token caches until angos is restarted.
+- Aborting an upload another replica already aborted now counts as done rather than failing, so two prune runs sharing a bucket no longer report a spurious error.
+- S3 multipart uploads respect the protocol's part limits: a large append is split to stay under the 5 GiB per-part ceiling instead of failing the push, a configured part size below the 5 MiB floor is raised to it rather than failing at completion, and an upload past 10,000 parts is refused before its bytes are streamed.
+- An upload write whose body is longer than its declared length is rejected on the S3 backend as it already was on the others, instead of silently discarding the excess.
+- A chunked upload now keeps one hasher checkpoint instead of one per chunk, so the listing every append and finalize performs no longer grows with the number of chunks, and completing an upload probes its liveness marker rather than reading the whole session.
+- Cached upstream bearer tokens are scoped to the credential that obtained them, so two clients configured against the same registry with different usernames no longer serve each other's tokens and act as the wrong identity.
+- Upstream request logging moved to debug and no longer includes the query string, keeping the signed state in a server-assigned upload-session URL out of the logs and pull-through probe traffic out of info-level output.
+- `angos migrate` now warns past a link it cannot read or rewrite and reports the count in its summary, instead of one defective object aborting the whole run.
+- A JWT whose key id is absent from the cached JWKS now forces at most one provider refetch a minute rather than one per request, so unauthenticated tokens carrying random key ids can no longer amplify into outbound requests to the identity provider.
+- Resuming a child listing from a directory name on the S3 backend no longer re-emits that directory forever or skips siblings sorting between it and its delimiter, so paging through a namespace's children terminates and returns every child.
+- An upstream or storage outage is no longer reported to clients as a missing image: a non-404 upstream status on a blob fetch and a backend fault on a local manifest read now surface as errors instead of collapsing into 404, and a routine manifest miss is logged at debug rather than error.
+- A cached upstream token now indexes the URL it served, so requests to a token-auth upstream stop paying an extra unauthenticated round trip and 401 for every URL other than the one that first obtained the token.
+- A streamed blob download from S3 is no longer cut off once the per-attempt timeout elapses, so pulling a large layer over a slow connection completes; a transfer that stalls is still ended by a read timeout that resets on every read.
+- Multipart cleanup now treats only a genuinely absent session marker as proof that an upload was abandoned, so a transient backend failure during a prune pass no longer aborts an in-progress upload and destroys the parts it had already committed.
+- An upstream that refuses a request after angos refreshes its token now reports a denial rather than an opaque failure, so a replication job whose credential lacks the scope dead-letters immediately instead of retrying to its attempt limit, and reads classify it the same way writes already did.
+- Raising `angos prune --concurrency` no longer multiplies into that many in-flight metadata reads squared, since the per-namespace tag reads keep their own fixed fan-out instead of borrowing the knob that already bounds the namespace walk.
+- A client header listed in an authorization webhook's `forward_headers` now reaches the webhook with every one of its values instead of just the first, and the extra values are part of the decision cache key.
+- A replication push whose blob or child-manifest transfer fails now lets its siblings finish instead of dropping them mid-transfer, which left their upload sessions open on the downstream until its own garbage collection.
+- A replication delete job now carries the referrer's subject, so a retry that finds the manifest already gone downstream can still drop its stale descriptor from the OCI 1.0 referrers fallback index.
+- Pushing a manifest whose `schemaVersion` is not 2 is now refused instead of stored with none of its blobs linked, leaving them to be reclaimed as orphans.
+
 ## 1.4.4
 
 ### Added

@@ -55,11 +55,9 @@ pub struct CacheFetchBlobPayload {
 ///
 /// # Errors
 ///
-/// Returns a [`serde_json::Error`] when the payload cannot be serialized.
-pub fn build_envelope(
-    namespace: &Namespace,
-    digest: &Digest,
-) -> Result<JobEnvelope, serde_json::Error> {
+/// Returns an [`Error`] when the lock key is invalid or the payload cannot be
+/// serialized.
+pub fn build_envelope(namespace: &Namespace, digest: &Digest) -> Result<JobEnvelope, Error> {
     let payload = CacheFetchBlobPayload {
         namespace: namespace.clone(),
         digest: digest.to_string(),

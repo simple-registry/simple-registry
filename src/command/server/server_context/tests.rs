@@ -1,4 +1,5 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
+use tempfile::TempDir;
 
 use argon2::{
     Algorithm, Argon2, Params, PasswordHasher, Version,
@@ -100,12 +101,18 @@ pub async fn create_test_server_context_from_config(config: &Configuration) -> S
 }
 
 /// Context over a fresh FS root with a `test` repository matching `test/*`
-/// (the minimal config resolves no repository at all). Blob and metadata
-/// stores share the root so content written through one is readable through
-/// the other. With `webhook_url`, a required-policy webhook subscribed to the
-/// pull events is wired in.
-pub async fn create_test_repo_context(webhook_url: Option<&str>) -> ServerContext {
-    let nonce = Uuid::new_v4();
+/// (the minimal config resolves no repository at all). The blob and metadata
+/// stores get separate roots, so a read that reaches the wrong one fails here
+/// rather than in production. With `webhook_url`, a required-policy webhook
+/// subscribed to the pull events is wired in.
+///
+/// The returned [`TempDir`] owns both roots; drop it and they are removed.
+pub async fn create_test_repo_context(webhook_url: Option<&str>) -> (ServerContext, TempDir) {
+    let root = TempDir::new().expect("temp dir");
+    let blob_root = root.path().join("blob");
+    let metadata_root = root.path().join("metadata");
+    let blob_root = blob_root.to_string_lossy();
+    let metadata_root = metadata_root.to_string_lossy();
     let webhook_ref = if webhook_url.is_some() {
         r#"event_webhooks = ["pull_hook"]"#
     } else {
@@ -126,10 +133,10 @@ pub async fn create_test_repo_context(webhook_url: Option<&str>) -> ServerContex
     let toml = format!(
         r#"
         [blob_store.fs]
-        root_dir = "/tmp/angos-test-repo-{nonce}"
+        root_dir = "{blob_root}"
 
         [metadata_store.fs]
-        root_dir = "/tmp/angos-test-repo-{nonce}"
+        root_dir = "{metadata_root}"
 
         [cache.memory]
 
@@ -155,7 +162,7 @@ pub async fn create_test_repo_context(webhook_url: Option<&str>) -> ServerContex
     "#
     );
     let config: Configuration = toml::from_str(&toml).unwrap();
-    create_test_server_context_from_config(&config).await
+    (create_test_server_context_from_config(&config).await, root)
 }
 
 pub async fn create_test_registry(config: &Configuration) -> Arc<Registry> {

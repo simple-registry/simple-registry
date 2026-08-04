@@ -375,6 +375,8 @@ impl Registry {
 
         let bounded = self.bound_blob_stream(summary.size, content_length, stream);
         // PATCH only needs the running size; the digest is finalized at the PUT.
+        // Concurrent PATCHes on one session are unserialized (the backends call
+        // them unsupported); the PUT's digest check catches any interleaving.
         let (_, size) = self
             .blob_store
             .append_upload(namespace, &session_key, Box::new(bounded), content_length)
@@ -425,13 +427,15 @@ impl Registry {
             .actor(actor);
         self.dispatch_events(&[event]).await?;
 
-        let committed = match self
+        // An unknown session reads as empty only so the blob-exists path below
+        // can answer a retry whose 201 was lost; anything else it reaches 404s.
+        let (committed, session_known) = match self
             .blob_store
             .upload_summary(namespace, &session_key)
             .await
         {
-            Ok(summary) => summary.size,
-            Err(Error::BlobUploadUnknown) => 0,
+            Ok(summary) => (summary.size, true),
+            Err(Error::BlobUploadUnknown) => (0, false),
             Err(e) => return Err(e),
         };
         let has_prior_writes = committed > 0;
@@ -459,6 +463,10 @@ impl Registry {
             return self
                 .finish_completed_upload(namespace, &session_key, digest)
                 .await;
+        }
+
+        if !session_known {
+            return Err(Error::BlobUploadUnknown);
         }
 
         // A monolithic PUT (no prior chunked writes) knows its algorithm up
@@ -1172,6 +1180,66 @@ mod tests {
             }
         })
         .await;
+    }
+
+    /// The spec answers a PUT naming a session the registry does not hold with
+    /// `BLOB_UPLOAD_UNKNOWN`, not a 201.
+    #[tokio::test]
+    async fn completing_an_unknown_session_is_rejected() {
+        let test_case = FSRegistryTestCase::new();
+        let registry = test_case.registry();
+        let namespace = &Namespace::new("test-repo").unwrap();
+        let content = b"body for a session that was never opened";
+        let digest = Digest::sha256_of_bytes(content);
+
+        let error = registry
+            .complete_upload(
+                CompleteUploadRequest {
+                    actor: None,
+                    namespace,
+                    session_id: &UploadSessionId::generate(),
+                    digest: &digest,
+                    start_offset: None,
+                    content_length: Some(content.len() as u64),
+                },
+                Cursor::new(content.to_vec()),
+            )
+            .await
+            .err()
+            .expect("a PUT naming an unknown session must not store the blob");
+
+        assert!(matches!(error, Error::BlobUploadUnknown), "got {error:?}");
+        assert!(
+            registry.blob_store.read(&digest).await.is_err(),
+            "the rejected PUT must not have stored the blob"
+        );
+    }
+
+    /// The one case it still succeeds: a retry of a PUT whose 201 was lost.
+    #[tokio::test]
+    async fn completing_an_unknown_session_succeeds_once_the_blob_exists() {
+        let test_case = FSRegistryTestCase::new();
+        let registry = test_case.registry();
+        let namespace = &Namespace::new("test-repo").unwrap();
+        let content = b"body whose 201 never reached the client";
+        let digest = put_blob_direct(test_case.metadata_store().store(), content).await;
+
+        let response = registry
+            .complete_upload(
+                CompleteUploadRequest {
+                    actor: None,
+                    namespace,
+                    session_id: &UploadSessionId::generate(),
+                    digest: &digest,
+                    start_offset: None,
+                    content_length: Some(content.len() as u64),
+                },
+                Cursor::new(content.to_vec()),
+            )
+            .await
+            .expect("retrying a completed PUT must stay idempotent");
+
+        assert_eq!(response.digest, digest);
     }
 
     #[tokio::test]
