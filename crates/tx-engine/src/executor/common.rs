@@ -13,11 +13,8 @@ use angos_storage::{Error as StorageError, Etag, ObjectStore};
 
 use crate::{
     error::Error,
-    intent::{
-        INTENT_BODIES_PREFIX, IntentRecord, MutationProgress, MutationRecord, ReadRecord,
-        body_ref_key,
-    },
-    transaction::{Expectation, Mutation, Read, Transaction},
+    intent::{INTENT_BODIES_PREFIX, IntentRecord, MutationProgress, MutationRecord, body_ref_key},
+    transaction::{Mutation, Read, Transaction},
 };
 
 use uuid::Uuid;
@@ -135,10 +132,9 @@ pub async fn stage_bodies(
 
 /// Assemble the [`IntentRecord`] written at the Commit-intent stage.
 ///
-/// Folds in the read-records mapping (each [`Read`]'s key plus its fingerprint,
-/// hex-encoded or empty for a read that recorded absence) and initialises a
-/// `Pending` progress slot per mutation. Shared by both executors so the intent
-/// literal lives once.
+/// Folds in the read-records mapping (each [`Read`]'s key and the state it
+/// observed) and initialises a `Pending` progress slot per mutation. Shared by
+/// both executors so the intent literal lives once.
 #[must_use]
 pub fn build_intent(
     tx_id: Uuid,
@@ -147,22 +143,12 @@ pub fn build_intent(
     mutations: Vec<MutationRecord>,
     coarse_lock_keys: Vec<String>,
 ) -> IntentRecord {
-    let read_records: Vec<ReadRecord> = reads
-        .iter()
-        .map(|r| ReadRecord {
-            key: r.key.clone(),
-            fingerprint: match r.expected {
-                Expectation::Absent => String::new(),
-                Expectation::Present(fingerprint) => hex::encode(fingerprint),
-            },
-        })
-        .collect();
     let progress = vec![MutationProgress::Pending; mutations.len()];
     IntentRecord {
         id: tx_id,
         created_at: Utc::now(),
         ttl_secs,
-        reads: read_records,
+        reads: reads.to_vec(),
         mutations,
         coarse_lock_keys,
         progress,

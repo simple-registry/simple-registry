@@ -2,6 +2,7 @@
 //! that the engine either commits atomically or leaves entirely unapplied.
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
@@ -17,7 +18,10 @@ pub type Fingerprint = [u8; 32];
 
 /// The state a read observed, and the state its key must still be in at
 /// Prepare time.
-#[derive(Clone, Copy, Debug)]
+/// Spelled as the intent log has always spelled it: hex digits for an observed
+/// body, empty for an absent key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
 pub enum Expectation {
     /// The key held no object. A key that exists at Prepare conflicts,
     /// whatever its content.
@@ -26,16 +30,40 @@ pub enum Expectation {
     Present(Fingerprint),
 }
 
+impl From<Expectation> for String {
+    fn from(expected: Expectation) -> Self {
+        match expected {
+            Expectation::Absent => String::new(),
+            Expectation::Present(fingerprint) => hex::encode(fingerprint),
+        }
+    }
+}
+
+impl TryFrom<String> for Expectation {
+    type Error = hex::FromHexError;
+
+    fn try_from(spelling: String) -> Result<Self, Self::Error> {
+        if spelling.is_empty() {
+            return Ok(Expectation::Absent);
+        }
+        let mut fingerprint: Fingerprint = [0; 32];
+        hex::decode_to_slice(&spelling, &mut fingerprint)?;
+        Ok(Expectation::Present(fingerprint))
+    }
+}
+
 /// A single key read that the transaction depends on.
 ///
 /// If the key's state differs from `expected` at Prepare time, the executor
 /// aborts the transaction with a `Conflict` error and the caller retries with
 /// a fresh read.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Read {
     /// The storage key to observe.
     pub key: String,
-    /// The state the key must still be in at commit time.
+    /// The state the key must still be in at commit time. The wire name is the
+    /// one the intent log has always used.
+    #[serde(rename = "fingerprint")]
     pub expected: Expectation,
 }
 

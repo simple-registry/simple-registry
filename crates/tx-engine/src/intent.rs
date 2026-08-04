@@ -23,6 +23,8 @@ use uuid::Uuid;
 
 use angos_storage::Etag;
 
+use crate::transaction::Read;
+
 /// The operation variant recorded in an intent record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op")]
@@ -111,15 +113,6 @@ pub fn body_ref_key(id: Uuid, idx: usize) -> String {
     format!("{INTENT_BODIES_PREFIX}/{id}/{idx}")
 }
 
-/// A read dependency recorded in an intent.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ReadRecord {
-    pub key: String,
-    /// Hex-encoded content hash of the body observed at build time, empty when
-    /// the read recorded the key as absent.
-    pub fingerprint: String,
-}
-
 /// The complete intent record written to `.tx-log/<tx-id>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntentRecord {
@@ -131,7 +124,7 @@ pub struct IntentRecord {
     /// by the recovery loop.
     pub ttl_secs: u64,
     /// Read dependencies.
-    pub reads: Vec<ReadRecord>,
+    pub reads: Vec<Read>,
     /// Ordered mutations.
     pub mutations: Vec<MutationRecord>,
     /// Coarse lock keys captured at build time so recovery can reconstruct
@@ -204,6 +197,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::intent::{IntentRecord, MutationProgress, MutationRecord};
+    use crate::transaction::{Expectation, Fingerprint, Read};
 
     fn sample_intent(progress: Vec<MutationProgress>) -> IntentRecord {
         let mutations = (0..progress.len())
@@ -222,6 +216,102 @@ mod tests {
             coarse_lock_keys: vec![],
             progress,
         }
+    }
+
+    /// The intent log is durable, so a read's spelling is a stored format: hex
+    /// digits for an observed body, empty for an absent key, under the
+    /// `fingerprint` name. Both directions, so an intent any earlier angos
+    /// wrote still replays and one this build writes is still readable by a
+    /// peer running that build.
+    #[test]
+    fn a_stored_read_keeps_its_spelling() {
+        let hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let mut fingerprint: Fingerprint = [0; 32];
+        hex::decode_to_slice(hex, &mut fingerprint).unwrap();
+
+        let cases = [
+            (
+                Read {
+                    key: "k".to_string(),
+                    expected: Expectation::Present(fingerprint),
+                },
+                format!(r#"{{"key":"k","fingerprint":"{hex}"}}"#),
+            ),
+            (
+                Read {
+                    key: "k".to_string(),
+                    expected: Expectation::Absent,
+                },
+                r#"{"key":"k","fingerprint":""}"#.to_string(),
+            ),
+        ];
+
+        for (read, stored) in cases {
+            assert_eq!(
+                serde_json::to_string(&read).unwrap(),
+                stored,
+                "the read must keep the spelling the intent log already holds"
+            );
+            assert_eq!(
+                serde_json::from_str::<Read>(&stored).unwrap(),
+                read,
+                "a stored read must read back unchanged"
+            );
+        }
+    }
+
+    /// A fingerprint that is not 32 bytes of hex cannot have been written by any
+    /// angos, so refusing it keeps a corrupt record from replaying as a read the
+    /// executor would silently accept.
+    #[test]
+    fn a_malformed_stored_read_is_refused() {
+        for stored in [
+            r#"{"key":"k","fingerprint":"nothex"}"#,
+            r#"{"key":"k","fingerprint":"aabb"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Read>(stored).is_err(),
+                "a malformed fingerprint must not parse: {stored}"
+            );
+        }
+    }
+
+    /// A whole `.tx-log/<id>.json` body as an earlier angos wrote it, so the
+    /// record recovery replays from is checked end to end and not just the read
+    /// entry in isolation.
+    #[test]
+    fn a_stored_intent_record_still_replays() {
+        let hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let stored = format!(
+            r#"{{"id":"cfa8d910-641e-478a-8bd1-5718ac886223",
+                 "created_at":"2026-08-04T19:38:52.196719Z","ttl_secs":300,
+                 "reads":[{{"key":"present","fingerprint":"{hex}"}},
+                          {{"key":"absent","fingerprint":""}}],
+                 "mutations":[{{"op":"Put","key":"k0","body_ref":"b0","expected":null}}],
+                 "coarse_lock_keys":[],"progress":["Pending"]}}"#
+        );
+
+        let intent: IntentRecord =
+            serde_json::from_str(&stored).expect("a stored intent must still deserialize");
+
+        let mut fingerprint: Fingerprint = [0; 32];
+        hex::decode_to_slice(hex, &mut fingerprint).unwrap();
+        assert_eq!(
+            intent.reads,
+            vec![
+                Read {
+                    key: "present".to_string(),
+                    expected: Expectation::Present(fingerprint),
+                },
+                Read {
+                    key: "absent".to_string(),
+                    expected: Expectation::Absent,
+                },
+            ],
+            "both read spellings must survive the round trip"
+        );
+        assert_eq!(intent.ttl_secs, 300);
+        assert_eq!(intent.progress, vec![MutationProgress::Pending]);
     }
 
     #[test]
