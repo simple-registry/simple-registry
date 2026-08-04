@@ -12,6 +12,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::{self, StreamExt};
+use tracing::warn;
+
+use angos_storage::Error as StorageError;
 
 use crate::{
     oci::Namespace,
@@ -104,13 +107,22 @@ impl MultipartCleanup for BlobStore {
             let page_orphans = stream::iter(candidates)
                 .map(|(upload, startedat_path)| async move {
                     // A live session (its `startedat` marker exists) is not an
-                    // orphan.
+                    // orphan. Only absence proves it is gone: aborting on a
+                    // transient failure destroys a progressing upload's parts.
                     match self.object.head(&startedat_path).await {
                         Ok(_) => None,
-                        Err(_) => Some(OrphanMultipartUpload {
+                        Err(StorageError::NotFound) => Some(OrphanMultipartUpload {
                             key: upload.key,
                             upload_id: upload.upload_id,
                         }),
+                        Err(e) => {
+                            warn!(
+                                "Leaving multipart upload at {} for a later pass: its liveness \
+                                 probe failed: {e}",
+                                upload.key
+                            );
+                            None
+                        }
                     }
                 })
                 .buffer_unordered(ORPHAN_PROBE_CONCURRENCY)
@@ -144,6 +156,14 @@ impl MultipartCleanup for BlobStore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use angos_storage::{
+        BoxedReader, ByteStream, ChildrenPage, MultipartUploadPage, ObjectMeta, ObjectStore, Page,
+        PendingMultipartUpload,
+    };
+    use bytes::Bytes;
+
     use super::*;
 
     #[test]
@@ -217,5 +237,146 @@ mod tests {
     fn test_parse_upload_key_missing_uploads() {
         let result = parse_upload_key("v2/repositories/repo/blobs/sha256/abc/data");
         assert_eq!(result, None);
+    }
+
+    /// Reports one long-abandoned multipart upload and answers every `head`
+    /// with `head_result`, so a test can pin what each probe outcome means.
+    #[derive(Debug)]
+    struct OneStaleUpload {
+        key: String,
+        head_error: StorageError,
+    }
+
+    #[async_trait]
+    impl ObjectStore for OneStaleUpload {
+        async fn list_multipart_uploads(
+            &self,
+            _key_marker: Option<&str>,
+            _upload_id_marker: Option<&str>,
+        ) -> Result<MultipartUploadPage, StorageError> {
+            Ok(MultipartUploadPage {
+                uploads: vec![PendingMultipartUpload {
+                    key: self.key.clone(),
+                    upload_id: "upload-1".to_string(),
+                    initiated_at: Utc::now() - Duration::days(1),
+                }],
+                next_key_marker: None,
+                next_upload_id_marker: None,
+            })
+        }
+
+        async fn head(&self, _key: &str) -> Result<ObjectMeta, StorageError> {
+            Err(match &self.head_error {
+                StorageError::NotFound => StorageError::NotFound,
+                other => StorageError::Backend(other.to_string()),
+            })
+        }
+
+        async fn get(&self, _key: &str) -> Result<Vec<u8>, StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn get_stream(
+            &self,
+            _key: &str,
+            _offset: Option<u64>,
+        ) -> Result<(BoxedReader, u64), StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn put(&self, _key: &str, _data: Bytes) -> Result<(), StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn delete(&self, _key: &str) -> Result<(), StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn delete_prefix(&self, _prefix: &str) -> Result<(), StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn list(
+            &self,
+            _prefix: &str,
+            _n: u16,
+            _token: Option<String>,
+        ) -> Result<Page<String>, StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn list_children(
+            &self,
+            _prefix: &str,
+            _n: u16,
+            _token: Option<String>,
+            _start_after: Option<String>,
+        ) -> Result<ChildrenPage, StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn copy(&self, _source: &str, _destination: &str) -> Result<(), StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn create_upload(&self, _key: &str) -> Result<(), StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn write_upload(
+            &self,
+            _key: &str,
+            _body: ByteStream,
+            _len: Option<u64>,
+        ) -> Result<u64, StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn complete_upload(&self, _key: &str) -> Result<(), StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+        async fn abort_upload(&self, _key: &str) -> Result<(), StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
+    }
+
+    /// The abort is keyed and destroys every committed part, so a probe that
+    /// merely failed must not condemn the upload: only a missing marker proves
+    /// the session is gone.
+    #[tokio::test]
+    async fn a_failed_liveness_probe_does_not_orphan_a_live_upload() {
+        let namespace = Namespace::new("test-repo").unwrap();
+        let key = path_builder::upload_path(&namespace, "upload-uuid");
+        let store = BlobStore::new(
+            Arc::new(OneStaleUpload {
+                key,
+                head_error: StorageError::Backend("upstream is unavailable".to_string()),
+            }),
+            None,
+        );
+
+        let orphans = store
+            .list_orphan_multipart_uploads(Duration::hours(1))
+            .await
+            .expect("a failed probe must not fail the sweep");
+
+        assert!(
+            orphans.is_empty(),
+            "a transient probe failure must not condemn an upload, got {} orphan(s)",
+            orphans.len()
+        );
+    }
+
+    /// The counterpart: an absent marker still proves the session is gone, so
+    /// cleanup must not have been disabled along with the false positives.
+    #[tokio::test]
+    async fn an_absent_marker_still_orphans_a_stale_upload() {
+        let namespace = Namespace::new("test-repo").unwrap();
+        let key = path_builder::upload_path(&namespace, "upload-uuid");
+        let store = BlobStore::new(
+            Arc::new(OneStaleUpload {
+                key: key.clone(),
+                head_error: StorageError::NotFound,
+            }),
+            None,
+        );
+
+        let orphans = store
+            .list_orphan_multipart_uploads(Duration::hours(1))
+            .await
+            .expect("listing must succeed");
+
+        assert_eq!(orphans.len(), 1, "an absent marker must still be cleaned");
+        assert_eq!(orphans[0].key, key);
     }
 }
