@@ -55,13 +55,11 @@ pub async fn validate_oidc_token(
     verify_allowed_algorithm(provider, header.alg)?;
 
     let mut jwks = fetch_jwks(provider, client, cache).await?;
-    if jwks.from_cache && cached_jwks_misses_kid(&jwks.value, &header) {
-        info!(
-            "Cached JWKS for provider {} does not contain kid {:?}; refreshing",
-            provider.name(),
-            header.kid
-        );
-        jwks = refresh_jwks(provider, client, cache).await?;
+    if jwks.from_cache
+        && cached_jwks_misses_kid(&jwks.value, &header)
+        && let Some(refreshed) = refresh_jwks_rate_limited(provider, client, cache).await?
+    {
+        jwks = refreshed;
     }
 
     verify_jwt_with_header(token, &header, &jwks.value, provider_name, provider)
@@ -208,6 +206,18 @@ async fn get_jwks_url(
     Ok(oidc_config.jwks_uri)
 }
 
+/// Shortest interval between forced JWKS refetches for one provider. A cached
+/// JWKS missing the token's kid forces a refetch, so without a floor an
+/// unauthenticated client sending random kids drives one outbound fetch per
+/// request. The cost is that a key rotation can take this long to be picked up.
+const JWKS_REFRESH_COOLDOWN_SECS: u64 = 60;
+
+fn jwks_refresh_cooldown_key(provider: &dyn OidcProvider) -> String {
+    let provider_name = provider.name();
+    let issuer_hash = sha256_hex(&provider.base_config().issuer);
+    format!("oidc:{provider_name}:jwks-refresh:{issuer_hash}")
+}
+
 fn jwks_cache_key(provider: &dyn OidcProvider) -> String {
     let provider_name = provider.name();
     let issuer_hash = sha256_hex(&provider.base_config().issuer);
@@ -292,6 +302,38 @@ async fn fetch_jwks(
         info!("Fetched JWKS from {jwks_url}");
     }
     Ok(fetched)
+}
+
+/// Force a refetch unless one already ran inside
+/// [`JWKS_REFRESH_COOLDOWN_SECS`], returning `None` when it is suppressed so
+/// the caller keeps its cached JWKS and the token fails on the missing key.
+/// The marker is claimed before fetching, so a burst of unknown-kid requests
+/// costs one outbound fetch rather than one each.
+async fn refresh_jwks_rate_limited(
+    provider: &dyn OidcProvider,
+    client: &Client,
+    cache: &Cache,
+) -> Result<Option<CachedJson<Jwks>>, Error> {
+    let cooldown_key = jwks_refresh_cooldown_key(provider);
+    if cache
+        .retrieve_value(&cooldown_key)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        debug!(
+            "Skipping JWKS refresh for provider {}: one already ran within the cooldown",
+            provider.name()
+        );
+        return Ok(None);
+    }
+    let _ = cache
+        .store_value(&cooldown_key, "1", JWKS_REFRESH_COOLDOWN_SECS)
+        .await;
+
+    info!("Refreshing JWKS for provider {}", provider.name());
+    refresh_jwks(provider, client, cache).await.map(Some)
 }
 
 /// Force a fresh JWKS fetch, bypassing the cache under a short timeout. Used

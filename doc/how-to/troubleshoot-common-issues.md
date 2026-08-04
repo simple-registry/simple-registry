@@ -87,7 +87,7 @@ Useful modules:
    ```bash
    curl https://token.actions.githubusercontent.com/.well-known/jwks
    ```
-   If a token uses a new `kid`, Angos refreshes JWKS once outside the cache before rejecting it.
+   If a token uses a new `kid`, Angos refreshes JWKS once outside the cache before rejecting it, and at most once a minute per provider so unknown kids cannot amplify into provider traffic. A key rotation can therefore take up to a minute to be picked up.
 
 ### OIDC Provider Unavailable
 

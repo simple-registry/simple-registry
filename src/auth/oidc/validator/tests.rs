@@ -435,6 +435,50 @@ async fn test_validate_oidc_token_refreshes_jwks_once_when_cached_kid_is_missing
     assert!(cached_jwks.keys.iter().any(|key| key.kid() == Some(KID)));
 }
 
+/// An unknown kid forces a refetch, so without a cooldown a client sending
+/// random kids drives one outbound `IdP` fetch per request. The second attempt
+/// must be served from the cached JWKS and fail on the missing key.
+#[tokio::test]
+async fn unknown_kids_cost_one_jwks_fetch_per_cooldown_not_one_per_request() {
+    let mock_server = MockServer::start().await;
+
+    // Two unknown-kid requests, but the JWKS may be fetched only once.
+    Mock::given(method("GET"))
+        .and(path("/.well-known/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(static_jwks_response()))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(build_test_provider_config(&mock_server.uri()));
+    let client = Client::new();
+    let cache = cache::Config::Memory.to_backend().unwrap();
+    let stale_jwks = Jwks {
+        keys: vec![Jwk::Ec {
+            key_use: Some("sig".to_string()),
+            kid: Some("old-kid".to_string()),
+            alg: Some("ES256".to_string()),
+            x: jwk_x().to_string(),
+            y: jwk_y().to_string(),
+        }],
+    };
+    cache
+        .store(&jwks_cache_key(&provider), &stale_jwks, 3600)
+        .await
+        .unwrap();
+
+    let claims = valid_claims(&mock_server.uri(), "test-audience");
+    for kid in ["attacker-kid-1", "attacker-kid-2"] {
+        let token = make_token(&claims, kid);
+        let result =
+            validate_oidc_token("test-provider", &provider, &token, &client, cache.as_ref()).await;
+        assert!(
+            matches!(result, Err(Error::Unauthorized(_))),
+            "an unknown kid must be rejected, got {result:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_validate_oidc_token_returns_unauthorized_when_refreshed_jwks_still_misses_kid() {
     let mock_server = MockServer::start().await;
