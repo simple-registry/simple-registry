@@ -31,5 +31,5 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["io-util", "sync", "time", "macros", "rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["io-util", "sync", "time", "macros", "net", "rt", "rt-multi-thread"] }
 wiremock = { workspace = true }

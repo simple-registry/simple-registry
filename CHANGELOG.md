@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Resuming a child listing from a directory name on the S3 backend no longer re-emits that directory forever or skips siblings sorting between it and its delimiter, so paging through a namespace's children terminates and returns every child.
 - An upstream or storage outage is no longer reported to clients as a missing image: a non-404 upstream status on a blob fetch and a backend fault on a local manifest read now surface as errors instead of collapsing into 404, and a routine manifest miss is logged at debug rather than error.
 - A cached upstream token now indexes the URL it served, so requests to a token-auth upstream stop paying an extra unauthenticated round trip and 401 for every URL other than the one that first obtained the token.
+- A streamed blob download from S3 is no longer cut off once the per-attempt timeout elapses, so pulling a large layer over a slow connection completes; a transfer that stalls is still ended by a read timeout that resets on every read.
 
 ## 1.4.4
 

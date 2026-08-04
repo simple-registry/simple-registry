@@ -973,7 +973,10 @@ fn ensure_trailing_slash(mut s: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use bytesize::ByteSize;
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path, query_param},
@@ -1496,5 +1499,84 @@ mod tests {
             "an idempotent PUT must still retry on a transport error",
         )
         .await;
+    }
+
+    /// Serves one request: headers, then the body in chunks spaced under the
+    /// read timeout but totalling more than the per-attempt timeout. Returns
+    /// the address to point a backend at.
+    async fn trickling_body_server(body: &'static [u8]) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+            socket.write_all(head.as_bytes()).await.unwrap();
+            for byte in body {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                socket.write_all(&[*byte]).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+        });
+        addr
+    }
+
+    /// A streamed download carries no whole-request deadline: the body is
+    /// consumed by the caller, so bounding the request bounds the client's
+    /// download speed. A slow but progressing transfer must complete.
+    #[tokio::test]
+    async fn a_slow_streaming_download_outlives_the_attempt_timeout() {
+        let body: &[u8] = b"0123456789";
+        let addr = trickling_body_server(body).await;
+        let backend = Backend::new(&fast_retry_config(format!("http://{addr}"))).unwrap();
+
+        let mut result = backend
+            .get_object("slow/blob", None)
+            .await
+            .expect("headers");
+        let mut downloaded = Vec::new();
+        result
+            .body
+            .read_to_end(&mut downloaded)
+            .await
+            .expect("a body still flowing must not be severed by the per-attempt timeout");
+
+        assert_eq!(downloaded, body);
+    }
+
+    /// Dropping the whole-request deadline must not leave a stalled download
+    /// hanging: the client's read timeout resets per read, so a body that
+    /// stops arriving still fails.
+    #[tokio::test]
+    async fn a_stalled_streaming_download_still_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            // Never sends the body.
+            tokio::time::sleep(Duration::from_mins(1)).await;
+        });
+
+        let backend = Backend::new(&fast_retry_config(format!("http://{addr}"))).unwrap();
+        let mut result = backend
+            .get_object("stalled/blob", None)
+            .await
+            .expect("headers");
+        let mut downloaded = Vec::new();
+        let error = result
+            .body
+            .read_to_end(&mut downloaded)
+            .await
+            .expect_err("a stalled body must not hang forever");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other, "got: {error:?}");
     }
 }
