@@ -145,11 +145,11 @@ async fn rewrite_link(store: &Store, blob_store: &BlobStore, key: &str) -> Resul
     let (_, plan) = store
         .update_with_payload(
             &[key.to_string()],
-            |snapshots| async move {
-                let Some(snapshot) = snapshots.first().filter(|snapshot| snapshot.present) else {
+            |bodies| async move {
+                let Some(body) = bodies.first().and_then(Option::as_ref) else {
                     return Ok((Vec::new(), Plan::Vanished));
                 };
-                let (metadata, plan) = match classify(&snapshot.body) {
+                let (metadata, plan) = match classify(body) {
                     LinkForm::Unrecognized => return Ok((Vec::new(), Plan::Unrecognized)),
                     LinkForm::Legacy(target) => {
                         let media_type = link_media_type(blob_store, key, &target).await;
