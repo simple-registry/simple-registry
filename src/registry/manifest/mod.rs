@@ -5,7 +5,7 @@ mod response;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
-use parse::parse_and_validate_manifest;
+use parse::parse_pushed_manifest;
 pub use parse::{ParsedManifestDigests, parse_manifest_digests, recover_media_type};
 pub use response::{GetManifestResponse, HeadManifestResponse, PutManifestResponse};
 use response::{ManifestBody, ManifestMeta};
@@ -496,7 +496,7 @@ impl Registry {
             reference_policy,
             created_at,
         } = *write;
-        let mut manifest = parse_and_validate_manifest(body, content_type)?;
+        let mut manifest = parse_pushed_manifest(body, content_type)?;
         // A digest reference fixes the algorithm to verify against; a tag push has
         // no client-chosen algorithm, so the manifest lands under its canonical
         // sha256 digest.

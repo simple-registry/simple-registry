@@ -477,6 +477,36 @@ async fn put_manifest_rejects_references_owned_by_another_namespace() {
     .await;
 }
 
+/// The image spec pins `schemaVersion` to 2, and a manifest angos accepts
+/// without one links no layers, leaving its blobs to be reclaimed as orphans.
+#[tokio::test]
+async fn put_manifest_rejects_a_foreign_schema_version() {
+    let case = FSRegistryTestCase::new();
+    let namespace = Namespace::new("test-repo").unwrap();
+    let body = serde_json::to_vec(&json!({
+        "schemaVersion": 1,
+        "mediaType": IMAGE_MANIFEST_MEDIA_TYPE,
+    }))
+    .unwrap();
+
+    let error = case
+        .registry()
+        .put_manifest(
+            &namespace,
+            &Reference::Tag(Tag::new("legacy").unwrap()),
+            Some(&MediaType::new(IMAGE_MANIFEST_MEDIA_TYPE).unwrap()),
+            &body,
+        )
+        .await
+        .err()
+        .expect("a schemaVersion other than 2 must not be stored");
+
+    let Error::ManifestInvalid(message) = error else {
+        panic!("expected ManifestInvalid, got {error:?}");
+    };
+    assert!(message.contains("schemaVersion"), "message: {message}");
+}
+
 #[tokio::test]
 async fn put_manifest_allows_missing_subject_reference() {
     for_each_backend(async |test_case| {
