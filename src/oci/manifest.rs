@@ -509,7 +509,10 @@ mod tests {
             );
         }
 
-        for (name, body) in [("docker manifest list", docker_list), ("oci index", oci_index)] {
+        for (name, body) in [
+            ("docker manifest list", docker_list),
+            ("oci index", oci_index),
+        ] {
             let raw = serde_json::to_vec(&body).unwrap();
             let manifest = Manifest::from_pushed(&raw)
                 .unwrap_or_else(|e| panic!("{name} must be accepted on push: {e}"));

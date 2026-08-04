@@ -59,6 +59,20 @@ mod tests {
     }
 
     #[test]
+    fn tmp_probe_wire_form() {
+        let all = vec![
+            LinkKind::Blob(sha(HASH_A)),
+            LinkKind::Tag(Tag::new("v1").unwrap()),
+            LinkKind::Digest(sha(HASH_A)),
+            LinkKind::Layer(sha(HASH_A)),
+            LinkKind::Config(sha(HASH_A)),
+            LinkKind::Referrer(sha(HASH_A), sha(HASH_B)),
+            LinkKind::Manifest(sha(HASH_A), sha(HASH_B)),
+        ];
+        println!("PROBE {}", serde_json::to_string(&all).unwrap());
+    }
+
+    #[test]
     fn test_from_reference() {
         let tag = Reference::Tag(Tag::new("tag").unwrap());
         let tag_link = LinkKind::Tag(Tag::new("tag").unwrap());
