@@ -164,7 +164,7 @@ Prune is the config-and-time command: run it against the same configuration file
 |---------------------|-------|---------------------------------------------------------------------------|
 | `--dry-run`         | `-d`  | Preview what would be deleted without changes                            |
 | `--uploads <dur>`   | `-u`  | Age window for upload-lifecycle reclamation (default `1h`)               |
-| `--concurrency <N>` |       | Namespaces, uploads, blobs, or shards checked concurrently per sweep (default 25) |
+| `--concurrency <N>` |       | Namespaces, uploads, blobs, or shards checked concurrently per sweep (default 25); each namespace adds a small fixed tag-read fan-out of its own |
 
 **Examples:**
 

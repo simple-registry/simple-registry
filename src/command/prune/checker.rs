@@ -20,6 +20,9 @@ use crate::{
 };
 
 /// Fan-out for the per-tag link-metadata reads feeding the retention rankings.
+/// Fixed rather than derived from `--concurrency`, which already bounds the
+/// namespace walk driving this checker: deriving both from one knob multiplies
+/// them into that many in-flight reads squared.
 const TAG_METADATA_CONCURRENCY: usize = 16;
 
 struct TagWithMetadata {
@@ -31,7 +34,6 @@ pub struct RetentionChecker {
     metadata_store: Arc<MetadataStore>,
     resolver: Arc<RepositoryResolver>,
     global_retention_policy: Option<Arc<RetentionPolicy>>,
-    tag_metadata_concurrency: usize,
 }
 
 fn has_link_kind(
@@ -279,16 +281,7 @@ impl RetentionChecker {
             metadata_store,
             resolver,
             global_retention_policy,
-            tag_metadata_concurrency: TAG_METADATA_CONCURRENCY,
         }
-    }
-
-    /// Override the per-tag link-read fan-out; the prune command derives it from
-    /// its `--concurrency` option.
-    #[must_use]
-    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
-        self.tag_metadata_concurrency = concurrency.max(1);
-        self
     }
 }
 
@@ -328,7 +321,7 @@ impl RetentionChecker {
                     metadata,
                 })
             })
-            .try_buffered(self.tag_metadata_concurrency)
+            .try_buffered(TAG_METADATA_CONCURRENCY)
             .try_collect()
             .await
     }
@@ -550,9 +543,16 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet},
         str::FromStr,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration as StdDuration,
     };
 
+    use angos_storage::{
+        Error as StorageError, ObjectStore,
+        test_util::{HookedStore, StoreHook, StoreOp},
+    };
     use chrono::{TimeZone, Utc};
+    use tokio::time::sleep;
     use url::Url;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
@@ -576,7 +576,8 @@ mod tests {
             metadata_store::{BlobIndexOperation, LinkOperation},
             repository_resolver::RepositoryResolver,
             test_utils::{
-                self, FSRegistryTestCase, RegistryTestCase, for_each_backend, put_blob_direct,
+                self, FSRegistryTestCase, RegistryTestCase, for_each_backend, metadata_store_over,
+                put_blob_direct,
             },
         },
     };
@@ -1527,5 +1528,77 @@ mod tests {
             );
         })
         .await;
+    }
+
+    /// Records the peak number of overlapping tag-link reads, holding each one
+    /// open long enough for the whole buffered batch to pile up.
+    struct PeakTagLinkReads {
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl StoreHook for PeakTagLinkReads {
+        async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+            let StoreOp::Get { key } = op else {
+                return Ok(());
+            };
+            if !key.contains("/_manifests/tags/") {
+                return Ok(());
+            }
+            let overlapping = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(overlapping, Ordering::SeqCst);
+            sleep(StdDuration::from_millis(20)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The namespace walk is already parallel, so a per-namespace fan-out
+    /// derived from the same `--concurrency` would square the in-flight reads.
+    #[tokio::test]
+    async fn tag_metadata_reads_stay_within_the_fixed_fan_out() {
+        let case = FSRegistryTestCase::new();
+        let namespace = Namespace::new("test-repo/fanout").unwrap();
+        let links: Vec<LinkOperation> = (0..TAG_METADATA_CONCURRENCY * 3)
+            .map(|i| {
+                LinkOperation::create(
+                    LinkKind::Tag(Tag::new(&format!("v{i}")).unwrap()),
+                    dummy_digest(),
+                )
+            })
+            .collect();
+        case.metadata_store()
+            .update_links(&namespace, &links)
+            .await
+            .unwrap();
+
+        let peak = Arc::new(AtomicUsize::new(0));
+        let inner: Arc<dyn ObjectStore> = case.metadata_store().store().object_store().clone();
+        let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+            inner,
+            PeakTagLinkReads {
+                in_flight: Arc::new(AtomicUsize::new(0)),
+                peak: peak.clone(),
+            },
+        ));
+        let checker = RetentionChecker::new(
+            metadata_store_over(hooked),
+            Arc::new(RepositoryResolver::new(Arc::new(HashMap::new())).unwrap()),
+            None,
+        );
+
+        let tags = checker.fetch_tag_metadata(&namespace).await.unwrap();
+
+        assert_eq!(tags.len(), links.len(), "every tag must be read");
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(
+            peak > 1,
+            "the reads must overlap, otherwise the bound is vacuous, got {peak}"
+        );
+        assert!(
+            peak <= TAG_METADATA_CONCURRENCY,
+            "tag reads must stay within the fixed fan-out, got {peak}"
+        );
     }
 }
