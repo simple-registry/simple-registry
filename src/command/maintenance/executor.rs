@@ -457,6 +457,7 @@ impl Executor {
             // time, so the push carries the same last-writer-wins version as the
             // event path.
             source_ts: None,
+            subject: None,
         };
         self.enqueue_replication(build_envelope(&payload)).await
     }
@@ -479,6 +480,7 @@ impl Executor {
             digest: None,
             kind: REPLICATION_DELETE_MANIFEST_KIND.to_string(),
             source_ts: Some(Utc::now().to_rfc3339()),
+            subject: None,
         };
         // The prune envelope keys on the bare reference so repeated runs
         // coalesce instead of stacking one fresh-ts job per run.
@@ -1282,6 +1284,7 @@ mod tests {
             digest: None,
             kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
             source_ts: None,
+            subject: None,
         };
         build_envelope(&payload).unwrap()
     }

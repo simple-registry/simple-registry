@@ -33,6 +33,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - An upstream that refuses a request after angos refreshes its token now reports a denial rather than an opaque failure, so a replication job whose credential lacks the scope dead-letters immediately instead of retrying to its attempt limit, and reads classify it the same way writes already did.
 - Raising `angos prune --concurrency` no longer multiplies into that many in-flight metadata reads squared, since the per-namespace tag reads keep their own fixed fan-out instead of borrowing the knob that already bounds the namespace walk.
 - A client header listed in an authorization webhook's `forward_headers` now reaches the webhook with every one of its values instead of just the first, and the extra values are part of the decision cache key.
+- A replication push whose blob or child-manifest transfer fails now lets its siblings finish instead of dropping them mid-transfer, which left their upload sessions open on the downstream until its own garbage collection.
+- A replication delete job now carries the referrer's subject, so a retry that finds the manifest already gone downstream can still drop its stale descriptor from the OCI 1.0 referrers fallback index.
 
 ## 1.4.4
 

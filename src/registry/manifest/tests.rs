@@ -4032,9 +4032,10 @@ mod dispatch_replication_tests {
     use chrono::{DateTime, Duration, Utc};
     use regex::Regex;
 
+    use super::{DispatchTarget, MISSING_SUBJECT_DIGEST, create_test_manifest_with_subject};
     use crate::{
         jobs::{Queue, store::JobStore},
-        oci::{Digest, Namespace, Tag},
+        oci::{Digest, Namespace, Reference, Tag},
         registry::{
             Registry, RegistryConfig, Repository,
             test_utils::{
@@ -4123,9 +4124,10 @@ mod dispatch_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_PUSH_MANIFEST_KIND,
-                Some(&tag),
-                Some(&digest),
+                DispatchTarget::Push {
+                    tag: Some(&tag),
+                    digest: &digest,
+                },
                 None,
             )
             .await;
@@ -4156,9 +4158,10 @@ mod dispatch_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_PUSH_MANIFEST_KIND,
-                Some(&tag),
-                Some(&digest),
+                DispatchTarget::Push {
+                    tag: Some(&tag),
+                    digest: &digest,
+                },
                 None,
             )
             .await;
@@ -4199,9 +4202,10 @@ mod dispatch_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_PUSH_MANIFEST_KIND,
-                Some(&tag),
-                Some(&digest),
+                DispatchTarget::Push {
+                    tag: Some(&tag),
+                    digest: &digest,
+                },
                 None,
             )
             .await;
@@ -4229,6 +4233,55 @@ mod dispatch_replication_tests {
         );
     }
 
+    /// Once the manifest is gone neither the job nor its retries can name the
+    /// subject still listing the referrer, so the job has to carry it.
+    #[tokio::test]
+    async fn a_digest_delete_carries_the_referrer_subject() {
+        init_for_tests();
+        let (registry, job_store, _dir) = build_registry();
+
+        let namespace = Namespace::new(NAMESPACE).unwrap();
+        let (body, media_type) = create_test_manifest_with_subject(&registry, &namespace).await;
+        let referrer = registry
+            .put_manifest(
+                &namespace,
+                &Reference::Tag(Tag::new("v1").unwrap()),
+                Some(&media_type),
+                &body,
+            )
+            .await
+            .expect("the referrer manifest must push")
+            .digest;
+
+        registry
+            .delete_manifest(None, None, &namespace, &Reference::Digest(referrer))
+            .await
+            .expect("the digest delete must succeed");
+
+        // The push enqueued by `put_manifest` is still pending alongside it.
+        let mut deletes = Vec::new();
+        for key in job_store
+            .list_pending(Queue::Replication, 16)
+            .await
+            .unwrap()
+        {
+            let envelope = job_store
+                .read_pending(Queue::Replication, &key)
+                .await
+                .unwrap();
+            let payload: ReplicationPushPayload =
+                serde_json::from_value(envelope.payload).expect("decode payload");
+            if payload.kind == REPLICATION_DELETE_MANIFEST_KIND {
+                deletes.push(payload.subject);
+            }
+        }
+        assert_eq!(
+            deletes,
+            vec![Some(MISSING_SUBJECT_DIGEST.to_string())],
+            "the delete job must carry the subject read before the manifest went away"
+        );
+    }
+
     /// A caller-provided timestamp (an inbound replicated delete's author
     /// time) propagates verbatim; a re-stamped `now()` would let the bounced
     /// delete outrank a recreate authored in between.
@@ -4246,9 +4299,7 @@ mod dispatch_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_DELETE_MANIFEST_KIND,
-                Some(&tag),
-                None,
+                DispatchTarget::TagDelete { tag: &tag },
                 Some(author_ts),
             )
             .await;
@@ -4277,9 +4328,10 @@ mod dispatch_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_PUSH_MANIFEST_KIND,
-                Some(&tag),
-                Some(&digest),
+                DispatchTarget::Push {
+                    tag: Some(&tag),
+                    digest: &digest,
+                },
                 None,
             )
             .await;
@@ -4311,9 +4363,10 @@ mod dispatch_replication_tests {
             .dispatch_replication(
                 repository,
                 &namespace,
-                REPLICATION_PUSH_MANIFEST_KIND,
-                Some(&tag),
-                Some(&digest),
+                DispatchTarget::Push {
+                    tag: Some(&tag),
+                    digest: &digest,
+                },
                 None,
             )
             .await;

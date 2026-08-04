@@ -374,6 +374,7 @@ mod tests {
             digest: None,
             kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
             source_ts: None,
+            subject: None,
         }
     }
 

@@ -51,6 +51,7 @@ fn sample_payload() -> ReplicationPushPayload {
         ),
         kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
         source_ts: Some("2026-06-03T00:00:00Z".to_string()),
+        subject: None,
     }
 }
 
@@ -517,6 +518,7 @@ async fn execute_push_resolves_tag_past_the_link_cache() {
         digest: Some(stale_digest.to_string()),
         kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
         source_ts: Some("2026-06-03T00:00:00Z".to_string()),
+        subject: None,
     };
     let envelope = build_envelope(&payload).unwrap();
     handler.execute(&envelope).await.unwrap();

@@ -54,6 +54,26 @@ struct StoreManifest<'a> {
     created_at: Option<DateTime<Utc>>,
 }
 
+/// What a replication job addresses. Each variant carries exactly the
+/// coordinates its job kind uses, so a delete cannot be dispatched with a
+/// push's shape.
+pub enum DispatchTarget<'a> {
+    /// The digest is authoritative; the tag is the push's path tag, absent for
+    /// a by-digest push.
+    Push {
+        tag: Option<&'a Tag>,
+        digest: &'a Digest,
+    },
+    /// The receiver keys off the tag, and the manifest itself stays.
+    TagDelete { tag: &'a Tag },
+    /// Carries the referrer's subject so a retry can still prune the
+    /// downstream fallback index.
+    DigestDelete {
+        digest: &'a Digest,
+        subject: Option<&'a Digest>,
+    },
+}
+
 fn manifest_event(
     kind: EventKind,
     namespace: &Namespace,
@@ -608,6 +628,10 @@ impl Registry {
         let events = delete_events(namespace, repository, digest_str, reference, actor);
         self.dispatch_events(&events).await?;
 
+        // Read while the manifest is still here: once gone, neither this job nor
+        // its retries can name the subject holding the referrer's descriptor.
+        let subject = self.referrer_subject(resolved_repository, reference).await;
+
         // A digest delete cascades to every pointing tag; the scan, the plan and
         // the commit run together under the blob-data lock. LWW guarding of a
         // replicated delete happens in the link transaction planner.
@@ -615,11 +639,12 @@ impl Registry {
             .commit_manifest_delete(resolved_repository, namespace, reference, source_ts)
             .await?;
 
-        // For a tag delete the receiver keys off `payload.tag`, so no digest
-        // is carried.
-        let (tag, dispatch_digest) = match reference {
-            Reference::Tag(tag) => (Some(tag), None),
-            Reference::Digest(digest) => (None, Some(digest)),
+        let target = match reference {
+            Reference::Tag(tag) => DispatchTarget::TagDelete { tag },
+            Reference::Digest(digest) => DispatchTarget::DigestDelete {
+                digest,
+                subject: subject.as_ref(),
+            },
         };
         // Webhook events fire unconditionally; only the replication
         // dispatch is gated on a real removal. A replicated delete forwards
@@ -633,18 +658,28 @@ impl Registry {
                 .replication
                 .iter()
                 .filter(|downstream| client_initiated || downstream.prune);
-            self.dispatch_replication_to(
-                downstreams,
-                namespace,
-                REPLICATION_DELETE_MANIFEST_KIND,
-                tag,
-                dispatch_digest,
-                source_ts,
-            )
-            .await;
+            self.dispatch_replication_to(downstreams, namespace, target, source_ts)
+                .await;
         }
 
         Ok(())
+    }
+
+    /// Subject of the referrer manifest at `reference`, for the delete job to
+    /// carry. Only a replicated delete has a fallback index to prune.
+    async fn referrer_subject(
+        &self,
+        repository: Option<&Repository>,
+        reference: &Reference,
+    ) -> Option<Digest> {
+        let Reference::Digest(digest) = reference else {
+            return None;
+        };
+        if repository.is_none_or(|repository| repository.replication.is_empty()) {
+            return None;
+        }
+        let body = self.blob_store.read(digest).await.ok()?;
+        parse_manifest_digests(&body, None).ok()?.subject
     }
 
     /// Whether the reference counted as present before the delete, gating the
@@ -1043,9 +1078,10 @@ impl Registry {
         self.dispatch_replication(
             repository,
             namespace,
-            REPLICATION_PUSH_MANIFEST_KIND,
-            path_tag,
-            Some(digest),
+            DispatchTarget::Push {
+                tag: path_tag,
+                digest,
+            },
             None,
         )
         .await;
@@ -1054,9 +1090,10 @@ impl Registry {
             self.dispatch_replication(
                 repository,
                 namespace,
-                REPLICATION_PUSH_MANIFEST_KIND,
-                Some(tag),
-                Some(digest),
+                DispatchTarget::Push {
+                    tag: Some(tag),
+                    digest,
+                },
                 None,
             )
             .await;
@@ -1071,23 +1108,14 @@ impl Registry {
         &self,
         repository: Option<&Repository>,
         namespace: &Namespace,
-        kind: &str,
-        tag: Option<&Tag>,
-        digest: Option<&Digest>,
+        target: DispatchTarget<'_>,
         source_ts: Option<DateTime<Utc>>,
     ) {
         let Some(repository) = repository else {
             return;
         };
-        self.dispatch_replication_to(
-            repository.replication.iter(),
-            namespace,
-            kind,
-            tag,
-            digest,
-            source_ts,
-        )
-        .await;
+        self.dispatch_replication_to(repository.replication.iter(), namespace, target, source_ts)
+            .await;
     }
 
     /// [`Registry::dispatch_replication`] over a caller-selected downstream
@@ -1097,9 +1125,7 @@ impl Registry {
         &self,
         downstreams: impl Iterator<Item = &'a ReplicationDownstream>,
         namespace: &Namespace,
-        kind: &str,
-        tag: Option<&Tag>,
-        digest: Option<&Digest>,
+        target: DispatchTarget<'_>,
         source_ts: Option<DateTime<Utc>>,
     ) {
         // Receiver-side last-writer-wins timestamp: authoritative for a DELETE;
@@ -1108,6 +1134,20 @@ impl Registry {
         // propagates verbatim: re-stamping `now()` would let the bounced delete
         // outrank (and destroy) a recreate that landed in between.
         let source_ts = source_ts.unwrap_or_else(Utc::now).to_rfc3339();
+        let (kind, tag, digest, subject) = match target {
+            DispatchTarget::Push { tag, digest } => {
+                (REPLICATION_PUSH_MANIFEST_KIND, tag, Some(digest), None)
+            }
+            DispatchTarget::TagDelete { tag } => {
+                (REPLICATION_DELETE_MANIFEST_KIND, Some(tag), None, None)
+            }
+            DispatchTarget::DigestDelete { digest, subject } => (
+                REPLICATION_DELETE_MANIFEST_KIND,
+                None,
+                Some(digest),
+                subject,
+            ),
+        };
 
         // The per-downstream enqueues run concurrently: each one is an index
         // GET plus a CAS transaction, and this awaits inside the client's
@@ -1122,6 +1162,7 @@ impl Registry {
                     digest: digest.map(ToString::to_string),
                     kind: kind.to_string(),
                     source_ts: Some(source_ts.clone()),
+                    subject: subject.map(ToString::to_string),
                 };
                 async move {
                     // Build + enqueue as one fallible step so failures share the warn + metric path.
