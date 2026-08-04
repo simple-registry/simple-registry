@@ -25,10 +25,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use tokio::time::sleep;
 use tracing::warn;
 
-use angos_tx_engine::{
-    INTENT_LOG_PREFIX, StorageError,
-    intent::{IntentRecord, MutationRecord},
-};
+use angos_tx_engine::{INTENT_LOG_PREFIX, StorageError, intent::IntentRecord};
 
 use crate::{
     command::maintenance::{
@@ -365,7 +362,7 @@ impl From<&IntentRecord> for CachedIntent {
         let touched_keys = intent
             .mutations
             .iter()
-            .flat_map(MutationRecord::all_keys)
+            .flat_map(|planned| planned.record.all_keys())
             .map(str::to_string)
             .collect();
         Self {

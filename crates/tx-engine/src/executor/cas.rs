@@ -174,7 +174,7 @@ impl CasExecutor {
     ///   `Err(Error::PartialCommit)` is returned so the caller skips `reap`.
     async fn apply_all(&self, intent: &mut IntentRecord) -> Result<(), Error> {
         for idx in 0..intent.mutations.len() {
-            let mutation = intent.mutations[idx].clone();
+            let mutation = intent.mutations[idx].record.clone();
             match apply_cas(self.store.as_ref(), &mutation, ApplyMode::Abort).await {
                 Ok(()) => stamp_applied(self.store.as_ref(), intent, idx).await,
                 Err(Error::Precondition) => {

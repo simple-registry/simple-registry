@@ -84,13 +84,13 @@ impl MutationRecord {
 
 /// Per-mutation apply progress recorded in the intent log.
 ///
-/// Parallel to `IntentRecord::mutations`: one entry per mutation. `Pending`
+/// Carried by the [`PlannedMutation`] it belongs to. `Pending`
 /// means the mutation has not yet been confirmed applied; `Applied` means
 /// the engine observed a successful apply. Only the discriminant matters:
 /// recovery and `any_applied` inspect `Applied` to decide replay-forward vs
 /// rollback and to skip already-applied slots, but the value carries no
 /// payload.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum MutationProgress {
     Pending,
     Applied,
@@ -113,8 +113,18 @@ pub fn body_ref_key(id: Uuid, idx: usize) -> String {
     format!("{INTENT_BODIES_PREFIX}/{id}/{idx}")
 }
 
+/// One mutation of an intent together with how far it has been applied.
+/// Recovery reasons about the pair, so they travel as one value instead of two
+/// arrays whose lengths could only ever agree by convention.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlannedMutation {
+    pub record: MutationRecord,
+    pub progress: MutationProgress,
+}
+
 /// The complete intent record written to `.tx-log/<tx-id>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "StoredIntent")]
 pub struct IntentRecord {
     /// Unique transaction identifier.
     pub id: Uuid,
@@ -125,18 +135,80 @@ pub struct IntentRecord {
     pub ttl_secs: u64,
     /// Read dependencies.
     pub reads: Vec<Read>,
-    /// Ordered mutations.
-    pub mutations: Vec<MutationRecord>,
+    /// Ordered mutations, each carrying its own apply progress. Initialised to
+    /// `Pending` when the intent is first written and stamped to `Applied`
+    /// after each successful apply; recovery reads them to decide
+    /// replay-forward vs rollback (any `Applied` entry implies the transaction
+    /// is committed).
+    pub mutations: Vec<PlannedMutation>,
     /// Coarse lock keys captured at build time so recovery can reconstruct
     /// the full lock set when reclaiming a stale intent.
-    #[serde(default)]
     pub coarse_lock_keys: Vec<String>,
-    /// Per-mutation apply progress, length-matched to `mutations`. Initialised
-    /// to `Pending` for every mutation when the intent is first written and
-    /// stamped to `Applied` after each successful apply. Recovery uses this
-    /// vector to decide replay-forward vs rollback (any `Applied` entry implies
-    /// the transaction is committed).
-    pub progress: Vec<MutationProgress>,
+}
+
+/// A mutation as a stored intent may hold it: paired with its own progress,
+/// or bare beside a top-level `progress` array, which is how every angos before
+/// the pairing wrote it.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredMutation {
+    Paired(PlannedMutation),
+    Bare(MutationRecord),
+}
+
+/// The read side of `.tx-log/`, accepting both shapes so a record written
+/// before the pairing still replays. Writing goes through the derive on
+/// [`IntentRecord`], so new records carry the paired shape.
+///
+/// TODO: drop this type in a future minor release
+#[derive(Deserialize)]
+struct StoredIntent {
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    ttl_secs: u64,
+    reads: Vec<Read>,
+    mutations: Vec<StoredMutation>,
+    #[serde(default)]
+    coarse_lock_keys: Vec<String>,
+    #[serde(default)]
+    progress: Option<Vec<MutationProgress>>,
+}
+
+impl TryFrom<StoredIntent> for IntentRecord {
+    type Error = String;
+
+    fn try_from(stored: StoredIntent) -> Result<Self, Self::Error> {
+        let id = stored.id;
+        // A bare mutation draws its progress from the companion array, in order.
+        // Running out either way means the record cannot be replayed faithfully,
+        // so it is refused rather than padded or truncated.
+        let mut legacy_progress = stored.progress.unwrap_or_default().into_iter();
+        let mutations = stored
+            .mutations
+            .into_iter()
+            .map(|stored| match stored {
+                StoredMutation::Paired(planned) => Ok(planned),
+                StoredMutation::Bare(record) => legacy_progress
+                    .next()
+                    .map(|progress| PlannedMutation { record, progress })
+                    .ok_or_else(|| format!("intent {id} has more mutations than progress slots")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if legacy_progress.next().is_some() {
+            return Err(format!(
+                "intent {id} has more progress slots than mutations"
+            ));
+        }
+
+        Ok(Self {
+            id,
+            created_at: stored.created_at,
+            ttl_secs: stored.ttl_secs,
+            reads: stored.reads,
+            mutations,
+            coarse_lock_keys: stored.coarse_lock_keys,
+        })
+    }
 }
 
 impl IntentRecord {
@@ -169,25 +241,31 @@ impl IntentRecord {
     /// applied (derived from `progress`).
     #[must_use]
     pub fn any_applied(&self) -> bool {
-        self.progress
+        self.mutations
             .iter()
-            .any(|p| matches!(p, MutationProgress::Applied))
+            .any(|planned| matches!(planned.progress, MutationProgress::Applied))
+    }
+
+    /// How far mutation `idx` has been applied, or `None` past the end.
+    #[must_use]
+    pub fn progress(&self, idx: usize) -> Option<MutationProgress> {
+        self.mutations.get(idx).map(|planned| planned.progress)
     }
 
     /// Record that mutation `idx` has been applied. A no-op (with a warning)
     /// when `idx` is out of range, defending against a malformed intent without
     /// panicking.
     pub fn mark_applied(&mut self, idx: usize) {
-        if idx >= self.progress.len() {
+        let Some(planned) = self.mutations.get_mut(idx) else {
             warn!(
                 tx_id = %self.id,
                 idx,
-                len = self.progress.len(),
+                len = self.mutations.len(),
                 "mark_applied called with out-of-range index; ignoring"
             );
             return;
-        }
-        self.progress[idx] = MutationProgress::Applied;
+        };
+        planned.progress = MutationProgress::Applied;
     }
 }
 
@@ -196,15 +274,20 @@ mod tests {
     use chrono::Utc;
     use uuid::Uuid;
 
-    use crate::intent::{IntentRecord, MutationProgress, MutationRecord};
+    use crate::intent::{IntentRecord, MutationProgress, MutationRecord, PlannedMutation};
     use crate::transaction::{Expectation, Fingerprint, Read};
 
     fn sample_intent(progress: Vec<MutationProgress>) -> IntentRecord {
-        let mutations = (0..progress.len())
-            .map(|i| MutationRecord::Put {
-                key: format!("k{i}"),
-                body_ref: format!("b{i}"),
-                expected: None,
+        let mutations = progress
+            .into_iter()
+            .enumerate()
+            .map(|(idx, progress)| PlannedMutation {
+                record: MutationRecord::Put {
+                    key: format!("k{idx}"),
+                    body_ref: format!("b{idx}"),
+                    expected: None,
+                },
+                progress,
             })
             .collect();
         IntentRecord {
@@ -214,7 +297,6 @@ mod tests {
             reads: vec![],
             mutations,
             coarse_lock_keys: vec![],
-            progress,
         }
     }
 
@@ -311,7 +393,83 @@ mod tests {
             "both read spellings must survive the round trip"
         );
         assert_eq!(intent.ttl_secs, 300);
-        assert_eq!(intent.progress, vec![MutationProgress::Pending]);
+        assert_eq!(intent.progress(0), Some(MutationProgress::Pending));
+    }
+
+    /// What this build writes is the paired shape, one array of mutations each
+    /// carrying its own progress and no companion array.
+    #[test]
+    fn a_written_record_carries_the_paired_shape() {
+        let intent = sample_intent(vec![MutationProgress::Applied, MutationProgress::Pending]);
+        let json = serde_json::to_value(&intent).unwrap();
+
+        assert!(
+            !json.as_object().is_some_and(|o| o.contains_key("progress")),
+            "the companion progress array must be gone: {json}"
+        );
+        assert_eq!(
+            json["mutations"][0]["progress"], "Applied",
+            "each mutation carries its own progress: {json}"
+        );
+        assert!(
+            json["mutations"][0]["record"]["op"].is_string(),
+            "the mutation itself sits under `record`: {json}"
+        );
+
+        let parsed: IntentRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.mutations, intent.mutations);
+    }
+
+    /// A record written before the pairing keeps replaying: its bare mutations
+    /// draw progress from the companion array, in order.
+    #[test]
+    fn a_two_array_record_still_replays() {
+        let stored = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "created_at": Utc::now(),
+            "ttl_secs": 300,
+            "reads": [],
+            "mutations": [
+                {"op": "Delete", "key": "k0", "expected": null},
+                {"op": "Delete", "key": "k1", "expected": null},
+            ],
+            "coarse_lock_keys": [],
+            "progress": ["Applied", "Pending"],
+        });
+
+        let intent: IntentRecord =
+            serde_json::from_value(stored).expect("a two-array record must still parse");
+        assert_eq!(intent.progress(0), Some(MutationProgress::Applied));
+        assert_eq!(intent.progress(1), Some(MutationProgress::Pending));
+        assert!(
+            matches!(&intent.mutations[1].record, MutationRecord::Delete { key, .. } if key == "k1"),
+            "the mutations must keep their order alongside their progress"
+        );
+    }
+
+    /// A two-array record whose arrays disagree cannot be replayed faithfully:
+    /// pairing would silently drop or invent a slot.
+    #[test]
+    fn a_desynced_stored_record_is_refused() {
+        let stored = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "created_at": Utc::now(),
+            "ttl_secs": 300,
+            "reads": [],
+            "mutations": [
+                {"op": "Delete", "key": "k0", "expected": null},
+                {"op": "Delete", "key": "k1", "expected": null},
+            ],
+            "coarse_lock_keys": [],
+            "progress": ["Pending"],
+        });
+
+        let error = serde_json::from_value::<IntentRecord>(stored)
+            .expect_err("two mutations against one progress slot must not parse");
+        assert!(
+            error.to_string().contains("progress slots"),
+            "the error must name the disagreement, got: {error}"
+        );
     }
 
     #[test]
@@ -323,16 +481,16 @@ mod tests {
         ]);
         let json = serde_json::to_vec(&intent).expect("serialise");
         let back: IntentRecord = serde_json::from_slice(&json).expect("deserialise");
-        assert_eq!(back.progress, intent.progress);
+        assert_eq!(back.mutations, intent.mutations);
     }
 
     #[test]
     fn mark_applied_sets_correct_slot() {
         let mut intent = sample_intent(vec![MutationProgress::Pending; 3]);
         intent.mark_applied(1);
-        assert_eq!(intent.progress[0], MutationProgress::Pending);
-        assert_eq!(intent.progress[1], MutationProgress::Applied);
-        assert_eq!(intent.progress[2], MutationProgress::Pending);
+        assert_eq!(intent.mutations[0].progress, MutationProgress::Pending);
+        assert_eq!(intent.mutations[1].progress, MutationProgress::Applied);
+        assert_eq!(intent.mutations[2].progress, MutationProgress::Pending);
     }
 
     #[test]
@@ -341,9 +499,9 @@ mod tests {
         intent.mark_applied(5);
         assert!(
             intent
-                .progress
+                .mutations
                 .iter()
-                .all(|p| matches!(p, MutationProgress::Pending))
+                .all(|planned| matches!(planned.progress, MutationProgress::Pending))
         );
     }
 

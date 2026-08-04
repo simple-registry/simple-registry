@@ -17,7 +17,7 @@ use angos_storage::{ConditionalStore, ObjectStore};
 
 use crate::{
     executor::{cas::CasExecutor, locked::LockedExecutor},
-    intent::{IntentRecord, MutationProgress, MutationRecord, body_ref_key},
+    intent::{IntentRecord, MutationProgress, MutationRecord, PlannedMutation, body_ref_key},
     lock::{primitive::Lock, storage::memory::MemoryLockStorage},
     recovery::RecoveryLoop,
 };
@@ -71,9 +71,12 @@ pub fn stale_intent(
         created_at: Utc::now() - Duration::seconds(3600),
         ttl_secs: 1,
         reads: vec![],
-        mutations,
+        mutations: mutations
+            .into_iter()
+            .zip(progress)
+            .map(|(record, progress)| PlannedMutation { record, progress })
+            .collect(),
         coarse_lock_keys: vec![],
-        progress,
     }
 }
 

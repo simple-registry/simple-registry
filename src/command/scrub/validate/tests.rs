@@ -6,7 +6,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use uuid::Uuid;
 
-use angos_tx_engine::intent::{IntentRecord, MutationProgress, MutationRecord};
+use angos_tx_engine::intent::{IntentRecord, MutationProgress, MutationRecord, PlannedMutation};
 
 use crate::{
     command::{
@@ -813,12 +813,14 @@ async fn put_intent_touching(
         created_at: Utc::now(),
         ttl_secs,
         reads: Vec::new(),
-        mutations: vec![MutationRecord::Delete {
-            key: key.to_string(),
-            expected: None,
+        mutations: vec![PlannedMutation {
+            record: MutationRecord::Delete {
+                key: key.to_string(),
+                expected: None,
+            },
+            progress: MutationProgress::Pending,
         }],
         coarse_lock_keys: Vec::new(),
-        progress: vec![MutationProgress::Pending],
     };
     let log_key = intent.log_key();
     metadata_store

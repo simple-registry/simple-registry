@@ -13,7 +13,10 @@ use angos_storage::{Error as StorageError, Etag, ObjectStore};
 
 use crate::{
     error::Error,
-    intent::{INTENT_BODIES_PREFIX, IntentRecord, MutationProgress, MutationRecord, body_ref_key},
+    intent::{
+        INTENT_BODIES_PREFIX, IntentRecord, MutationProgress, MutationRecord, PlannedMutation,
+        body_ref_key,
+    },
     transaction::{Mutation, Read, Transaction},
 };
 
@@ -143,7 +146,13 @@ pub fn build_intent(
     mutations: Vec<MutationRecord>,
     coarse_lock_keys: Vec<String>,
 ) -> IntentRecord {
-    let progress = vec![MutationProgress::Pending; mutations.len()];
+    let mutations = mutations
+        .into_iter()
+        .map(|record| PlannedMutation {
+            record,
+            progress: MutationProgress::Pending,
+        })
+        .collect();
     IntentRecord {
         id: tx_id,
         created_at: Utc::now(),
@@ -151,7 +160,6 @@ pub fn build_intent(
         reads: reads.to_vec(),
         mutations,
         coarse_lock_keys,
-        progress,
     }
 }
 
