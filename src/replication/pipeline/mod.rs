@@ -20,7 +20,7 @@ use crate::{
         metadata_store::{LinkKind, MetadataStore},
         parse_manifest_digests,
     },
-    registry_client::{DeleteManifestOutcome, RegistryClient, UploadSession},
+    registry_client::{DeleteManifestOutcome, PutManifestOutcome, RegistryClient, UploadSession},
     replication::ReplicationDownstream,
     replication::{Error, manifest_accept_types},
 };
@@ -162,7 +162,11 @@ pub async fn push_manifest(
         .await?;
 
     // An LWW loss is convergence: drop the push and skip the referrers fallback.
-    if result.superseded {
+    let PutManifestOutcome::Stored {
+        digest: echoed,
+        subject,
+    } = result
+    else {
         info!(
             namespace = %ctx.namespace,
             %digest,
@@ -170,10 +174,10 @@ pub async fn push_manifest(
             "Downstream superseded the push (last-writer-wins); treating as converged"
         );
         return Ok(PushOutcome::Superseded);
-    }
+    };
     // A downstream echoing a digest other than the locally computed one has
     // transformed the manifest body: silent content divergence worth a warn.
-    if let Some(echoed) = &result.digest
+    if let Some(echoed) = &echoed
         && echoed != digest
     {
         warn!(
@@ -188,7 +192,7 @@ pub async fn push_manifest(
 
     // An OCI-1.0 downstream (no `OCI-Subject` response) does not auto-index the
     // subject, so push the referrers fallback tag.
-    if let Some(body) = fallback_body.filter(|_| result.subject.is_none()) {
+    if let Some(body) = fallback_body.filter(|_| subject.is_none()) {
         push_referrers_fallback(
             &ctx.downstream.registry_client,
             ctx.metadata_store,

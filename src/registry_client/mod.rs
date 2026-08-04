@@ -25,7 +25,7 @@ use url::Url;
 
 pub use crate::registry_client::{
     error::Error,
-    write::{DeleteManifestOutcome, PutManifestResult, UploadSession},
+    write::{DeleteManifestOutcome, PutManifestOutcome, UploadSession},
 };
 
 use crate::{

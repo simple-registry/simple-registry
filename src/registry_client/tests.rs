@@ -14,8 +14,8 @@ use crate::{
     oci::{Digest, MediaType, Reference, Tag},
     registry::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES},
     registry_client::{
-        DeleteManifestOutcome, Error, REPLICATION_SUPERSEDED_CODE, RegistryClient,
-        RegistryClientConfig, X_ANGOS_SOURCE_TIMESTAMP,
+        DeleteManifestOutcome, Error, PutManifestOutcome, REPLICATION_SUPERSEDED_CODE,
+        RegistryClient, RegistryClientConfig, X_ANGOS_SOURCE_TIMESTAMP,
         auth::{token_cache_key, token_index_cache_key},
         without_query,
     },
@@ -1600,9 +1600,15 @@ async fn test_put_manifest_with_oci_subject() {
         .await
         .unwrap();
 
-    assert_eq!(result.digest, Some(Digest::try_from(digest).unwrap()));
-    assert_eq!(result.subject, Some(subject.to_string()));
-    assert!(!result.superseded);
+    let PutManifestOutcome::Stored {
+        digest: echoed,
+        subject: echoed_subject,
+    } = result
+    else {
+        panic!("a 2xx push must report the manifest as stored, got {result:?}");
+    };
+    assert_eq!(echoed, Some(Digest::try_from(digest).unwrap()));
+    assert_eq!(echoed_subject, Some(subject.to_string()));
 }
 
 /// A push the downstream accepted must not fail over a bad echo, but the echo
@@ -1641,7 +1647,10 @@ async fn put_manifest_warns_on_an_unparseable_advertised_digest() {
 
     drop(guard);
 
-    assert_eq!(result.digest, None);
+    assert!(
+        matches!(result, PutManifestOutcome::Stored { digest: None, .. }),
+        "an unparseable echo must drop the digest, got {result:?}"
+    );
     let logs = log_capture.contents();
     assert!(
         logs.contains("put_manifest") && logs.contains(DOCKER_CONTENT_DIGEST),
@@ -1671,12 +1680,18 @@ async fn test_put_manifest_without_oci_subject() {
         .await
         .unwrap();
 
-    assert_eq!(result.digest, Some(Digest::try_from(digest).unwrap()));
+    let PutManifestOutcome::Stored {
+        digest: echoed,
+        subject,
+    } = result
+    else {
+        panic!("a 2xx push must report the manifest as stored, got {result:?}");
+    };
+    assert_eq!(echoed, Some(Digest::try_from(digest).unwrap()));
     assert!(
-        result.subject.is_none(),
+        subject.is_none(),
         "OCI-1.0 downstream must not report an OCI-Subject header"
     );
-    assert!(!result.superseded);
 }
 
 #[tokio::test]
@@ -1727,8 +1742,10 @@ async fn test_put_manifest_superseded_409() {
         .put_manifest(&location, Some("application/json"), b"{}".to_vec(), None)
         .await
         .unwrap();
-    assert!(result.superseded, "an LWW-superseded 409 sets superseded");
-    assert!(result.digest.is_none());
+    assert!(
+        matches!(result, PutManifestOutcome::Superseded),
+        "an LWW-superseded 409 must converge rather than report a store, got {result:?}"
+    );
 }
 
 #[tokio::test]
