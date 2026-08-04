@@ -17,7 +17,7 @@ use crate::{
         INTENT_BODIES_PREFIX, IntentRecord, MutationProgress, MutationRecord, ReadRecord,
         body_ref_key,
     },
-    transaction::{Mutation, Read, Transaction},
+    transaction::{Expectation, Mutation, Read, Transaction},
 };
 
 use uuid::Uuid;
@@ -135,9 +135,10 @@ pub async fn stage_bodies(
 
 /// Assemble the [`IntentRecord`] written at the Commit-intent stage.
 ///
-/// Folds in the read-records mapping (each [`Read`]'s key plus its hex-encoded
-/// fingerprint) and initialises a `Pending` progress slot per mutation. Shared
-/// by both executors so the intent literal lives once.
+/// Folds in the read-records mapping (each [`Read`]'s key plus its fingerprint,
+/// hex-encoded or empty for a read that recorded absence) and initialises a
+/// `Pending` progress slot per mutation. Shared by both executors so the intent
+/// literal lives once.
 #[must_use]
 pub fn build_intent(
     tx_id: Uuid,
@@ -150,7 +151,10 @@ pub fn build_intent(
         .iter()
         .map(|r| ReadRecord {
             key: r.key.clone(),
-            fingerprint: hex::encode(r.fingerprint),
+            fingerprint: match r.expected {
+                Expectation::Absent => String::new(),
+                Expectation::Present(fingerprint) => hex::encode(fingerprint),
+            },
         })
         .collect();
     let progress = vec![MutationProgress::Pending; mutations.len()];

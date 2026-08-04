@@ -38,7 +38,7 @@ use crate::{
     },
     intent::{DEFAULT_INTENT_TTL_SECS, IntentRecord, MutationRecord},
     lock::primitive::Lock,
-    transaction::{Transaction, lock_key_set},
+    transaction::{Expectation, Transaction, lock_key_set},
 };
 
 /// CAS-mode executor.
@@ -114,19 +114,24 @@ impl CasExecutor {
     /// Verify the read set, capturing each present read key's live etag and
     /// each key a read confirmed absent.
     ///
-    /// Re-reads every read key, checks the content fingerprint recorded at
-    /// build time (returning [`Error::Conflict`] on mismatch or if a
-    /// present-expecting key has vanished). The etags let the caller turn a
-    /// same-key write into a compare-and-swap; the absent set lets it turn a
-    /// same-key write into a `PutIfAbsent` so the absence precondition holds
-    /// through Apply, not just Prepare.
+    /// Re-reads every read key and checks it against the state recorded at
+    /// build time, returning [`Error::Conflict`] when the content differs, a
+    /// present-expecting key has vanished, or an absent-expecting key now
+    /// exists. The etags let the caller turn a same-key write into a
+    /// compare-and-swap; the absent set lets it turn a same-key write into a
+    /// `PutIfAbsent` so the absence precondition holds through Apply, not just
+    /// Prepare.
     async fn prepare_reads(&self, tx: &Transaction) -> Result<PreparedReads, Error> {
         let mut prepared = PreparedReads::default();
         for read in &tx.reads {
             match self.store.get_with_etag(&read.key).await {
                 Ok((body, etag)) => {
+                    // A live object matches only a read that recorded one.
+                    let Expectation::Present(expected) = read.expected else {
+                        return Err(Error::Conflict);
+                    };
                     let actual: [u8; 32] = Sha256::digest(&body).into();
-                    if actual != read.fingerprint {
+                    if actual != expected {
                         debug!(
                             key = read.key,
                             "CAS executor: content hash mismatch at Prepare, signalling Conflict"
@@ -139,7 +144,7 @@ impl CasExecutor {
                 }
                 Err(StorageError::NotFound) => {
                     // An absent key matches only a read that recorded absence.
-                    if !read.expects_absent() {
+                    if !matches!(read.expected, Expectation::Absent) {
                         return Err(Error::Conflict);
                     }
                     prepared.absent.insert(read.key.clone());
@@ -576,7 +581,10 @@ impl TransactionExecutor for CasExecutor {
 
 #[cfg(test)]
 mod tests {
+    use angos_storage::{MemoryObjectStore, ObjectStore};
+
     use super::*;
+    use crate::{lock::storage::memory::MemoryLockStorage, transaction::Mutation};
 
     fn put(key: &str) -> MutationRecord {
         MutationRecord::Put {
@@ -636,5 +644,37 @@ mod tests {
             &records[0],
             MutationRecord::Put { expected: None, .. }
         ));
+    }
+
+    /// A read recording absence is about the key existing, not about its
+    /// content. While absence was the hash of an empty body, a zero-length
+    /// object appearing at the key hashed identically and passed Prepare,
+    /// letting the transaction write over a key another writer had just
+    /// created.
+    #[tokio::test]
+    async fn prepare_conflicts_when_an_empty_object_appeared_at_an_absent_read() {
+        let store = Arc::new(MemoryObjectStore::new());
+        store.put("k", Bytes::new()).await.unwrap();
+        let lock = Arc::new(
+            Lock::builder(Arc::new(MemoryLockStorage::new()))
+                .build()
+                .unwrap(),
+        );
+        let executor = CasExecutor::builder(store as Arc<dyn ConditionalStore>, lock).build();
+
+        let tx = Transaction::builder()
+            .read_absent("k")
+            .mutation(Mutation::Put {
+                key: "out".to_string(),
+                body: Bytes::from("x"),
+                expected: None,
+            })
+            .build();
+
+        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        assert!(
+            matches!(result, Err(Error::Conflict)),
+            "an empty object written since the absence was recorded must conflict, got: {result:?}"
+        );
     }
 }

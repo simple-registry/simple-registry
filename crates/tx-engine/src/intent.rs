@@ -115,8 +115,8 @@ pub fn body_ref_key(id: Uuid, idx: usize) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReadRecord {
     pub key: String,
-    /// Serialised fingerprint: either an `ETag` string (for CAS) or a
-    /// hex-encoded content hash (for Locked).
+    /// Hex-encoded content hash of the body observed at build time, empty when
+    /// the read recorded the key as absent.
     pub fingerprint: String,
 }
 

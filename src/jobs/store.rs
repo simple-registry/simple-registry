@@ -24,7 +24,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
-use sha2::{Digest as _, Sha256};
 use tokio::{
     select,
     time::{MissedTickBehavior, interval, sleep},
@@ -931,10 +930,7 @@ impl JobStore {
         if index_storage_key != target_storage_key {
             return None;
         }
-        let read = Read {
-            key: index_path.clone(),
-            fingerprint: Sha256::digest(index_body).into(),
-        };
+        let read = Read::present(index_path.clone(), index_body);
         let delete = Mutation::Delete {
             key: index_path,
             expected: None,
@@ -1240,10 +1236,7 @@ impl JobStore {
                         &storage_key,
                     ),
                     Err(_) => Some((
-                        Read {
-                            key: index_path.clone(),
-                            fingerprint: Sha256::digest(&body).into(),
-                        },
+                        Read::present(index_path.clone(), &body),
                         Mutation::Delete {
                             key: index_path,
                             expected: None,
@@ -1392,10 +1385,7 @@ impl JobStore {
             .await
         {
             Ok(None) => {
-                tx.reads.push(Read {
-                    key: index_path.clone(),
-                    fingerprint: Sha256::digest([]).into(),
-                });
+                tx.reads.push(Read::absent(index_path.clone()));
                 tx.mutations.push(Mutation::Put {
                     key: index_path,
                     body: index_body,

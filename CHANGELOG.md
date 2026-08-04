@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A transaction read that recorded a key as absent now conflicts when a zero-length object appears at that key, instead of mistaking it for the absence it recorded and writing over another writer's fresh entry.
 - A multipart part upload whose response carries no `ETag` now fails at that part, naming it, instead of defaulting to an empty string that the S3 backend rejects later at `CompleteMultipartUpload` with no clue which part was at fault.
 - `angos migrate` now rewrites each link inside a transaction that reads it, so a tag push landing mid-run is kept instead of being silently reverted to its pre-push target.
 - A blob PUT naming a session the registry does not hold is refused at the upload endpoint rather than relying on the storage layer to reject the write.

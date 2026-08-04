@@ -15,29 +15,50 @@ use angos_storage::Etag;
 /// and re-hashes at Prepare time.
 pub type Fingerprint = [u8; 32];
 
+/// The state a read observed, and the state its key must still be in at
+/// Prepare time.
+#[derive(Clone, Copy, Debug)]
+pub enum Expectation {
+    /// The key held no object. A key that exists at Prepare conflicts,
+    /// whatever its content.
+    Absent,
+    /// The key held a body hashing to this fingerprint.
+    Present(Fingerprint),
+}
+
 /// A single key read that the transaction depends on.
 ///
-/// If the key's state differs from `fingerprint` at Prepare time, the
-/// executor aborts the transaction with a `Conflict` error and the caller
-/// retries with a fresh read.
+/// If the key's state differs from `expected` at Prepare time, the executor
+/// aborts the transaction with a `Conflict` error and the caller retries with
+/// a fresh read.
 #[derive(Clone, Debug)]
 pub struct Read {
     /// The storage key to observe.
     pub key: String,
-    /// The expected fingerprint at commit time. Engine-internal; callers
-    /// supply body bytes via [`TransactionBuilder::read`] and the fingerprint
-    /// is derived automatically.
-    pub fingerprint: Fingerprint,
+    /// The state the key must still be in at commit time.
+    pub expected: Expectation,
 }
 
 impl Read {
-    /// Whether this read recorded the key as absent (the fingerprint of an
-    /// empty body, per [`TransactionBuilder::read`]); a missing key at verify
-    /// time then matches instead of conflicting.
+    /// Record `key` as holding `body`. The fingerprint is engine-internal:
+    /// callers supply the bytes they observed and it is derived here.
     #[must_use]
-    pub fn expects_absent(&self) -> bool {
-        let empty: Fingerprint = Sha256::digest([]).into();
-        self.fingerprint == empty
+    pub fn present(key: impl Into<String>, body: impl AsRef<[u8]>) -> Self {
+        let fingerprint: Fingerprint = Sha256::digest(body.as_ref()).into();
+        Self {
+            key: key.into(),
+            expected: Expectation::Present(fingerprint),
+        }
+    }
+
+    /// Record `key` as holding no object, so any write to it before Apply is
+    /// detected as a conflict.
+    #[must_use]
+    pub fn absent(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            expected: Expectation::Absent,
+        }
     }
 }
 
@@ -142,8 +163,8 @@ impl Mutation {
 /// executor.
 #[derive(Clone, Debug)]
 pub struct Transaction {
-    /// Keys whose state the transaction depends on. If any fingerprint
-    /// mismatches at Prepare, the transaction is aborted.
+    /// Keys whose state the transaction depends on. If any of them differs
+    /// from what was observed at Prepare, the transaction is aborted.
     pub reads: Vec<Read>,
     /// Mutations to apply atomically.
     pub mutations: Vec<Mutation>,
@@ -228,23 +249,22 @@ impl TransactionBuilder {
         Self::default()
     }
 
-    /// Add a read dependency.
+    /// Add a read dependency on `key`, observed holding `body`.
     ///
-    /// `body` is the raw bytes the caller observed when reading `key`. The
-    /// engine computes a SHA-256 fingerprint from those bytes and uses it to
-    /// detect concurrent modifications: under the Locked executor the hash is
-    /// re-verified after the lock is acquired; under the CAS executor it is
-    /// re-verified at Prepare time.
-    ///
-    /// Passing an empty slice records the key as absent; any subsequent write
-    /// to that key before Apply will be detected as a conflict.
+    /// The engine fingerprints those bytes and re-verifies them before the
+    /// mutations land: under the Locked executor once the lock is acquired,
+    /// under the CAS executor at Prepare time.
     #[must_use]
-    pub fn read(mut self, key: impl Into<String>, body: impl Into<Bytes>) -> Self {
-        let hash: [u8; 32] = Sha256::digest(body.into()).into();
-        self.reads.push(Read {
-            key: key.into(),
-            fingerprint: hash,
-        });
+    pub fn read(mut self, key: impl Into<String>, body: impl AsRef<[u8]>) -> Self {
+        self.reads.push(Read::present(key, body));
+        self
+    }
+
+    /// Add a read dependency on `key`, observed as absent. Any write to that
+    /// key before Apply is detected as a conflict.
+    #[must_use]
+    pub fn read_absent(mut self, key: impl Into<String>) -> Self {
+        self.reads.push(Read::absent(key));
         self
     }
 

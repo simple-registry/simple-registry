@@ -223,10 +223,11 @@ struct LinksSnapshot<'a> {
     /// Current metadata per present `Create` link, consumed by the mutation
     /// builders when merging tracked-link referrers.
     link_cache: HashMap<LinkKind, LinkMetadata>,
-    /// The observed bytes per link path (empty = absent), joined to the
-    /// transaction read set: any racing write to a touched link fails the
-    /// commit's prepare validation and the retry re-plans against fresh state.
-    reads: Vec<(String, Bytes)>,
+    /// The observed bytes per link path, `None` when the link was absent,
+    /// joined to the transaction read set: any racing write to a touched link
+    /// fails the commit's prepare validation and the retry re-plans against
+    /// fresh state.
+    reads: Vec<(String, Option<Bytes>)>,
 }
 
 /// The link-derived part of a transaction: the in-progress builder plus the
@@ -513,9 +514,7 @@ impl MetadataStore {
         for result in results {
             let (op, link_path, found) = result?;
             if seen_paths.insert(link_path.clone()) {
-                let bytes = found
-                    .as_ref()
-                    .map_or_else(Bytes::new, |(bytes, _)| bytes.clone());
+                let bytes = found.as_ref().map(|(bytes, _)| bytes.clone());
                 snapshot.reads.push((link_path, bytes));
             }
             let metadata = found.map(|(_, metadata)| metadata);
@@ -637,12 +636,15 @@ fn build_link_mutations(
     ops: &[OpSnapshot<'_>],
     link_cache: &mut HashMap<LinkKind, LinkMetadata>,
     tx: &LinksTx<'_>,
-    reads: Vec<(String, Bytes)>,
+    reads: Vec<(String, Option<Bytes>)>,
     reference_shards: &ReferenceShards,
 ) -> Result<LinkMutations, TxError> {
     let mut builder = Transaction::builder();
     for (key, body) in reads {
-        builder = builder.read(key, body);
+        builder = match body {
+            Some(body) => builder.read(key, body),
+            None => builder.read_absent(key),
+        };
     }
     let mut pending_blob_ops: HashMap<Digest, Vec<BlobIndexOperation>> = HashMap::new();
 

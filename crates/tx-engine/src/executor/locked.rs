@@ -34,7 +34,7 @@ use crate::{
     },
     intent::{DEFAULT_INTENT_TTL_SECS, IntentRecord},
     lock::primitive::Lock,
-    transaction::Transaction,
+    transaction::{Expectation, Transaction},
 };
 
 /// Locked-mode executor.
@@ -105,15 +105,19 @@ impl LockedExecutor {
 
     /// Verify read fingerprints after acquiring the lock.
     ///
-    /// Re-fetches each key and checks the SHA-256 of the live body against the
-    /// captured hash. A missing key or a hash mismatch returns
-    /// [`Error::Conflict`] so the caller retries.
+    /// Re-fetches each key and checks it against the state recorded at build
+    /// time. A hash mismatch, a vanished key, or a key that appeared where
+    /// absence was recorded returns [`Error::Conflict`] so the caller retries.
     async fn verify_reads_under_lock(&self, tx: &Transaction) -> Result<(), Error> {
         for read in &tx.reads {
             match self.store.get(&read.key).await {
                 Ok(body) => {
+                    // A live object matches only a read that recorded one.
+                    let Expectation::Present(expected) = read.expected else {
+                        return Err(Error::Conflict);
+                    };
                     let actual: [u8; 32] = Sha256::digest(&body).into();
-                    if actual != read.fingerprint {
+                    if actual != expected {
                         debug!(
                             key = read.key,
                             "Locked executor: content hash mismatch, signalling Conflict"
@@ -123,7 +127,7 @@ impl LockedExecutor {
                 }
                 Err(StorageError::NotFound) => {
                     // An absent key matches only a read that recorded absence.
-                    if !read.expects_absent() {
+                    if !matches!(read.expected, Expectation::Absent) {
                         return Err(Error::Conflict);
                     }
                 }
@@ -368,7 +372,7 @@ mod tests {
         let executor = make_executor(Arc::new(MemoryObjectStore::new()));
 
         let tx = Transaction::builder()
-            .read("no-such-key", Bytes::new())
+            .read_absent("no-such-key")
             .mutation(Mutation::Put {
                 key: "out".to_string(),
                 body: Bytes::from("x"),
@@ -379,21 +383,22 @@ mod tests {
         let result: Result<Outcome, Error> = executor.execute(tx).await;
         assert!(
             result.is_ok(),
-            "an empty-body read records absence and must match a missing key: {result:?}"
+            "a read recording absence must match a missing key: {result:?}"
         );
     }
 
+    /// A read recording absence is about the key existing, not about its
+    /// content. While absence was the hash of an empty body, a zero-length
+    /// object appearing at the key hashed identically and committed, letting
+    /// the transaction write over a key another writer had just created.
     #[tokio::test]
-    async fn read_recording_absence_conflicts_when_key_appeared() {
+    async fn read_recording_absence_conflicts_when_an_empty_object_appeared() {
         let store = MemoryObjectStore::new();
-        store
-            .put("k", Bytes::from_static(b"created"))
-            .await
-            .unwrap();
+        store.put("k", Bytes::new()).await.unwrap();
         let executor = make_executor(Arc::new(store));
 
         let tx = Transaction::builder()
-            .read("k", Bytes::new())
+            .read_absent("k")
             .mutation(Mutation::Put {
                 key: "out".to_string(),
                 body: Bytes::from("x"),
@@ -404,7 +409,7 @@ mod tests {
         let result: Result<Outcome, Error> = executor.execute(tx).await;
         assert!(
             matches!(result, Err(Error::Conflict)),
-            "a key written since the absence was recorded must conflict, got: {result:?}"
+            "an empty object written since the absence was recorded must conflict, got: {result:?}"
         );
     }
 
