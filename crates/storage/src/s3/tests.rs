@@ -19,7 +19,10 @@ use bytes::Bytes;
 use bytesize::ByteSize;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use uuid::Uuid;
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, query_param},
+};
 
 use super::{MAX_PART_SIZE, MIN_PART_SIZE, next_part_number, plan_known_length_parts, staged_key};
 use crate::test_util::frame;
@@ -933,4 +936,47 @@ fn part_number_past_the_s3_limit_is_refused() {
     parts.push(part(10_000));
     let error = next_part_number(&parts).expect_err("the 10,001st part must be refused");
     assert!(error.to_string().contains("10000"), "got: {error}");
+}
+
+/// S3's `start-after` is an exclusive bound on raw keys, so it cannot express
+/// "after this child name". The request must bound on the bare name, and the
+/// directory child of that exact name must be dropped from the response rather
+/// than re-emitted forever.
+#[tokio::test]
+async fn list_children_bounds_on_the_bare_name_and_drops_the_named_child() {
+    let server = MockServer::start().await;
+    let config = S3Config {
+        key_prefix: "kp".to_string(),
+        ..mock_config(server.uri())
+    };
+
+    Mock::given(method("GET"))
+        // Not `kp/sa/v1/`: that skips `v1.2`, which sorts before it.
+        .and(query_param("start-after", "kp/sa/v1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListBucketResult>
+              <IsTruncated>false</IsTruncated>
+              <CommonPrefixes><Prefix>kp/sa/v1/</Prefix></CommonPrefixes>
+              <CommonPrefixes><Prefix>kp/sa/v1.2/</Prefix></CommonPrefixes>
+              <Contents><Key>kp/sa/v2</Key></Contents>
+            </ListBucketResult>"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(S3Backend::new(&config).expect("s3 client"));
+    let page = Backend::builder(client)
+        .build()
+        .list_children("sa", 10, None, Some("v1".to_string()))
+        .await
+        .expect("listing must succeed");
+
+    assert_eq!(
+        page.sub_prefixes,
+        vec!["v1.2".to_string()],
+        "the directory named by start_after must not be re-emitted"
+    );
+    assert_eq!(page.objects, vec!["v2".to_string()]);
 }

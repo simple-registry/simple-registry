@@ -257,6 +257,30 @@ macro_rules! object_store_conformance {
             }
 
             #[tokio::test]
+            async fn list_children_start_after_spans_directory_children() {
+                // `start_after` names a directory child, and `v1.2`/`v1.5` sort
+                // between `v1` and `v1/`: a raw-key bound re-emits `v1` forever
+                // and skips the two siblings.
+                let (store, _guard) = $fixture;
+                for key in ["sa2/v1/leaf", "sa2/v1.2/leaf"] {
+                    store.put(key, Bytes::from_static(b"x")).await.unwrap();
+                }
+                for key in ["sa2/v1.5", "sa2/v2"] {
+                    store.put(key, Bytes::from_static(b"x")).await.unwrap();
+                }
+
+                let page = store
+                    .list_children("sa2/", 10, None, Some("v1".to_string()))
+                    .await
+                    .unwrap();
+
+                let mut children = page.sub_prefixes;
+                children.extend(page.objects);
+                children.sort();
+                assert_eq!(children, vec!["v1.2", "v1.5", "v2"]);
+            }
+
+            #[tokio::test]
             async fn list_all_children_is_complete_across_prefix_families() {
                 let (store, _guard) = $fixture;
                 // Names where one is a prefix of another continuing with a

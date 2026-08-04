@@ -405,16 +405,18 @@ impl ObjectStore for Backend {
         token: Option<String>,
         start_after: Option<String>,
     ) -> Result<ChildrenPage, Error> {
-        // Appending the delimiter makes `start_after` exclusive of the named
-        // child itself: an object child's exact key sorts before `name/`.
-        let start_after = start_after.map(|name| format!("{name}/"));
+        // S3's start-after is an exclusive bound on raw keys, which cannot
+        // express "after this child name": a directory child's own keys sort
+        // after the bare name, and a sibling like `v1.2` sorts before `v1/`.
+        // So bound on the bare name and drop what the contract excludes.
         let (sub_prefixes, objects, next_token) = self
             .client
-            .list_prefixes(prefix, "/", n, token, start_after)
+            .list_prefixes(prefix, "/", n, token, start_after.clone())
             .await?;
+        let after = start_after.as_deref();
         Ok(ChildrenPage {
-            sub_prefixes,
-            objects,
+            sub_prefixes: children_after(sub_prefixes, after),
+            objects: children_after(objects, after),
             next_token,
         })
     }
@@ -688,6 +690,18 @@ fn plan_known_length_parts(uniform: bool, part_size: u64, available: u64) -> (u6
     let count = available.div_ceil(MAX_PART_SIZE);
     let emit_size = available / count;
     (count, emit_size, available - count * emit_size)
+}
+
+/// Children strictly after `start_after` by bare name, matching the FS and
+/// memory backends.
+fn children_after(names: Vec<String>, start_after: Option<&str>) -> Vec<String> {
+    match start_after {
+        Some(after) => names
+            .into_iter()
+            .filter(|name| name.as_str() > after)
+            .collect(),
+        None => names,
+    }
 }
 
 fn next_part_number(parts: &[UploadedPart]) -> Result<u32, Error> {

@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Upstream request logging moved to debug and no longer includes the query string, keeping the signed state in a server-assigned upload-session URL out of the logs and pull-through probe traffic out of info-level output.
 - `angos migrate` now warns past a link it cannot read or rewrite and reports the count in its summary, instead of one defective object aborting the whole run.
 - A JWT whose key id is absent from the cached JWKS now forces at most one provider refetch a minute rather than one per request, so unauthenticated tokens carrying random key ids can no longer amplify into outbound requests to the identity provider.
+- Resuming a child listing from a directory name on the S3 backend no longer re-emits that directory forever or skips siblings sorting between it and its delimiter, so paging through a namespace's children terminates and returns every child.
 
 ## 1.4.4
 
