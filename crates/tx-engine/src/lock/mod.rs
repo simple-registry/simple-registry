@@ -77,7 +77,7 @@ type AsyncReleaseFn = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send
 ///
 /// Backends construct one of these from their `acquire` impl; callers consume
 /// it by awaiting [`release`](Self::release) and nothing else should reach for
-/// `release` / `cancellation` directly.
+/// the held release or `cancellation` directly.
 ///
 /// **Release contract:** the happy path runs through
 /// [`release`](Self::release), awaited on the calling task's call path before
@@ -87,11 +87,19 @@ type AsyncReleaseFn = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send
 /// runtime so the remote lock is freed without waiting on TTL. If no runtime is
 /// available the remote lock expires via the backend's TTL.
 pub struct LockSession {
-    async_release: Option<AsyncReleaseFn>,
+    /// The held lock, absent for a session over an empty key set.
+    held: Option<HeldLock>,
     /// Fired by the backend's heartbeat task to signal lock-ownership
     /// loss.
     cancellation: CancellationToken,
-    heartbeat_handle: Option<JoinHandle<()>>,
+}
+
+/// What a session holds while it owns the lock: the release the backend handed
+/// back, and the heartbeat keeping ownership alive. A session has both or
+/// neither, so they travel as one value.
+struct HeldLock {
+    release: AsyncReleaseFn,
+    heartbeat: JoinHandle<()>,
 }
 
 impl LockSession {
@@ -99,9 +107,8 @@ impl LockSession {
     #[must_use]
     pub fn noop() -> Self {
         Self {
-            async_release: None,
+            held: None,
             cancellation: CancellationToken::new(),
-            heartbeat_handle: None,
         }
     }
 
@@ -112,9 +119,11 @@ impl LockSession {
         heartbeat_handle: JoinHandle<()>,
     ) -> Self {
         Self {
-            async_release: Some(Box::new(release_fn)),
+            held: Some(HeldLock {
+                release: Box::new(release_fn),
+                heartbeat: heartbeat_handle,
+            }),
             cancellation,
-            heartbeat_handle: Some(heartbeat_handle),
         }
     }
 
@@ -127,27 +136,89 @@ impl LockSession {
 
     /// Release the lock on the calling task's call path.
     pub async fn release(mut self) {
-        if let Some(handle) = self.heartbeat_handle.take() {
-            handle.abort();
-        }
-        if let Some(release_fn) = self.async_release.take() {
-            release_fn().await;
+        if let Some(held) = self.held.take() {
+            // Abort first: a heartbeat that refreshed after the release would
+            // hand ownership back to a session that no longer holds it.
+            held.heartbeat.abort();
+            (held.release)().await;
         }
     }
 }
 
 impl Drop for LockSession {
     fn drop(&mut self) {
-        if let Some(handle) = self.heartbeat_handle.take() {
-            handle.abort();
-        }
-        if let Some(release_fn) = self.async_release.take() {
+        if let Some(held) = self.held.take() {
+            held.heartbeat.abort();
             if let Ok(runtime) = Handle::try_current() {
-                runtime.spawn(release_fn());
+                runtime.spawn((held.release)());
             } else {
                 debug!("LockSession::drop: no Tokio runtime; remote lock will expire via TTL");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use tokio::time::sleep;
+
+    use super::{CancellationToken, LockSession};
+
+    /// The heartbeat is stopped before the lock is handed back. A refresh
+    /// landing after the release would renew a key this session no longer
+    /// owns, and another holder may already have taken it.
+    #[tokio::test]
+    async fn releasing_stops_the_heartbeat_first() {
+        let releasing = Arc::new(AtomicBool::new(false));
+        let ticked_during_release = Arc::new(AtomicBool::new(false));
+
+        let heartbeat = tokio::spawn({
+            let releasing = releasing.clone();
+            let ticked_during_release = ticked_during_release.clone();
+            async move {
+                loop {
+                    sleep(Duration::from_millis(1)).await;
+                    if releasing.load(Ordering::SeqCst) {
+                        ticked_during_release.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+        });
+
+        let session = LockSession::with_async_release_and_heartbeat(
+            {
+                let releasing = releasing.clone();
+                move || {
+                    Box::pin(async move {
+                        releasing.store(true, Ordering::SeqCst);
+                        // Long enough for a still-running heartbeat to tick.
+                        sleep(Duration::from_millis(50)).await;
+                    })
+                }
+            },
+            CancellationToken::new(),
+            heartbeat,
+        );
+
+        session.release().await;
+
+        assert!(
+            !ticked_during_release.load(Ordering::SeqCst),
+            "the heartbeat must be aborted before the lock is released"
+        );
+    }
+
+    /// A session over an empty key set holds nothing, so releasing it is a
+    /// no-op rather than a half-initialised release.
+    #[tokio::test]
+    async fn a_noop_session_releases_cleanly() {
+        let session = LockSession::noop();
+        assert!(!session.cancellation().is_cancelled());
+        session.release().await;
     }
 }
 
