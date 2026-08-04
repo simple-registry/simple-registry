@@ -68,6 +68,16 @@ fn without_query(location: &str) -> &str {
     }
 }
 
+/// A `403` is terminal: the credential is valid and simply lacks the scope, so
+/// no retry can clear it. Applied to the refreshed attempt as well, which is
+/// the normal scope-denied token flow.
+fn denied_if_forbidden(response: &Response) -> Result<(), Error> {
+    if response.status() == StatusCode::FORBIDDEN {
+        return Err(Error::Denied("Access forbidden".to_string()));
+    }
+    Ok(())
+}
+
 /// Reads and parses a required response header, naming it in an `Internal` error
 /// when it is absent or unparseable (a protocol fault, not an unsupported
 /// operation).
@@ -344,13 +354,18 @@ impl RegistryClient {
                 .refresh_auth_header(&response, cached_auth.as_deref())
                 .await?;
             let response = send_once(Some(token.clone())).await?;
+            // A token that was just obtained will not become valid on another
+            // attempt, so this is terminal rather than a response to hand back.
+            if response.status() == StatusCode::UNAUTHORIZED {
+                return Err(Error::Unauthorized(
+                    "Upstream rejected a freshly obtained token".to_string(),
+                ));
+            }
+            denied_if_forbidden(&response)?;
             return Ok((response, Some(token)));
         }
 
-        if response.status() == StatusCode::FORBIDDEN {
-            return Err(Error::Denied("Access forbidden".to_string()));
-        }
-
+        denied_if_forbidden(&response)?;
         Ok((response, cached_auth))
     }
 

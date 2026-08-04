@@ -1,6 +1,7 @@
 use std::{io::Cursor, time::Duration};
 
 use futures_util::future::join_all;
+use serde_json::json;
 use tracing::Level;
 use url::Url;
 use wiremock::{
@@ -890,6 +891,80 @@ async fn test_basic_authentication() {
         .await;
 
     assert!(result.is_ok());
+}
+
+/// The normal scope-denied token flow: the first attempt 401s, the refreshed
+/// retry 403s. Returning that raw made reads report `Internal` while writes
+/// reported `Denied`, and replication retried to max attempts instead of
+/// dead-lettering on the `Denied` fast path.
+#[tokio::test]
+async fn a_forbidden_response_after_a_token_refresh_is_denied() {
+    let mock_server = MockServer::start().await;
+    let registry_url = mock_server.uri();
+
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "scoped" })))
+        .mount(&mock_server)
+        .await;
+    // Authenticated: the credential is valid but lacks the scope.
+    Mock::given(method("GET"))
+        .and(path("/v2/test/manifests/latest"))
+        .and(header("Authorization", "Bearer scoped"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/test/manifests/latest"))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "WWW-Authenticate",
+            format!(r#"Bearer realm="{registry_url}/token",service="registry""#).as_str(),
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let error = client_for(&mock_server)
+        .get_manifest(&[], &format!("{registry_url}/v2/test/manifests/latest"))
+        .await
+        .expect_err("a 403 must not read as a successful fetch");
+
+    assert!(
+        matches!(error, Error::Denied(_)),
+        "a scope denial must be terminal, got: {error:?}"
+    );
+}
+
+/// A token obtained moments ago will not become valid on another attempt, so a
+/// persistent 401 is terminal rather than a raw response for a read path to
+/// mislabel.
+#[tokio::test]
+async fn a_persistent_unauthorized_after_a_refresh_is_terminal() {
+    let mock_server = MockServer::start().await;
+    let registry_url = mock_server.uri();
+
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "scoped" })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/test/manifests/latest"))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "WWW-Authenticate",
+            format!(r#"Bearer realm="{registry_url}/token",service="registry""#).as_str(),
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let error = client_for(&mock_server)
+        .get_manifest(&[], &format!("{registry_url}/v2/test/manifests/latest"))
+        .await
+        .expect_err("a persistent 401 must not read as a successful fetch");
+
+    assert!(
+        matches!(error, Error::Unauthorized(_)),
+        "a rejected fresh token must be terminal, got: {error:?}"
+    );
 }
 
 #[tokio::test]

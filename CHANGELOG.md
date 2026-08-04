@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A cached upstream token now indexes the URL it served, so requests to a token-auth upstream stop paying an extra unauthenticated round trip and 401 for every URL other than the one that first obtained the token.
 - A streamed blob download from S3 is no longer cut off once the per-attempt timeout elapses, so pulling a large layer over a slow connection completes; a transfer that stalls is still ended by a read timeout that resets on every read.
 - Multipart cleanup now treats only a genuinely absent session marker as proof that an upload was abandoned, so a transient backend failure during a prune pass no longer aborts an in-progress upload and destroys the parts it had already committed.
+- An upstream that refuses a request after angos refreshes its token now reports a denial rather than an opaque failure, so a replication job whose credential lacks the scope dead-letters immediately instead of retrying to its attempt limit, and reads classify it the same way writes already did.
 
 ## 1.4.4
 
