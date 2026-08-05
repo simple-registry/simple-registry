@@ -17,7 +17,7 @@ use crate::{
     event_webhook::event::{Event, EventActor},
     jobs::Queue,
     metrics_provider::metrics_provider,
-    oci::{Content, Digest, Manifest, MediaType, Namespace, Reference, Tag},
+    oci::{Content, Digest, Manifest, MediaRange, MediaType, Namespace, Reference, Tag},
     registry::{
         Error, Registry, Repository,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, ReferencePolicy},
@@ -98,7 +98,7 @@ impl Registry {
     pub async fn head_manifest(
         &self,
         repository: &Repository,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: Reference,
         is_tag_immutable: bool,
@@ -199,7 +199,7 @@ impl Registry {
     pub async fn get_manifest(
         &self,
         repository: &Repository,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: Reference,
         is_tag_immutable: bool,
@@ -318,7 +318,7 @@ impl Registry {
     async fn needs_upstream_pull_manifest(
         &self,
         repository: &Repository,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: &Reference,
         is_tag_immutable: bool,
@@ -724,7 +724,7 @@ impl Registry {
         actor: Option<EventActor>,
         namespace: &Namespace,
         reference: Reference,
-        mime_types: &[String],
+        mime_types: &[MediaRange],
         is_tag_immutable: bool,
         allow_redirect: bool,
     ) -> Result<GetManifestResponse, Error> {
@@ -760,7 +760,7 @@ impl Registry {
         repository: &Repository,
         namespace: &Namespace,
         reference: Reference,
-        mime_types: &[String],
+        mime_types: &[MediaRange],
         is_tag_immutable: bool,
         allow_redirect: bool,
     ) -> Result<GetManifestResponse, Error> {

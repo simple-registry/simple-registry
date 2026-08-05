@@ -233,7 +233,7 @@ mod tests {
         },
         event_webhook::event::EventActor,
         identity::ClientIdentity,
-        oci::{Digest, MediaType, Namespace, Reference, Tag},
+        oci::{Digest, MediaRange, MediaType, Namespace, Reference, Tag},
         registry::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT, OCI_TAG, PutManifestRequest},
         registry_client::{REPLICATION_SUPERSEDED_CODE, X_ANGOS_SOURCE_TIMESTAMP},
     };
@@ -244,6 +244,10 @@ mod tests {
     };
 
     const MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+
+    fn media_range() -> MediaRange {
+        MediaRange::from(MediaType::oci_manifest())
+    }
 
     fn sample_digest() -> Digest {
         "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -440,7 +444,7 @@ mod tests {
             .registry
             .get_manifest(
                 repo,
-                std::slice::from_ref(&MEDIA_TYPE.to_string()),
+                std::slice::from_ref(&media_range()),
                 &namespace,
                 tag(),
                 false,
@@ -492,7 +496,7 @@ mod tests {
             .registry
             .get_manifest(
                 repo,
-                std::slice::from_ref(&MEDIA_TYPE.to_string()),
+                std::slice::from_ref(&media_range()),
                 &namespace,
                 tag(),
                 false,

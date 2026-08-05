@@ -31,7 +31,7 @@ pub use crate::registry_client::{
 use crate::{
     cache::Cache,
     http_client::apply_tls_files,
-    oci::{Digest, MediaType, Reference, Tag},
+    oci::{Digest, MediaRange, MediaType, Reference, Tag},
     registry::{
         DOCKER_CONTENT_DIGEST, blob_store::BoxedReader, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
     },
@@ -334,7 +334,7 @@ impl RegistryClient {
     async fn query(
         &self,
         method: &Method,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
     ) -> Result<Response, Error> {
         debug!("Requesting from upstream: {}", without_query(location));
@@ -465,7 +465,7 @@ impl RegistryClient {
     async fn send(
         &self,
         method: &Method,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
         auth_header: Option<&str>,
     ) -> Result<Response, Error> {
@@ -478,13 +478,13 @@ impl RegistryClient {
     fn build_request(
         &self,
         method: &Method,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
         auth_header: Option<&str>,
     ) -> RequestBuilder {
         let mut request = self.client.request(method.clone(), location);
         for accepted_type in accepted_types {
-            request = request.header(ACCEPT, accepted_type);
+            request = request.header(ACCEPT, accepted_type.as_str());
         }
         if let Some(auth) = auth_header {
             request = request.header(AUTHORIZATION, auth);
@@ -500,7 +500,7 @@ impl RegistryClient {
     /// headers, or reports that the blob is unknown.
     pub async fn head_blob(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
     ) -> Result<(Digest, u64), Error> {
         let response = self.query(&Method::HEAD, accepted_types, location).await?;
@@ -630,7 +630,7 @@ impl RegistryClient {
     /// headers, or reports that the blob is unknown.
     pub async fn get_blob(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
     ) -> Result<(u64, BoxedReader), Error> {
         let response = self.query(&Method::GET, accepted_types, location).await?;
@@ -661,7 +661,7 @@ impl RegistryClient {
     /// headers, or reports that the manifest is unknown.
     pub async fn head_manifest(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
     ) -> Result<ManifestHead, Error> {
         let response = self.query(&Method::HEAD, accepted_types, location).await?;
@@ -696,7 +696,7 @@ impl RegistryClient {
     /// headers, reports that the manifest is unknown, or the response body cannot be read.
     pub async fn get_manifest(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
     ) -> Result<FetchedManifest, Error> {
         let response = self.query(&Method::GET, accepted_types, location).await?;

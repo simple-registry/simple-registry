@@ -12,7 +12,9 @@ use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
 
 use crate::{
-    command::server::error::Error, oci::MediaType, registry::BlobRange,
+    command::server::error::Error,
+    oci::{MediaRange, MediaType},
+    registry::BlobRange,
     registry_client::X_ANGOS_SOURCE_TIMESTAMP,
 };
 
@@ -43,7 +45,7 @@ impl<'a> RequestHeaders<'a> {
         Self { headers }
     }
 
-    pub fn accepted_content_types(&self) -> Vec<String> {
+    pub fn accepted_content_types(&self) -> Vec<MediaRange> {
         let mut media_ranges = Vec::new();
 
         for header in self.headers.get_all(ACCEPT) {
@@ -52,14 +54,16 @@ impl<'a> RequestHeaders<'a> {
             };
 
             for media_range in header.split(',') {
-                let media_range = media_range.trim();
-                if media_range.is_empty() {
+                // A member that is not a media range is dropped rather than
+                // forwarded: angos re-sends these upstream and must not relay a
+                // malformed `Accept`.
+                let Ok(value) = MediaRange::new(media_range.trim()) else {
                     continue;
-                }
+                };
 
                 media_ranges.push(AcceptMediaRange {
-                    value: media_range.to_string(),
-                    quality: quality_for_media_range(media_range),
+                    quality: quality_for_media_range(value.as_str()),
+                    value,
                     order: media_ranges.len(),
                 });
             }
@@ -198,7 +202,7 @@ impl<'a> RequestHeaders<'a> {
 
 #[derive(Debug, PartialEq, Eq)]
 struct AcceptMediaRange {
-    value: String,
+    value: MediaRange,
     quality: u16,
     order: usize,
 }

@@ -12,7 +12,7 @@ use crate::{
     jobs::Queue,
     jobs::store::JobStore,
     metrics_provider,
-    oci::{Digest, MediaType, Namespace, Tag, UploadSessionId},
+    oci::{Digest, MediaRange, MediaType, Namespace, Tag, UploadSessionId},
     policy::{RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::{
         CompleteUploadRequest, Error, Registry, RegistryConfig, Repository,
@@ -264,7 +264,7 @@ pub async fn put_blob_direct(store: &Store, content: &[u8]) -> Digest {
 pub async fn get_blob(
     registry: &Registry,
     repository: &Repository,
-    accepted_types: &[String],
+    accepted_types: &[MediaRange],
     namespace: &Namespace,
     digest: &Digest,
     range: Option<BlobRange>,

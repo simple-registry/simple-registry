@@ -8,7 +8,7 @@ use crate::{
     event_webhook::event::{Event, EventActor},
     jobs::Queue,
     metrics_provider::metrics_provider,
-    oci::{Digest, Namespace, UploadSessionId},
+    oci::{Digest, MediaRange, Namespace, UploadSessionId},
     registry::{
         Error, Registry, Repository,
         blob_ownership::promote_and_grant,
@@ -196,7 +196,7 @@ impl Registry {
     pub async fn head_blob(
         &self,
         repository: &Repository,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<HeadBlobResponse, Error> {
@@ -239,7 +239,7 @@ impl Registry {
     pub async fn get_blob_with_access(
         &self,
         repository: &Repository,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
         range: Option<BlobRange>,
@@ -375,7 +375,7 @@ impl Registry {
         actor: Option<EventActor>,
         namespace: &Namespace,
         digest: &Digest,
-        mime_types: &[String],
+        mime_types: &[MediaRange],
         range: Option<BlobRange>,
         allow_redirect: bool,
     ) -> Result<GetBlobResponse, Error> {

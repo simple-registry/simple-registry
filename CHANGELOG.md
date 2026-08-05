@@ -43,6 +43,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A malformed `?from=` on a blob-upload POST is now refused instead of ignored when no `?mount=` accompanies it, matching the `?mount=` and `?digest=` values on the same request.
 - An upload directory whose name is not a session id is now quarantined by scrub like any other unrecognized key, instead of being reported as a session that only prune could reach.
 - A directory whose name is not a valid namespace no longer appears in the `_catalog` listing or the admin namespace listing, matching how a malformed tag directory is already dropped; scrub still reports and reclaims it.
+- An `Accept` member that is not a media range is dropped instead of being relayed verbatim to an upstream on a pull-through request; the wildcard forms clients actually send (`*/*`, `type/*`) are unaffected.
 
 ## 1.4.4
 

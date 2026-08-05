@@ -10,7 +10,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::oci::Error;
-use crate::oci::constants::{OCI_INDEX_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE};
+use crate::oci::constants::{
+    DOCKER_MANIFEST_LIST_MEDIA_TYPE, DOCKER_MANIFEST_MEDIA_TYPE, OCI_INDEX_MEDIA_TYPE,
+    OCI_MANIFEST_MEDIA_TYPE,
+};
 
 // RFC 6838 media type: `type/subtype` where each name is a `restricted-name`
 // (alphanumeric first char, then alphanumerics and `!#$&-^_.+`, max 127 chars),
@@ -56,6 +59,18 @@ impl MediaType {
     /// [`Self::oci_manifest`].
     pub fn oci_index() -> Self {
         Self(OCI_INDEX_MEDIA_TYPE.to_owned())
+    }
+
+    /// The Docker v2 schema-2 manifest media type, infallible like
+    /// [`Self::oci_manifest`].
+    pub fn docker_manifest() -> Self {
+        Self(DOCKER_MANIFEST_MEDIA_TYPE.to_owned())
+    }
+
+    /// The Docker v2 manifest-list media type, infallible like
+    /// [`Self::oci_manifest`].
+    pub fn docker_manifest_list() -> Self {
+        Self(DOCKER_MANIFEST_LIST_MEDIA_TYPE.to_owned())
     }
 }
 

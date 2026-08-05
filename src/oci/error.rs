@@ -15,6 +15,8 @@ pub enum Error {
     InvalidManifestJson(#[from] serde_json::Error),
     #[error("invalid manifest: {0}")]
     InvalidManifest(String),
+    #[error("invalid media range: {0}")]
+    InvalidMediaRange(String),
     #[error("invalid media type: {0}")]
     InvalidMediaType(String),
     #[error("invalid upload session id: {0}")]

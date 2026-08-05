@@ -10,7 +10,7 @@ use crate::{
         request::{ByteRange, RequestHeaders, X_ANGOS_NO_REDIRECT},
         response_body::ResponseBody,
     },
-    oci::MediaType,
+    oci::{MediaRange, MediaType},
     registry::BlobRange,
     registry_client::X_ANGOS_SOURCE_TIMESTAMP,
 };
@@ -369,7 +369,8 @@ fn test_accepted_content_types_multiple() {
     let request = request.body(ResponseBody::empty()).unwrap();
     let (parts, _) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
     assert_eq!(
         result,
         vec!["application/json", "application/xml", "text/plain"]
@@ -384,7 +385,8 @@ fn test_accepted_content_types_single() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
     assert_eq!(result, vec!["application/json"]);
 }
 
@@ -393,7 +395,8 @@ fn test_accepted_content_types_empty() {
     let request = Request::builder().body(()).unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
     assert!(result.is_empty());
 }
 
@@ -406,7 +409,8 @@ fn test_accepted_content_types_with_quality() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
     assert_eq!(result, vec!["application/json;q=0.9", "text/html;q=0.8"]);
 }
 
@@ -419,7 +423,8 @@ fn test_accepted_content_types_splits_commas_and_orders_by_quality() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
     assert_eq!(
         result,
         vec![
@@ -439,7 +444,8 @@ fn test_accepted_content_types_keeps_original_order_for_equal_quality() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
     assert_eq!(
         result,
         vec!["application/json", "application/xml;q=1.0", "text/plain"]
@@ -635,4 +641,20 @@ fn test_redirect_not_suppressed_for_falsey_values() {
             "'{value}' must not suppress the redirect"
         );
     }
+}
+
+/// `*/*` is what curl and Docker send by default and angos re-sends it to the
+/// upstream, so it must survive parsing; a member that is not a media range is
+/// dropped rather than relayed malformed.
+#[test]
+fn wildcard_accept_members_survive_and_malformed_ones_are_dropped() {
+    let request = Request::builder()
+        .header(ACCEPT, "*/*, application/*, not-a-range, application/json")
+        .body(())
+        .unwrap();
+    let (parts, ()) = request.into_parts();
+
+    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
+    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
+    assert_eq!(result, vec!["*/*", "application/*", "application/json"]);
 }

@@ -9,7 +9,7 @@ pub use crate::registry_client::RegistryClientConfig;
 use crate::{
     cache::Cache,
     configuration::RegexPattern,
-    oci::{Digest, Error as OciError, Namespace, Reference},
+    oci::{Digest, Error as OciError, MediaRange, Namespace, Reference},
     policy::{AccessPolicyConfig, RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::{Error, blob_store::BoxedReader},
     registry_client::{FetchedManifest, ManifestHead, RegistryClient},
@@ -295,7 +295,7 @@ impl Repository {
     /// to be current.
     pub async fn is_upstream_digest_match(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: &Reference,
         local_digest: &Digest,
@@ -309,7 +309,7 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn head_blob(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<(Digest, u64), Error> {
@@ -327,7 +327,7 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn get_blob(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<(u64, BoxedReader), Error> {
@@ -345,7 +345,7 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn head_manifest(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: &Reference,
     ) -> Result<ManifestHead, Error> {
@@ -366,7 +366,7 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn get_manifest(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: &Reference,
     ) -> Result<FetchedManifest, Error> {
