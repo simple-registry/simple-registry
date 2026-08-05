@@ -733,7 +733,7 @@ impl Registry {
         Ok(build_digest_to_tags_map_from_pairs(tag_links))
     }
 
-    async fn list_repository_namespaces(&self, repository: &str) -> Result<Vec<String>, Error> {
+    async fn list_repository_namespaces(&self, repository: &str) -> Result<Vec<Namespace>, Error> {
         if !self.resolver.contains_key(repository) {
             return Err(Error::NameUnknown);
         }
@@ -746,7 +746,7 @@ impl Registry {
     /// store. The manifest catalog keys namespaces off `_manifests`, so a
     /// namespace holding only in-progress uploads is absent from it; the blob
     /// store's `_uploads`-keyed listing is merged so pending uploads surface.
-    async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<String>, Error> {
+    async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<Namespace>, Error> {
         let (mut namespaces, upload_namespaces) = try_join!(
             self.metadata_store.collect_namespaces(scope),
             self.blob_store.collect_upload_namespaces(scope),

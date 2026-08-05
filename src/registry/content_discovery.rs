@@ -33,7 +33,7 @@ impl Registry {
         &self,
         n: Option<u16>,
         last: Option<String>,
-    ) -> Result<Page<String>, Error> {
+    ) -> Result<Page<Namespace>, Error> {
         let n = n.unwrap_or(DEFAULT_PAGE_SIZE);
         self.metadata_store.list_namespaces(n, last).await
     }
@@ -362,7 +362,7 @@ mod tests {
         }
 
         // Fetch 2 at a time and collect all namespaces.
-        let mut all_collected: Vec<String> = Vec::new();
+        let mut all_collected: Vec<Namespace> = Vec::new();
         let mut last: Option<String> = None;
 
         loop {
@@ -386,7 +386,7 @@ mod tests {
         );
         for ns in &namespaces {
             assert!(
-                all_collected.contains(&ns.to_string()),
+                all_collected.iter().any(|got| got == ns),
                 "namespace '{ns}' must appear in paginated results"
             );
         }

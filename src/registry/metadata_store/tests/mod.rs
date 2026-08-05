@@ -568,7 +568,7 @@ pub async fn test_datastore_list_namespaces_many_namespaces_pagination(m: Arc<Me
     loop {
         let Page {
             items: page,
-            next_token: next_token,
+            next_token,
         } = m.list_namespaces(3, token).await.unwrap();
         assert!(
             !page.is_empty(),
@@ -588,7 +588,11 @@ pub async fn test_datastore_list_namespaces_many_namespaces_pagination(m: Arc<Me
     }
 
     assert_eq!(
-        all_namespaces, namespace_names,
+        all_namespaces
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        namespace_names,
         "All namespaces should be returned in sorted order across pages"
     );
     assert_eq!(
@@ -613,7 +617,7 @@ pub async fn test_datastore_list_namespaces_single_item_pages(m: Arc<MetadataSto
     for (i, expected_name) in namespace_names.iter().enumerate() {
         let Page {
             items: page,
-            next_token: next_token,
+            next_token,
         } = m.list_namespaces(1, token).await.unwrap();
         assert_eq!(
             page.len(),
@@ -622,7 +626,8 @@ pub async fn test_datastore_list_namespaces_single_item_pages(m: Arc<MetadataSto
             page.len()
         );
         assert_eq!(
-            page[0], *expected_name,
+            page[0].to_string(),
+            *expected_name,
             "Page {i} should contain '{expected_name}' but contained '{}'",
             page[0]
         );
@@ -634,7 +639,13 @@ pub async fn test_datastore_list_namespaces_single_item_pages(m: Arc<MetadataSto
         token.is_none(),
         "Token should be None after all namespaces are consumed"
     );
-    assert_eq!(all_namespaces, namespace_names);
+    assert_eq!(
+        all_namespaces
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        namespace_names
+    );
 }
 
 #[tokio::test]
@@ -684,7 +695,7 @@ pub async fn test_datastore_list_tags_many_tags_pagination(m: Arc<MetadataStore>
     loop {
         let Page {
             items: page,
-            next_token: next_token,
+            next_token,
         } = m.list_tags(namespace, 3, token).await.unwrap();
         assert!(
             !page.is_empty(),
@@ -736,7 +747,7 @@ pub async fn test_datastore_list_tags_single_item_pages(m: Arc<MetadataStore>) {
     for (i, expected_name) in tag_names.iter().enumerate() {
         let Page {
             items: page,
-            next_token: next_token,
+            next_token,
         } = m.list_tags(namespace, 1, token).await.unwrap();
         assert_eq!(
             page.len(),

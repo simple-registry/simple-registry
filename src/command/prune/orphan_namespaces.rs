@@ -40,11 +40,6 @@ pub async fn sweep_orphan_namespaces(
         if resolver.resolve(&namespace).is_some() {
             continue;
         }
-        // An invalid name cannot form typed links; scrub reclaims such
-        // directories structurally.
-        let Ok(namespace) = Namespace::new(&namespace) else {
-            continue;
-        };
         if let Err(e) = clear_namespace(metadata_store, &namespace, sink).await {
             error!("prune: failed to clear orphan namespace '{namespace}': {e}");
         }
@@ -56,9 +51,6 @@ pub async fn sweep_orphan_namespaces(
         if resolver.resolve(&namespace).is_some() {
             continue;
         }
-        let Ok(namespace) = Namespace::new(&namespace) else {
-            continue;
-        };
         if let Err(e) = clear_uploads(blob_store, &namespace, sink).await {
             error!("prune: failed to clear orphan uploads of '{namespace}': {e}");
         }

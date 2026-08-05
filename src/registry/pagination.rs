@@ -3,6 +3,8 @@ use std::future::Future;
 
 use angos_storage::Page;
 
+use crate::oci::Namespace;
+
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 /// Fan-out for the concurrent namespace walk: up to this many directories are
@@ -38,7 +40,7 @@ pub async fn collect_namespaces_with_marker<E, List, ListFut>(
     marker: &str,
     concurrency: usize,
     children_of: List,
-) -> Result<Vec<String>, E>
+) -> Result<Vec<Namespace>, E>
 where
     List: Fn(String) -> ListFut,
     ListFut: Future<Output = Result<Vec<String>, E>>,
@@ -59,7 +61,10 @@ where
             break;
         };
         let scan = scan?;
-        if let Some(namespace) = scan.namespace {
+        // A directory whose name is not a namespace is dropped rather than
+        // surfaced, as `stream_tags` does for tags: scrub reports and reclaims
+        // such directories, so the drop is silent.
+        if let Some(namespace) = scan.namespace.and_then(|name| Namespace::new(&name).ok()) {
             namespaces.push(namespace);
         }
         backlog.extend(scan.children);

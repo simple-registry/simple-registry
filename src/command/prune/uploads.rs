@@ -66,10 +66,6 @@ pub async fn sweep_upload_sessions(
     concurrency: usize,
 ) -> Result<(), Error> {
     for namespace in blob_store.collect_upload_namespaces(None).await? {
-        let Ok(namespace) = Namespace::new(&namespace) else {
-            // Invalid upload namespaces are scrub's concern.
-            continue;
-        };
         let namespace = &namespace;
         blob_store
             .stream_uploads(namespace)

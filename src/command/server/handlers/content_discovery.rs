@@ -38,7 +38,7 @@ impl Default for ReferrerList {
 
 #[derive(Serialize)]
 struct CatalogBody {
-    repositories: Vec<String>,
+    repositories: Vec<Namespace>,
 }
 
 #[derive(Serialize)]

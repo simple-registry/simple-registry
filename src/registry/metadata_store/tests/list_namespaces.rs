@@ -28,7 +28,7 @@ async fn list_namespaces_is_derived_from_content() {
             .unwrap()
             .items;
         assert!(
-            listed.contains(&namespace.to_string()),
+            listed.contains(namespace),
             "a namespace with content must appear in the catalog; got: {listed:?}"
         );
 
@@ -51,7 +51,7 @@ async fn list_namespaces_is_derived_from_content() {
             .unwrap()
             .items;
         assert!(
-            !listed.contains(&namespace.to_string()),
+            !listed.contains(namespace),
             "a namespace whose revisions and tags were all deleted must \
              disappear from the catalog; got: {listed:?}"
         );
@@ -82,7 +82,7 @@ async fn list_namespaces_excludes_upload_only_namespace() {
             .unwrap()
             .items;
         assert!(
-            !listed.contains(&namespace.to_string()),
+            !listed.contains(&namespace),
             "a namespace with only an _uploads artifact must not appear in the \
              catalog; got: {listed:?}"
         );
@@ -123,29 +123,29 @@ async fn collect_upload_namespaces_keys_off_uploads_not_manifests() {
 
         let upload_listed = blob_store.collect_upload_namespaces(None).await.unwrap();
         assert!(
-            upload_listed.contains(&upload_only.to_string()),
+            upload_listed.contains(upload_only),
             "an upload-only namespace must appear in collect_upload_namespaces; got: {upload_listed:?}"
         );
         assert!(
-            upload_listed.contains(&mixed.to_string()),
+            upload_listed.contains(mixed),
             "a namespace with an upload must appear in collect_upload_namespaces; got: {upload_listed:?}"
         );
         assert!(
-            !upload_listed.contains(&manifest_only.to_string()),
+            !upload_listed.contains(manifest_only),
             "a manifest-only namespace must not appear in collect_upload_namespaces; got: {upload_listed:?}"
         );
 
         let manifest_listed = metadata_store.list_namespaces(1000, None).await.unwrap().items;
         assert!(
-            manifest_listed.contains(&manifest_only.to_string()),
+            manifest_listed.contains(manifest_only),
             "a manifest-only namespace must appear in the catalog; got: {manifest_listed:?}"
         );
         assert!(
-            manifest_listed.contains(&mixed.to_string()),
+            manifest_listed.contains(mixed),
             "a namespace with content must appear in the catalog; got: {manifest_listed:?}"
         );
         assert!(
-            !manifest_listed.contains(&upload_only.to_string()),
+            !manifest_listed.contains(upload_only),
             "an upload-only namespace must not appear in the catalog; got: {manifest_listed:?}"
         );
 

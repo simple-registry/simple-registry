@@ -27,7 +27,7 @@ impl MetadataStore {
         &self,
         n: u16,
         last: Option<String>,
-    ) -> Result<Page<String>, Error> {
+    ) -> Result<Page<Namespace>, Error> {
         debug!("Fetching {n} namespace(s) with continuation token: {last:?}");
 
         let mut namespaces = self.collect_namespaces(None).await?;
@@ -40,7 +40,7 @@ impl MetadataStore {
     /// every namespace, unpaginated and unsorted. `scope` restricts the walk to
     /// one repository's subtree; `None` walks the whole store.
     #[instrument(skip(self))]
-    pub async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<String>, Error> {
+    pub async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<Namespace>, Error> {
         let (root, prefix) = path_builder::namespace_walk_root(scope);
 
         pagination::collect_namespaces_with_marker(

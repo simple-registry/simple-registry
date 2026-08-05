@@ -264,7 +264,7 @@ impl BlobStore {
     pub async fn collect_upload_namespaces(
         &self,
         scope: Option<&str>,
-    ) -> Result<Vec<String>, Error> {
+    ) -> Result<Vec<Namespace>, Error> {
         let (root, prefix) = path_builder::namespace_walk_root(scope);
 
         pagination::collect_namespaces_with_marker(

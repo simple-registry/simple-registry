@@ -541,7 +541,7 @@ mod tests {
         test_util::{HookedStore, StoreHook, StoreOp},
     };
 
-    use crate::intent::{INTENT_BODIES_PREFIX, INTENT_LOG_PREFIX, IntentRecord};
+    use crate::intent::{INTENT_BODIES_PREFIX, INTENT_LOG_PREFIX};
     use crate::janitor::{BodyJanitor, LockJanitor};
     use crate::lock::primitive::MAX_LOCK_TTL_SECS;
     use crate::lock::storage::LockBody;
@@ -647,7 +647,7 @@ mod tests {
             .expect("put intent");
 
         BodyJanitor::builder(store.clone() as Arc<dyn ObjectStore>)
-            .orphan_age(Duration::from_secs(3600))
+            .orphan_age(Duration::from_hours(1))
             .build()
             .sweep()
             .await;
