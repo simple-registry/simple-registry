@@ -289,7 +289,7 @@ pub async fn repositories(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, path::PathBuf};
 
     use angos_tx_engine::lock::{LockStrategy, S3LockConfig};
 
@@ -454,7 +454,7 @@ mod tests {
     #[tokio::test]
     async fn test_probe_fs_config_is_noop() {
         let config = ResolvedStorageConfig::FS(MetadataFsConfig {
-            root_dir: "/tmp/probe-test".to_string(),
+            root_dir: PathBuf::from("/tmp/probe-test"),
             lock_strategy: LockStrategy::Memory,
             sync_to_disk: false,
         });

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 use tempfile::TempDir;
 
 use argon2::{
@@ -584,7 +584,7 @@ fn build_shutdown_flush_harness(unique_prefix: &str) -> ShutdownFlushHarness {
 
     let blob_backend = Arc::new(
         BlobStoreConfig::FS(BlobFsConfig {
-            root_dir: "/tmp/test-blobs-shutdown-flush".to_string(),
+            root_dir: PathBuf::from("/tmp/test-blobs-shutdown-flush"),
             ..Default::default()
         })
         .build_backend()

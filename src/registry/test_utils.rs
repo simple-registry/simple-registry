@@ -352,7 +352,7 @@ impl FSRegistryTestCase {
     /// `link_cache_ttl_secs`, for tests pinning which reads must bypass it.
     pub fn with_link_cache_ttl(link_cache_ttl_secs: u64) -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir for FSBackendConfig");
-        let path = temp_dir.path().to_string_lossy().to_string();
+        let path = temp_dir.path().to_path_buf();
 
         let config = BlobStoreConfig::FS(blob_store::FsBackendConfig {
             root_dir: path.clone(),
@@ -381,8 +381,8 @@ impl FSRegistryTestCase {
     /// cross-store-isolation regression this fixture exercises.
     pub fn with_split_backends() -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir for split backends");
-        let blob_path = temp_dir.path().join("blob").to_string_lossy().into_owned();
-        let meta_path = temp_dir.path().join("meta").to_string_lossy().into_owned();
+        let blob_path = temp_dir.path().join("blob");
+        let meta_path = temp_dir.path().join("meta");
 
         let config = BlobStoreConfig::FS(blob_store::FsBackendConfig {
             root_dir: blob_path,

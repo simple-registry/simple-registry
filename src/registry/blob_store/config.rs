@@ -7,6 +7,7 @@
 //! backend. The blob store holds no transaction executor: blob-lifecycle
 //! serialisation lives on the metadata store's `blob-data:{digest}` lock.
 
+use std::path::PathBuf;
 use std::{sync::Arc, time::Duration};
 
 use bytesize::ByteSize;
@@ -27,7 +28,7 @@ use crate::registry::{
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct FsBackendConfig {
-    pub root_dir: String,
+    pub root_dir: PathBuf,
     #[serde(default)]
     pub sync_to_disk: bool,
 }
@@ -161,7 +162,7 @@ mod tests {
     async fn fs_backend_builds() {
         let temp_dir = TempDir::new().unwrap();
         let config = BlobStoreConfig::FS(FsBackendConfig {
-            root_dir: temp_dir.path().to_string_lossy().to_string(),
+            root_dir: temp_dir.path().to_path_buf(),
             sync_to_disk: false,
         });
         let backend = config.build_backend().unwrap();

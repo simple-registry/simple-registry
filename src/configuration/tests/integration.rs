@@ -98,7 +98,7 @@ fn test_metadata_store_explicit_config_not_overridden() {
     // Should keep the explicitly configured FS metadata store
     match config.registry_storage {
         RegistryStorageConfig::FS(config) => {
-            assert_eq!(config.root_dir, "/custom/metadata/path");
+            assert_eq!(config.root_dir, PathBuf::from("/custom/metadata/path"));
         }
         _ => panic!("Expected explicitly configured FS metadata store to be preserved"),
     }
@@ -435,7 +435,7 @@ fn test_metadata_store_fs_with_redis() {
 
     match metadata_config {
         ResolvedStorageConfig::FS(fs_config) => {
-            assert_eq!(fs_config.root_dir, "/data/metadata");
+            assert_eq!(fs_config.root_dir, PathBuf::from("/data/metadata"));
             match &fs_config.lock_strategy {
                 LockStrategy::Redis(lock_config) => {
                     assert_eq!(lock_config.url, "redis://localhost:6379");
