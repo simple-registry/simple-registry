@@ -89,8 +89,8 @@ struct TagQuery {
 
 #[derive(Deserialize, Default)]
 struct MountQuery {
-    mount: Option<String>,
-    from: Option<String>,
+    mount: Option<Digest>,
+    from: Option<Namespace>,
     digest: Option<Digest>,
 }
 
@@ -222,27 +222,18 @@ fn try_parse_upload(method: &Method, path: &str, params: Option<&str>) -> Option
         if *method != Method::POST {
             return None;
         }
-        // Strict parse: a malformed query rejects the POST as a 400 instead of
-        // silently starting a session.
+        // The OCI fall-back-to-session rule covers unsatisfiable mounts, not
+        // syntactically invalid ones, so a malformed query is a 400.
         let query: MountQuery = match params {
             Some(p) => parse_query(p)?,
             None => MountQuery::default(),
         };
 
-        // A malformed `?mount=` rejects the POST: the OCI fall-back-to-session
-        // rule covers unsatisfiable mounts, not syntactically invalid ones.
-        if let Some(value) = &query.mount {
-            let digest = value.parse::<Digest>().ok()?;
-            // A malformed `?from=` is rejected rather than treated as from-less
-            // auto-discovery, which would widen the authorized source set.
-            let from = match &query.from {
-                Some(repo) => Some(Namespace::new(repo).ok()?),
-                None => None,
-            };
+        if let Some(digest) = query.mount {
             return Some(Action::MountBlob {
                 namespace,
                 digest,
-                from,
+                from: query.from,
             });
         }
 

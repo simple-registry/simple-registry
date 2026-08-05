@@ -247,6 +247,18 @@ fn test_parse_mount_blob_with_malformed_from_is_rejected() {
 }
 
 #[test]
+fn test_parse_malformed_from_without_mount_is_rejected() {
+    let uri: Uri = "/v2/myrepo/target/blobs/uploads/?from=Invalid"
+        .parse()
+        .unwrap();
+    let route = parse(&Method::POST, &uri);
+    assert!(
+        route.is_none(),
+        "a malformed ?from= must not route even unused (POST -> 400), got: {route:?}"
+    );
+}
+
+#[test]
 fn test_parse_start_upload_with_malformed_digest_is_rejected() {
     let uri: Uri = "/v2/myrepo/app/blobs/uploads?digest=not-a-digest"
         .parse()
