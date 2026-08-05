@@ -16,9 +16,9 @@ use angos_storage::{
 use angos_tx_engine::transaction::{Mutation, Transaction};
 
 use crate::jobs::store::{
-    CompleteOutcome, FailOutcome, JobEnvelope, JobQueueConfig, JobState, JobStore, LockKey,
-    MAX_REPORTED_PENDING, Queue, STORAGE_KEY_PREFIX_LEN, make_storage_key, parse_lock_key_index,
-    parse_not_before, serialize_dead_letter, serialize_lock_key_index,
+    CompleteOutcome, FailOutcome, JobEnvelope, JobQueueConfig, JobRetryPolicy, JobState, JobStore,
+    LockKey, MAX_REPORTED_PENDING, Queue, STORAGE_KEY_PREFIX_LEN, make_storage_key,
+    parse_lock_key_index, parse_not_before, serialize_dead_letter, serialize_lock_key_index,
 };
 use crate::metrics_provider;
 use crate::registry::test_utils::build_store;
@@ -107,7 +107,7 @@ async fn run_enqueue_then_claim_succeeds(h: Harness) {
 
 async fn run_retry_writes_pending_with_backoff(h: Harness) {
     let mut env = dummy_envelope("cache.ns:sha256:retry");
-    env.max_attempts = 3;
+    env.max_attempts = Some(3);
     h.store.enqueue(env).await.expect("enqueue");
 
     let claimed = h
@@ -139,7 +139,7 @@ async fn run_retry_writes_pending_with_backoff(h: Harness) {
 
 async fn run_dead_letter_after_max_attempts(h: Harness) {
     let mut env = dummy_envelope("cache.ns:sha256:dl");
-    env.max_attempts = 1;
+    env.max_attempts = Some(1);
     h.store.enqueue(env).await.expect("enqueue");
 
     let claimed = h
@@ -165,7 +165,7 @@ async fn run_count_failed_reflects_dead_letters(h: Harness) {
     assert_eq!(h.store.count_failed(Queue::Cache).await.expect("count"), 0);
 
     let mut env = dummy_envelope("cache.ns:sha256:dl-count");
-    env.max_attempts = 1;
+    env.max_attempts = Some(1);
     h.store.enqueue(env).await.expect("enqueue");
     let claimed = h
         .store
@@ -248,7 +248,7 @@ async fn run_count_pending_excludes_envelopes_past_readiness_horizon(h: Harness)
 
 async fn run_future_storage_key_yields_next_ready_without_claiming(h: Harness) {
     let mut env = dummy_envelope("cache.ns:sha256:future");
-    env.max_attempts = 5;
+    env.max_attempts = Some(5);
     h.store.enqueue(env).await.expect("enqueue");
 
     let claimed = h
@@ -304,7 +304,7 @@ async fn run_retry_updates_lock_key_index_to_new_storage_key(h: Harness) {
     let lock_key = lock_key("cache.ns:sha256:retry-index");
 
     let mut env = dummy_envelope(lock_key.as_str());
-    env.max_attempts = 3;
+    env.max_attempts = Some(3);
     h.store.enqueue(env).await.expect("enqueue");
 
     let claimed = h
@@ -638,7 +638,7 @@ async fn retry_leaves_a_concurrent_producers_index_alone() {
     let lock_key = lock_key("cache.ns:sha256:retry-vs-producer");
 
     let mut env = dummy_envelope(lock_key.as_str());
-    env.max_attempts = 3;
+    env.max_attempts = Some(3);
     h.store.enqueue(env).await.expect("enqueue");
 
     let claimed = h
@@ -1111,4 +1111,81 @@ fn a_lock_key_containing_the_escape_character_is_rejected() {
         LockKey::new(""),
         Err(crate::jobs::store::Error::InvalidLockKey(_))
     ));
+}
+
+/// A pinned budget of zero used to be indistinguishable from "not set", so the
+/// queue's own budget overwrote it. Zero now means zero: the job dead-letters
+/// on its first failure rather than retrying five times.
+#[tokio::test]
+async fn a_pinned_zero_budget_is_not_overwritten_by_the_queue_default() {
+    metrics_provider::init_for_tests();
+    let h = harness_memory();
+
+    let mut env = dummy_envelope("cache.ns:sha256:no-retries");
+    env.max_attempts = Some(0);
+    h.store.enqueue(env).await.expect("enqueue");
+
+    let claimed = h
+        .store
+        .claim_one(Queue::Cache)
+        .await
+        .expect("claim")
+        .claimed
+        .expect("Some");
+    assert_eq!(
+        claimed.envelope.max_attempts,
+        Some(0),
+        "enqueue must leave a pinned budget alone"
+    );
+
+    let outcome = h.store.fail(claimed, "boom").await.expect("fail");
+    assert!(
+        matches!(outcome, FailOutcome::MovedToDeadLetter),
+        "a zero budget must dead-letter on the first failure"
+    );
+}
+
+/// An envelope that pins nothing takes the queue's configured budget at
+/// enqueue, which is what every production caller relies on.
+#[tokio::test]
+async fn an_unpinned_budget_takes_the_queue_default() {
+    metrics_provider::init_for_tests();
+    let h = harness_memory();
+
+    let env = dummy_envelope("cache.ns:sha256:default-budget");
+    assert_eq!(env.max_attempts, None, "a fresh envelope pins nothing");
+    h.store.enqueue(env).await.expect("enqueue");
+
+    let claimed = h
+        .store
+        .claim_one(Queue::Cache)
+        .await
+        .expect("claim")
+        .claimed
+        .expect("Some");
+    assert_eq!(
+        claimed.envelope.max_attempts,
+        Some(JobRetryPolicy::default().max_attempts),
+        "enqueue must stamp the queue's budget when the caller pinned none"
+    );
+}
+
+/// The queue is durable, so a record written before the budget became optional
+/// must still claim and still carry the same budget.
+#[test]
+fn a_stored_envelope_keeps_its_budget() {
+    let stored = r#"{"id":"j1","queue":"cache","kind":"test.noop",
+        "lock_key":"cache.ns:sha256:aaa","created_at":"2026-01-01T00:00:00Z",
+        "attempts":2,"max_attempts":5,"payload":null}"#;
+
+    let envelope: JobEnvelope =
+        serde_json::from_str(stored).expect("a stored envelope must still parse");
+    assert_eq!(envelope.max_attempts, Some(5));
+    assert_eq!(envelope.attempts, 2);
+
+    let json = serde_json::to_value(&envelope).expect("serialize");
+    assert_eq!(
+        json["max_attempts"], 5,
+        "the budget must stay a plain number on the wire: {json}"
+    );
 }

@@ -323,7 +323,11 @@ pub struct JobEnvelope {
     pub lock_key: LockKey,
     pub created_at: DateTime<Utc>,
     pub attempts: u32,
-    pub max_attempts: u32,
+    /// Retry budget. `None` until [`JobStore::enqueue`] stamps the queue's
+    /// configured one, so a caller can pin its own, zero included, without
+    /// colliding with "not set yet".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
     pub payload: serde_json::Value,
 }
 
@@ -348,9 +352,7 @@ impl JobEnvelope {
             lock_key: LockKey::new(lock_key)?,
             created_at: Utc::now(),
             attempts: 0,
-            // 0 means "unset": `JobStore::enqueue` stamps the queue's configured
-            // budget unless a caller set an explicit per-job value first.
-            max_attempts: 0,
+            max_attempts: None,
             payload: serde_json::to_value(payload).map_err(|e| Error::Execution(e.to_string()))?,
         })
     }
@@ -1020,11 +1022,9 @@ impl JobStore {
     /// only one wins at the engine's Prepare/Apply stage; the loser receives
     /// `Conflict` or `Precondition` and we treat that as a dedup hit.
     pub async fn enqueue(&self, mut envelope: JobEnvelope) -> Result<(), Error> {
-        // Apply the queue's configured retry budget unless a caller pinned an
-        // explicit per-job value (a non-zero `max_attempts`).
-        if envelope.max_attempts == 0 {
-            envelope.max_attempts = self.max_attempts;
-        }
+        // Apply the queue's configured retry budget unless a caller pinned one.
+        envelope.max_attempts.get_or_insert(self.max_attempts);
+
         // Fast path: index present and pending exists, a hit, no writes needed.
         // A lookup error (including a failed orphan self-heal) is propagated
         // rather than swallowed as a miss, so a lingering orphan index cannot
@@ -1306,7 +1306,9 @@ impl JobStore {
         } = claimed;
         let new_attempts = envelope.attempts.saturating_add(1);
 
-        if new_attempts >= envelope.max_attempts {
+        // Every stored envelope carries a budget; the queue's stands in for one
+        // that somehow reached here without going through `enqueue`.
+        if new_attempts >= envelope.max_attempts.unwrap_or(self.max_attempts) {
             return self
                 .fail_dead_letter(session, envelope, storage_key, err)
                 .await;

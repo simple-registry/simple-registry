@@ -472,7 +472,7 @@ impl Registry {
                             kind: envelope.kind,
                             lock_key: envelope.lock_key.to_string(),
                             attempts: envelope.attempts,
-                            max_attempts: envelope.max_attempts,
+                            max_attempts: envelope.max_attempts.unwrap_or_default(),
                             created_at: envelope.created_at,
                             not_before,
                         }))
@@ -514,7 +514,7 @@ impl Registry {
                         kind: record.envelope.kind,
                         lock_key: record.envelope.lock_key.to_string(),
                         attempts: record.envelope.attempts,
-                        max_attempts: record.envelope.max_attempts,
+                        max_attempts: record.envelope.max_attempts.unwrap_or_default(),
                         created_at: record.envelope.created_at,
                         failed_at: record.failed_at,
                         last_error: record.last_error,

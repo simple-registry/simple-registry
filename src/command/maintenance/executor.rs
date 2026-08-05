@@ -1378,7 +1378,7 @@ mod tests {
             ] {
                 // A single-attempt job failed once dead-letters under its
                 // original key.
-                envelope.max_attempts = 1;
+                envelope.max_attempts = Some(1);
                 job_store.enqueue(envelope).await.unwrap();
                 let claimed = job_store
                     .claim_one(queue)

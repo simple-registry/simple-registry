@@ -405,7 +405,7 @@ mod tests {
     /// Enqueues a single-attempt job and fails it once so it dead-letters under
     /// its original storage key.
     async fn dead_letter(job_store: &JobStore, queue: Queue, mut envelope: JobEnvelope) {
-        envelope.max_attempts = 1;
+        envelope.max_attempts = Some(1);
         job_store.enqueue(envelope).await.unwrap();
         let claimed = job_store
             .claim_one(queue)
