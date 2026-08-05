@@ -5,7 +5,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::{
     cache_fill::build_envelope,
-    event_webhook::event::{Event, EventActor, EventKind},
+    event_webhook::event::{Event, EventActor},
     jobs::Queue,
     metrics_provider::metrics_provider,
     oci::{Digest, Namespace, UploadSessionId},
@@ -409,9 +409,7 @@ impl Registry {
                 .await?
         };
 
-        let event = Event::new(EventKind::BlobPull, namespace.clone(), repository_name)
-            .digest(Some(digest.to_string()))
-            .actor(actor);
+        let event = Event::pull_blob(namespace, &repository_name, digest, actor.as_ref());
         self.dispatch_events(&[event]).await?;
 
         Ok(response)

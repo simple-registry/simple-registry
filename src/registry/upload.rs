@@ -2,7 +2,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, copy, sink};
 use tracing::{instrument, warn};
 
 use crate::{
-    event_webhook::event::{Event, EventActor, EventKind},
+    event_webhook::event::{Event, EventActor},
     oci::{Digest, Namespace, UploadSessionId},
     registry::{
         Error, Registry,
@@ -256,9 +256,7 @@ impl Registry {
         source: &Namespace,
     ) -> Result<StartUploadResponse, Error> {
         let repository = self.repository_name_for(namespace);
-        let event = Event::new(EventKind::BlobPush, namespace.clone(), repository)
-            .digest(Some(mount.digest.to_string()))
-            .actor(actor);
+        let event = Event::push_blob(namespace, &repository, &mount.digest, actor.as_ref());
         self.dispatch_events(&[event]).await?;
 
         if let Some(digest) = self.try_cross_repo_mount(namespace, mount, source).await? {
@@ -422,9 +420,7 @@ impl Registry {
         // completed blob can never go unnotified; a completion that fails
         // past this point leaves a false-positive notification instead.
         let repository = self.repository_name_for(namespace);
-        let event = Event::new(EventKind::BlobPush, namespace.clone(), repository)
-            .digest(Some(digest.to_string()))
-            .actor(actor);
+        let event = Event::push_blob(namespace, &repository, digest, actor.as_ref());
         self.dispatch_events(&[event]).await?;
 
         // An unknown session reads as empty only so the blob-exists path below

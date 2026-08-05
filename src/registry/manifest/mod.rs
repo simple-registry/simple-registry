@@ -14,7 +14,7 @@ use tracing::{debug, error, instrument, warn};
 
 use crate::{
     cache_fill::CACHE_ACTOR,
-    event_webhook::event::{Event, EventActor, EventKind},
+    event_webhook::event::{Event, EventActor},
     jobs::Queue,
     metrics_provider::metrics_provider,
     oci::{Content, Digest, Manifest, MediaType, Namespace, Reference, Tag},
@@ -69,110 +69,6 @@ pub enum DispatchTarget<'a> {
         digest: &'a Digest,
         subject: Option<&'a Digest>,
     },
-}
-
-fn manifest_event(
-    kind: EventKind,
-    namespace: &Namespace,
-    repository: String,
-    digest: Option<String>,
-    reference: &Reference,
-    actor: Option<EventActor>,
-) -> Event {
-    Event::new(kind, namespace.clone(), repository)
-        .digest(digest)
-        .reference(Some(reference.to_string()))
-        .actor(actor)
-}
-
-fn tag_event(
-    kind: EventKind,
-    namespace: &Namespace,
-    repository: String,
-    digest: Option<String>,
-    reference: &Reference,
-    tag: &Tag,
-    actor: Option<EventActor>,
-) -> Event {
-    Event::new(kind, namespace.clone(), repository)
-        .digest(digest)
-        .reference(Some(reference.to_string()))
-        .tag(Some(tag.to_string()))
-        .actor(actor)
-}
-
-/// The `ManifestDelete` event a delete emits, plus a `TagDelete` when the
-/// reference is a tag.
-fn delete_events(
-    namespace: &Namespace,
-    repository: String,
-    digest: Option<String>,
-    reference: &Reference,
-    actor: Option<EventActor>,
-) -> Vec<Event> {
-    let mut events = vec![manifest_event(
-        EventKind::ManifestDelete,
-        namespace,
-        repository.clone(),
-        digest.clone(),
-        reference,
-        actor.clone(),
-    )];
-    if let Some(tag) = reference.as_tag() {
-        events.push(tag_event(
-            EventKind::TagDelete,
-            namespace,
-            repository,
-            digest,
-            reference,
-            tag,
-            actor,
-        ));
-    }
-    events
-}
-
-/// The `ManifestPush` event a put emits, a `TagCreate` when the reference is a
-/// tag, and one `TagCreate` per tag created via a `?tag=` query parameter.
-fn put_manifest_events(
-    namespace: &Namespace,
-    repository: &str,
-    digest: Option<&str>,
-    reference: &Reference,
-    created_tags: &[Tag],
-    actor: Option<&EventActor>,
-) -> Vec<Event> {
-    let mut events = vec![manifest_event(
-        EventKind::ManifestPush,
-        namespace,
-        repository.to_string(),
-        digest.map(str::to_string),
-        reference,
-        actor.cloned(),
-    )];
-    if let Some(tag) = reference.as_tag() {
-        events.push(tag_event(
-            EventKind::TagCreate,
-            namespace,
-            repository.to_string(),
-            digest.map(str::to_string),
-            reference,
-            tag,
-            actor.cloned(),
-        ));
-    }
-    for tag in created_tags {
-        events.push(tag_event(
-            EventKind::TagCreate,
-            namespace,
-            repository.to_string(),
-            digest.map(str::to_string),
-            reference,
-            tag,
-            actor.cloned(),
-        ));
-    }
-    events
 }
 
 /// Buffers the manifest body from `body_stream`, rejecting a stream longer than
@@ -351,13 +247,12 @@ impl Registry {
         // The registry is about to gain upstream content, so webhook
         // consumers see the intent like any other write. Best effort: the
         // client operation is the pull, so a delivery failure must not fail it.
-        let event = manifest_event(
-            EventKind::ManifestPush,
+        let event = Event::push_manifest(
             namespace,
-            repository.name.to_string(),
-            Some(digest.to_string()),
+            &repository.name,
+            &digest,
             &reference,
-            Some(EventActor::internal(CACHE_ACTOR)),
+            Some(&EventActor::internal(CACHE_ACTOR)),
         );
         if let Err(error) = self.dispatch_events(&[event]).await {
             warn!("Cache-fill event delivery failed: {error}");
@@ -619,14 +514,10 @@ impl Registry {
         let repository = resolved_repository
             .map(|r| r.name.to_string())
             .unwrap_or_default();
-        let digest_str = match reference {
-            Reference::Digest(d) => Some(d.to_string()),
-            Reference::Tag(_) => None,
-        };
         // Intent-first emission: the events fire before the delete, so a
         // performed delete can never go unnotified; a delete that fails past
         // this point leaves a false-positive notification instead.
-        let events = delete_events(namespace, repository, digest_str, reference, actor);
+        let events = Event::delete_manifest(namespace, &repository, reference, actor.as_ref());
         self.dispatch_events(&events).await?;
 
         // Read while the manifest is still here: once gone, neither this job nor
@@ -837,8 +728,7 @@ impl Registry {
     ) -> Result<GetManifestResponse, Error> {
         let repository = self.get_repository_for_namespace(namespace)?;
         let repository_name = repository.name.to_string();
-        let event_tag = reference.as_tag().map(ToString::to_string);
-        let reference_str = reference.to_string();
+        let event_reference = reference.clone();
 
         let response = self
             .resolve_get_manifest_response(
@@ -851,11 +741,13 @@ impl Registry {
             )
             .await?;
 
-        let event = Event::new(EventKind::ManifestPull, namespace.clone(), repository_name)
-            .digest(Some(response.digest().to_string()))
-            .reference(Some(reference_str))
-            .tag(event_tag)
-            .actor(actor);
+        let event = Event::pull_manifest(
+            namespace,
+            &repository_name,
+            response.digest(),
+            &event_reference,
+            actor.as_ref(),
+        );
         self.dispatch_events(&[event]).await?;
 
         Ok(response)
@@ -1012,11 +904,10 @@ impl Registry {
         // Intent-first emission: the events fire before the write, so a
         // performed write can never go unnotified; a write that fails past
         // this point leaves a false-positive notification instead.
-        let digest_str = digest.to_string();
-        let events = put_manifest_events(
+        let events = Event::put_manifest(
             namespace,
             &repository,
-            Some(&digest_str),
+            &digest,
             &reference,
             &created_tags,
             actor.as_ref(),

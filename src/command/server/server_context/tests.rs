@@ -6,7 +6,6 @@ use argon2::{
     password_hash::{SaltString, rand_core::OsRng},
 };
 use base64::Engine;
-use chrono::Utc;
 use hyper::{Request, header::HeaderMap};
 use uuid::Uuid;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
@@ -18,11 +17,7 @@ use crate::{
     cache::{self, Cache},
     command::server::server_context::{ServerContext, resolve_forwarded_ip},
     configuration::{Configuration, TrustedProxy},
-    event_webhook::{
-        config::EventWebhookConfig,
-        dispatcher::EventDispatcher,
-        event::{Event, EventKind},
-    },
+    event_webhook::{config::EventWebhookConfig, dispatcher::EventDispatcher, event::Event},
     identity::{Action, ClientIdentity},
     metrics_provider,
     oci::{Digest, Namespace, Reference, Tag},
@@ -34,10 +29,7 @@ use crate::{
         repository_resolver::RepositoryResolver,
         test_utils::{build_store, s3_test_connection},
     },
-    test_fixtures::{
-        configuration::{load_config, minimal_config},
-        events::manifest_push_event,
-    },
+    test_fixtures::configuration::{load_config, minimal_config},
 };
 
 #[derive(Default)]
@@ -206,7 +198,16 @@ pub async fn create_test_registry(config: &Configuration) -> Arc<Registry> {
 }
 
 pub fn create_test_event() -> Event {
-    manifest_push_event("test/repo", "test-repo", None)
+    let digest: Digest = "sha256:abc1230000000000000000000000000000000000000000000000000000000000"
+        .parse()
+        .expect("test digest should parse");
+    Event::push_manifest(
+        &Namespace::new("test/repo").expect("test namespace should parse"),
+        "test-repo",
+        &digest,
+        &Reference::Digest(digest.clone()),
+        None,
+    )
 }
 
 #[tokio::test]
@@ -411,17 +412,7 @@ async fn test_dispatch_event_with_no_dispatcher() {
     let registry = create_test_registry(&config).await;
     let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
 
-    let event = Event {
-        id: Uuid::new_v4(),
-        timestamp: Utc::now(),
-        kind: EventKind::ManifestPush,
-        namespace: Namespace::new("test/repo").unwrap(),
-        digest: Some("sha256:abc123".to_string()),
-        reference: Some("sha256:abc123".to_string()),
-        tag: None,
-        actor: None,
-        repository: "test-repo".to_string(),
-    };
+    let event = create_test_event();
 
     let result = context.registry.dispatch_events(&[event]).await;
     assert!(result.is_ok());
@@ -451,17 +442,7 @@ async fn test_dispatch_event_delivers_to_webhook() {
     let registry = create_test_registry(&config).await;
     let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
 
-    let event = Event {
-        id: Uuid::new_v4(),
-        timestamp: Utc::now(),
-        kind: EventKind::ManifestPush,
-        namespace: Namespace::new("test/repo").unwrap(),
-        digest: Some("sha256:abc123".to_string()),
-        reference: Some("sha256:abc123".to_string()),
-        tag: None,
-        actor: None,
-        repository: "test-repo".to_string(),
-    };
+    let event = create_test_event();
 
     let result = context.registry.dispatch_events(&[event]).await;
     assert!(result.is_ok());
@@ -490,17 +471,7 @@ async fn test_dispatch_event_required_webhook_failure_returns_error() {
     let registry = create_test_registry(&config).await;
     let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
 
-    let event = Event {
-        id: Uuid::new_v4(),
-        timestamp: Utc::now(),
-        kind: EventKind::ManifestPush,
-        namespace: Namespace::new("test/repo").unwrap(),
-        digest: Some("sha256:abc123".to_string()),
-        reference: Some("sha256:abc123".to_string()),
-        tag: None,
-        actor: None,
-        repository: "test-repo".to_string(),
-    };
+    let event = create_test_event();
 
     let result = context.registry.dispatch_events(&[event]).await;
     assert!(matches!(result, Err(RegistryError::EventDelivery(_))));
@@ -540,17 +511,7 @@ async fn test_server_context_shutdown_drains_in_flight_async_delivery() {
     let registry = create_test_registry(&config).await;
     let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
 
-    let event = Event {
-        id: Uuid::new_v4(),
-        timestamp: Utc::now(),
-        kind: EventKind::ManifestPush,
-        namespace: Namespace::new("test/repo").unwrap(),
-        digest: Some("sha256:abc123".to_string()),
-        reference: Some("sha256:abc123".to_string()),
-        tag: None,
-        actor: None,
-        repository: "test-repo".to_string(),
-    };
+    let event = create_test_event();
 
     context.registry.dispatch_events(&[event]).await.unwrap();
 
@@ -588,17 +549,7 @@ async fn test_server_context_shutdown_rejects_new_async_dispatches() {
 
     context.shutdown().await;
 
-    let event = Event {
-        id: Uuid::new_v4(),
-        timestamp: Utc::now(),
-        kind: EventKind::ManifestPush,
-        namespace: Namespace::new("test/repo").unwrap(),
-        digest: Some("sha256:abc123".to_string()),
-        reference: Some("sha256:abc123".to_string()),
-        tag: None,
-        actor: None,
-        repository: "test-repo".to_string(),
-    };
+    let event = create_test_event();
 
     let _ = context.registry.dispatch_events(&[event]).await;
 
@@ -791,20 +742,6 @@ fn test_resolve_forwarded_ip_x_forwarded_for_takes_precedence() {
     );
 }
 
-fn make_event(id: Uuid) -> Event {
-    Event {
-        id,
-        timestamp: Utc::now(),
-        kind: EventKind::ManifestPush,
-        namespace: Namespace::new("test/repo").unwrap(),
-        digest: Some("sha256:abc123".to_string()),
-        reference: Some("sha256:abc123".to_string()),
-        tag: None,
-        actor: None,
-        repository: "test-repo".to_string(),
-    }
-}
-
 #[tokio::test]
 async fn dispatch_events_first_failure_does_not_abort_batch() {
     // With max_retries = 0 each event fails in a single attempt, so the mock
@@ -831,9 +768,9 @@ async fn dispatch_events_first_failure_does_not_abort_batch() {
     let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
 
     let events = vec![
-        make_event(Uuid::new_v4()),
-        make_event(Uuid::new_v4()),
-        make_event(Uuid::new_v4()),
+        create_test_event(),
+        create_test_event(),
+        create_test_event(),
     ];
     let result = context.registry.dispatch_events(&events).await;
 
@@ -868,7 +805,7 @@ async fn dispatch_events_all_success_returns_ok() {
     let registry = create_test_registry(&config).await;
     let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
 
-    let events = vec![make_event(Uuid::new_v4()), make_event(Uuid::new_v4())];
+    let events = vec![create_test_event(), create_test_event()];
     let result = context.registry.dispatch_events(&events).await;
 
     assert!(result.is_ok());

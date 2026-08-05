@@ -14,7 +14,7 @@ use angos_tx_engine::transaction::Transaction;
 use crate::{
     event_webhook::{
         dispatcher::EventDispatcher,
-        event::{Event, EventActor, EventKind},
+        event::{Event, EventActor},
     },
     jobs::Queue,
     jobs::store::{Error, JobEnvelope, JobHandler},
@@ -110,9 +110,12 @@ impl CacheFillJobHandler {
             .resolve(namespace)
             .map(|r| r.name.to_string())
             .unwrap_or_default();
-        let event = Event::new(EventKind::BlobPush, namespace.clone(), repository_name)
-            .digest(Some(digest.to_string()))
-            .actor(Some(EventActor::internal(CACHE_ACTOR)));
+        let event = Event::push_blob(
+            namespace,
+            &repository_name,
+            digest,
+            Some(&EventActor::internal(CACHE_ACTOR)),
+        );
         if let Some(dispatcher) = &self.event_dispatcher
             && let Err(error) = dispatcher.dispatch(&event).await
         {

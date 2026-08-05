@@ -11,9 +11,11 @@ use crate::{
         event::{Event, EventKind},
     },
     metrics_provider,
+    oci::{Digest, Namespace, Reference},
     secret::Secret,
-    test_fixtures::events::manifest_push_event,
 };
+
+const TEST_DIGEST: &str = "sha256:abc1230000000000000000000000000000000000000000000000000000000000";
 
 pub fn build_dispatcher(webhooks: HashMap<String, EventWebhookConfig>) -> EventDispatcher {
     metrics_provider::init_for_tests();
@@ -38,7 +40,14 @@ pub fn single_hook_dispatcher(
 }
 
 pub fn create_test_event() -> Event {
-    manifest_push_event("library/nginx", "docker-hub", Some("latest"))
+    let digest: Digest = TEST_DIGEST.parse().expect("test digest should parse");
+    Event::push_manifest(
+        &Namespace::new("library/nginx").expect("test namespace should parse"),
+        "docker-hub",
+        &digest,
+        &Reference::Digest(digest.clone()),
+        None,
+    )
 }
 
 pub fn create_test_config(
