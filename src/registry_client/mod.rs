@@ -6,7 +6,7 @@ mod error;
 mod write;
 
 use std::{
-    collections::HashSet, fmt::Display, future::Future, io, path::Path, str::FromStr, sync::Arc,
+    collections::HashSet, fmt::Display, future::Future, io, path::PathBuf, str::FromStr, sync::Arc,
     time::Duration,
 };
 
@@ -94,6 +94,14 @@ fn parse_header<T: FromStr>(
         .ok_or_else(|| Error::Internal(format!("missing or invalid '{name}' response header")))
 }
 
+/// The mTLS client identity. Holding both files together is what makes a
+/// certificate without its key unrepresentable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MtlsIdentity {
+    pub client_certificate: PathBuf,
+    pub client_private_key: PathBuf,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(try_from = "RegistryClientConfigFields")]
 pub struct RegistryClientConfig {
@@ -104,11 +112,8 @@ pub struct RegistryClientConfig {
     /// Bounds inactivity between reads during a transfer; a long but
     /// progressing blob transfer is never capped by a total deadline.
     pub read_timeout_secs: u64,
-    pub server_ca_bundle: Option<String>,
-    /// Note: named `client_certificate` (without `_bundle`) to match the existing config key;
-    /// renaming would break operator configs.
-    pub client_certificate: Option<String>,
-    pub client_private_key: Option<String>,
+    pub server_ca_bundle: Option<PathBuf>,
+    pub mtls: Option<MtlsIdentity>,
     pub username: Option<String>,
     pub password: Option<Secret<String>>,
 }
@@ -122,9 +127,11 @@ struct RegistryClientConfigFields {
     connect_timeout_secs: u64,
     #[serde(default = "RegistryClientConfig::default_read_timeout_secs")]
     read_timeout_secs: u64,
-    server_ca_bundle: Option<String>,
-    client_certificate: Option<String>,
-    client_private_key: Option<String>,
+    server_ca_bundle: Option<PathBuf>,
+    /// Named without `_bundle` to match the existing config key; renaming would
+    /// break operator configs.
+    client_certificate: Option<PathBuf>,
+    client_private_key: Option<PathBuf>,
     username: Option<String>,
     password: Option<Secret<String>>,
 }
@@ -133,19 +140,26 @@ impl TryFrom<RegistryClientConfigFields> for RegistryClientConfig {
     type Error = String;
 
     fn try_from(fields: RegistryClientConfigFields) -> Result<Self, Self::Error> {
-        if fields.client_certificate.is_some() != fields.client_private_key.is_some() {
-            return Err(
-                "both client_certificate and client_private_key are required for mTLS".to_string(),
-            );
-        }
+        let mtls = match (fields.client_certificate, fields.client_private_key) {
+            (Some(client_certificate), Some(client_private_key)) => Some(MtlsIdentity {
+                client_certificate,
+                client_private_key,
+            }),
+            (None, None) => None,
+            _ => {
+                return Err(
+                    "both client_certificate and client_private_key are required for mTLS"
+                        .to_string(),
+                );
+            }
+        };
         Ok(Self {
             url: fields.url,
             max_redirect: fields.max_redirect,
             connect_timeout_secs: fields.connect_timeout_secs,
             read_timeout_secs: fields.read_timeout_secs,
             server_ca_bundle: fields.server_ca_bundle,
-            client_certificate: fields.client_certificate,
-            client_private_key: fields.client_private_key,
+            mtls,
             username: fields.username,
             password: fields.password,
         })
@@ -233,9 +247,9 @@ impl RegistryClient {
             .read_timeout(Duration::from_secs(config.read_timeout_secs));
         let client = apply_tls_files(
             builder,
-            config.server_ca_bundle.as_deref().map(Path::new),
-            config.client_certificate.as_deref().map(Path::new),
-            config.client_private_key.as_deref().map(Path::new),
+            config.server_ca_bundle.as_deref(),
+            config.mtls.as_ref().map(|m| m.client_certificate.as_path()),
+            config.mtls.as_ref().map(|m| m.client_private_key.as_path()),
         )
         .map_err(Error::Initialization)?
         .build()

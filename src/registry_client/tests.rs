@@ -1,4 +1,4 @@
-use std::{io::Cursor, time::Duration};
+use std::{io::Cursor, path::PathBuf, time::Duration};
 
 use futures_util::future::join_all;
 use serde_json::json;
@@ -14,8 +14,9 @@ use crate::{
     oci::{Digest, MediaType, Reference, Tag},
     registry::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES},
     registry_client::{
-        DeleteManifestOutcome, Error, PutManifestOutcome, REPLICATION_SUPERSEDED_CODE,
-        RegistryClient, RegistryClientConfig, X_ANGOS_SOURCE_TIMESTAMP,
+        DeleteManifestOutcome, Error, MtlsIdentity, PutManifestOutcome,
+        REPLICATION_SUPERSEDED_CODE, RegistryClient, RegistryClientConfig,
+        X_ANGOS_SOURCE_TIMESTAMP,
         auth::{token_cache_key, token_index_cache_key},
         without_query,
     },
@@ -1078,7 +1079,7 @@ async fn test_get_blob_not_found() {
 #[test]
 fn test_new_with_invalid_ca_bundle() {
     let config = RegistryClientConfig {
-        server_ca_bundle: Some("/nonexistent/ca.pem".to_string()),
+        server_ca_bundle: Some(PathBuf::from("/nonexistent/ca.pem")),
         ..test_client_config("https://example.com")
     };
 
@@ -1122,8 +1123,10 @@ fn test_registry_client_config_key_without_cert_rejected_at_deserialize() {
 #[test]
 fn test_new_with_both_certificate_and_key_invalid_files() {
     let config = RegistryClientConfig {
-        client_certificate: Some("/nonexistent/cert.pem".to_string()),
-        client_private_key: Some("/nonexistent/key.pem".to_string()),
+        mtls: Some(MtlsIdentity {
+            client_certificate: PathBuf::from("/nonexistent/cert.pem"),
+            client_private_key: PathBuf::from("/nonexistent/key.pem"),
+        }),
         ..test_client_config("https://example.com")
     };
 

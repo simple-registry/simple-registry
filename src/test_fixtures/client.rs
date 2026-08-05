@@ -12,8 +12,7 @@ pub fn test_client_config(url: impl Into<String>) -> RegistryClientConfig {
         connect_timeout_secs: 30,
         read_timeout_secs: 300,
         server_ca_bundle: None,
-        client_certificate: None,
-        client_private_key: None,
+        mtls: None,
         username: None,
         password: None,
     }

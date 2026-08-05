@@ -598,7 +598,7 @@ mod tests {
         let cache = cache::Config::Memory.to_backend().unwrap();
         let config = Config {
             upstream: vec![RegistryClientConfig {
-                server_ca_bundle: Some(ca_bundle_path.to_string_lossy().to_string()),
+                server_ca_bundle: Some(ca_bundle_path.clone()),
                 ..test_client_config("https://registry.example.test")
             }],
             ..Default::default()
