@@ -19,7 +19,7 @@ use crate::{
     oci::{Digest, Namespace, Reference, Tag, UploadSessionId},
     registry::{
         Error as RegistryError, Registry,
-        blob_store::{self, BlobStore, MultipartCleanup},
+        blob_store::{BlobStore, MultipartCleanup, OrphanMultipartUpload},
         metadata_store::{BlobIndexOperation, LinkKind, LinkOperation, MetadataStore},
         path_builder,
     },
@@ -442,9 +442,9 @@ impl Executor {
         Ok(())
     }
 
-    async fn abort_multipart_upload(&self, key: String, upload_id: String) -> Result<(), Error> {
+    async fn abort_multipart_upload(&self, upload: OrphanMultipartUpload) -> Result<(), Error> {
         self.blob_store
-            .abort_orphan_multipart_upload(&blob_store::OrphanMultipartUpload { key, upload_id })
+            .abort_orphan_multipart_upload(&upload)
             .await?;
         Ok(())
     }
@@ -616,9 +616,7 @@ impl ActionSink for Executor {
                 link,
                 referrer,
             } => self.remove_referrer(namespace, link, referrer).await,
-            Action::AbortMultipartUpload { key, upload_id } => {
-                self.abort_multipart_upload(key, upload_id).await
-            }
+            Action::AbortMultipartUpload { upload } => self.abort_multipart_upload(upload).await,
             Action::EnqueueReplicationPush {
                 downstream,
                 namespace,

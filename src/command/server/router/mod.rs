@@ -36,7 +36,7 @@ pub fn parse(method: &Method, uri: &Uri) -> Option<Action> {
             return Some(Action::ApiVersion);
         }
         "/v2/_catalog" if method == Method::GET => {
-            let (n, last) = parse_pagination(params);
+            let PaginationQuery { n, last } = parse_pagination(params);
             return Some(Action::ListCatalog { n, last });
         }
         _ => {}
@@ -109,32 +109,35 @@ struct PaginationQuery {
     last: Option<String>,
 }
 
-fn parse_pagination(params: Option<&str>) -> (Option<u16>, Option<String>) {
-    let query: PaginationQuery = params.and_then(parse_query).unwrap_or_default();
-    (query.n, query.last)
+fn parse_pagination(params: Option<&str>) -> PaginationQuery {
+    params.and_then(parse_query).unwrap_or_default()
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct JobsQuery {
     n: Option<u16>,
     after: Option<String>,
-    queue: Option<String>,
+    #[serde(default = "default_jobs_queue")]
+    queue: Queue,
+}
+
+fn default_jobs_queue() -> Queue {
+    Queue::Cache
 }
 
 /// Parses the `?n=&after=&queue=` of a `_jobs` admin route strictly: a lenient
 /// parse would reset the whole struct on one bad value and silently administer
 /// the default `cache` queue. Returns `None` on a malformed value or unknown
 /// queue; an absent selector defaults to `cache`.
-fn parse_jobs_query(params: Option<&str>) -> Option<(Option<u16>, Option<String>, Queue)> {
-    let query: JobsQuery = match params {
-        Some(params) => parse_query(params)?,
-        None => JobsQuery::default(),
-    };
-    let queue = match query.queue.as_deref() {
-        None => Queue::Cache,
-        Some(name) => name.parse().ok()?,
-    };
-    Some((query.n, query.after, queue))
+fn parse_jobs_query(params: Option<&str>) -> Option<JobsQuery> {
+    match params {
+        Some(params) => parse_query(params),
+        None => Some(JobsQuery {
+            n: None,
+            after: None,
+            queue: default_jobs_queue(),
+        }),
+    }
 }
 
 /// Parse the angos-specific extension API routes. `path` is relative to the
@@ -150,11 +153,11 @@ fn try_parse_extension(method: &Method, path: &str, params: Option<&str>) -> Opt
         Method::GET => match path {
             "_repositories" => Some(Action::ListRepositories),
             "_jobs" => {
-                let (n, after, queue) = parse_jobs_query(params)?;
+                let JobsQuery { n, after, queue } = parse_jobs_query(params)?;
                 Some(Action::ListJobs { queue, n, after })
             }
             "_jobs/failed" => {
-                let (n, after, queue) = parse_jobs_query(params)?;
+                let JobsQuery { n, after, queue } = parse_jobs_query(params)?;
                 Some(Action::ListFailedJobs { queue, n, after })
             }
             _ => {
@@ -178,7 +181,7 @@ fn try_parse_extension(method: &Method, path: &str, params: Option<&str>) -> Opt
                 .strip_prefix("_jobs/failed/")
                 .and_then(|rest| rest.strip_suffix("/retry"))
                 .filter(|key| is_job_key(key))?;
-            let (_, _, queue) = parse_jobs_query(params)?;
+            let queue = parse_jobs_query(params)?.queue;
             Some(Action::RetryJob {
                 queue,
                 storage_key: key.to_string(),
@@ -186,7 +189,7 @@ fn try_parse_extension(method: &Method, path: &str, params: Option<&str>) -> Opt
         }
         Method::DELETE => {
             if let Some(key) = path.strip_prefix("_jobs/failed/").filter(|k| is_job_key(k)) {
-                let (_, _, queue) = parse_jobs_query(params)?;
+                let queue = parse_jobs_query(params)?.queue;
                 return Some(Action::DeleteJob {
                     queue,
                     state: JobState::Failed,
@@ -196,7 +199,7 @@ fn try_parse_extension(method: &Method, path: &str, params: Option<&str>) -> Opt
             let key = path
                 .strip_prefix("_jobs/pending/")
                 .filter(|k| is_job_key(k))?;
-            let (_, _, queue) = parse_jobs_query(params)?;
+            let queue = parse_jobs_query(params)?.queue;
             Some(Action::DeleteJob {
                 queue,
                 state: JobState::Pending,
@@ -356,7 +359,7 @@ fn try_find_tags(method: &Method, path: &str, params: Option<&str>) -> Option<Ac
         && *method == Method::GET
     {
         let namespace = Namespace::new(namespace_str).ok()?;
-        let (n, last) = parse_pagination(params);
+        let PaginationQuery { n, last } = parse_pagination(params);
         return Some(Action::ListTags { namespace, n, last });
     }
 

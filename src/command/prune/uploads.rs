@@ -118,11 +118,8 @@ pub async fn sweep_orphan_multiparts(
         .map_err(Error::from)?;
     let count = orphans.len();
     for orphan in orphans {
-        sink.apply(Action::AbortMultipartUpload {
-            key: orphan.key,
-            upload_id: orphan.upload_id,
-        })
-        .await?;
+        sink.apply(Action::AbortMultipartUpload { upload: orphan })
+            .await?;
     }
     info!("prune: found {count} orphan multipart upload(s)");
     Ok(())
