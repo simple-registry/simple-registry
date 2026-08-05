@@ -41,6 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A replication delete job now carries the referrer's subject, so a retry that finds the manifest already gone downstream can still drop its stale descriptor from the OCI 1.0 referrers fallback index.
 - Pushing a manifest whose `schemaVersion` is not 2 is now refused instead of stored with none of its blobs linked, leaving them to be reclaimed as orphans.
 - A malformed `?from=` on a blob-upload POST is now refused instead of ignored when no `?mount=` accompanies it, matching the `?mount=` and `?digest=` values on the same request.
+- An upload directory whose name is not a session id is now quarantined by scrub like any other unrecognized key, instead of being reported as a session that only prune could reach.
 
 ## 1.4.4
 

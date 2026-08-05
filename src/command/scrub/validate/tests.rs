@@ -636,6 +636,38 @@ async fn unknown_keys_are_quarantined_in_both_stores() {
     .await;
 }
 
+/// An upload directory whose name is not a session id is no angos session, so
+/// it reaches the unknown-key quarantine like any other unrecognized key.
+#[tokio::test]
+async fn an_upload_directory_that_is_not_a_session_is_quarantined() {
+    for_each_backend(async |test_case| {
+        let blob_store = test_case.blob_store();
+
+        let stray = "v2/repositories/test-repo/_uploads/not-a-session/data";
+        blob_store
+            .object_store()
+            .put(stray, Bytes::from_static(b"stray upload"))
+            .await
+            .unwrap();
+
+        scrub_apply(test_case).await;
+
+        assert!(
+            blob_store.object_store().get(stray).await.is_err(),
+            "the stray upload directory must be moved"
+        );
+        assert_eq!(
+            blob_store
+                .object_store()
+                .get(&format!("{LOST_AND_FOUND_PREFIX}/{stray}"))
+                .await
+                .unwrap(),
+            b"stray upload"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn delete_unknown_removes_aliens_without_quarantining() {
     for_each_backend(async |test_case| {
