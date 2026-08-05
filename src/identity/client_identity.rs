@@ -2,6 +2,8 @@ use std::{collections::HashMap, net::SocketAddr};
 
 use serde::Serialize;
 
+use crate::identity::AuthMethod;
+
 /// Client identity information used in access control decisions.
 ///
 /// Contains authentication details extracted from basic auth, mTLS certificates, or OIDC tokens.
@@ -12,12 +14,11 @@ pub struct ClientIdentity {
     pub certificate: ClientCertificate,
     pub oidc: Option<OidcClaims>,
     pub client_ip: Option<String>,
-    /// The authentication method that produced this identity (strongest wins:
-    /// mTLS > OIDC > basic), set once by the authenticator so the trace span
-    /// and the denial audit log report the same answer. Excluded from the
-    /// serialized form: CEL policies see the credential fields, not the label.
+    /// Set once by the authenticator, so the trace span and the denial audit
+    /// log report the same answer. Excluded from the serialized form: CEL
+    /// policies see the credential fields, not the label.
     #[serde(skip)]
-    pub auth_method: Option<&'static str>,
+    pub auth_method: AuthMethod,
 }
 
 impl ClientIdentity {
