@@ -152,11 +152,10 @@ impl Validator {
                 Pass::Blob,
                 KeyCategory::UploadArtifact {
                     namespace,
-                    uuid,
                     artifact,
                 },
             ) => {
-                self.validate_upload_artifact(key, &namespace, &uuid, artifact)
+                self.validate_upload_artifact(key, &namespace, artifact)
                     .await
             }
             (pass, KeyCategory::Unknown) => self.quarantine(walked_store(pass), key).await,

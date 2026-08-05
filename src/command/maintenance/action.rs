@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::{
     jobs::{JobState, Queue},
-    oci::{Digest, Namespace, Tag},
+    oci::{Digest, Namespace, Tag, UploadSessionId},
     registry::metadata_store::LinkKind,
 };
 
@@ -95,7 +95,7 @@ pub enum Action {
     },
     DeleteExpiredUpload {
         namespace: Namespace,
-        uuid: String,
+        session_id: UploadSessionId,
     },
     DeleteOrphanReferrer {
         namespace: Namespace,
@@ -232,8 +232,11 @@ impl fmt::Display for Action {
             Action::DeleteOrphanManifest { namespace, digest } => {
                 write!(f, "delete orphan manifest '{namespace}@{digest}' (policy)")
             }
-            Action::DeleteExpiredUpload { namespace, uuid } => {
-                write!(f, "delete expired upload '{namespace}/{uuid}'")
+            Action::DeleteExpiredUpload {
+                namespace,
+                session_id,
+            } => {
+                write!(f, "delete expired upload '{namespace}/{session_id}'")
             }
             Action::DeleteOrphanReferrer {
                 namespace,

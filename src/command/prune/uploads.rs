@@ -20,7 +20,7 @@ use crate::{
         executor::ActionSink,
         walk,
     },
-    oci::{Digest, Namespace},
+    oci::{Digest, Namespace, UploadSessionId},
     registry::{
         Error as RegistryError,
         blob_store::{BlobStore, MultipartCleanup, UploadSummary},
@@ -74,9 +74,11 @@ pub async fn sweep_upload_sessions(
         blob_store
             .stream_uploads(namespace)
             .err_into::<Error>()
-            .try_for_each_concurrent(concurrency, |uuid| async move {
-                if let Err(e) = sweep_one_upload(blob_store, namespace, &uuid, window, sink).await {
-                    error!("prune: failed to check upload '{namespace}/{uuid}': {e}");
+            .try_for_each_concurrent(concurrency, |session_id| async move {
+                if let Err(e) =
+                    sweep_one_upload(blob_store, namespace, &session_id, window, sink).await
+                {
+                    error!("prune: failed to check upload '{namespace}/{session_id}': {e}");
                 }
                 Ok(())
             })
@@ -88,17 +90,17 @@ pub async fn sweep_upload_sessions(
 async fn sweep_one_upload(
     blob_store: &Arc<BlobStore>,
     namespace: &Namespace,
-    uuid: &str,
+    session_id: &UploadSessionId,
     window: Duration,
     sink: &dyn ActionSink,
 ) -> Result<(), Error> {
-    let summary = blob_store.upload_summary(namespace, uuid).await;
+    let summary = blob_store.upload_summary(namespace, session_id).await;
     match classify_upload(summary.as_ref(), window, Utc::now()) {
         UploadVerdict::DeleteInconsistent | UploadVerdict::DeleteObsolete => {
-            debug!("prune: reaping upload '{namespace}/{uuid}'");
+            debug!("prune: reaping upload '{namespace}/{session_id}'");
             sink.apply(Action::DeleteExpiredUpload {
                 namespace: namespace.clone(),
-                uuid: uuid.to_string(),
+                session_id: session_id.clone(),
             })
             .await
         }
@@ -226,7 +228,6 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::oci::UploadSessionId;
 
     fn fixed_now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap()
@@ -323,7 +324,7 @@ mod tests {
                 .unwrap();
             assert!(
                 blob_store
-                    .upload_summary(&namespace, old_uuid.as_ref())
+                    .upload_summary(&namespace, &old_uuid)
                     .await
                     .is_err(),
                 "an upload past the window must be reaped"
@@ -339,7 +340,7 @@ mod tests {
                 .unwrap();
             assert!(
                 blob_store
-                    .upload_summary(&namespace, fresh_uuid.as_ref())
+                    .upload_summary(&namespace, &fresh_uuid)
                     .await
                     .is_ok(),
                 "an upload within the window must be kept"
@@ -354,8 +355,11 @@ mod tests {
             let namespace = Namespace::new("test-repo/app").unwrap();
             let blob_store = test_case.blob_store();
 
-            let uuid = UploadSessionId::generate();
-            blob_store.create_upload(&namespace, &uuid).await.unwrap();
+            let session_id = UploadSessionId::generate();
+            blob_store
+                .create_upload(&namespace, &session_id)
+                .await
+                .unwrap();
 
             let sink: Mutex<Vec<Action>> = Mutex::new(Vec::new());
             sweep_upload_sessions(&blob_store, Duration::zero(), &sink, 4)
@@ -370,7 +374,10 @@ mod tests {
                 "the capture sink must record the delete"
             );
             assert!(
-                blob_store.upload_summary(&namespace, &uuid).await.is_ok(),
+                blob_store
+                    .upload_summary(&namespace, &session_id)
+                    .await
+                    .is_ok(),
                 "a capture sink must not delete"
             );
         })

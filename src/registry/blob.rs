@@ -131,7 +131,7 @@ pub async fn cache_blob(
         digest,
         stream,
         content_length,
-        session_id.as_ref(),
+        &session_id,
     )
     .await;
 
@@ -140,10 +140,7 @@ pub async fn cache_blob(
     // repeated failures (a flaky upstream, a poisoning attempt) would fill the
     // disk. On success the bytes have been promoted and the session is spent;
     // so has a racer's session whose bytes this one found already promoted.
-    if let Err(error) = blob_store
-        .delete_upload(namespace, session_id.as_ref())
-        .await
-    {
+    if let Err(error) = blob_store.delete_upload(namespace, &session_id).await {
         warn!("Failed to delete cache-fill upload state: {error}");
     }
     result?;
@@ -161,7 +158,7 @@ async fn fill_cache_session(
     digest: &Digest,
     stream: BoxedReader,
     content_length: u64,
-    session_key: &str,
+    session_key: &UploadSessionId,
 ) -> Result<(), Error> {
     // A single-shot copy of a known blob: hash only the target algorithm.
     let (computed_digest, hashed_size) = blob_store

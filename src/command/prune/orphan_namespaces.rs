@@ -102,10 +102,10 @@ async fn clear_uploads(
     sink: &dyn ActionSink,
 ) -> Result<(), Error> {
     let mut uploads = pin!(blob_store.stream_uploads(namespace));
-    while let Some(uuid) = uploads.next().await {
+    while let Some(session_id) = uploads.next().await {
         sink.apply(Action::DeleteExpiredUpload {
             namespace: namespace.clone(),
-            uuid: uuid?,
+            session_id: session_id?,
         })
         .await?;
     }

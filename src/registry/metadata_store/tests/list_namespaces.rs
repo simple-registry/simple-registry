@@ -58,9 +58,9 @@ async fn list_namespaces_excludes_upload_only_namespace() {
     for_each_backend(async |test_case| {
         let metadata_store = test_case.metadata_store();
         let namespace = Namespace::new("upload-only/repo").unwrap();
-        let uuid = uuid::Uuid::new_v4().to_string();
+        let session_id = UploadSessionId::generate();
 
-        let upload_data_path = path_builder::upload_path(&namespace, &uuid);
+        let upload_data_path = path_builder::upload_path(&namespace, &session_id);
         metadata_store
             .store()
             .object_store()

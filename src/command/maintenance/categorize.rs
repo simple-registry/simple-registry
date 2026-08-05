@@ -40,7 +40,6 @@ pub enum KeyCategory {
     /// (blob store).
     UploadArtifact {
         namespace: String,
-        uuid: String,
         artifact: UploadArtifact,
     },
     /// A pending or dead-lettered job envelope (metadata store).
@@ -230,23 +229,24 @@ fn categorize_repository(rest: &str) -> KeyCategory {
 /// `{uuid}/data`, `{uuid}/startedat`, `{uuid}/hashstates/{offset}`, or
 /// `{uuid}/staged/{offset}`.
 fn categorize_upload(namespace: String, tail: &[&str]) -> KeyCategory {
-    let (uuid, artifact) = match tail {
-        [uuid, "data"] => (uuid, UploadArtifact::Data),
-        [uuid, "startedat"] => (uuid, UploadArtifact::StartedAt),
-        [uuid, "hashstates", offset] if offset.parse::<u64>().is_ok() => {
-            (uuid, UploadArtifact::HashState)
+    let (session_id, artifact) = match tail {
+        [session_id, "data"] => (session_id, UploadArtifact::Data),
+        [session_id, "startedat"] => (session_id, UploadArtifact::StartedAt),
+        [session_id, "hashstates", offset] if offset.parse::<u64>().is_ok() => {
+            (session_id, UploadArtifact::HashState)
         }
-        [uuid, "staged", offset] if offset.parse::<u64>().is_ok() => (uuid, UploadArtifact::Staged),
+        [session_id, "staged", offset] if offset.parse::<u64>().is_ok() => {
+            (session_id, UploadArtifact::Staged)
+        }
         _ => return KeyCategory::Unknown,
     };
     // A directory angos never opened: leave it to the unknown-key quarantine
     // rather than reporting it as a session the upload passes can address.
-    if UploadSessionId::from_str(uuid).is_err() {
+    if UploadSessionId::from_str(session_id).is_err() {
         return KeyCategory::Unknown;
     }
     KeyCategory::UploadArtifact {
         namespace,
-        uuid: (*uuid).to_string(),
         artifact,
     }
 }
@@ -418,17 +418,21 @@ mod tests {
 
     const SESSION: &str = "067e6162-3b6f-4ae2-a171-2470b63dff00";
 
+    fn session() -> UploadSessionId {
+        UploadSessionId::from_str(SESSION).unwrap()
+    }
+
     #[test]
     fn upload_artifacts_round_trip() {
         let ns = namespace();
         let cases = [
-            (upload_path(&ns, SESSION), UploadArtifact::Data),
+            (upload_path(&ns, &session()), UploadArtifact::Data),
             (
-                upload_start_date_path(&ns, SESSION),
+                upload_start_date_path(&ns, &session()),
                 UploadArtifact::StartedAt,
             ),
             (
-                upload_hash_context_path(&ns, SESSION, 42),
+                upload_hash_context_path(&ns, &session(), 42),
                 UploadArtifact::HashState,
             ),
             (
@@ -441,7 +445,6 @@ mod tests {
                 categorize(&key),
                 KeyCategory::UploadArtifact {
                     namespace: "org/app".to_string(),
-                    uuid: SESSION.to_string(),
                     artifact: expected,
                 },
                 "upload artifact {key} must round-trip"
@@ -463,10 +466,9 @@ mod tests {
             );
         }
         assert_eq!(
-            categorize(&upload_path(&ns, SESSION)),
+            categorize(&upload_path(&ns, &session())),
             KeyCategory::UploadArtifact {
                 namespace: "org/app".to_string(),
-                uuid: SESSION.to_string(),
                 artifact: UploadArtifact::Data,
             }
         );

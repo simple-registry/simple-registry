@@ -17,7 +17,7 @@ use tracing::warn;
 use angos_storage::Error as StorageError;
 
 use crate::{
-    oci::Namespace,
+    oci::{Namespace, UploadSessionId},
     registry::{Error, blob_store::BlobStore, path_builder},
 };
 
@@ -99,9 +99,12 @@ impl MultipartCleanup for BlobStore {
                 if !is_orphan(upload.initiated_at, now, timeout) {
                     return None;
                 }
-                let (namespace, uuid) = parse_upload_key(&upload.key)?;
+                let (namespace, session_id) = parse_upload_key(&upload.key)?;
                 let namespace = Namespace::new(namespace).ok()?;
-                let startedat_path = path_builder::upload_start_date_path(&namespace, uuid);
+                // A key naming no session was never opened by angos, so it has
+                // no marker to probe and no session of ours to abort.
+                let session_id: UploadSessionId = session_id.parse().ok()?;
+                let startedat_path = path_builder::upload_start_date_path(&namespace, &session_id);
                 Some((upload, startedat_path))
             });
             let page_orphans = stream::iter(candidates)
@@ -336,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_liveness_probe_does_not_orphan_a_live_upload() {
         let namespace = Namespace::new("test-repo").unwrap();
-        let key = path_builder::upload_path(&namespace, "upload-uuid");
+        let key = path_builder::upload_path(&namespace, &UploadSessionId::generate());
         let store = BlobStore::new(
             Arc::new(OneStaleUpload {
                 key,
@@ -362,7 +365,7 @@ mod tests {
     #[tokio::test]
     async fn an_absent_marker_still_orphans_a_stale_upload() {
         let namespace = Namespace::new("test-repo").unwrap();
-        let key = path_builder::upload_path(&namespace, "upload-uuid");
+        let key = path_builder::upload_path(&namespace, &UploadSessionId::generate());
         let store = BlobStore::new(
             Arc::new(OneStaleUpload {
                 key: key.clone(),

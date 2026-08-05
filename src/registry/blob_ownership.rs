@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::{
-    oci::{Digest, Namespace},
+    oci::{Digest, Namespace, UploadSessionId},
     registry::{
         Error,
         blob_store::BlobStore,
@@ -18,7 +18,7 @@ pub async fn promote_and_grant(
     blob_store: &BlobStore,
     metadata_store: &MetadataStore,
     namespace: &Namespace,
-    session_key: &str,
+    session_key: &UploadSessionId,
     digest: &Digest,
     hashed_size: u64,
 ) -> Result<(), Error> {

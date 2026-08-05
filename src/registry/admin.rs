@@ -16,7 +16,7 @@ use crate::{
     jobs::{JobState, Queue},
     oci::{
         Content, DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
-        MediaType, Namespace, Platform as OciPlatform, Tag, namespace_belongs_to,
+        MediaType, Namespace, Platform as OciPlatform, Tag, UploadSessionId, namespace_belongs_to,
     },
     registry::{Error, Registry, metadata_store::LinkKind},
 };
@@ -134,7 +134,7 @@ pub struct RevisionsBody {
 
 #[derive(Serialize, Debug)]
 pub struct UploadEntry {
-    uuid: String,
+    session_id: UploadSessionId,
     size: u64,
     started_at: DateTime<Utc>,
 }
@@ -410,24 +410,24 @@ impl Registry {
 
     #[instrument(skip(self))]
     pub async fn get_uploads_info(&self, namespace: &Namespace) -> Result<UploadsBody, Error> {
-        let mut uuids: Vec<String> = self
+        let mut session_ids: Vec<UploadSessionId> = self
             .blob_store
             .stream_uploads(namespace)
             .try_collect()
             .await?;
-        uuids.sort();
+        session_ids.sort();
 
         // Summary reads fan out; `buffered` keeps the sorted uuid order. An
         // upload whose summary read fails (e.g. reaped mid-listing) is skipped.
-        let all_uploads: Vec<UploadEntry> = stream::iter(uuids)
-            .map(|uuid| async move {
+        let all_uploads: Vec<UploadEntry> = stream::iter(session_ids)
+            .map(|session_id| async move {
                 let summary = self
                     .blob_store
-                    .upload_summary(namespace, &uuid)
+                    .upload_summary(namespace, &session_id)
                     .await
                     .ok()?;
                 Some(UploadEntry {
-                    uuid,
+                    session_id,
                     size: summary.size,
                     started_at: summary.started_at,
                 })

@@ -16,7 +16,7 @@ use crate::{
     event_webhook::event::EventActor,
     jobs::store::{Error as JobStoreError, JobEnvelope, JobStore},
     jobs::{JobState, Queue},
-    oci::{Digest, Namespace, Reference, Tag},
+    oci::{Digest, Namespace, Reference, Tag, UploadSessionId},
     registry::{
         Error as RegistryError, Registry,
         blob_store::{self, BlobStore, MultipartCleanup},
@@ -398,8 +398,14 @@ impl Executor {
         Ok(())
     }
 
-    async fn delete_expired_upload(&self, namespace: Namespace, uuid: String) -> Result<(), Error> {
-        self.blob_store.delete_upload(&namespace, &uuid).await?;
+    async fn delete_expired_upload(
+        &self,
+        namespace: Namespace,
+        session_id: UploadSessionId,
+    ) -> Result<(), Error> {
+        self.blob_store
+            .delete_upload(&namespace, &session_id)
+            .await?;
         Ok(())
     }
 
@@ -593,9 +599,10 @@ impl ActionSink for Executor {
             Action::DeleteOrphanManifest { namespace, digest } => {
                 self.delete_orphan_manifest(namespace, digest).await
             }
-            Action::DeleteExpiredUpload { namespace, uuid } => {
-                self.delete_expired_upload(namespace, uuid).await
-            }
+            Action::DeleteExpiredUpload {
+                namespace,
+                session_id,
+            } => self.delete_expired_upload(namespace, session_id).await,
             Action::DeleteOrphanReferrer {
                 namespace,
                 subject,
@@ -1449,7 +1456,7 @@ mod tests {
             .unwrap();
         sink.apply(Action::DeleteExpiredUpload {
             namespace: Namespace::new("ns").unwrap(),
-            uuid: "uuid".to_string(),
+            session_id: UploadSessionId::generate(),
         })
         .await
         .unwrap();
