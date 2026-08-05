@@ -3,21 +3,20 @@ use std::io::Cursor;
 use chrono::{Duration, Utc};
 use futures_util::TryStreamExt;
 use tokio::io::AsyncReadExt;
-use uuid::Uuid;
 
 use angos_storage::test_util::frame;
 
 use super::*;
 use crate::{
-    oci::{Algorithm, Digest, Namespace},
+    oci::{Algorithm, Digest, Namespace, UploadSessionId},
     registry::Error,
 };
 
 pub async fn test_datastore_stream_uploads(store: &BlobStore) {
     let namespace = &Namespace::new("test-repo").unwrap();
 
-    let upload_ids = ["upload1", "upload2", "upload3"];
-    for id in upload_ids {
+    let upload_ids: Vec<UploadSessionId> = (0..3).map(|_| UploadSessionId::generate()).collect();
+    for id in &upload_ids {
         store.create_upload(namespace, id).await.unwrap();
 
         let content = format!("Content for upload {id}").into_bytes();
@@ -36,11 +35,11 @@ pub async fn test_datastore_stream_uploads(store: &BlobStore) {
 
     let uploads: Vec<String> = store.stream_uploads(namespace).try_collect().await.unwrap();
     assert_eq!(uploads.len(), upload_ids.len());
-    for id in upload_ids {
+    for id in &upload_ids {
         assert!(uploads.contains(&id.to_string()));
     }
 
-    let upload_to_complete = upload_ids[0];
+    let upload_to_complete = upload_ids[0].as_ref();
     let completed_digest =
         Digest::sha256_of_bytes(format!("Content for upload {upload_to_complete}").as_bytes());
     store
@@ -64,7 +63,7 @@ pub async fn test_datastore_stream_uploads(store: &BlobStore) {
 /// `complete_upload`). Mirrors how production creates blobs.
 async fn seed_blob_with(store: &BlobStore, content: &[u8], algorithm: Algorithm) -> Digest {
     let namespace = Namespace::new("test/setup").unwrap();
-    let uuid = Uuid::new_v4().to_string();
+    let uuid = UploadSessionId::generate();
     store.create_upload(&namespace, &uuid).await.unwrap();
     let len = content.len() as u64;
     store
@@ -168,7 +167,7 @@ pub async fn test_build_blob_reader_with_offset_returns_full_size(store: &BlobSt
 
 pub async fn test_datastore_upload_operations(store: &BlobStore) {
     let namespace = &Namespace::new("test-namespace").unwrap();
-    let uuid = Uuid::new_v4().to_string();
+    let uuid = UploadSessionId::generate();
 
     store.create_upload(namespace, &uuid).await.unwrap();
 
@@ -241,7 +240,7 @@ pub async fn test_repeated_promotion_converges(store: &BlobStore) {
 /// so this guards that the marker is consumed before the multipart-complete.
 pub async fn test_complete_upload_fails_on_rerun(store: &BlobStore) {
     let namespace = Namespace::new("test/rerun").unwrap();
-    let uuid = Uuid::new_v4().to_string();
+    let uuid = UploadSessionId::generate();
     let content = b"one-shot completion";
     store.create_upload(&namespace, &uuid).await.unwrap();
     store
@@ -274,6 +273,29 @@ pub async fn test_complete_upload_fails_on_rerun(store: &BlobStore) {
     );
 }
 
+/// Prune reclaims a stray upload directory by its raw name, so the sweep path
+/// must keep listing names that are not session ids.
+pub async fn test_datastore_stream_uploads_lists_a_non_canonical_name(store: &BlobStore) {
+    let namespace = &Namespace::new("test-raw-upload").unwrap();
+    let session = UploadSessionId::generate();
+    store.create_upload(namespace, &session).await.unwrap();
+
+    let stray = "not-a-session-id";
+    let key = path_builder::upload_start_date_path(namespace, stray);
+    store
+        .object_store()
+        .put(&key, Bytes::from_static(b"2026-01-01T00:00:00Z"))
+        .await
+        .unwrap();
+
+    let uploads: Vec<String> = store.stream_uploads(namespace).try_collect().await.unwrap();
+    assert!(uploads.contains(&session.to_string()));
+    assert!(
+        uploads.contains(&stray.to_string()),
+        "a non-canonical upload directory must stay reachable, got: {uploads:?}"
+    );
+}
+
 // Test entry points: run each helper against every backend fixture
 
 use crate::registry::test_utils::{FSRegistryTestCase, RegistryTestCase, for_each_backend};
@@ -282,6 +304,14 @@ use crate::registry::test_utils::{FSRegistryTestCase, RegistryTestCase, for_each
 async fn stream_uploads() {
     for_each_backend(async |tc| {
         test_datastore_stream_uploads(tc.blob_store().as_ref()).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn stream_uploads_lists_a_non_canonical_name() {
+    for_each_backend(async |tc| {
+        test_datastore_stream_uploads_lists_a_non_canonical_name(tc.blob_store().as_ref()).await;
     })
     .await;
 }
@@ -374,7 +404,7 @@ async fn complete_upload_rejects_size_divergence() {
 pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
     let tail = b"orphaned tail".to_vec();
     let namespace = Namespace::new("test/divergence").unwrap();
-    let uuid = Uuid::new_v4().to_string();
+    let uuid = UploadSessionId::generate();
     let content = b"hashed prefix";
     store.create_upload(&namespace, &uuid).await.unwrap();
     store
@@ -416,7 +446,7 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
 /// finalize progressively more expensive.
 pub async fn test_checkpoints_supersede_rather_than_accumulate(store: &BlobStore) {
     let namespace = &Namespace::new("checkpoint-supersede").unwrap();
-    let uuid = &Uuid::new_v4().to_string();
+    let uuid = &UploadSessionId::generate();
     store.create_upload(namespace, uuid).await.unwrap();
 
     for chunk in ["one", "two", "three", "four"] {

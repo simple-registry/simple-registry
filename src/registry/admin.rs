@@ -1151,7 +1151,7 @@ mod tests {
             let upload_only = Namespace::new("test-repo/upload-only").unwrap();
             registry
                 .blob_store
-                .create_upload(&upload_only, UploadSessionId::generate().as_ref())
+                .create_upload(&upload_only, &UploadSessionId::generate())
                 .await
                 .unwrap();
 
@@ -1159,7 +1159,7 @@ mod tests {
             create_test_blob(registry, &mixed, b"mixed content").await;
             registry
                 .blob_store
-                .create_upload(&mixed, UploadSessionId::generate().as_ref())
+                .create_upload(&mixed, &UploadSessionId::generate())
                 .await
                 .unwrap();
 
@@ -1252,7 +1252,7 @@ mod tests {
         let namespace = Namespace::new("test-repo/upload-only").unwrap();
         registry
             .blob_store
-            .create_upload(&namespace, UploadSessionId::generate().as_ref())
+            .create_upload(&namespace, &UploadSessionId::generate())
             .await
             .unwrap();
 

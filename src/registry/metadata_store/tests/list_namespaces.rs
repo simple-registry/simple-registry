@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
 use crate::{
-    oci::{Namespace, Tag},
+    oci::{Namespace, Tag, UploadSessionId},
     registry::{
         metadata_store::{LinkKind, LinkOperation},
         path_builder,
@@ -98,14 +98,14 @@ async fn collect_upload_namespaces_keys_off_uploads_not_manifests() {
 
         // Upload-only: an upload session and no manifest content.
         blob_store
-            .create_upload(upload_only, &uuid::Uuid::new_v4().to_string())
+            .create_upload(upload_only, &UploadSessionId::generate())
             .await
             .unwrap();
 
         // Mixed: both a `_manifests` child and an upload session.
         test_utils::create_test_blob(registry, mixed, b"mixed").await;
         blob_store
-            .create_upload(mixed, &uuid::Uuid::new_v4().to_string())
+            .create_upload(mixed, &UploadSessionId::generate())
             .await
             .unwrap();
 

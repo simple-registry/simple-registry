@@ -226,6 +226,7 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+    use crate::oci::UploadSessionId;
 
     fn fixed_now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap()
@@ -308,7 +309,7 @@ mod tests {
             let namespace = Namespace::new("test-repo/app").unwrap();
             let blob_store = test_case.blob_store();
 
-            let old_uuid = uuid::Uuid::new_v4().to_string();
+            let old_uuid = UploadSessionId::generate();
             blob_store
                 .create_upload(&namespace, &old_uuid)
                 .await
@@ -322,13 +323,13 @@ mod tests {
                 .unwrap();
             assert!(
                 blob_store
-                    .upload_summary(&namespace, &old_uuid)
+                    .upload_summary(&namespace, old_uuid.as_ref())
                     .await
                     .is_err(),
                 "an upload past the window must be reaped"
             );
 
-            let fresh_uuid = uuid::Uuid::new_v4().to_string();
+            let fresh_uuid = UploadSessionId::generate();
             blob_store
                 .create_upload(&namespace, &fresh_uuid)
                 .await
@@ -338,7 +339,7 @@ mod tests {
                 .unwrap();
             assert!(
                 blob_store
-                    .upload_summary(&namespace, &fresh_uuid)
+                    .upload_summary(&namespace, fresh_uuid.as_ref())
                     .await
                     .is_ok(),
                 "an upload within the window must be kept"
@@ -353,7 +354,7 @@ mod tests {
             let namespace = Namespace::new("test-repo/app").unwrap();
             let blob_store = test_case.blob_store();
 
-            let uuid = uuid::Uuid::new_v4().to_string();
+            let uuid = UploadSessionId::generate();
             blob_store.create_upload(&namespace, &uuid).await.unwrap();
 
             let sink: Mutex<Vec<Action>> = Mutex::new(Vec::new());

@@ -122,9 +122,7 @@ pub async fn cache_blob(
 ) -> Result<(), Error> {
     debug!("Fetching blob: {digest}");
     let session_id = UploadSessionId::generate();
-    blob_store
-        .create_upload(namespace, session_id.as_ref())
-        .await?;
+    blob_store.create_upload(namespace, &session_id).await?;
 
     let result = fill_cache_session(
         blob_store,

@@ -117,6 +117,7 @@ mod tests {
     use super::*;
     use crate::{
         command::maintenance::executor::Executor,
+        oci::UploadSessionId,
         registry::{
             repository_resolver::RepositoryResolver,
             test_utils::{create_test_repositories, for_each_backend, seed_manifest},
@@ -141,7 +142,7 @@ mod tests {
             let owned = Namespace::new("test-repo/app").unwrap();
             seed_manifest(metadata_store.store(), &metadata_store, &ghost).await;
             seed_manifest(metadata_store.store(), &metadata_store, &owned).await;
-            let ghost_upload = uuid::Uuid::new_v4().to_string();
+            let ghost_upload = UploadSessionId::generate();
             blob_store
                 .create_upload(&ghost, &ghost_upload)
                 .await

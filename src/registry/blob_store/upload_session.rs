@@ -45,7 +45,7 @@ use angos_storage::paginated;
 use angos_tx_engine::StorageError;
 
 use crate::{
-    oci::{Algorithm, Digest, Namespace},
+    oci::{Algorithm, Digest, Namespace, UploadSessionId},
     registry::{
         Error,
         blob_store::{
@@ -274,7 +274,14 @@ impl BlobStore {
     }
 
     #[instrument(skip(self))]
-    pub async fn create_upload(&self, namespace: &Namespace, uuid: &str) -> Result<(), Error> {
+    /// Typed rather than `&str`: no caller opens a session it did not just
+    /// mint, while the sweep paths address existing directories by raw name.
+    pub async fn create_upload(
+        &self,
+        namespace: &Namespace,
+        session_id: &UploadSessionId,
+    ) -> Result<(), Error> {
+        let uuid = session_id.as_ref();
         let upload_path = path_builder::upload_path(namespace, uuid);
         // Begin/clear a fresh upload at the data key (clears any leaked prior
         // multipart and staged remainder).
