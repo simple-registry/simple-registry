@@ -167,7 +167,7 @@ impl OrphanJobChecker {
         let mut orphans: u64 = 0;
         let mut after: Option<String> = None;
         loop {
-            let (keys, next) = match state {
+            let page = match state {
                 JobState::Pending => {
                     self.job_store
                         .list_pending_page(queue, PAGE_SIZE, after.as_deref())
@@ -183,7 +183,7 @@ impl OrphanJobChecker {
 
             // Payload reads fan out; classification and the sink stay serial
             // in key order.
-            let payloads: Vec<(String, Option<Value>)> = stream::iter(keys)
+            let payloads: Vec<(String, Option<Value>)> = stream::iter(page.items)
                 .map(|storage_key| async move {
                     let payload = self.read_payload(state, &storage_key).await?;
                     Ok::<_, Error>((storage_key, payload))
@@ -220,7 +220,7 @@ impl OrphanJobChecker {
                 .await?;
             }
 
-            let Some(cursor) = next else {
+            let Some(cursor) = page.next_token else {
                 break;
             };
             after = Some(cursor);

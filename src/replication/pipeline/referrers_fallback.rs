@@ -94,11 +94,11 @@ pub async fn deleted_referrer_subject(
 ) -> Option<Digest> {
     let location =
         downstream.get_manifest_path(downstream_namespace, &Reference::Digest(digest.clone()));
-    let (_, _, body) = downstream
+    let fetched = downstream
         .get_manifest(&manifest_accept_types(), &location)
         .await
         .ok()?;
-    parse_manifest_digests(&body, None).ok()?.subject
+    parse_manifest_digests(&fetched.body, None).ok()?.subject
 }
 
 /// The subject's fallback tag (`<alg>-<hash>`) and that tag's manifest
@@ -232,7 +232,7 @@ async fn fetch_fallback_manifests(
     let accept = manifest_accept_types();
     let get = downstream.get_manifest(&accept, location);
     let body = match timeout(REFERRERS_MERGE_HTTP_TIMEOUT, get).await {
-        Ok(Ok((_, _, body))) => body,
+        Ok(Ok(fetched)) => fetched.body,
         Ok(Err(ClientError::ManifestUnknown)) => return Ok(Vec::new()),
         Ok(Err(e)) => return Err(Error::Client(e)),
         Err(_) => {

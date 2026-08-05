@@ -33,6 +33,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use angos_backoff::Backoff;
+use angos_storage::Page;
 use angos_tx_engine::{
     StorageError,
     error::Error as TxError,
@@ -710,7 +711,7 @@ impl JobStore {
         queue: Queue,
         n: u16,
         after: Option<&str>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
+    ) -> Result<Page<String>, Error> {
         self.list_page(&job_pending_dir(queue.as_str()), n, after)
             .await
     }
@@ -722,7 +723,7 @@ impl JobStore {
         queue: Queue,
         n: u16,
         after: Option<&str>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
+    ) -> Result<Page<String>, Error> {
         self.list_page(&job_failed_dir(queue.as_str()), n, after)
             .await
     }
@@ -736,7 +737,7 @@ impl JobStore {
         dir: &str,
         n: u16,
         after: Option<&str>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
+    ) -> Result<Page<String>, Error> {
         let start_after = after.map(|k| format!("{k}.json"));
         let page = self
             .store
@@ -750,12 +751,15 @@ impl JobStore {
             .collect();
         // The backend's `next_token` is the accurate "more entries exist"
         // signal; surface our own last storage key as the (non-opaque) cursor.
-        let next = page
+        let next_token = page
             .next_token
             .is_some()
             .then(|| keys.last().cloned())
             .flatten();
-        Ok((keys, next))
+        Ok(Page {
+            items: keys,
+            next_token,
+        })
     }
 
     /// Count pending envelopes ready for handling within

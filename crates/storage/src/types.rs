@@ -56,6 +56,14 @@ pub struct Page<T> {
     pub next_token: Option<String>,
 }
 
+/// Every immediate child under a prefix, with no ordering guarantee. Same two
+/// name sets as [`ChildrenPage`], without the pagination cursor.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Children {
+    pub sub_prefixes: Vec<String>,
+    pub objects: Vec<String>,
+}
+
 /// One page of results from a hierarchical listing (`ObjectStore::list_children`).
 ///
 /// `sub_prefixes` contains the immediate sub-prefix names (the "subdirectories"

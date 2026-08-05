@@ -228,7 +228,7 @@ impl Registry {
             return Ok(manifest);
         }
 
-        let (media_type, upstream_digest, content) = repository
+        let fetched = repository
             .get_manifest(accepted_types, namespace, &reference)
             .await?;
 
@@ -236,7 +236,9 @@ impl Registry {
         // The body is what the digest describes, so hash it under the algorithm the
         // reference asked for; a tag names none and takes the spec's mandatory
         // one.
-        let digest = match upstream_digest {
+        let content = fetched.body;
+        let media_type = fetched.media_type;
+        let digest = match fetched.digest {
             Some(digest) => digest,
             None => match &reference {
                 Reference::Digest(requested) => Digest::from_bytes(requested.algorithm(), &content),

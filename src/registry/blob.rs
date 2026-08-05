@@ -902,7 +902,7 @@ mod tests {
             .list_all_children(&path_builder::uploads_root_dir(namespace))
             .await
             .expect("list upload sessions")
-            .0
+            .sub_prefixes
             .len()
     }
 

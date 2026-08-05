@@ -25,6 +25,14 @@ static QUALITY_PARAM: &str = "q";
 /// OCI clients never send it, so their redirect fast path is unaffected.
 pub const X_ANGOS_NO_REDIRECT: &str = "X-Angos-No-Redirect";
 
+/// A `start-end` byte range parsed from a `Range` or `Content-Range` header;
+/// `end` is absent for an open-ended one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ByteRange {
+    pub start: u64,
+    pub end: Option<u64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct RequestHeaders<'a> {
     headers: &'a HeaderMap,
@@ -135,7 +143,7 @@ impl<'a> RequestHeaders<'a> {
         Some(parsed.min(Utc::now()))
     }
 
-    pub fn range(&self, header: HeaderName) -> Result<Option<(u64, Option<u64>)>, Error> {
+    pub fn range(&self, header: HeaderName) -> Result<Option<ByteRange>, Error> {
         let Some(range_header) = self.header_string(header)? else {
             return Ok(None);
         };
@@ -168,8 +176,11 @@ impl<'a> RequestHeaders<'a> {
             )?)));
         }
 
-        let (start, end) = parse_start_end_range(range_value)?;
-        Ok(Some(BlobRange::FromTo { start, end }))
+        let range = parse_start_end_range(range_value)?;
+        Ok(Some(BlobRange::FromTo {
+            start: range.start,
+            end: range.end,
+        }))
     }
 
     fn header_string(&self, header: HeaderName) -> Result<Option<String>, Error> {
@@ -209,7 +220,7 @@ fn invalid_range_header(range_header: &str) -> Error {
 }
 
 /// Parses a `start-end` range value where `end` is optional (`100-200`, `0-`).
-fn parse_start_end_range(range_value: &str) -> Result<(u64, Option<u64>), Error> {
+fn parse_start_end_range(range_value: &str) -> Result<ByteRange, Error> {
     let (start, end) = range_value
         .split_once('-')
         .filter(|(start, end)| is_digits(start) && (end.is_empty() || is_digits(end)))
@@ -217,7 +228,7 @@ fn parse_start_end_range(range_value: &str) -> Result<(u64, Option<u64>), Error>
 
     let start = parse_range_number(start, "start")?;
     if end.is_empty() {
-        return Ok((start, None));
+        return Ok(ByteRange { start, end: None });
     }
 
     let end = parse_range_number(end, "end")?;
@@ -226,7 +237,10 @@ fn parse_start_end_range(range_value: &str) -> Result<(u64, Option<u64>), Error>
         return Err(Error::RangeNotSatisfiable(msg));
     }
 
-    Ok((start, Some(end)))
+    Ok(ByteRange {
+        start,
+        end: Some(end),
+    })
 }
 
 fn is_digits(value: &str) -> bool {

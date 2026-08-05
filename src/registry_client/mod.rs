@@ -180,13 +180,30 @@ impl RegistryClientConfig {
     }
 }
 
-/// Resolved basic-auth credentials: `(username, password)`.
-type BasicAuth = (String, Secret<String>);
+/// Resolved basic-auth credentials.
+#[derive(Clone, Debug)]
+pub struct BasicAuth {
+    pub username: String,
+    pub password: Secret<String>,
+}
 
-/// A fetched manifest: `(media type, digest, body)`. The digest is absent when
-/// the upstream omits `Docker-Content-Digest`, which the OCI spec states as
-/// optional.
-pub type FetchedManifest = (Option<MediaType>, Option<Digest>, Vec<u8>);
+/// A fetched manifest. The `digest` is absent when the upstream omits
+/// `Docker-Content-Digest`, which the OCI spec states as optional.
+/// What a manifest `HEAD` reports. The `digest` is absent when the upstream
+/// omits `Docker-Content-Digest`, which the OCI spec states as optional.
+#[derive(Clone, Debug)]
+pub struct ManifestHead {
+    pub media_type: Option<MediaType>,
+    pub digest: Option<Digest>,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct FetchedManifest {
+    pub media_type: Option<MediaType>,
+    pub digest: Option<Digest>,
+    pub body: Vec<u8>,
+}
 
 #[derive(Debug)]
 pub struct RegistryClient {
@@ -209,7 +226,7 @@ impl RegistryClient {
     /// Configured basic-auth username, `None` when the client is anonymous.
     /// Scopes cached bearer tokens so clients never share across identities.
     fn auth_username(&self) -> Option<&str> {
-        self.basic_auth.as_ref().map(|(user, _)| user.as_str())
+        self.basic_auth.as_ref().map(|auth| auth.username.as_str())
     }
 
     /// Starts building a registry client from individual resolved fields. The
@@ -256,7 +273,10 @@ impl RegistryClient {
         .map_err(|e| Error::Initialization(format!("Failed to create HTTP client: {e}")))?;
 
         let basic_auth = match (&config.username, &config.password) {
-            (Some(username), Some(password)) => Some((username.clone(), password.clone())),
+            (Some(username), Some(password)) => Some(BasicAuth {
+                username: username.clone(),
+                password: password.clone(),
+            }),
             (Some(_), None) | (None, Some(_)) => {
                 warn!("Username and password must be both provided");
                 None
@@ -643,7 +663,7 @@ impl RegistryClient {
         &self,
         accepted_types: &[String],
         location: &str,
-    ) -> Result<(Option<MediaType>, Option<Digest>, u64), Error> {
+    ) -> Result<ManifestHead, Error> {
         let response = self.query(&Method::HEAD, accepted_types, location).await?;
 
         if !response.status().is_success() {
@@ -658,7 +678,11 @@ impl RegistryClient {
         let digest = parse_header(&response, DOCKER_CONTENT_DIGEST).ok();
         let size = parse_header(&response, CONTENT_LENGTH)?;
 
-        Ok((media_type, digest, size))
+        Ok(ManifestHead {
+            media_type,
+            digest,
+            size,
+        })
     }
 
     /// Fetches a manifest body from the upstream registry. The digest is absent
@@ -711,7 +735,11 @@ impl RegistryClient {
             return Err(Error::ManifestBodyTooLarge { limit });
         }
 
-        Ok((media_type, digest, content))
+        Ok(FetchedManifest {
+            media_type,
+            digest,
+            body: content,
+        })
     }
 }
 

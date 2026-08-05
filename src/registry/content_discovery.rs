@@ -1,10 +1,19 @@
 use futures_util::stream::TryStreamExt;
 use tracing::{instrument, warn};
 
+use angos_storage::Page;
+
 use crate::{
     oci::{Descriptor, Digest, Manifest, MediaType, Namespace, Tag},
     registry::{Error, Registry, metadata_store::LinkKind},
 };
+
+/// The referrers of one subject, and whether an `artifactType` filter was
+/// applied: the response must advertise the filter it honoured.
+pub struct Referrers {
+    pub manifests: Vec<Descriptor>,
+    pub filter_applied: bool,
+}
 
 /// Fan-out for resolving referrer candidates to descriptors: each candidate is
 /// an independent manifest read, so a bounded window keeps the listing and the
@@ -24,7 +33,7 @@ impl Registry {
         &self,
         n: Option<u16>,
         last: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
+    ) -> Result<Page<String>, Error> {
         let n = n.unwrap_or(DEFAULT_PAGE_SIZE);
         self.metadata_store.list_namespaces(n, last).await
     }
@@ -37,7 +46,7 @@ impl Registry {
         namespace: &Namespace,
         n: Option<u16>,
         last: Option<String>,
-    ) -> Result<(Vec<Tag>, Option<String>), Error> {
+    ) -> Result<Page<Tag>, Error> {
         let n = n.unwrap_or(DEFAULT_PAGE_SIZE);
         self.metadata_store.list_tags(namespace, n, last).await
     }
@@ -51,13 +60,16 @@ impl Registry {
         namespace: &Namespace,
         digest: &Digest,
         artifact_type: Option<MediaType>,
-    ) -> Result<(Vec<Descriptor>, bool), Error> {
-        let filtered = artifact_type.is_some();
+    ) -> Result<Referrers, Error> {
+        let filter_applied = artifact_type.is_some();
         let manifests = self
             .list_referrers(namespace, digest, artifact_type)
             .await?;
 
-        Ok((manifests, filtered))
+        Ok(Referrers {
+            manifests,
+            filter_applied,
+        })
     }
 
     /// Resolves every referrer of `digest` in `namespace` to a sorted
@@ -163,6 +175,8 @@ impl Registry {
 mod tests {
     use std::collections::HashMap;
 
+    use angos_storage::Page;
+
     use crate::{
         oci::{Descriptor, Digest, Manifest, MediaType, Namespace, Reference, Tag},
         registry::{
@@ -179,15 +193,24 @@ mod tests {
         for_each_backend(async |test_case| {
             let registry = test_case.registry();
 
-            let (namespaces, token) = registry.list_catalog_entries(None, None).await.unwrap();
+            let Page {
+                items: namespaces,
+                next_token: token,
+            } = registry.list_catalog_entries(None, None).await.unwrap();
             assert!(namespaces.is_empty());
             assert!(token.is_none());
 
-            let (namespaces, token) = registry.list_catalog_entries(Some(10), None).await.unwrap();
+            let Page {
+                items: namespaces,
+                next_token: token,
+            } = registry.list_catalog_entries(Some(10), None).await.unwrap();
             assert!(namespaces.is_empty());
             assert!(token.is_none());
 
-            let (namespaces, token) = registry
+            let Page {
+                items: namespaces,
+                next_token: token,
+            } = registry
                 .list_catalog_entries(Some(10), Some("test".to_string()))
                 .await
                 .unwrap();
@@ -221,7 +244,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (tags, token) = registry
+            let Page {
+                items: tags,
+                next_token: token,
+            } = registry
                 .list_tag_entries(namespace, None, None)
                 .await
                 .unwrap();
@@ -231,7 +257,10 @@ mod tests {
             assert!(tags.contains(&Tag::new("v2.0").unwrap()));
             assert!(token.is_none());
 
-            let (page1, token1) = registry
+            let Page {
+                items: page1,
+                next_token: token1,
+            } = registry
                 .list_tag_entries(namespace, Some(2), None)
                 .await
                 .unwrap();
@@ -240,14 +269,20 @@ mod tests {
 
             let last_tag = token1.unwrap();
 
-            let (page2, token2) = registry
+            let Page {
+                items: page2,
+                next_token: token2,
+            } = registry
                 .list_tag_entries(namespace, Some(2), Some(last_tag))
                 .await
                 .unwrap();
             assert_eq!(page2.len(), 1);
             assert!(token2.is_none());
 
-            let (page1, token1) = registry
+            let Page {
+                items: page1,
+                next_token: token1,
+            } = registry
                 .list_tag_entries(namespace, Some(1), None)
                 .await
                 .unwrap();
@@ -256,7 +291,10 @@ mod tests {
 
             let last_tag = token1.unwrap();
 
-            let (page2, token2) = registry
+            let Page {
+                items: page2,
+                next_token: token2,
+            } = registry
                 .list_tag_entries(namespace, Some(1), Some(last_tag))
                 .await
                 .unwrap();
@@ -265,14 +303,20 @@ mod tests {
 
             let last_tag = token2.unwrap();
 
-            let (page3, token3) = registry
+            let Page {
+                items: page3,
+                next_token: token3,
+            } = registry
                 .list_tag_entries(namespace, Some(1), Some(last_tag))
                 .await
                 .unwrap();
             assert_eq!(page3.len(), 1);
             assert!(token3.is_none());
 
-            let (tags, token) = registry
+            let Page {
+                items: tags,
+                next_token: token,
+            } = registry
                 .list_tag_entries(namespace, Some(10), Some("latest".to_string()))
                 .await
                 .unwrap();
@@ -322,7 +366,10 @@ mod tests {
         let mut last: Option<String> = None;
 
         loop {
-            let (page, token) = registry.list_catalog_entries(Some(2), last).await.unwrap();
+            let Page {
+                items: page,
+                next_token: token,
+            } = registry.list_catalog_entries(Some(2), last).await.unwrap();
             all_collected.extend(page);
 
             // The token is the continuation cursor: feed it straight back as `last`.
@@ -353,7 +400,10 @@ mod tests {
         let registry = test_case.registry();
         let unknown = Namespace::new("no-such-repo/no-such-image").unwrap();
 
-        let (tags, token) = registry
+        let Page {
+            items: tags,
+            next_token: token,
+        } = registry
             .list_tag_entries(&unknown, None, None)
             .await
             .unwrap();

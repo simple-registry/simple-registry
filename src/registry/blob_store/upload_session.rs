@@ -273,7 +273,7 @@ impl BlobStore {
             "_uploads",
             self.namespace_walk_concurrency,
             |path| async move {
-                let (sub_prefixes, _) = self.object.list_all_children(&path).await?;
+                let sub_prefixes = self.object.list_all_children(&path).await?.sub_prefixes;
                 Ok(sub_prefixes)
             },
         )

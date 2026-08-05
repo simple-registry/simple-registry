@@ -1991,11 +1991,12 @@ async fn test_delete_manifest_with_many_tags() {
             );
         }
 
-        let (tags, _) = registry
+        let tags = registry
             .metadata_store
             .list_tags(namespace, 100, None)
             .await
-            .unwrap();
+            .unwrap()
+            .items;
         assert_eq!(tags.len(), 20, "expected exactly 20 remaining tags");
     })
     .await;

@@ -454,13 +454,13 @@ impl Registry {
         after: Option<String>,
     ) -> Result<JobsBody, Error> {
         let n = n.unwrap_or(DEFAULT_JOBS_PAGE);
-        let (keys, next) = self
+        let page = self
             .job_queue
             .list_pending_page(queue, n, after.as_deref())
             .await?;
 
         // Envelope reads fan out; `buffered` keeps the keyset (time) order.
-        let jobs: Vec<JobEntry> = stream::iter(keys)
+        let jobs: Vec<JobEntry> = stream::iter(page.items)
             .map(|storage_key| async move {
                 match self.job_queue.read_pending(queue, &storage_key).await {
                     Ok(envelope) => {
@@ -486,7 +486,10 @@ impl Registry {
             .try_collect()
             .await?;
 
-        Ok(JobsBody { jobs, next })
+        Ok(JobsBody {
+            jobs,
+            next: page.next_token,
+        })
     }
 
     /// One keyset page of dead-letter (exhausted-retry) jobs on `queue`. See
@@ -499,13 +502,13 @@ impl Registry {
         after: Option<String>,
     ) -> Result<FailedJobsBody, Error> {
         let n = n.unwrap_or(DEFAULT_JOBS_PAGE);
-        let (keys, next) = self
+        let page = self
             .job_queue
             .list_failed_page(queue, n, after.as_deref())
             .await?;
 
         // Record reads fan out; `buffered` keeps the keyset (time) order.
-        let failed: Vec<FailedJobEntry> = stream::iter(keys)
+        let failed: Vec<FailedJobEntry> = stream::iter(page.items)
             .map(|storage_key| async move {
                 match self.job_queue.read_failed(queue, &storage_key).await {
                     Ok(record) => Ok(Some(FailedJobEntry {
@@ -528,7 +531,10 @@ impl Registry {
             .try_collect()
             .await?;
 
-        Ok(FailedJobsBody { failed, next })
+        Ok(FailedJobsBody {
+            failed,
+            next: page.next_token,
+        })
     }
 
     /// Requeue a dead-letter job (attempts reset to zero) on `queue`. Delegates

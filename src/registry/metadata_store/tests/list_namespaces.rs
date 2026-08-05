@@ -22,7 +22,11 @@ async fn list_namespaces_is_derived_from_content() {
 
         let (digest, _) = test_utils::create_test_blob(registry, namespace, b"content").await;
 
-        let (listed, _) = metadata_store.list_namespaces(1000, None).await.unwrap();
+        let listed = metadata_store
+            .list_namespaces(1000, None)
+            .await
+            .unwrap()
+            .items;
         assert!(
             listed.contains(&namespace.to_string()),
             "a namespace with content must appear in the catalog; got: {listed:?}"
@@ -41,7 +45,11 @@ async fn list_namespaces_is_derived_from_content() {
             .await
             .unwrap();
 
-        let (listed, _) = metadata_store.list_namespaces(1000, None).await.unwrap();
+        let listed = metadata_store
+            .list_namespaces(1000, None)
+            .await
+            .unwrap()
+            .items;
         assert!(
             !listed.contains(&namespace.to_string()),
             "a namespace whose revisions and tags were all deleted must \
@@ -68,7 +76,11 @@ async fn list_namespaces_excludes_upload_only_namespace() {
             .await
             .unwrap();
 
-        let (listed, _) = metadata_store.list_namespaces(1000, None).await.unwrap();
+        let listed = metadata_store
+            .list_namespaces(1000, None)
+            .await
+            .unwrap()
+            .items;
         assert!(
             !listed.contains(&namespace.to_string()),
             "a namespace with only an _uploads artifact must not appear in the \
@@ -123,7 +135,7 @@ async fn collect_upload_namespaces_keys_off_uploads_not_manifests() {
             "a manifest-only namespace must not appear in collect_upload_namespaces; got: {upload_listed:?}"
         );
 
-        let (manifest_listed, _) = metadata_store.list_namespaces(1000, None).await.unwrap();
+        let manifest_listed = metadata_store.list_namespaces(1000, None).await.unwrap().items;
         assert!(
             manifest_listed.contains(&manifest_only.to_string()),
             "a manifest-only namespace must appear in the catalog; got: {manifest_listed:?}"

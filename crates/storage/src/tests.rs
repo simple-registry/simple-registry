@@ -299,7 +299,9 @@ macro_rules! object_store_conformance {
                     .await
                     .unwrap();
 
-                let (mut sub_prefixes, objects) = store.list_all_children("fam").await.unwrap();
+                let children = store.list_all_children("fam").await.unwrap();
+                let mut sub_prefixes = children.sub_prefixes;
+                let objects = children.objects;
                 sub_prefixes.sort();
                 assert_eq!(sub_prefixes, dirs);
                 assert_eq!(objects, vec!["manifest".to_string()]);
@@ -308,8 +310,9 @@ macro_rules! object_store_conformance {
             #[tokio::test]
             async fn list_all_children_missing_prefix_returns_empty() {
                 let (store, _guard) = $fixture;
-                let (sub_prefixes, objects) =
-                    store.list_all_children("does/not/exist").await.unwrap();
+                let children = store.list_all_children("does/not/exist").await.unwrap();
+                let sub_prefixes = children.sub_prefixes;
+                let objects = children.objects;
                 assert!(sub_prefixes.is_empty());
                 assert!(objects.is_empty());
             }

@@ -153,7 +153,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (ghost_tags, _) = metadata_store.list_tags(&ghost, 10, None).await.unwrap();
+            let ghost_tags = metadata_store
+                .list_tags(&ghost, 10, None)
+                .await
+                .unwrap()
+                .items;
             assert!(
                 ghost_tags.is_empty(),
                 "the orphan namespace's tags must be gone"
@@ -165,7 +169,11 @@ mod tests {
                     .is_err(),
                 "the orphan namespace's uploads must be gone"
             );
-            let (owned_tags, _) = metadata_store.list_tags(&owned, 10, None).await.unwrap();
+            let owned_tags = metadata_store
+                .list_tags(&owned, 10, None)
+                .await
+                .unwrap()
+                .items;
             assert_eq!(owned_tags.len(), 1, "the owned namespace must be untouched");
         })
         .await;
@@ -188,7 +196,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (tags, _) = metadata_store.list_tags(&ghost, 10, None).await.unwrap();
+            let tags = metadata_store
+                .list_tags(&ghost, 10, None)
+                .await
+                .unwrap()
+                .items;
             assert_eq!(
                 tags.len(),
                 1,

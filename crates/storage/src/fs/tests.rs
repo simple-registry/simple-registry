@@ -220,7 +220,9 @@ async fn list_all_children_returns_all_entries() {
     // Also a direct object at the same level.
     store.put("ns/z", Bytes::from_static(b"v")).await.unwrap();
 
-    let (sub_prefixes, objects) = store.list_all_children("ns").await.unwrap();
+    let children = store.list_all_children("ns").await.unwrap();
+    let sub_prefixes = children.sub_prefixes;
+    let objects = children.objects;
     assert_eq!(
         sub_prefixes,
         vec![

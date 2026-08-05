@@ -1396,7 +1396,11 @@ mod tests {
                 let outcome = job_store.fail(claimed, "simulated failure").await.unwrap();
                 assert!(matches!(outcome, FailOutcome::MovedToDeadLetter));
 
-                let (failed_keys, _) = job_store.list_failed_page(queue, 10, None).await.unwrap();
+                let failed_keys = job_store
+                    .list_failed_page(queue, 10, None)
+                    .await
+                    .unwrap()
+                    .items;
                 assert_eq!(failed_keys.len(), 1);
 
                 executor
@@ -1408,7 +1412,11 @@ mod tests {
                     .await
                     .unwrap();
 
-                let (failed_keys, _) = job_store.list_failed_page(queue, 10, None).await.unwrap();
+                let failed_keys = job_store
+                    .list_failed_page(queue, 10, None)
+                    .await
+                    .unwrap()
+                    .items;
                 assert!(
                     failed_keys.is_empty(),
                     "the dead-lettered orphan job on '{queue}' must be deleted"

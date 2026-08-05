@@ -7,7 +7,7 @@ use hyper::{
 use crate::{
     command::server::{
         error::Error,
-        request::{RequestHeaders, X_ANGOS_NO_REDIRECT},
+        request::{ByteRange, RequestHeaders, X_ANGOS_NO_REDIRECT},
         response_body::ResponseBody,
     },
     oci::MediaType,
@@ -27,7 +27,13 @@ fn test_range_with_bytes_prefix() {
         .range(RANGE)
         .unwrap()
         .unwrap();
-    assert_eq!(range, (0, Some(499)));
+    assert_eq!(
+        range,
+        ByteRange {
+            start: 0,
+            end: Some(499)
+        }
+    );
 }
 
 #[test]
@@ -99,7 +105,13 @@ fn test_range_without_bytes_prefix() {
         .range(RANGE)
         .unwrap()
         .unwrap();
-    assert_eq!(range, (100, Some(200)));
+    assert_eq!(
+        range,
+        ByteRange {
+            start: 100,
+            end: Some(200)
+        }
+    );
 }
 
 #[test]
@@ -114,7 +126,13 @@ fn test_content_range_without_bytes_prefix() {
         .range(CONTENT_RANGE)
         .unwrap()
         .unwrap();
-    assert_eq!(range, (100, Some(200)));
+    assert_eq!(
+        range,
+        ByteRange {
+            start: 100,
+            end: Some(200)
+        }
+    );
 }
 
 #[test]
@@ -141,7 +159,13 @@ fn test_range_no_end() {
         .range(RANGE)
         .unwrap()
         .unwrap();
-    assert_eq!(range, (0, None));
+    assert_eq!(
+        range,
+        ByteRange {
+            start: 0,
+            end: None
+        }
+    );
 }
 
 #[test]
@@ -186,7 +210,13 @@ fn test_range_large_numbers() {
         .range(RANGE)
         .unwrap()
         .unwrap();
-    assert_eq!(range, (1_000_000_000, Some(2_000_000_000)));
+    assert_eq!(
+        range,
+        ByteRange {
+            start: 1_000_000_000,
+            end: Some(2_000_000_000)
+        }
+    );
 }
 
 #[test]
@@ -211,7 +241,13 @@ fn test_range_custom_header_name() {
         .range(custom_header)
         .unwrap()
         .unwrap();
-    assert_eq!(range, (50, Some(100)));
+    assert_eq!(
+        range,
+        ByteRange {
+            start: 50,
+            end: Some(100)
+        }
+    );
 }
 
 #[test]

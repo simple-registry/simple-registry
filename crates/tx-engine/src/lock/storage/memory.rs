@@ -17,11 +17,12 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 
 use crate::lock::{
     Error,
-    storage::{DeleteIfMatchOutcome, LockStorage, PutIfAbsentOutcome, PutIfMatchOutcome},
+    storage::{
+        DeleteIfMatchOutcome, LockStorage, PutIfAbsentOutcome, PutIfMatchOutcome, TaggedObject,
+    },
 };
 
 /// A single entry in the in-memory store.
@@ -108,16 +109,17 @@ impl LockStorage for MemoryLockStorage {
         Ok(PutIfMatchOutcome::Updated(new_etag))
     }
 
-    async fn get_with_etag(
-        &self,
-        key: &str,
-    ) -> Result<(Vec<u8>, String, Option<DateTime<Utc>>), Error> {
+    async fn get_with_etag(&self, key: &str) -> Result<TaggedObject, Error> {
         let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         match inner.entries.get(key) {
             None => Err(Error::NotFound),
             Some(entry) => {
                 let etag = format!("\"{}\"", entry.version);
-                Ok((entry.body.clone(), etag, None))
+                Ok(TaggedObject {
+                    body: entry.body.clone(),
+                    etag,
+                    last_modified: None,
+                })
             }
         }
     }

@@ -48,7 +48,7 @@ pub use crate::memory::MemoryObjectStore;
 pub use crate::object::{KeyStream, ObjectStore};
 pub use crate::pagination::paginated;
 pub use crate::presigned::PresignedStore;
-pub use crate::types::{ChildrenPage, Etag, ObjectMeta, Page};
+pub use crate::types::{Children, ChildrenPage, Etag, ObjectMeta, Page};
 pub use crate::upload_session::{
     ByteStream, MultipartUploadPage, PendingMultipartUpload, channel_stream,
 };

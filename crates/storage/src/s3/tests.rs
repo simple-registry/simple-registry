@@ -85,7 +85,9 @@ async fn list_all_children_partitions_skewed_names_completely() {
         .await
         .unwrap();
 
-    let (mut sub_prefixes, mut objects) = store.list_all_children("skew").await.unwrap();
+    let children = store.list_all_children("skew").await.unwrap();
+    let mut sub_prefixes = children.sub_prefixes;
+    let mut objects = children.objects;
     let (mut plain_prefixes, mut plain_objects) = plain_list_children(&store, "skew").await;
     sub_prefixes.sort();
     objects.sort();

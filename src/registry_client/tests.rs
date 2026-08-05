@@ -284,13 +284,13 @@ async fn test_head_manifest_success() {
         .await;
 
     assert!(result.is_ok());
-    let (media_type, digest, size) = result.unwrap();
+    let head = result.unwrap();
     assert_eq!(
-        media_type,
+        head.media_type,
         Some(MediaType::new("application/vnd.docker.distribution.manifest.v2+json").unwrap())
     );
-    assert_eq!(digest, Some(Digest::try_from(test_digest).unwrap()));
-    assert_eq!(size, 5678);
+    assert_eq!(head.digest, Some(Digest::try_from(test_digest).unwrap()));
+    assert_eq!(head.size, 5678);
 }
 
 /// `Docker-Content-Digest` is a SHOULD, so a conformant upstream may omit it.
@@ -313,7 +313,7 @@ async fn head_manifest_without_content_digest_reports_an_unknown_digest() {
         .mount(&mock_server)
         .await;
 
-    let (media_type, digest, size) = client_for(&mock_server)
+    let head = client_for(&mock_server)
         .head_manifest(
             &[],
             &format!("{}/v2/test/manifests/latest", mock_server.uri()),
@@ -321,12 +321,12 @@ async fn head_manifest_without_content_digest_reports_an_unknown_digest() {
         .await
         .expect("a manifest HEAD without Docker-Content-Digest must still succeed");
 
-    assert_eq!(digest, None);
+    assert_eq!(head.digest, None);
     assert_eq!(
-        media_type,
+        head.media_type,
         Some(MediaType::new("application/vnd.docker.distribution.manifest.v2+json").unwrap())
     );
-    assert_eq!(size, 5678);
+    assert_eq!(head.size, 5678);
 }
 
 /// The GET counterpart: the digest is unknown to the client, and the body it
@@ -349,7 +349,7 @@ async fn get_manifest_without_content_digest_still_returns_the_body() {
         .mount(&mock_server)
         .await;
 
-    let (_, digest, body) = client_for(&mock_server)
+    let fetched = client_for(&mock_server)
         .get_manifest(
             &[],
             &format!("{}/v2/test/manifests/latest", mock_server.uri()),
@@ -357,8 +357,8 @@ async fn get_manifest_without_content_digest_still_returns_the_body() {
         .await
         .expect("a manifest GET without Docker-Content-Digest must still succeed");
 
-    assert_eq!(digest, None);
-    assert_eq!(body, manifest_body);
+    assert_eq!(fetched.digest, None);
+    assert_eq!(fetched.body, manifest_body);
 }
 
 #[tokio::test]
@@ -391,13 +391,13 @@ async fn test_get_manifest_success() {
         .await;
 
     assert!(result.is_ok());
-    let (media_type, digest, body) = result.unwrap();
+    let fetched = result.unwrap();
     assert_eq!(
-        media_type,
+        fetched.media_type,
         Some(MediaType::new("application/vnd.docker.distribution.manifest.v2+json").unwrap())
     );
-    assert_eq!(digest, Some(Digest::try_from(test_digest).unwrap()));
-    assert_eq!(body, manifest_body);
+    assert_eq!(fetched.digest, Some(Digest::try_from(test_digest).unwrap()));
+    assert_eq!(fetched.body, manifest_body);
 }
 
 #[tokio::test]

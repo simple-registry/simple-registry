@@ -558,7 +558,7 @@ mod in_process_replication_tests {
             let failed = inspector
                 .list_failed_page(Queue::Replication, 16, None)
                 .await
-                .map_or(usize::MAX, |(keys, _)| keys.len());
+                .map_or(usize::MAX, |page| page.items.len());
             panic!(
                 "in-process replication loop must drain the job and PUT the manifest \
                  downstream; received requests: {summary:?}; pending={pending}; failed={failed}"
@@ -584,7 +584,7 @@ mod in_process_replication_tests {
         let failed = inspector
             .list_failed_page(Queue::Replication, 16, None)
             .await
-            .map_or(usize::MAX, |(keys, _)| keys.len());
+            .map_or(usize::MAX, |page| page.items.len());
         assert!(
             drained,
             "the replication queue must drain to zero pending after a successful push"

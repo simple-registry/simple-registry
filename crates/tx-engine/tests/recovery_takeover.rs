@@ -31,7 +31,6 @@ use std::sync::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -47,7 +46,9 @@ use angos_tx_engine::{
     lock::{
         Error as LockError,
         primitive::Lock,
-        storage::{DeleteIfMatchOutcome, LockStorage, PutIfAbsentOutcome, PutIfMatchOutcome},
+        storage::{
+            DeleteIfMatchOutcome, LockStorage, PutIfAbsentOutcome, PutIfMatchOutcome, TaggedObject,
+        },
     },
     transaction::{Mutation, Transaction},
 };
@@ -620,10 +621,7 @@ impl LockStorage for OwnershipLostLockStorage {
         Ok(PutIfMatchOutcome::Mismatch)
     }
 
-    async fn get_with_etag(
-        &self,
-        _key: &str,
-    ) -> Result<(Vec<u8>, String, Option<DateTime<Utc>>), LockError> {
+    async fn get_with_etag(&self, _key: &str) -> Result<TaggedObject, LockError> {
         Err(LockError::NotFound)
     }
 

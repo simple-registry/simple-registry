@@ -808,14 +808,15 @@ async fn run_list_pending_page_is_keyset_ordered(h: Harness) {
     let mut seen: Vec<String> = Vec::new();
     let mut after: Option<String> = None;
     loop {
-        let (keys, next) = h
+        let page = h
             .store
             .list_pending_page(Queue::Cache, 2, after.as_deref())
             .await
             .expect("page");
+        let keys = page.items;
         assert!(keys.len() <= 2, "page must not exceed n");
         seen.extend(keys.iter().cloned());
-        match next {
+        match page.next_token {
             Some(cursor) => {
                 assert_eq!(
                     Some(&cursor),
@@ -874,11 +875,12 @@ async fn run_retry_failed_resets_attempts(h: Harness) {
         "failed record is consumed by retry",
     );
 
-    let (pending, _) = h
+    let pending = h
         .store
         .list_pending_page(Queue::Cache, 10, None)
         .await
-        .expect("list pending");
+        .expect("list pending")
+        .items;
     assert_eq!(pending.len(), 1, "exactly one requeued envelope");
     let restored = h
         .store
@@ -942,11 +944,12 @@ async fn run_delete_pending_removes_record_and_index(h: Harness) {
         "enqueue establishes the dedup index",
     );
 
-    let (pending, _) = h
+    let pending = h
         .store
         .list_pending_page(Queue::Cache, 10, None)
         .await
-        .expect("list");
+        .expect("list")
+        .items;
     assert_eq!(pending.len(), 1);
     let key = pending[0].clone();
 
@@ -955,11 +958,12 @@ async fn run_delete_pending_removes_record_and_index(h: Harness) {
         .await
         .expect("delete");
 
-    let (after, _) = h
+    let after = h
         .store
         .list_pending_page(Queue::Cache, 10, None)
         .await
-        .expect("list");
+        .expect("list")
+        .items;
     assert!(after.is_empty(), "pending file removed");
     assert!(
         !h.store

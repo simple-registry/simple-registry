@@ -10,6 +10,8 @@ use std::{
 
 use bytes::Bytes;
 use chrono::{Duration, Utc};
+
+use angos_storage::Page;
 use futures_util::TryStreamExt;
 
 use angos_s3_client::Backend as S3HttpBackend;
@@ -137,25 +139,40 @@ pub async fn test_datastore_list_namespaces(m: Arc<MetadataStore>) {
         create_link(&m, namespace, &tag_link, &digest).await;
     }
 
-    let (listed_namespaces, _) = m.list_namespaces(10, None).await.unwrap();
+    let listed_namespaces = m.list_namespaces(10, None).await.unwrap().items;
     assert_eq!(listed_namespaces, namespaces);
 
-    let (page1, token1) = m.list_namespaces(2, None).await.unwrap();
+    let Page {
+        items: page1,
+        next_token: token1,
+    } = m.list_namespaces(2, None).await.unwrap();
     assert_eq!(page1, ["repo1", "repo2"]);
     assert!(token1.is_some());
 
-    let (page2, token2) = m.list_namespaces(2, token1).await.unwrap();
+    let Page {
+        items: page2,
+        next_token: token2,
+    } = m.list_namespaces(2, token1).await.unwrap();
     assert_eq!(page2, ["repo3/nested"]);
     assert!(token2.is_none());
 
-    let (page1, token1) = m.list_namespaces(1, None).await.unwrap();
+    let Page {
+        items: page1,
+        next_token: token1,
+    } = m.list_namespaces(1, None).await.unwrap();
     assert_eq!(page1, ["repo1"]);
     assert!(token1.is_some());
 
-    let (page2, token2) = m.list_namespaces(1, token1).await.unwrap();
+    let Page {
+        items: page2,
+        next_token: token2,
+    } = m.list_namespaces(1, token1).await.unwrap();
     assert_eq!(page2, ["repo2"]);
 
-    let (page3, token3) = m.list_namespaces(1, token2).await.unwrap();
+    let Page {
+        items: page3,
+        next_token: token3,
+    } = m.list_namespaces(1, token2).await.unwrap();
     assert_eq!(page3, ["repo3/nested"]);
     assert!(token3.is_none());
 
@@ -176,30 +193,48 @@ pub async fn test_datastore_list_tags(m: Arc<MetadataStore>) {
         create_link(&m, namespace, &tag_link, &digest).await;
     }
 
-    let (all_tags, token) = m.list_tags(namespace, 10, None).await.unwrap();
+    let Page {
+        items: all_tags,
+        next_token: token,
+    } = m.list_tags(namespace, 10, None).await.unwrap();
     assert_eq!(all_tags.len(), tags.len());
     for tag in tags {
         assert!(all_tags.contains(&Tag::new(tag).unwrap()));
     }
     assert!(token.is_none());
 
-    let (page1, token1) = m.list_tags(namespace, 2, None).await.unwrap();
+    let Page {
+        items: page1,
+        next_token: token1,
+    } = m.list_tags(namespace, 2, None).await.unwrap();
     assert_eq!(page1.len(), 2);
     assert!(token1.is_some());
 
-    let (page2, token2) = m.list_tags(namespace, 2, token1).await.unwrap();
+    let Page {
+        items: page2,
+        next_token: token2,
+    } = m.list_tags(namespace, 2, token1).await.unwrap();
     assert_eq!(page2.len(), 1);
     assert!(token2.is_none());
 
-    let (page1, token1) = m.list_tags(namespace, 1, None).await.unwrap();
+    let Page {
+        items: page1,
+        next_token: token1,
+    } = m.list_tags(namespace, 1, None).await.unwrap();
     assert_eq!(page1.len(), 1);
     assert!(token1.is_some());
 
-    let (page2, token2) = m.list_tags(namespace, 1, token1).await.unwrap();
+    let Page {
+        items: page2,
+        next_token: token2,
+    } = m.list_tags(namespace, 1, token1).await.unwrap();
     assert_eq!(page2.len(), 1);
     assert!(token2.is_some());
 
-    let (page3, token3) = m.list_tags(namespace, 1, token2).await.unwrap();
+    let Page {
+        items: page3,
+        next_token: token3,
+    } = m.list_tags(namespace, 1, token2).await.unwrap();
     assert_eq!(page3.len(), 1);
     assert!(token3.is_none());
 
@@ -207,7 +242,7 @@ pub async fn test_datastore_list_tags(m: Arc<MetadataStore>) {
     let tag_link = LinkKind::Tag(Tag::new(delete_tag).unwrap());
     delete_link(&m, namespace, &tag_link).await;
 
-    let (tags_after_delete, _) = m.list_tags(namespace, 10, None).await.unwrap();
+    let tags_after_delete = m.list_tags(namespace, 10, None).await.unwrap().items;
     assert_eq!(tags_after_delete.len(), tags.len() - 1);
     assert!(!tags_after_delete.contains(&Tag::new(delete_tag).unwrap()));
 }
@@ -236,11 +271,11 @@ pub async fn test_datastore_list_tag_names_includes_malformed(m: Arc<MetadataSto
         .await
         .unwrap();
 
-    let (raw_names, _) = m.list_tag_names(namespace, 10, None).await.unwrap();
+    let raw_names = m.list_tag_names(namespace, 10, None).await.unwrap().items;
     assert!(raw_names.contains(&"-bad".to_string()));
     assert!(raw_names.contains(&"v1.0".to_string()));
 
-    let (tags, _) = m.list_tags(namespace, 10, None).await.unwrap();
+    let tags = m.list_tags(namespace, 10, None).await.unwrap().items;
     assert!(tags.contains(&Tag::new("v1.0").unwrap()));
     assert!(
         !tags.iter().any(|t| &**t == "-bad"),
@@ -277,12 +312,12 @@ pub async fn test_datastore_delete_tag_directory_guards_unsafe_names(m: Arc<Meta
         .await
         .unwrap();
 
-    let (before, _) = m.list_tag_names(namespace, 10, None).await.unwrap();
+    let before = m.list_tag_names(namespace, 10, None).await.unwrap().items;
     assert!(before.contains(&"-bad".to_string()));
 
     m.delete_tag_directory(namespace, "-bad").await.unwrap();
 
-    let (after, _) = m.list_tag_names(namespace, 10, None).await.unwrap();
+    let after = m.list_tag_names(namespace, 10, None).await.unwrap().items;
     assert!(
         !after.contains(&"-bad".to_string()),
         "the '-bad' tag directory must be gone after delete"
@@ -508,7 +543,7 @@ pub async fn test_datastore_list_namespaces_deduplication(m: Arc<MetadataStore>)
     create_link(&m, namespace, &config_link, &digest).await;
 
     // The namespace should appear exactly once despite having multiple object types
-    let (namespaces, _) = m.list_namespaces(10, None).await.unwrap();
+    let namespaces = m.list_namespaces(10, None).await.unwrap().items;
     let count = namespaces.iter().filter(|n| *n == namespace).count();
     assert_eq!(
         count, 1,
@@ -531,7 +566,10 @@ pub async fn test_datastore_list_namespaces_many_namespaces_pagination(m: Arc<Me
     let mut page_count = 0;
 
     loop {
-        let (page, next_token) = m.list_namespaces(3, token).await.unwrap();
+        let Page {
+            items: page,
+            next_token: next_token,
+        } = m.list_namespaces(3, token).await.unwrap();
         assert!(
             !page.is_empty(),
             "Page {page_count} should not be empty while paginating"
@@ -573,7 +611,10 @@ pub async fn test_datastore_list_namespaces_single_item_pages(m: Arc<MetadataSto
     let mut token: Option<String> = None;
 
     for (i, expected_name) in namespace_names.iter().enumerate() {
-        let (page, next_token) = m.list_namespaces(1, token).await.unwrap();
+        let Page {
+            items: page,
+            next_token: next_token,
+        } = m.list_namespaces(1, token).await.unwrap();
         assert_eq!(
             page.len(),
             1,
@@ -641,7 +682,10 @@ pub async fn test_datastore_list_tags_many_tags_pagination(m: Arc<MetadataStore>
     let mut page_count = 0;
 
     loop {
-        let (page, next_token) = m.list_tags(namespace, 3, token).await.unwrap();
+        let Page {
+            items: page,
+            next_token: next_token,
+        } = m.list_tags(namespace, 3, token).await.unwrap();
         assert!(
             !page.is_empty(),
             "Page {page_count} should not be empty while paginating"
@@ -690,7 +734,10 @@ pub async fn test_datastore_list_tags_single_item_pages(m: Arc<MetadataStore>) {
     let mut token: Option<String> = None;
 
     for (i, expected_name) in tag_names.iter().enumerate() {
-        let (page, next_token) = m.list_tags(namespace, 1, token).await.unwrap();
+        let Page {
+            items: page,
+            next_token: next_token,
+        } = m.list_tags(namespace, 1, token).await.unwrap();
         assert_eq!(
             page.len(),
             1,
@@ -1151,7 +1198,7 @@ pub async fn test_datastore_parallel_multiple_creates(m: Arc<MetadataStore>) {
         );
     }
 
-    let (tags, _) = m.list_tags(namespace, 10, None).await.unwrap();
+    let tags = m.list_tags(namespace, 10, None).await.unwrap().items;
     assert_eq!(tags.len(), 5, "Should have 5 tags but got {}", tags.len());
     for i in 0..5 {
         let tag = format!("t{}", i + 1);

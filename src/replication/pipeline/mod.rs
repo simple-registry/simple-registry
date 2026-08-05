@@ -118,7 +118,7 @@ pub async fn push_manifest(
             .registry_client
             .head_manifest(&manifest_accept_types(), &location)
             .await
-            .is_ok_and(|(_, downstream_digest, _)| downstream_digest.as_ref() == Some(digest))
+            .is_ok_and(|head| head.digest.as_ref() == Some(digest))
     {
         info!(
             namespace = %ctx.namespace,

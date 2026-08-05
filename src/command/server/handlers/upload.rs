@@ -137,7 +137,7 @@ pub async fn handle_patch_upload(
     uuid: UploadSessionId,
 ) -> Result<Response<ResponseBody>, Error> {
     let headers = RequestHeaders::new(&parts.headers);
-    let start_offset = headers.range(CONTENT_RANGE)?.map(|(start, _)| start);
+    let start_offset = headers.range(CONTENT_RANGE)?.map(|range| range.start);
     // A missing Content-Length is a chunked (Transfer-Encoding: chunked) upload,
     // which docker push sends; the body is then streamed to EOF.
     let content_length = headers.content_length()?;
@@ -163,7 +163,7 @@ pub async fn handle_put_upload(
     digest: &Digest,
 ) -> Result<Response<ResponseBody>, Error> {
     let headers = RequestHeaders::new(&request.parts.headers);
-    let start_offset = headers.range(CONTENT_RANGE)?.map(|(start, _)| start);
+    let start_offset = headers.range(CONTENT_RANGE)?.map(|range| range.start);
     let content_length = headers.content_length()?;
     let body_reader = incoming_into_async_read(request.incoming);
 

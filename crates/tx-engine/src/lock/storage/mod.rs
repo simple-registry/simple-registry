@@ -97,6 +97,16 @@ pub enum DeleteIfMatchOutcome {
 /// delete is conditional on it, so a holder can only ever remove its own lock
 /// object. Backends that cannot honour this contract do not qualify as lock
 /// storage; the CAS capability gate enforces it for S3 providers.
+/// An object read together with the concurrency token that read observed.
+/// `last_modified` is the server-assigned timestamp, absent on backends that
+/// do not report one.
+#[derive(Clone, Debug)]
+pub struct TaggedObject {
+    pub body: Vec<u8>,
+    pub etag: String,
+    pub last_modified: Option<DateTime<Utc>>,
+}
+
 #[async_trait]
 pub trait LockStorage: Send + Sync + Debug {
     /// Atomically write `body` at `key` if and only if `key` does not currently
@@ -113,13 +123,8 @@ pub trait LockStorage: Send + Sync + Debug {
         body: Vec<u8>,
     ) -> Result<PutIfMatchOutcome, Error>;
 
-    /// Read `key` and return its body bytes together with the `ETag` and the
-    /// server-assigned `last_modified` timestamp (if available). Returns
-    /// `Err(Error::NotFound)` when the key is absent.
-    async fn get_with_etag(
-        &self,
-        key: &str,
-    ) -> Result<(Vec<u8>, String, Option<DateTime<Utc>>), Error>;
+    /// Read `key`. Returns `Err(Error::NotFound)` when the key is absent.
+    async fn get_with_etag(&self, key: &str) -> Result<TaggedObject, Error>;
 
     /// Atomically delete `key` if and only if the current `ETag` equals
     /// `expected_etag`. Returns `Mismatch` when the `ETag` does not match; a

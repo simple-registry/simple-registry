@@ -62,14 +62,15 @@ mod backend {
     };
 
     use async_trait::async_trait;
-    use chrono::{DateTime, Utc};
     use redis::{Client, Script, aio::ConnectionManager};
     use tokio::sync::OnceCell;
 
     use super::RedisLockStorageConfig;
     use crate::lock::{
         Error,
-        storage::{DeleteIfMatchOutcome, LockStorage, PutIfAbsentOutcome, PutIfMatchOutcome},
+        storage::{
+            DeleteIfMatchOutcome, LockStorage, PutIfAbsentOutcome, PutIfMatchOutcome, TaggedObject,
+        },
     };
 
     // ARGV[1] = value, ARGV[2] = ttl_secs
@@ -217,10 +218,7 @@ return 1
             }
         }
 
-        async fn get_with_etag(
-            &self,
-            key: &str,
-        ) -> Result<(Vec<u8>, String, Option<DateTime<Utc>>), Error> {
+        async fn get_with_etag(&self, key: &str) -> Result<TaggedObject, Error> {
             let full_key = self.full_key(key);
             let mut conn = self.connection().await?;
 
@@ -234,7 +232,11 @@ return 1
                 None => Err(Error::NotFound),
                 Some(v) => {
                     let etag = v.clone();
-                    Ok((v.into_bytes(), etag, None))
+                    Ok(TaggedObject {
+                        body: v.into_bytes(),
+                        etag,
+                        last_modified: None,
+                    })
                 }
             }
         }
