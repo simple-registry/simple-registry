@@ -64,6 +64,11 @@ pub enum Error {
     EventDelivery(String),
     #[error("internal server error: {0}")]
     Internal(String),
+    /// Stored content that does not decode. Distinct from [`Self::Internal`]
+    /// because re-reading returns the same bytes: a caller reclaiming broken
+    /// state can act on it instead of treating it as a transient failure.
+    #[error("corrupt stored data: {0}")]
+    Corrupt(String),
 
     // Typed variants that preserve the source error chain.
     #[error("configuration error during operations: {0}")]
@@ -127,17 +132,17 @@ impl From<TxError> for Error {
     }
 }
 
-// Opaque encoding/parsing failures collapse to `Internal` (HTTP 500), matching
-// the behaviour of the deleted store enums that fed them.
+// Decoding stored bytes: a failure is the content, not the read, so it is
+// permanent and reported as `Corrupt` (still HTTP 500).
 impl From<DeserializeStateError> for Error {
     fn from(error: DeserializeStateError) -> Self {
-        Error::Internal(format!("hash state deserialization error: {error}"))
+        Error::Corrupt(format!("hash state deserialization error: {error}"))
     }
 }
 
 impl From<FromUtf8Error> for Error {
     fn from(error: FromUtf8Error) -> Self {
-        Error::Internal(error.to_string())
+        Error::Corrupt(error.to_string())
     }
 }
 
@@ -149,7 +154,7 @@ impl From<TryFromIntError> for Error {
 
 impl From<chrono::format::ParseError> for Error {
     fn from(error: chrono::format::ParseError) -> Self {
-        Error::Internal(error.to_string())
+        Error::Corrupt(error.to_string())
     }
 }
 
@@ -211,6 +216,7 @@ impl From<x509_parser::error::X509Error> for Error {
 mod tests {
     use std::error::Error as StdError;
 
+    use chrono::DateTime;
     use x509_parser::error::X509Error;
 
     use super::*;
@@ -306,5 +312,24 @@ mod tests {
         let err: Error = X509Error::InvalidCertificate.into();
         assert!(matches!(err, Error::Unauthorized(_)));
         assert!(err.to_string().contains("Invalid client certificate"));
+    }
+
+    /// The reclaim paths key off `Corrupt` to tell undecodable stored bytes
+    /// from a transient read, so each decode failure must land there.
+    #[test]
+    fn decoding_stored_bytes_fails_as_corrupt() {
+        let not_utf8 = String::from_utf8(vec![0xff, 0xfe]).unwrap_err();
+        assert!(matches!(Error::from(not_utf8), Error::Corrupt(_)));
+
+        let not_rfc3339 = DateTime::parse_from_rfc3339("not-a-timestamp").unwrap_err();
+        assert!(matches!(Error::from(not_rfc3339), Error::Corrupt(_)));
+    }
+
+    /// A backend read that failed is transient, and must stay distinct from
+    /// corrupt content or a reclaim would delete a live upload.
+    #[test]
+    fn a_backend_read_failure_stays_internal() {
+        let error = Error::from(StorageError::Backend("connection reset".to_string()));
+        assert!(matches!(error, Error::Internal(_)));
     }
 }

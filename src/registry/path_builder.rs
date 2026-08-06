@@ -1,5 +1,5 @@
 use crate::{
-    oci::{Digest, Namespace},
+    oci::{Digest, Namespace, UploadSessionId},
     registry::metadata_store::LinkKind,
 };
 
@@ -60,36 +60,40 @@ pub fn blob_index_shard_path(digest: &Digest, namespace: &Namespace) -> String {
 }
 
 /// Root directory holding every upload container for a namespace. Used to
-/// enumerate the namespace's active sessions (one child directory per UUID).
+/// enumerate the namespace's active sessions (one child directory per session).
 pub fn uploads_root_dir(namespace: &Namespace) -> String {
     format!("{REPOS_ROOT}/{namespace}/_uploads")
 }
 
-pub fn upload_container_path(namespace: &Namespace, uuid: &str) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{uuid}")
+pub fn upload_container_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
+    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}")
 }
 
-pub fn upload_path(namespace: &Namespace, uuid: &str) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{uuid}/data")
+pub fn upload_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
+    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/data")
 }
 
 /// Directory holding an upload's hasher-state checkpoints, one file per offset.
 /// Used to enumerate checkpoints and pick the most recent.
-pub fn upload_hash_context_dir(namespace: &Namespace, uuid: &str) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{uuid}/hashstates")
+pub fn upload_hash_context_dir(namespace: &Namespace, session_id: &UploadSessionId) -> String {
+    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/hashstates")
 }
 
 /// An upload's serialised hasher-state checkpoint after consuming its bytes up
 /// to `offset`. One file per offset, allowing hash resumption after a crash
 /// without re-reading the uploaded bytes.
-pub fn upload_hash_context_path(namespace: &Namespace, uuid: &str, offset: u64) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{uuid}/hashstates/{offset}")
+pub fn upload_hash_context_path(
+    namespace: &Namespace,
+    session_id: &UploadSessionId,
+    offset: u64,
+) -> String {
+    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/hashstates/{offset}")
 }
 
 /// RFC3339 timestamp marking when the upload session was created. Used for
 /// age-based orphan detection during scrub.
-pub fn upload_start_date_path(namespace: &Namespace, uuid: &str) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{uuid}/startedat")
+pub fn upload_start_date_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
+    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/startedat")
 }
 
 pub fn manifest_revisions_link_root_dir(namespace: &Namespace, algorithm: &str) -> String {
@@ -151,7 +155,7 @@ pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> String {
                 digest.hash()
             )
         }
-        LinkKind::Referrer(subject, referrer) => {
+        LinkKind::Referrer { subject, referrer } => {
             format!(
                 "{REPOS_ROOT}/{namespace}/_manifests/referrers/{}/{}/{}/{}",
                 subject.algorithm(),
@@ -160,7 +164,7 @@ pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> String {
                 referrer.hash()
             )
         }
-        LinkKind::Manifest(index, child) => {
+        LinkKind::Manifest { index, child } => {
             format!(
                 "{REPOS_ROOT}/{namespace}/_manifests/index/{}/{}/{}/{}",
                 index.algorithm(),
@@ -205,22 +209,23 @@ mod tests {
     #[test]
     fn test_upload_paths() {
         let ns = Namespace::new("ns").unwrap();
+        let id = UploadSessionId::new("067e6162-3b6f-4ae2-a171-2470b63dff00").unwrap();
         assert_eq!(
-            upload_container_path(&ns, "uuid"),
-            "v2/repositories/ns/_uploads/uuid"
+            upload_container_path(&ns, &id),
+            format!("v2/repositories/ns/_uploads/{id}")
         );
         assert_eq!(
-            upload_path(&ns, "uuid"),
-            "v2/repositories/ns/_uploads/uuid/data"
+            upload_path(&ns, &id),
+            format!("v2/repositories/ns/_uploads/{id}/data")
         );
         assert_eq!(uploads_root_dir(&ns), "v2/repositories/ns/_uploads");
         assert_eq!(
-            upload_hash_context_path(&ns, "uuid", 42),
-            "v2/repositories/ns/_uploads/uuid/hashstates/42"
+            upload_hash_context_path(&ns, &id, 42),
+            format!("v2/repositories/ns/_uploads/{id}/hashstates/42")
         );
         assert_eq!(
-            upload_start_date_path(&ns, "uuid"),
-            "v2/repositories/ns/_uploads/uuid/startedat"
+            upload_start_date_path(&ns, &id),
+            format!("v2/repositories/ns/_uploads/{id}/startedat")
         );
     }
 
@@ -316,7 +321,7 @@ mod tests {
 
         let subject = Digest::sha256(HASH_A).unwrap();
         let referrer = Digest::sha256(HASH_B).unwrap();
-        let referrer_link = LinkKind::Referrer(subject, referrer);
+        let referrer_link = LinkKind::Referrer { subject, referrer };
         assert_eq!(
             link_path(&referrer_link, &ns),
             format!("v2/repositories/ns/_manifests/referrers/sha256/{HASH_A}/sha256/{HASH_B}/link")
@@ -328,7 +333,7 @@ mod tests {
 
         let index = Digest::sha256(HASH_A).unwrap();
         let child = Digest::sha256(HASH_B).unwrap();
-        let manifest_link = LinkKind::Manifest(index, child);
+        let manifest_link = LinkKind::Manifest { index, child };
         assert_eq!(
             link_path(&manifest_link, &ns),
             format!("v2/repositories/ns/_manifests/index/sha256/{HASH_A}/sha256/{HASH_B}/link")

@@ -399,7 +399,7 @@ pub async fn seed_defects(store: &GateStore, registry: &RegistryClient) -> GateR
     let pending = json!({
         "id": "gate-orphan-pending",
         "queue": "replication",
-        "kind": "replication.push",
+        "kind": "replication.push_manifest",
         "lock_key": format!("{GATE_NS}:gate"),
         "created_at": Utc::now(),
         "attempts": 0,
@@ -408,7 +408,7 @@ pub async fn seed_defects(store: &GateStore, registry: &RegistryClient) -> GateR
             "downstream": "gate-ghost-downstream",
             "namespace": GATE_NS,
             "tag": GATE_TAG,
-            "kind": "replication.push",
+            "kind": "replication.push_manifest",
         },
     });
     store

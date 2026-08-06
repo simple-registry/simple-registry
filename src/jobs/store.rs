@@ -24,7 +24,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
-use sha2::{Digest as _, Sha256};
 use tokio::{
     select,
     time::{MissedTickBehavior, interval, sleep},
@@ -34,6 +33,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use angos_backoff::Backoff;
+use angos_storage::Page;
 use angos_tx_engine::{
     StorageError,
     error::Error as TxError,
@@ -324,7 +324,11 @@ pub struct JobEnvelope {
     pub lock_key: LockKey,
     pub created_at: DateTime<Utc>,
     pub attempts: u32,
-    pub max_attempts: u32,
+    /// Retry budget. `None` until [`JobStore::enqueue`] stamps the queue's
+    /// configured one, so a caller can pin its own, zero included, without
+    /// colliding with "not set yet".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
     pub payload: serde_json::Value,
 }
 
@@ -349,9 +353,7 @@ impl JobEnvelope {
             lock_key: LockKey::new(lock_key)?,
             created_at: Utc::now(),
             attempts: 0,
-            // 0 means "unset": `JobStore::enqueue` stamps the queue's configured
-            // budget unless a caller set an explicit per-job value first.
-            max_attempts: 0,
+            max_attempts: None,
             payload: serde_json::to_value(payload).map_err(|e| Error::Execution(e.to_string()))?,
         })
     }
@@ -709,7 +711,7 @@ impl JobStore {
         queue: Queue,
         n: u16,
         after: Option<&str>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
+    ) -> Result<Page<String>, Error> {
         self.list_page(&job_pending_dir(queue.as_str()), n, after)
             .await
     }
@@ -721,7 +723,7 @@ impl JobStore {
         queue: Queue,
         n: u16,
         after: Option<&str>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
+    ) -> Result<Page<String>, Error> {
         self.list_page(&job_failed_dir(queue.as_str()), n, after)
             .await
     }
@@ -735,7 +737,7 @@ impl JobStore {
         dir: &str,
         n: u16,
         after: Option<&str>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
+    ) -> Result<Page<String>, Error> {
         let start_after = after.map(|k| format!("{k}.json"));
         let page = self
             .store
@@ -749,12 +751,15 @@ impl JobStore {
             .collect();
         // The backend's `next_token` is the accurate "more entries exist"
         // signal; surface our own last storage key as the (non-opaque) cursor.
-        let next = page
+        let next_token = page
             .next_token
             .is_some()
             .then(|| keys.last().cloned())
             .flatten();
-        Ok((keys, next))
+        Ok(Page {
+            items: keys,
+            next_token,
+        })
     }
 
     /// Count pending envelopes ready for handling within
@@ -931,10 +936,7 @@ impl JobStore {
         if index_storage_key != target_storage_key {
             return None;
         }
-        let read = Read {
-            key: index_path.clone(),
-            fingerprint: Sha256::digest(index_body).into(),
-        };
+        let read = Read::present(index_path.clone(), index_body);
         let delete = Mutation::Delete {
             key: index_path,
             expected: None,
@@ -1024,11 +1026,9 @@ impl JobStore {
     /// only one wins at the engine's Prepare/Apply stage; the loser receives
     /// `Conflict` or `Precondition` and we treat that as a dedup hit.
     pub async fn enqueue(&self, mut envelope: JobEnvelope) -> Result<(), Error> {
-        // Apply the queue's configured retry budget unless a caller pinned an
-        // explicit per-job value (a non-zero `max_attempts`).
-        if envelope.max_attempts == 0 {
-            envelope.max_attempts = self.max_attempts;
-        }
+        // Apply the queue's configured retry budget unless a caller pinned one.
+        envelope.max_attempts.get_or_insert(self.max_attempts);
+
         // Fast path: index present and pending exists, a hit, no writes needed.
         // A lookup error (including a failed orphan self-heal) is propagated
         // rather than swallowed as a miss, so a lingering orphan index cannot
@@ -1240,10 +1240,7 @@ impl JobStore {
                         &storage_key,
                     ),
                     Err(_) => Some((
-                        Read {
-                            key: index_path.clone(),
-                            fingerprint: Sha256::digest(&body).into(),
-                        },
+                        Read::present(index_path.clone(), &body),
                         Mutation::Delete {
                             key: index_path,
                             expected: None,
@@ -1313,7 +1310,9 @@ impl JobStore {
         } = claimed;
         let new_attempts = envelope.attempts.saturating_add(1);
 
-        if new_attempts >= envelope.max_attempts {
+        // Every stored envelope carries a budget; the queue's stands in for one
+        // that somehow reached here without going through `enqueue`.
+        if new_attempts >= envelope.max_attempts.unwrap_or(self.max_attempts) {
             return self
                 .fail_dead_letter(session, envelope, storage_key, err)
                 .await;
@@ -1392,10 +1391,7 @@ impl JobStore {
             .await
         {
             Ok(None) => {
-                tx.reads.push(Read {
-                    key: index_path.clone(),
-                    fingerprint: Sha256::digest([]).into(),
-                });
+                tx.reads.push(Read::absent(index_path.clone()));
                 tx.mutations.push(Mutation::Put {
                     key: index_path,
                     body: index_body,

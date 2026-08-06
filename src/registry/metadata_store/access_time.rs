@@ -196,16 +196,15 @@ async fn flush_one_access_time(
     store
         .update(
             &keys,
-            |snaps| {
+            |bodies| {
                 let link_path = link_path.clone();
                 async move {
-                    let snap = &snaps[0];
                     // Link vanished: nothing to stamp. An empty mutation set
                     // commits a no-op transaction.
-                    if !snap.present {
+                    let Some(body) = &bodies[0] else {
                         return Ok(Vec::new());
-                    }
-                    let link_data = serde_json::from_slice::<LinkMetadata>(&snap.body)
+                    };
+                    let link_data = serde_json::from_slice::<LinkMetadata>(body)
                         .map_err(|e| TxError::Build(e.to_string()))?
                         .accessed();
                     let serialized =

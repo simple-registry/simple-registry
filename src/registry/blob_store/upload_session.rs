@@ -2,7 +2,7 @@
 //!
 //! Upload metadata that must survive a process crash is persisted as a set of
 //! transparent files under the per-upload container
-//! `v2/repositories/<namespace>/_uploads/<uuid>/`:
+//! `v2/repositories/<namespace>/_uploads/<session_id>/`:
 //!
 //! - `startedat`: RFC3339 timestamp of the last activity, used by `scrub` for
 //!   age-based orphan detection.
@@ -45,7 +45,7 @@ use angos_storage::paginated;
 use angos_tx_engine::StorageError;
 
 use crate::{
-    oci::{Algorithm, Digest, Namespace},
+    oci::{Algorithm, Digest, Namespace, UploadSessionId},
     registry::{
         Error,
         blob_store::{
@@ -73,13 +73,10 @@ enum HashStart {
 }
 
 /// In-memory reconstruction of an upload's progress, assembled from the
-/// per-file artifacts under the upload container. The `session_id` equals the
-/// upload `uuid` so the existing `(namespace, uuid)` addressing maps 1:1
-/// without introducing a new ID space.
+/// per-file artifacts under the upload container.
 #[derive(Debug, Clone)]
 pub struct UploadSessionRecord {
-    /// Equals the upload UUID passed to `BlobStore::create_upload`.
-    pub session_id: String,
+    pub session_id: UploadSessionId,
     /// OCI namespace owning this upload.
     pub namespace: Namespace,
     /// Wall-clock time of the last activity, read from the `startedat` file
@@ -99,18 +96,18 @@ impl BlobStore {
     pub async fn read_session(
         &self,
         namespace: &Namespace,
-        uuid: &str,
+        session_id: &UploadSessionId,
     ) -> Result<UploadSessionRecord, Error> {
         // The start-date read and the hash-context read (itself a LIST + GET)
         // are independent, so issue them concurrently to save a serial S3
         // round-trip on every session read (every PATCH/finalize).
         let (started_at, (hash_context, uploaded_size)) = try_join!(
-            self.read_start_date(namespace, uuid),
-            self.read_hash_context(namespace, uuid),
+            self.read_start_date(namespace, session_id),
+            self.read_hash_context(namespace, session_id),
         )?;
 
         Ok(UploadSessionRecord {
-            session_id: uuid.to_string(),
+            session_id: session_id.clone(),
             namespace: namespace.clone(),
             started_at,
             hash_context,
@@ -128,14 +125,19 @@ impl BlobStore {
         supersedes: Option<u64>,
     ) -> Result<(), Error> {
         let namespace = &record.namespace;
-        let uuid = &record.session_id;
+        let session_id = &record.session_id;
 
         // The two artifacts live at distinct keys and do not depend on each
         // other, so persist them concurrently to save a serial S3 round-trip on
         // every session write.
         try_join!(
-            self.write_start_date(namespace, uuid, record.started_at),
-            self.write_hash_context(namespace, uuid, record.uploaded_size, &record.hash_context),
+            self.write_start_date(namespace, session_id, record.started_at),
+            self.write_hash_context(
+                namespace,
+                session_id,
+                record.uploaded_size,
+                &record.hash_context
+            ),
         )?;
 
         // Only after the replacement is durable, so a crash in between leaves
@@ -144,7 +146,7 @@ impl BlobStore {
         if let Some(previous) = supersedes
             && previous != record.uploaded_size
         {
-            let key = path_builder::upload_hash_context_path(namespace, uuid, previous);
+            let key = path_builder::upload_hash_context_path(namespace, session_id, previous);
             let _ = self.object.delete(&key).await;
         }
         Ok(())
@@ -154,9 +156,9 @@ impl BlobStore {
     async fn read_start_date(
         &self,
         namespace: &Namespace,
-        uuid: &str,
+        session_id: &UploadSessionId,
     ) -> Result<DateTime<Utc>, Error> {
-        let key = path_builder::upload_start_date_path(namespace, uuid);
+        let key = path_builder::upload_start_date_path(namespace, session_id);
         let data = match self.object.get(&key).await {
             Ok(data) => data,
             Err(StorageError::NotFound) => return Err(Error::BlobUploadUnknown),
@@ -170,10 +172,10 @@ impl BlobStore {
     async fn write_start_date(
         &self,
         namespace: &Namespace,
-        uuid: &str,
+        session_id: &UploadSessionId,
         started_at: DateTime<Utc>,
     ) -> Result<(), Error> {
-        let key = path_builder::upload_start_date_path(namespace, uuid);
+        let key = path_builder::upload_start_date_path(namespace, session_id);
         let body = started_at.to_rfc3339();
         self.object.put(&key, Bytes::from(body)).await?;
         Ok(())
@@ -185,11 +187,11 @@ impl BlobStore {
     async fn read_hash_context(
         &self,
         namespace: &Namespace,
-        uuid: &str,
+        session_id: &UploadSessionId,
     ) -> Result<(Vec<u8>, u64), Error> {
         let dir = format!(
             "{}/",
-            path_builder::upload_hash_context_dir(namespace, uuid)
+            path_builder::upload_hash_context_dir(namespace, session_id)
         );
         let dir = &dir;
         let highest: Option<u64> = paginated(move |token| async move {
@@ -207,7 +209,7 @@ impl BlobStore {
         let Some(offset) = highest else {
             return Err(Error::BlobUploadUnknown);
         };
-        let key = path_builder::upload_hash_context_path(namespace, uuid, offset);
+        let key = path_builder::upload_hash_context_path(namespace, session_id, offset);
         match self.object.get(&key).await {
             Ok(data) => Ok((data, offset)),
             Err(StorageError::NotFound) => Err(Error::BlobUploadUnknown),
@@ -220,11 +222,11 @@ impl BlobStore {
     async fn write_hash_context(
         &self,
         namespace: &Namespace,
-        uuid: &str,
+        session_id: &UploadSessionId,
         offset: u64,
         state: &[u8],
     ) -> Result<(), Error> {
-        let key = path_builder::upload_hash_context_path(namespace, uuid, offset);
+        let key = path_builder::upload_hash_context_path(namespace, session_id, offset);
         self.object.put(&key, Bytes::copy_from_slice(state)).await?;
         Ok(())
     }
@@ -234,15 +236,20 @@ impl BlobStore {
     pub fn stream_uploads(
         &self,
         namespace: &Namespace,
-    ) -> impl Stream<Item = Result<String, Error>> + Send + '_ {
+    ) -> impl Stream<Item = Result<UploadSessionId, Error>> + Send + '_ {
         let root = format!("{}/", path_builder::uploads_root_dir(namespace));
         paginated(move |token| {
             let root = root.clone();
             async move {
                 let page = self.object.list_children(&root, 1000, token, None).await?;
-                // Sub-prefix names are bare per the `ChildrenPage` contract, so
-                // the upload UUIDs can be taken directly.
-                Ok((page.sub_prefixes, page.next_token))
+                // A directory naming no session is scrub's to quarantine, not
+                // a session these sweeps can address.
+                let sessions = page
+                    .sub_prefixes
+                    .iter()
+                    .filter_map(|name| name.parse().ok())
+                    .collect();
+                Ok((sessions, page.next_token))
             }
         })
     }
@@ -257,7 +264,7 @@ impl BlobStore {
     pub async fn collect_upload_namespaces(
         &self,
         scope: Option<&str>,
-    ) -> Result<Vec<String>, Error> {
+    ) -> Result<Vec<Namespace>, Error> {
         let (root, prefix) = path_builder::namespace_walk_root(scope);
 
         pagination::collect_namespaces_with_marker(
@@ -266,7 +273,7 @@ impl BlobStore {
             "_uploads",
             self.namespace_walk_concurrency,
             |path| async move {
-                let (sub_prefixes, _) = self.object.list_all_children(&path).await?;
+                let sub_prefixes = self.object.list_all_children(&path).await?.sub_prefixes;
                 Ok(sub_prefixes)
             },
         )
@@ -274,15 +281,19 @@ impl BlobStore {
     }
 
     #[instrument(skip(self))]
-    pub async fn create_upload(&self, namespace: &Namespace, uuid: &str) -> Result<(), Error> {
-        let upload_path = path_builder::upload_path(namespace, uuid);
+    pub async fn create_upload(
+        &self,
+        namespace: &Namespace,
+        session_id: &UploadSessionId,
+    ) -> Result<(), Error> {
+        let upload_path = path_builder::upload_path(namespace, session_id);
         // Begin/clear a fresh upload at the data key (clears any leaked prior
         // multipart and staged remainder).
         self.object.create_upload(&upload_path).await?;
 
         let hash_context = Hasher::new().state().to_bytes()?;
         let record = UploadSessionRecord {
-            session_id: uuid.to_string(),
+            session_id: session_id.clone(),
             namespace: namespace.clone(),
             started_at: Utc::now(),
             hash_context,
@@ -300,13 +311,19 @@ impl BlobStore {
     pub async fn write_upload(
         &self,
         namespace: &Namespace,
-        uuid: &str,
+        session_id: &UploadSessionId,
         stream: Box<dyn AsyncRead + Unpin + Send + Sync>,
         content_length: Option<u64>,
         algorithm: Algorithm,
     ) -> Result<(Digest, u64), Error> {
         let (hasher, size) = self
-            .append(namespace, uuid, stream, content_length, HashStart::Resume)
+            .append(
+                namespace,
+                session_id,
+                stream,
+                content_length,
+                HashStart::Resume,
+            )
             .await?;
         Ok((hasher.digest(algorithm)?, size))
     }
@@ -319,7 +336,7 @@ impl BlobStore {
     pub async fn write_monolithic_upload(
         &self,
         namespace: &Namespace,
-        uuid: &str,
+        session_id: &UploadSessionId,
         stream: Box<dyn AsyncRead + Unpin + Send + Sync>,
         content_length: Option<u64>,
         algorithm: Algorithm,
@@ -327,7 +344,7 @@ impl BlobStore {
         let (hasher, size) = self
             .append(
                 namespace,
-                uuid,
+                session_id,
                 stream,
                 content_length,
                 HashStart::Fresh(algorithm),
@@ -343,12 +360,18 @@ impl BlobStore {
     pub async fn append_upload(
         &self,
         namespace: &Namespace,
-        uuid: &str,
+        session_id: &UploadSessionId,
         stream: Box<dyn AsyncRead + Unpin + Send + Sync>,
         content_length: Option<u64>,
     ) -> Result<(Hasher, u64), Error> {
-        self.append(namespace, uuid, stream, content_length, HashStart::Resume)
-            .await
+        self.append(
+            namespace,
+            session_id,
+            stream,
+            content_length,
+            HashStart::Resume,
+        )
+        .await
     }
 
     /// Append `stream` to the session, persisting the updated hash state and
@@ -358,12 +381,12 @@ impl BlobStore {
     async fn append(
         &self,
         namespace: &Namespace,
-        uuid: &str,
+        session_id: &UploadSessionId,
         mut stream: Box<dyn AsyncRead + Unpin + Send + Sync>,
         content_length: Option<u64>,
         start: HashStart,
     ) -> Result<(Hasher, u64), Error> {
-        let mut record = self.read_session(namespace, uuid).await?;
+        let mut record = self.read_session(namespace, session_id).await?;
         let hasher = match start {
             HashStart::Resume => HashState::from_bytes(&record.hash_context)?.into_hasher()?,
             HashStart::Fresh(algorithm) => Hasher::for_algorithm(algorithm),
@@ -396,7 +419,7 @@ impl BlobStore {
         let hashing_reader = HashingReader::new(stream, hasher);
         let (body_stream, finish) = hashing_stream(hashing_reader, content_length);
 
-        let upload_path = path_builder::upload_path(namespace, uuid);
+        let upload_path = path_builder::upload_path(namespace, session_id);
         let write_result = self
             .object
             .write_upload(&upload_path, body_stream, content_length)
@@ -423,9 +446,9 @@ impl BlobStore {
     pub async fn upload_summary(
         &self,
         namespace: &Namespace,
-        uuid: &str,
+        session_id: &UploadSessionId,
     ) -> Result<UploadSummary, Error> {
-        let record = self.read_session(namespace, uuid).await?;
+        let record = self.read_session(namespace, session_id).await?;
         Ok(UploadSummary {
             size: record.uploaded_size,
             started_at: record.started_at,
@@ -451,7 +474,7 @@ impl BlobStore {
     pub async fn complete_upload(
         &self,
         namespace: &Namespace,
-        uuid: &str,
+        session_id: &UploadSessionId,
         digest: &Digest,
         hashed_size: u64,
     ) -> Result<Digest, Error> {
@@ -459,7 +482,7 @@ impl BlobStore {
         // re-run fails at the check above instead of re-finalizing. The marker
         // alone answers liveness, so this is a HEAD rather than a full session
         // read (a LIST plus two GETs).
-        let started_at = path_builder::upload_start_date_path(namespace, uuid);
+        let started_at = path_builder::upload_start_date_path(namespace, session_id);
         match self.object.head(&started_at).await {
             Ok(_) => {}
             Err(StorageError::NotFound) => return Err(Error::BlobUploadUnknown),
@@ -467,7 +490,7 @@ impl BlobStore {
         }
         self.object.delete(&started_at).await?;
 
-        let upload_key = path_builder::upload_path(namespace, uuid);
+        let upload_key = path_builder::upload_path(namespace, session_id);
         self.object.complete_upload(&upload_key).await?;
 
         // An append that fails after durably writing bytes leaves staged data
@@ -476,7 +499,7 @@ impl BlobStore {
         let staged_size = self.object.head(&upload_key).await?.size;
         if staged_size != hashed_size {
             warn!("Staged {staged_size} bytes but hashed {hashed_size}, refusing to promote");
-            let container = path_builder::upload_container_path(namespace, uuid);
+            let container = path_builder::upload_container_path(namespace, session_id);
             let _ = self.object.delete_prefix(&container).await;
             return Err(Error::DigestInvalid);
         }
@@ -485,7 +508,7 @@ impl BlobStore {
         self.object.move_object(&upload_key, &blob_key).await?;
 
         // Sweep the remaining staging artifacts best-effort; scrub reclaims any leftover.
-        let container = path_builder::upload_container_path(namespace, uuid);
+        let container = path_builder::upload_container_path(namespace, session_id);
         let _ = self.object.delete_prefix(&container).await;
 
         Ok(digest.clone())
@@ -494,13 +517,17 @@ impl BlobStore {
     /// Abort the upload and delete the per-file session artifacts plus any
     /// staged bytes. Idempotent.
     #[instrument(skip(self))]
-    pub async fn delete_upload(&self, namespace: &Namespace, uuid: &str) -> Result<(), Error> {
-        let upload_path = path_builder::upload_path(namespace, uuid);
+    pub async fn delete_upload(
+        &self,
+        namespace: &Namespace,
+        session_id: &UploadSessionId,
+    ) -> Result<(), Error> {
+        let upload_path = path_builder::upload_path(namespace, session_id);
         // Discard the upload and all backend state it owns (in-progress
         // multipart(s) and any staged remainder on S3; the staging file on FS).
         let _ = self.object.abort_upload(&upload_path).await;
 
-        let container = path_builder::upload_container_path(namespace, uuid);
+        let container = path_builder::upload_container_path(namespace, session_id);
         self.object.delete_prefix(&container).await?;
         Ok(())
     }

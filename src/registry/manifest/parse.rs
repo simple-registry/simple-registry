@@ -1,7 +1,7 @@
 use tracing::warn;
 
 use crate::{
-    oci::{Digest, Manifest, MediaType, OCI_MANIFEST_SCHEMA_VERSION},
+    oci::{Content, Digest, Manifest, MediaType, OCI_MANIFEST_SCHEMA_VERSION},
     registry::{Error, metadata_store::LinkKind},
 };
 
@@ -24,7 +24,10 @@ impl ParsedManifestDigests {
 
         if let Some(subject) = &self.subject {
             links.push((
-                LinkKind::Referrer(subject.clone(), revision.clone()),
+                LinkKind::Referrer {
+                    subject: subject.clone(),
+                    referrer: revision.clone(),
+                },
                 revision.clone(),
             ));
         }
@@ -43,7 +46,10 @@ impl ParsedManifestDigests {
             .map(|digest| (LinkKind::Layer(digest.clone()), digest.clone()));
         let manifests = self.manifests.iter().map(|digest| {
             (
-                LinkKind::Manifest(revision.clone(), digest.clone()),
+                LinkKind::Manifest {
+                    index: revision.clone(),
+                    child: digest.clone(),
+                },
                 digest.clone(),
             )
         });
@@ -79,22 +85,27 @@ pub fn parse_and_validate_manifest(
     body: &[u8],
     content_type: Option<&MediaType>,
 ) -> Result<Manifest, Error> {
-    let manifest: Manifest = serde_json::from_slice(body).map_err(|e| {
+    let manifest = Manifest::from_slice(body).map_err(|e| {
         warn!("Failed to deserialize manifest: {e}");
-        Error::ManifestInvalid(format!("invalid manifest JSON: {e}"))
+        Error::ManifestInvalid(e.to_string())
     })?;
     validate_media_type_match(&manifest, content_type)?;
     Ok(manifest)
 }
 
-/// [`parse_and_validate_manifest`] for the ingress paths, additionally pinning
-/// `schemaVersion` to the one the image spec defines. Parsing and the check are
+/// [`parse_and_validate_manifest`] for the ingress paths, additionally refusing
+/// a document that declares both image and index content and pinning
+/// `schemaVersion` to the one the image spec defines. Parsing and the checks are
 /// one step so a write path cannot take the lenient door by accident.
 pub fn parse_pushed_manifest(
     body: &[u8],
     content_type: Option<&MediaType>,
 ) -> Result<Manifest, Error> {
-    let manifest = parse_and_validate_manifest(body, content_type)?;
+    let manifest = Manifest::from_pushed(body).map_err(|e| {
+        warn!("Rejecting pushed manifest: {e}");
+        Error::ManifestInvalid(e.to_string())
+    })?;
+    validate_media_type_match(&manifest, content_type)?;
     if manifest.schema_version != OCI_MANIFEST_SCHEMA_VERSION {
         warn!(
             "Rejecting manifest with schemaVersion {}",
@@ -119,7 +130,12 @@ pub fn recover_media_type(body: &[u8]) -> MediaType {
     if let Some(media_type) = manifest.as_ref().and_then(|m| m.media_type.clone()) {
         return media_type;
     }
-    if manifest.is_some_and(|m| !m.manifests.is_empty()) {
+    // Keyed on the children rather than the shape: a document whose `manifests`
+    // array is present but empty has always been served as an image manifest,
+    // and a stored one must keep the `Content-Type` it has always had.
+    let lists_children =
+        |m: &Manifest| matches!(&m.content, Content::Index { manifests } if !manifests.is_empty());
+    if manifest.as_ref().is_some_and(lists_children) {
         MediaType::oci_index()
     } else {
         MediaType::oci_manifest()
@@ -134,19 +150,18 @@ pub fn parse_manifest_digests(
 
     let subject = manifest.subject.map(|subject| subject.digest);
 
-    let config = manifest.config.map(|config| config.digest);
-
-    let layers = manifest
-        .layers
-        .into_iter()
-        .map(|layer| layer.digest)
-        .collect::<Vec<_>>();
-
-    let manifests = manifest
-        .manifests
-        .into_iter()
-        .map(|m| m.digest)
-        .collect::<Vec<_>>();
+    let (config, layers, manifests) = match manifest.content {
+        Content::Image { config, layers } => (
+            config.map(|config| config.digest),
+            layers.into_iter().map(|layer| layer.digest).collect(),
+            Vec::new(),
+        ),
+        Content::Index { manifests } => (
+            None,
+            Vec::new(),
+            manifests.into_iter().map(|m| m.digest).collect(),
+        ),
+    };
 
     Ok(ParsedManifestDigests {
         media_type: manifest.media_type,
@@ -214,6 +229,18 @@ mod tests {
         let parsed = parse_manifest_digests(&body, None)
             .expect("a stored manifest must stay readable whatever its schemaVersion");
         assert_eq!(parsed.media_type.as_deref(), Some(MEDIA_TYPE_V2));
+    }
+
+    /// A present but empty `manifests` array has always been served as an image
+    /// manifest; a stored document must not change `Content-Type` under it.
+    #[test]
+    fn recover_media_type_treats_an_empty_manifests_array_as_an_image() {
+        let body = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "manifests": [],
+        }))
+        .unwrap();
+        assert_eq!(recover_media_type(&body), MediaType::oci_manifest());
     }
 
     #[test]

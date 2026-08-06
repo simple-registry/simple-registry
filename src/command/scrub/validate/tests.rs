@@ -6,7 +6,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use uuid::Uuid;
 
-use angos_tx_engine::intent::{IntentRecord, MutationProgress, MutationRecord};
+use angos_tx_engine::intent::{IntentRecord, MutationProgress, MutationRecord, PlannedMutation};
 
 use crate::{
     command::{
@@ -557,7 +557,10 @@ async fn orphan_referrer_link_is_deleted() {
 
         // A referrer entry whose referrer manifest is not a current revision.
         let ghost_referrer = Digest::sha256_of_bytes(b"gone-referrer");
-        let link = LinkKind::Referrer(manifest_digest.clone(), ghost_referrer.clone());
+        let link = LinkKind::Referrer {
+            subject: manifest_digest.clone(),
+            referrer: ghost_referrer.clone(),
+        };
         let body = serde_json::to_vec(&LinkMetadata::from_digest(ghost_referrer.clone())).unwrap();
         put_link_raw(metadata_store.store(), namespace, &link, &body).await;
 
@@ -628,6 +631,38 @@ async fn unknown_keys_are_quarantined_in_both_stores() {
             actions.is_empty(),
             "quarantined keys must not be re-processed, got: {:?}",
             actions.iter().map(ToString::to_string).collect::<Vec<_>>()
+        );
+    })
+    .await;
+}
+
+/// An upload directory whose name is not a session id is no angos session, so
+/// it reaches the unknown-key quarantine like any other unrecognized key.
+#[tokio::test]
+async fn an_upload_directory_that_is_not_a_session_is_quarantined() {
+    for_each_backend(async |test_case| {
+        let blob_store = test_case.blob_store();
+
+        let stray = "v2/repositories/test-repo/_uploads/not-a-session/data";
+        blob_store
+            .object_store()
+            .put(stray, Bytes::from_static(b"stray upload"))
+            .await
+            .unwrap();
+
+        scrub_apply(test_case).await;
+
+        assert!(
+            blob_store.object_store().get(stray).await.is_err(),
+            "the stray upload directory must be moved"
+        );
+        assert_eq!(
+            blob_store
+                .object_store()
+                .get(&format!("{LOST_AND_FOUND_PREFIX}/{stray}"))
+                .await
+                .unwrap(),
+            b"stray upload"
         );
     })
     .await;
@@ -810,12 +845,14 @@ async fn put_intent_touching(
         created_at: Utc::now(),
         ttl_secs,
         reads: Vec::new(),
-        mutations: vec![MutationRecord::Delete {
-            key: key.to_string(),
-            expected: None,
+        mutations: vec![PlannedMutation {
+            record: MutationRecord::Delete {
+                key: key.to_string(),
+                expected: None,
+            },
+            progress: MutationProgress::Pending,
         }],
         coarse_lock_keys: Vec::new(),
-        progress: vec![MutationProgress::Pending],
     };
     let log_key = intent.log_key();
     metadata_store

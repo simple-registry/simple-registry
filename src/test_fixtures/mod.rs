@@ -13,9 +13,9 @@ pub mod client;
 #[allow(clippy::must_use_candidate)]
 pub mod configuration;
 #[allow(clippy::must_use_candidate)]
-pub mod events;
-#[allow(clippy::must_use_candidate)]
 pub mod logging;
+#[allow(clippy::must_use_candidate)]
+pub mod manifest;
 #[allow(clippy::must_use_candidate)]
 pub mod mocks;
 #[allow(clippy::must_use_candidate)]

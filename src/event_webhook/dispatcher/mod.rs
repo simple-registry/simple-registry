@@ -179,7 +179,7 @@ impl Delivery {
 fn serialize_event(event: &Event) -> Result<(Bytes, &'static str), Error> {
     let body = serde_json::to_vec(event)
         .map_err(|e| Error::Dispatch(format!("Failed to serialize event: {e}")))?;
-    Ok((Bytes::from(body), event.kind.as_str()))
+    Ok((Bytes::from(body), event.kind().as_str()))
 }
 
 fn compute_signature(secret: &str, body: &[u8]) -> Result<String, String> {
@@ -316,7 +316,7 @@ impl EventDispatcher {
 
         let mut first_required_failure = None;
         for (name, endpoint) in &self.endpoints {
-            if !endpoint.matches_event(&event.kind, &event.repository) {
+            if !endpoint.matches_event(event.kind(), &event.repository) {
                 continue;
             }
             let delivery =

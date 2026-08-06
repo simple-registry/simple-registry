@@ -20,7 +20,7 @@ use crate::{
         executor::ActionSink,
         walk,
     },
-    oci::{Digest, Namespace},
+    oci::{Digest, Namespace, UploadSessionId},
     registry::{
         Error as RegistryError,
         blob_store::{BlobStore, MultipartCleanup, UploadSummary},
@@ -47,12 +47,16 @@ fn classify_upload(
     match summary {
         Ok(s) if now.signed_duration_since(s.started_at) > window => UploadVerdict::DeleteObsolete,
         Ok(_) => UploadVerdict::Keep,
+        // A corrupt record never decodes on a retry, so the session can never
+        // complete and is safe to reap.
         Err(
-            RegistryError::BlobUploadUnknown | RegistryError::NotFound | RegistryError::BlobUnknown,
+            RegistryError::BlobUploadUnknown
+            | RegistryError::NotFound
+            | RegistryError::BlobUnknown
+            | RegistryError::Corrupt(_),
         ) => UploadVerdict::DeleteInconsistent,
-        // A corrupt session record and a transient backend read both collapse
-        // to `Internal`; err on the safe side and keep the upload rather than
-        // risk deleting one on a transient error.
+        // A transient backend read is kept: deleting on one would destroy a
+        // live upload.
         Err(_) => UploadVerdict::Keep,
     }
 }
@@ -66,17 +70,15 @@ pub async fn sweep_upload_sessions(
     concurrency: usize,
 ) -> Result<(), Error> {
     for namespace in blob_store.collect_upload_namespaces(None).await? {
-        let Ok(namespace) = Namespace::new(&namespace) else {
-            // Invalid upload namespaces are scrub's concern.
-            continue;
-        };
         let namespace = &namespace;
         blob_store
             .stream_uploads(namespace)
             .err_into::<Error>()
-            .try_for_each_concurrent(concurrency, |uuid| async move {
-                if let Err(e) = sweep_one_upload(blob_store, namespace, &uuid, window, sink).await {
-                    error!("prune: failed to check upload '{namespace}/{uuid}': {e}");
+            .try_for_each_concurrent(concurrency, |session_id| async move {
+                if let Err(e) =
+                    sweep_one_upload(blob_store, namespace, &session_id, window, sink).await
+                {
+                    error!("prune: failed to check upload '{namespace}/{session_id}': {e}");
                 }
                 Ok(())
             })
@@ -88,17 +90,17 @@ pub async fn sweep_upload_sessions(
 async fn sweep_one_upload(
     blob_store: &Arc<BlobStore>,
     namespace: &Namespace,
-    uuid: &str,
+    session_id: &UploadSessionId,
     window: Duration,
     sink: &dyn ActionSink,
 ) -> Result<(), Error> {
-    let summary = blob_store.upload_summary(namespace, uuid).await;
+    let summary = blob_store.upload_summary(namespace, session_id).await;
     match classify_upload(summary.as_ref(), window, Utc::now()) {
         UploadVerdict::DeleteInconsistent | UploadVerdict::DeleteObsolete => {
-            debug!("prune: reaping upload '{namespace}/{uuid}'");
+            debug!("prune: reaping upload '{namespace}/{session_id}'");
             sink.apply(Action::DeleteExpiredUpload {
                 namespace: namespace.clone(),
-                uuid: uuid.to_string(),
+                session_id: session_id.clone(),
             })
             .await
         }
@@ -120,11 +122,8 @@ pub async fn sweep_orphan_multiparts(
         .map_err(Error::from)?;
     let count = orphans.len();
     for orphan in orphans {
-        sink.apply(Action::AbortMultipartUpload {
-            key: orphan.key,
-            upload_id: orphan.upload_id,
-        })
-        .await?;
+        sink.apply(Action::AbortMultipartUpload { upload: orphan })
+            .await?;
     }
     info!("prune: found {count} orphan multipart upload(s)");
     Ok(())
@@ -274,6 +273,7 @@ mod tests {
             RegistryError::BlobUploadUnknown,
             RegistryError::NotFound,
             RegistryError::BlobUnknown,
+            RegistryError::Corrupt("hash state deserialization error".to_string()),
         ] {
             let verdict = classify_upload(Err(&error), Duration::hours(1), fixed_now());
             assert!(matches!(verdict, UploadVerdict::DeleteInconsistent));
@@ -308,7 +308,7 @@ mod tests {
             let namespace = Namespace::new("test-repo/app").unwrap();
             let blob_store = test_case.blob_store();
 
-            let old_uuid = uuid::Uuid::new_v4().to_string();
+            let old_uuid = UploadSessionId::generate();
             blob_store
                 .create_upload(&namespace, &old_uuid)
                 .await
@@ -328,7 +328,7 @@ mod tests {
                 "an upload past the window must be reaped"
             );
 
-            let fresh_uuid = uuid::Uuid::new_v4().to_string();
+            let fresh_uuid = UploadSessionId::generate();
             blob_store
                 .create_upload(&namespace, &fresh_uuid)
                 .await
@@ -353,8 +353,11 @@ mod tests {
             let namespace = Namespace::new("test-repo/app").unwrap();
             let blob_store = test_case.blob_store();
 
-            let uuid = uuid::Uuid::new_v4().to_string();
-            blob_store.create_upload(&namespace, &uuid).await.unwrap();
+            let session_id = UploadSessionId::generate();
+            blob_store
+                .create_upload(&namespace, &session_id)
+                .await
+                .unwrap();
 
             let sink: Mutex<Vec<Action>> = Mutex::new(Vec::new());
             sweep_upload_sessions(&blob_store, Duration::zero(), &sink, 4)
@@ -369,7 +372,10 @@ mod tests {
                 "the capture sink must record the delete"
             );
             assert!(
-                blob_store.upload_summary(&namespace, &uuid).await.is_ok(),
+                blob_store
+                    .upload_summary(&namespace, &session_id)
+                    .await
+                    .is_ok(),
                 "a capture sink must not delete"
             );
         })

@@ -17,7 +17,7 @@ use angos_tx_engine::{
 
 use crate::{
     jobs::{JobState, Queue, store::JOBS_ROOT},
-    oci::{Algorithm, Digest},
+    oci::{Algorithm, Digest, UploadSessionId},
     registry::{
         metadata_store::decode_blob_index_shard_namespace,
         path_builder::{BLOBS_ROOT, REPOS_ROOT},
@@ -40,7 +40,6 @@ pub enum KeyCategory {
     /// (blob store).
     UploadArtifact {
         namespace: String,
-        uuid: String,
         artifact: UploadArtifact,
     },
     /// A pending or dead-lettered job envelope (metadata store).
@@ -230,18 +229,24 @@ fn categorize_repository(rest: &str) -> KeyCategory {
 /// `{uuid}/data`, `{uuid}/startedat`, `{uuid}/hashstates/{offset}`, or
 /// `{uuid}/staged/{offset}`.
 fn categorize_upload(namespace: String, tail: &[&str]) -> KeyCategory {
-    let (uuid, artifact) = match tail {
-        [uuid, "data"] => (uuid, UploadArtifact::Data),
-        [uuid, "startedat"] => (uuid, UploadArtifact::StartedAt),
-        [uuid, "hashstates", offset] if offset.parse::<u64>().is_ok() => {
-            (uuid, UploadArtifact::HashState)
+    let (session_id, artifact) = match tail {
+        [session_id, "data"] => (session_id, UploadArtifact::Data),
+        [session_id, "startedat"] => (session_id, UploadArtifact::StartedAt),
+        [session_id, "hashstates", offset] if offset.parse::<u64>().is_ok() => {
+            (session_id, UploadArtifact::HashState)
         }
-        [uuid, "staged", offset] if offset.parse::<u64>().is_ok() => (uuid, UploadArtifact::Staged),
+        [session_id, "staged", offset] if offset.parse::<u64>().is_ok() => {
+            (session_id, UploadArtifact::Staged)
+        }
         _ => return KeyCategory::Unknown,
     };
+    // A directory angos never opened: leave it to the unknown-key quarantine
+    // rather than reporting it as a session the upload passes can address.
+    if UploadSessionId::from_str(session_id).is_err() {
+        return KeyCategory::Unknown;
+    }
     KeyCategory::UploadArtifact {
         namespace,
-        uuid: (*uuid).to_string(),
         artifact,
     }
 }
@@ -379,14 +384,20 @@ mod tests {
             (LinkKind::Layer(digest_a()), ParsedLink::Layer(digest_a())),
             (LinkKind::Config(digest_a()), ParsedLink::Config(digest_a())),
             (
-                LinkKind::Referrer(digest_a(), digest_b()),
+                LinkKind::Referrer {
+                    subject: digest_a(),
+                    referrer: digest_b(),
+                },
                 ParsedLink::Referrer {
                     subject: digest_a(),
                     referrer: digest_b(),
                 },
             ),
             (
-                LinkKind::Manifest(digest_a(), digest_b()),
+                LinkKind::Manifest {
+                    index: digest_a(),
+                    child: digest_b(),
+                },
                 ParsedLink::ManifestIndex {
                     index: digest_a(),
                     child: digest_b(),
@@ -405,21 +416,27 @@ mod tests {
         }
     }
 
+    const SESSION: &str = "067e6162-3b6f-4ae2-a171-2470b63dff00";
+
+    fn session() -> UploadSessionId {
+        UploadSessionId::from_str(SESSION).unwrap()
+    }
+
     #[test]
     fn upload_artifacts_round_trip() {
         let ns = namespace();
         let cases = [
-            (upload_path(&ns, "uuid-1"), UploadArtifact::Data),
+            (upload_path(&ns, &session()), UploadArtifact::Data),
             (
-                upload_start_date_path(&ns, "uuid-1"),
+                upload_start_date_path(&ns, &session()),
                 UploadArtifact::StartedAt,
             ),
             (
-                upload_hash_context_path(&ns, "uuid-1", 42),
+                upload_hash_context_path(&ns, &session(), 42),
                 UploadArtifact::HashState,
             ),
             (
-                "v2/repositories/org/app/_uploads/uuid-1/staged/7".to_string(),
+                format!("v2/repositories/org/app/_uploads/{SESSION}/staged/7"),
                 UploadArtifact::Staged,
             ),
         ];
@@ -428,12 +445,33 @@ mod tests {
                 categorize(&key),
                 KeyCategory::UploadArtifact {
                     namespace: "org/app".to_string(),
-                    uuid: "uuid-1".to_string(),
                     artifact: expected,
                 },
                 "upload artifact {key} must round-trip"
             );
         }
+    }
+
+    /// A directory angos never opened is not an upload session: it must reach
+    /// the unknown-key quarantine instead of being reported as one.
+    #[test]
+    fn an_upload_directory_that_is_not_a_session_is_unknown() {
+        let ns = namespace();
+        for name in ["uuid-1", "", "..", "not-a-uuid", "067e6162"] {
+            let key = format!("v2/repositories/org/app/_uploads/{name}/data");
+            assert_eq!(
+                categorize(&key),
+                KeyCategory::Unknown,
+                "'{name}' must not categorize as an upload session"
+            );
+        }
+        assert_eq!(
+            categorize(&upload_path(&ns, &session())),
+            KeyCategory::UploadArtifact {
+                namespace: "org/app".to_string(),
+                artifact: UploadArtifact::Data,
+            }
+        );
     }
 
     #[test]

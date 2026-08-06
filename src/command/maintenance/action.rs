@@ -2,8 +2,8 @@ use std::fmt;
 
 use crate::{
     jobs::{JobState, Queue},
-    oci::{Digest, Namespace, Tag},
-    registry::metadata_store::LinkKind,
+    oci::{Digest, Namespace, Tag, UploadSessionId},
+    registry::{blob_store::OrphanMultipartUpload, metadata_store::LinkKind},
 };
 
 /// Root prefix that quarantined keys are moved under, preserving their
@@ -95,7 +95,7 @@ pub enum Action {
     },
     DeleteExpiredUpload {
         namespace: Namespace,
-        uuid: String,
+        session_id: UploadSessionId,
     },
     DeleteOrphanReferrer {
         namespace: Namespace,
@@ -103,8 +103,7 @@ pub enum Action {
         referrer: Digest,
     },
     AbortMultipartUpload {
-        key: String,
-        upload_id: String,
+        upload: OrphanMultipartUpload,
     },
     /// Enqueue a replication push job for a tag diverging from or absent on a
     /// downstream. Enqueued rather than pushed inline, so scrub-discovered
@@ -232,8 +231,11 @@ impl fmt::Display for Action {
             Action::DeleteOrphanManifest { namespace, digest } => {
                 write!(f, "delete orphan manifest '{namespace}@{digest}' (policy)")
             }
-            Action::DeleteExpiredUpload { namespace, uuid } => {
-                write!(f, "delete expired upload '{namespace}/{uuid}'")
+            Action::DeleteExpiredUpload {
+                namespace,
+                session_id,
+            } => {
+                write!(f, "delete expired upload '{namespace}/{session_id}'")
             }
             Action::DeleteOrphanReferrer {
                 namespace,
@@ -245,8 +247,12 @@ impl fmt::Display for Action {
                     "delete orphan referrer '{namespace}': subject {subject} <- {referrer}"
                 )
             }
-            Action::AbortMultipartUpload { key, upload_id } => {
-                write!(f, "abort orphan multipart upload '{key}' ({upload_id})")
+            Action::AbortMultipartUpload { upload } => {
+                write!(
+                    f,
+                    "abort orphan multipart upload '{}' ({})",
+                    upload.key, upload.upload_id
+                )
             }
             Action::EnqueueReplicationPush {
                 downstream,

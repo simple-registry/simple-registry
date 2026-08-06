@@ -245,16 +245,16 @@ impl Lock {
         key: &str,
         writer_nonce: Uuid,
     ) -> Result<Option<String>, Error> {
-        let (data, etag, last_modified) = match self.storage.get_with_etag(key).await {
-            Ok(t) => t,
+        let observed = match self.storage.get_with_etag(key).await {
+            Ok(observed) => observed,
             Err(Error::NotFound) => return Ok(None),
             Err(e) => return Err(e),
         };
 
-        let body: LockBody = serde_json::from_slice(&data)
+        let body: LockBody = serde_json::from_slice(&observed.body)
             .map_err(|e| Error::InvalidData(format!("corrupt lock body: {e}")))?;
 
-        if !body.is_expired(last_modified) {
+        if !body.is_expired(observed.last_modified) {
             return Ok(None);
         }
 
@@ -265,7 +265,11 @@ impl Lock {
         );
 
         let new_body = self.make_body(writer_nonce)?;
-        match self.storage.put_if_match(key, &etag, new_body).await? {
+        match self
+            .storage
+            .put_if_match(key, &observed.etag, new_body)
+            .await?
+        {
             PutIfMatchOutcome::Updated(new_etag) => {
                 lock_metrics().record_recovery(self.storage.label(), "success");
                 Ok(Some(new_etag))
@@ -662,8 +666,8 @@ async fn heartbeat_tick_path(
     // No cached ETag: re-read to recover it. The live ETag alone proves nothing
     // about ownership, so the body must still carry this session's nonce.
     // Refreshing a peer's body would leave both sessions holding the lock.
-    let (data, etag, _) = match storage.get_with_etag(path).await {
-        Ok(t) => t,
+    let observed = match storage.get_with_etag(path).await {
+        Ok(observed) => observed,
         Err(Error::NotFound) => {
             warn!(path, "Lock: lock file disappeared");
             return PathTickOutcome::Invalidate("file_disappeared");
@@ -674,7 +678,7 @@ async fn heartbeat_tick_path(
         }
     };
 
-    if !body_is_ours(&data, writer_nonce) {
+    if !body_is_ours(&observed.body, writer_nonce) {
         warn!(path, "Lock: lock object reclaimed by another holder");
         return PathTickOutcome::Invalidate("ownership_lost");
     }
@@ -687,7 +691,7 @@ async fn heartbeat_tick_path(
         }
     };
 
-    match storage.put_if_match(path, &etag, body).await {
+    match storage.put_if_match(path, &observed.etag, body).await {
         Ok(PutIfMatchOutcome::Updated(new_etag)) => {
             debug!(path, "Lock: heartbeat refreshed (slow path)");
             PathTickOutcome::Updated(new_etag)
@@ -750,12 +754,12 @@ async fn release_single_path(
     let etag = match cached_etag {
         Some(etag) => etag.clone(),
         None => match storage.get_with_etag(path).await {
-            Ok((data, etag, _)) => {
-                if !body_is_ours(&data, writer_nonce) {
+            Ok(observed) => {
+                if !body_is_ours(&observed.body, writer_nonce) {
                     debug!(path, "Lock: another holder owns the lock, skipping release");
                     return;
                 }
-                etag
+                observed.etag
             }
             Err(Error::NotFound) => {
                 debug!(path, "Lock: already deleted");
@@ -817,6 +821,7 @@ mod tests {
         Error,
         storage::{
             DeleteIfMatchOutcome, LockBody, LockStorage, PutIfAbsentOutcome, PutIfMatchOutcome,
+            TaggedObject,
         },
     };
 
@@ -972,13 +977,15 @@ mod tests {
             }
         }
 
-        async fn get_with_etag(
-            &self,
-            _key: &str,
-        ) -> Result<(Vec<u8>, String, Option<chrono::DateTime<Utc>>), Error> {
+        async fn get_with_etag(&self, _key: &str) -> Result<TaggedObject, Error> {
+            let tagged = |expired| TaggedObject {
+                body: self.body_bytes(expired),
+                etag: self.mint_etag(),
+                last_modified: None,
+            };
             match self.get.lock().unwrap().expect("get script set") {
-                GetScript::Expired => Ok((self.body_bytes(true), self.mint_etag(), None)),
-                GetScript::Fresh => Ok((self.body_bytes(false), self.mint_etag(), None)),
+                GetScript::Expired => Ok(tagged(true)),
+                GetScript::Fresh => Ok(tagged(false)),
                 GetScript::NotFound => Err(Error::NotFound),
                 GetScript::Failure => {
                     Err(Error::StorageBackend("injected get_with_etag error".into()))
@@ -1631,10 +1638,7 @@ mod tests {
             Ok(PutIfMatchOutcome::Updated(self.mint_etag()))
         }
 
-        async fn get_with_etag(
-            &self,
-            _key: &str,
-        ) -> Result<(Vec<u8>, String, Option<chrono::DateTime<Utc>>), Error> {
+        async fn get_with_etag(&self, _key: &str) -> Result<TaggedObject, Error> {
             Err(Error::NotFound)
         }
 

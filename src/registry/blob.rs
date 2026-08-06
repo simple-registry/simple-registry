@@ -5,10 +5,10 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::{
     cache_fill::build_envelope,
-    event_webhook::event::{Event, EventActor, EventKind},
+    event_webhook::event::{Event, EventActor},
     jobs::Queue,
     metrics_provider::metrics_provider,
-    oci::{Digest, Namespace, UploadSessionId},
+    oci::{Digest, MediaRange, Namespace, UploadSessionId},
     registry::{
         Error, Registry, Repository,
         blob_ownership::promote_and_grant,
@@ -122,9 +122,7 @@ pub async fn cache_blob(
 ) -> Result<(), Error> {
     debug!("Fetching blob: {digest}");
     let session_id = UploadSessionId::generate();
-    blob_store
-        .create_upload(namespace, session_id.as_ref())
-        .await?;
+    blob_store.create_upload(namespace, &session_id).await?;
 
     let result = fill_cache_session(
         blob_store,
@@ -133,7 +131,7 @@ pub async fn cache_blob(
         digest,
         stream,
         content_length,
-        session_id.as_ref(),
+        &session_id,
     )
     .await;
 
@@ -142,10 +140,7 @@ pub async fn cache_blob(
     // repeated failures (a flaky upstream, a poisoning attempt) would fill the
     // disk. On success the bytes have been promoted and the session is spent;
     // so has a racer's session whose bytes this one found already promoted.
-    if let Err(error) = blob_store
-        .delete_upload(namespace, session_id.as_ref())
-        .await
-    {
+    if let Err(error) = blob_store.delete_upload(namespace, &session_id).await {
         warn!("Failed to delete cache-fill upload state: {error}");
     }
     result?;
@@ -163,7 +158,7 @@ async fn fill_cache_session(
     digest: &Digest,
     stream: BoxedReader,
     content_length: u64,
-    session_key: &str,
+    session_key: &UploadSessionId,
 ) -> Result<(), Error> {
     // A single-shot copy of a known blob: hash only the target algorithm.
     let (computed_digest, hashed_size) = blob_store
@@ -201,7 +196,7 @@ impl Registry {
     pub async fn head_blob(
         &self,
         repository: &Repository,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<HeadBlobResponse, Error> {
@@ -244,7 +239,7 @@ impl Registry {
     pub async fn get_blob_with_access(
         &self,
         repository: &Repository,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
         range: Option<BlobRange>,
@@ -380,7 +375,7 @@ impl Registry {
         actor: Option<EventActor>,
         namespace: &Namespace,
         digest: &Digest,
-        mime_types: &[String],
+        mime_types: &[MediaRange],
         range: Option<BlobRange>,
         allow_redirect: bool,
     ) -> Result<GetBlobResponse, Error> {
@@ -409,9 +404,7 @@ impl Registry {
                 .await?
         };
 
-        let event = Event::new(EventKind::BlobPull, namespace.clone(), repository_name)
-            .digest(Some(digest.to_string()))
-            .actor(actor);
+        let event = Event::pull_blob(namespace, &repository_name, digest, actor.as_ref());
         self.dispatch_events(&[event]).await?;
 
         Ok(response)
@@ -743,8 +736,14 @@ mod tests {
                 LinkKind::Tag(Tag::new("latest").unwrap()),
                 LinkKind::Layer(Digest::sha256_of_bytes(b"layer reference")),
                 LinkKind::Config(Digest::sha256_of_bytes(b"config reference")),
-                LinkKind::Manifest(parent.clone(), Digest::sha256_of_bytes(b"child manifest")),
-                LinkKind::Referrer(subject, Digest::sha256_of_bytes(b"referrer manifest")),
+                LinkKind::Manifest {
+                    index: parent.clone(),
+                    child: Digest::sha256_of_bytes(b"child manifest"),
+                },
+                LinkKind::Referrer {
+                    subject,
+                    referrer: Digest::sha256_of_bytes(b"referrer manifest"),
+                },
             ];
 
             for link in cases {
@@ -757,7 +756,11 @@ mod tests {
                     .unwrap();
 
                 let retargeted = retarget_link(&link, &digest);
-                let op = if let LinkKind::Manifest(parent, _) = &link {
+                let op = if let LinkKind::Manifest {
+                    index: parent,
+                    child: _,
+                } = &link
+                {
                     LinkOperation::create_with_referrer(retargeted, digest.clone(), parent.clone())
                 } else {
                     LinkOperation::create(retargeted, digest.clone())
@@ -781,8 +784,20 @@ mod tests {
             LinkKind::Digest(_) => LinkKind::Digest(digest.clone()),
             LinkKind::Layer(_) => LinkKind::Layer(digest.clone()),
             LinkKind::Config(_) => LinkKind::Config(digest.clone()),
-            LinkKind::Manifest(parent, _) => LinkKind::Manifest(parent.clone(), digest.clone()),
-            LinkKind::Referrer(subject, _) => LinkKind::Referrer(subject.clone(), digest.clone()),
+            LinkKind::Manifest {
+                index: parent,
+                child: _,
+            } => LinkKind::Manifest {
+                index: parent.clone(),
+                child: digest.clone(),
+            },
+            LinkKind::Referrer {
+                subject,
+                referrer: _,
+            } => LinkKind::Referrer {
+                subject: subject.clone(),
+                referrer: digest.clone(),
+            },
             LinkKind::Blob(_) | LinkKind::Tag(_) => link.clone(),
         }
     }
@@ -887,7 +902,7 @@ mod tests {
             .list_all_children(&path_builder::uploads_root_dir(namespace))
             .await
             .expect("list upload sessions")
-            .0
+            .sub_prefixes
             .len()
     }
 

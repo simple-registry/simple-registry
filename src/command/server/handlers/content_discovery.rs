@@ -9,7 +9,10 @@ use crate::{
         response::{APPLICATION_JSON, HeaderMap, OCI_FILTERS_APPLIED, ResponseHeaders},
         response_body::ResponseBody,
     },
-    oci::{Descriptor, Digest, Namespace, OCI_INDEX_MEDIA_TYPE, OCI_MANIFEST_SCHEMA_VERSION, Tag},
+    oci::{
+        Descriptor, Digest, MediaType, Namespace, OCI_INDEX_MEDIA_TYPE,
+        OCI_MANIFEST_SCHEMA_VERSION, Tag,
+    },
     registry::content_discovery::DEFAULT_PAGE_SIZE,
 };
 
@@ -35,7 +38,7 @@ impl Default for ReferrerList {
 
 #[derive(Serialize)]
 struct CatalogBody {
-    repositories: Vec<String>,
+    repositories: Vec<Namespace>,
 }
 
 #[derive(Serialize)]
@@ -69,21 +72,21 @@ pub async fn handle_get_referrers(
     context: &ServerContext,
     namespace: &Namespace,
     digest: &Digest,
-    artifact_type: Option<String>,
+    artifact_type: Option<MediaType>,
 ) -> Result<Response<ResponseBody>, Error> {
-    let (manifests, filtered) = context
+    let referrers = context
         .registry
         .get_referrers(namespace, digest, artifact_type)
         .await?;
 
     let referrer_list = ReferrerList {
-        manifests,
+        manifests: referrers.manifests,
         ..ReferrerList::default()
     };
 
     build_response(
         StatusCode::OK,
-        referrers_headers(filtered),
+        referrers_headers(referrers.filter_applied),
         ResponseBody::fixed(serde_json::to_vec(&referrer_list)?),
     )
 }
@@ -93,14 +96,18 @@ pub async fn handle_list_catalog(
     n: Option<u16>,
     last: Option<String>,
 ) -> Result<Response<ResponseBody>, Error> {
-    let (repositories, next_last) = context.registry.list_catalog_entries(n, last).await?;
+    let page = context.registry.list_catalog_entries(n, last).await?;
     let n = n.unwrap_or(DEFAULT_PAGE_SIZE);
-    let link = next_last.map(|last| format!("/v2/_catalog?n={n}&last={last}"));
+    let link = page
+        .next_token
+        .map(|last| format!("/v2/_catalog?n={n}&last={last}"));
 
     build_response(
         StatusCode::OK,
         paginated_json_headers(link.as_deref()),
-        ResponseBody::fixed(serde_json::to_vec(&CatalogBody { repositories })?),
+        ResponseBody::fixed(serde_json::to_vec(&CatalogBody {
+            repositories: page.items,
+        })?),
     )
 }
 
@@ -110,19 +117,21 @@ pub async fn handle_list_tags(
     n: Option<u16>,
     last: Option<String>,
 ) -> Result<Response<ResponseBody>, Error> {
-    let (tags, next_last) = context
+    let page = context
         .registry
         .list_tag_entries(namespace, n, last)
         .await?;
     let n = n.unwrap_or(DEFAULT_PAGE_SIZE);
-    let link = next_last.map(|last| format!("/v2/{namespace}/tags/list?n={n}&last={last}"));
+    let link = page
+        .next_token
+        .map(|last| format!("/v2/{namespace}/tags/list?n={n}&last={last}"));
 
     build_response(
         StatusCode::OK,
         paginated_json_headers(link.as_deref()),
         ResponseBody::fixed(serde_json::to_vec(&TagsBody {
             name: namespace.as_ref(),
-            tags,
+            tags: page.items,
         })?),
     )
 }

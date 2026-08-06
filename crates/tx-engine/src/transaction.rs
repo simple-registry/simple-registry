@@ -2,6 +2,7 @@
 //! that the engine either commits atomically or leaves entirely unapplied.
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
@@ -15,29 +16,77 @@ use angos_storage::Etag;
 /// and re-hashes at Prepare time.
 pub type Fingerprint = [u8; 32];
 
+/// The state a read observed, and the state its key must still be in at
+/// Prepare time.
+/// Spelled as the intent log has always spelled it: hex digits for an observed
+/// body, empty for an absent key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
+pub enum Expectation {
+    /// The key held no object. A key that exists at Prepare conflicts,
+    /// whatever its content.
+    Absent,
+    /// The key held a body hashing to this fingerprint.
+    Present(Fingerprint),
+}
+
+impl From<Expectation> for String {
+    fn from(expected: Expectation) -> Self {
+        match expected {
+            Expectation::Absent => String::new(),
+            Expectation::Present(fingerprint) => hex::encode(fingerprint),
+        }
+    }
+}
+
+impl TryFrom<String> for Expectation {
+    type Error = hex::FromHexError;
+
+    fn try_from(spelling: String) -> Result<Self, Self::Error> {
+        if spelling.is_empty() {
+            return Ok(Expectation::Absent);
+        }
+        let mut fingerprint: Fingerprint = [0; 32];
+        hex::decode_to_slice(&spelling, &mut fingerprint)?;
+        Ok(Expectation::Present(fingerprint))
+    }
+}
+
 /// A single key read that the transaction depends on.
 ///
-/// If the key's state differs from `fingerprint` at Prepare time, the
-/// executor aborts the transaction with a `Conflict` error and the caller
-/// retries with a fresh read.
-#[derive(Clone, Debug)]
+/// If the key's state differs from `expected` at Prepare time, the executor
+/// aborts the transaction with a `Conflict` error and the caller retries with
+/// a fresh read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Read {
     /// The storage key to observe.
     pub key: String,
-    /// The expected fingerprint at commit time. Engine-internal; callers
-    /// supply body bytes via [`TransactionBuilder::read`] and the fingerprint
-    /// is derived automatically.
-    pub fingerprint: Fingerprint,
+    /// The state the key must still be in at commit time. The wire name is the
+    /// one the intent log has always used.
+    #[serde(rename = "fingerprint")]
+    pub expected: Expectation,
 }
 
 impl Read {
-    /// Whether this read recorded the key as absent (the fingerprint of an
-    /// empty body, per [`TransactionBuilder::read`]); a missing key at verify
-    /// time then matches instead of conflicting.
+    /// Record `key` as holding `body`. The fingerprint is engine-internal:
+    /// callers supply the bytes they observed and it is derived here.
     #[must_use]
-    pub fn expects_absent(&self) -> bool {
-        let empty: Fingerprint = Sha256::digest([]).into();
-        self.fingerprint == empty
+    pub fn present(key: impl Into<String>, body: impl AsRef<[u8]>) -> Self {
+        let fingerprint: Fingerprint = Sha256::digest(body.as_ref()).into();
+        Self {
+            key: key.into(),
+            expected: Expectation::Present(fingerprint),
+        }
+    }
+
+    /// Record `key` as holding no object, so any write to it before Apply is
+    /// detected as a conflict.
+    #[must_use]
+    pub fn absent(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            expected: Expectation::Absent,
+        }
     }
 }
 
@@ -142,8 +191,8 @@ impl Mutation {
 /// executor.
 #[derive(Clone, Debug)]
 pub struct Transaction {
-    /// Keys whose state the transaction depends on. If any fingerprint
-    /// mismatches at Prepare, the transaction is aborted.
+    /// Keys whose state the transaction depends on. If any of them differs
+    /// from what was observed at Prepare, the transaction is aborted.
     pub reads: Vec<Read>,
     /// Mutations to apply atomically.
     pub mutations: Vec<Mutation>,
@@ -175,22 +224,6 @@ impl Transaction {
     #[must_use]
     pub fn builder() -> TransactionBuilder {
         TransactionBuilder::new()
-    }
-
-    /// Construct a `Transaction` from pre-computed `reads` and `mutations`.
-    ///
-    /// Use this when the caller already has [`Read`] fingerprints captured
-    /// from a prior read (e.g. via a planner that exposes its mutation set)
-    /// and would otherwise have to re-hash the bodies to feed the builder.
-    /// Coarse lock keys default to empty; add via direct field access if
-    /// needed.
-    #[must_use]
-    pub fn from_parts(reads: Vec<Read>, mutations: Vec<Mutation>) -> Self {
-        Self {
-            reads,
-            mutations,
-            coarse_lock_keys: Vec::new(),
-        }
     }
 
     /// Collect the full set of keys that must be locked for this transaction
@@ -228,23 +261,22 @@ impl TransactionBuilder {
         Self::default()
     }
 
-    /// Add a read dependency.
+    /// Add a read dependency on `key`, observed holding `body`.
     ///
-    /// `body` is the raw bytes the caller observed when reading `key`. The
-    /// engine computes a SHA-256 fingerprint from those bytes and uses it to
-    /// detect concurrent modifications: under the Locked executor the hash is
-    /// re-verified after the lock is acquired; under the CAS executor it is
-    /// re-verified at Prepare time.
-    ///
-    /// Passing an empty slice records the key as absent; any subsequent write
-    /// to that key before Apply will be detected as a conflict.
+    /// The engine fingerprints those bytes and re-verifies them before the
+    /// mutations land: under the Locked executor once the lock is acquired,
+    /// under the CAS executor at Prepare time.
     #[must_use]
-    pub fn read(mut self, key: impl Into<String>, body: impl Into<Bytes>) -> Self {
-        let hash: [u8; 32] = Sha256::digest(body.into()).into();
-        self.reads.push(Read {
-            key: key.into(),
-            fingerprint: hash,
-        });
+    pub fn read(mut self, key: impl Into<String>, body: impl AsRef<[u8]>) -> Self {
+        self.reads.push(Read::present(key, body));
+        self
+    }
+
+    /// Add a read dependency on `key`, observed as absent. Any write to that
+    /// key before Apply is detected as a conflict.
+    #[must_use]
+    pub fn read_absent(mut self, key: impl Into<String>) -> Self {
+        self.reads.push(Read::absent(key));
         self
     }
 

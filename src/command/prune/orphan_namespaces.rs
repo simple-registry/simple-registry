@@ -40,11 +40,6 @@ pub async fn sweep_orphan_namespaces(
         if resolver.resolve(&namespace).is_some() {
             continue;
         }
-        // An invalid name cannot form typed links; scrub reclaims such
-        // directories structurally.
-        let Ok(namespace) = Namespace::new(&namespace) else {
-            continue;
-        };
         if let Err(e) = clear_namespace(metadata_store, &namespace, sink).await {
             error!("prune: failed to clear orphan namespace '{namespace}': {e}");
         }
@@ -56,9 +51,6 @@ pub async fn sweep_orphan_namespaces(
         if resolver.resolve(&namespace).is_some() {
             continue;
         }
-        let Ok(namespace) = Namespace::new(&namespace) else {
-            continue;
-        };
         if let Err(e) = clear_uploads(blob_store, &namespace, sink).await {
             error!("prune: failed to clear orphan uploads of '{namespace}': {e}");
         }
@@ -102,10 +94,10 @@ async fn clear_uploads(
     sink: &dyn ActionSink,
 ) -> Result<(), Error> {
     let mut uploads = pin!(blob_store.stream_uploads(namespace));
-    while let Some(uuid) = uploads.next().await {
+    while let Some(session_id) = uploads.next().await {
         sink.apply(Action::DeleteExpiredUpload {
             namespace: namespace.clone(),
-            uuid: uuid?,
+            session_id: session_id?,
         })
         .await?;
     }
@@ -117,6 +109,7 @@ mod tests {
     use super::*;
     use crate::{
         command::maintenance::executor::Executor,
+        oci::UploadSessionId,
         registry::{
             repository_resolver::RepositoryResolver,
             test_utils::{create_test_repositories, for_each_backend, seed_manifest},
@@ -141,7 +134,7 @@ mod tests {
             let owned = Namespace::new("test-repo/app").unwrap();
             seed_manifest(metadata_store.store(), &metadata_store, &ghost).await;
             seed_manifest(metadata_store.store(), &metadata_store, &owned).await;
-            let ghost_upload = uuid::Uuid::new_v4().to_string();
+            let ghost_upload = UploadSessionId::generate();
             blob_store
                 .create_upload(&ghost, &ghost_upload)
                 .await
@@ -152,7 +145,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (ghost_tags, _) = metadata_store.list_tags(&ghost, 10, None).await.unwrap();
+            let ghost_tags = metadata_store
+                .list_tags(&ghost, 10, None)
+                .await
+                .unwrap()
+                .items;
             assert!(
                 ghost_tags.is_empty(),
                 "the orphan namespace's tags must be gone"
@@ -164,7 +161,11 @@ mod tests {
                     .is_err(),
                 "the orphan namespace's uploads must be gone"
             );
-            let (owned_tags, _) = metadata_store.list_tags(&owned, 10, None).await.unwrap();
+            let owned_tags = metadata_store
+                .list_tags(&owned, 10, None)
+                .await
+                .unwrap()
+                .items;
             assert_eq!(owned_tags.len(), 1, "the owned namespace must be untouched");
         })
         .await;
@@ -187,7 +188,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (tags, _) = metadata_store.list_tags(&ghost, 10, None).await.unwrap();
+            let tags = metadata_store
+                .list_tags(&ghost, 10, None)
+                .await
+                .unwrap()
+                .items;
             assert_eq!(
                 tags.len(),
                 1,

@@ -220,10 +220,11 @@ impl RegistryClient {
     }
 
     fn build_basic_auth_header(&self) -> Result<String, Error> {
-        let (user, pass) = self.basic_auth.as_ref().ok_or_else(|| {
+        let auth = self.basic_auth.as_ref().ok_or_else(|| {
             Error::Unauthorized("Basic auth required but not configured".to_string())
         })?;
-        let encoded = BASE64_STANDARD.encode(format!("{user}:{}", pass.expose()));
+        let encoded =
+            BASE64_STANDARD.encode(format!("{}:{}", auth.username, auth.password.expose()));
         Ok(format!("Basic {encoded}"))
     }
 }

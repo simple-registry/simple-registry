@@ -3,21 +3,20 @@ use std::io::Cursor;
 use chrono::{Duration, Utc};
 use futures_util::TryStreamExt;
 use tokio::io::AsyncReadExt;
-use uuid::Uuid;
 
 use angos_storage::test_util::frame;
 
 use super::*;
 use crate::{
-    oci::{Algorithm, Digest, Namespace},
+    oci::{Algorithm, Digest, Namespace, UploadSessionId},
     registry::Error,
 };
 
 pub async fn test_datastore_stream_uploads(store: &BlobStore) {
     let namespace = &Namespace::new("test-repo").unwrap();
 
-    let upload_ids = ["upload1", "upload2", "upload3"];
-    for id in upload_ids {
+    let upload_ids: Vec<UploadSessionId> = (0..3).map(|_| UploadSessionId::generate()).collect();
+    for id in &upload_ids {
         store.create_upload(namespace, id).await.unwrap();
 
         let content = format!("Content for upload {id}").into_bytes();
@@ -34,13 +33,14 @@ pub async fn test_datastore_stream_uploads(store: &BlobStore) {
             .unwrap();
     }
 
-    let uploads: Vec<String> = store.stream_uploads(namespace).try_collect().await.unwrap();
+    let uploads: Vec<UploadSessionId> =
+        store.stream_uploads(namespace).try_collect().await.unwrap();
     assert_eq!(uploads.len(), upload_ids.len());
-    for id in upload_ids {
-        assert!(uploads.contains(&id.to_string()));
+    for id in &upload_ids {
+        assert!(uploads.contains(id));
     }
 
-    let upload_to_complete = upload_ids[0];
+    let upload_to_complete = &upload_ids[0];
     let completed_digest =
         Digest::sha256_of_bytes(format!("Content for upload {upload_to_complete}").as_bytes());
     store
@@ -53,10 +53,10 @@ pub async fn test_datastore_stream_uploads(store: &BlobStore) {
         .await
         .unwrap();
 
-    let uploads_after_complete: Vec<String> =
+    let uploads_after_complete: Vec<UploadSessionId> =
         store.stream_uploads(namespace).try_collect().await.unwrap();
     assert_eq!(uploads_after_complete.len(), upload_ids.len() - 1);
-    assert!(!uploads_after_complete.contains(&upload_to_complete.to_string()));
+    assert!(!uploads_after_complete.contains(upload_to_complete));
 }
 
 /// Seed the backend with `content` at the canonical blob path for `algorithm`
@@ -64,13 +64,13 @@ pub async fn test_datastore_stream_uploads(store: &BlobStore) {
 /// `complete_upload`). Mirrors how production creates blobs.
 async fn seed_blob_with(store: &BlobStore, content: &[u8], algorithm: Algorithm) -> Digest {
     let namespace = Namespace::new("test/setup").unwrap();
-    let uuid = Uuid::new_v4().to_string();
-    store.create_upload(&namespace, &uuid).await.unwrap();
+    let session_id = UploadSessionId::generate();
+    store.create_upload(&namespace, &session_id).await.unwrap();
     let len = content.len() as u64;
     store
         .write_upload(
             &namespace,
-            &uuid,
+            &session_id,
             Box::new(Cursor::new(content.to_vec())),
             Some(len),
             algorithm,
@@ -79,7 +79,7 @@ async fn seed_blob_with(store: &BlobStore, content: &[u8], algorithm: Algorithm)
         .unwrap();
     let expected = Digest::from_bytes(algorithm, content);
     store
-        .complete_upload(&namespace, &uuid, &expected, len)
+        .complete_upload(&namespace, &session_id, &expected, len)
         .await
         .unwrap()
 }
@@ -168,9 +168,9 @@ pub async fn test_build_blob_reader_with_offset_returns_full_size(store: &BlobSt
 
 pub async fn test_datastore_upload_operations(store: &BlobStore) {
     let namespace = &Namespace::new("test-namespace").unwrap();
-    let uuid = Uuid::new_v4().to_string();
+    let session_id = UploadSessionId::generate();
 
-    store.create_upload(namespace, &uuid).await.unwrap();
+    store.create_upload(namespace, &session_id).await.unwrap();
 
     let test_content = b"Test upload content";
 
@@ -179,7 +179,7 @@ pub async fn test_datastore_upload_operations(store: &BlobStore) {
     store
         .write_upload(
             namespace,
-            &uuid,
+            &session_id,
             Box::new(Cursor::new(test_content.to_vec())),
             Some(test_content.len() as u64),
             Algorithm::Sha256,
@@ -187,14 +187,14 @@ pub async fn test_datastore_upload_operations(store: &BlobStore) {
         .await
         .unwrap();
 
-    let summary = store.upload_summary(namespace, &uuid).await.unwrap();
+    let summary = store.upload_summary(namespace, &session_id).await.unwrap();
     assert_eq!(summary.size, test_content.len() as u64);
     assert!(Utc::now().signed_duration_since(summary.started_at) < Duration::hours(1));
 
     let final_digest = store
         .complete_upload(
             namespace,
-            &uuid,
+            &session_id,
             &expected_digest,
             test_content.len() as u64,
         )
@@ -205,7 +205,7 @@ pub async fn test_datastore_upload_operations(store: &BlobStore) {
     let blob_content = store.read(&final_digest).await.unwrap();
     assert_eq!(blob_content, test_content);
 
-    let upload_result = store.upload_summary(namespace, &uuid).await;
+    let upload_result = store.upload_summary(namespace, &session_id).await;
     assert!(upload_result.is_err());
 }
 
@@ -224,7 +224,7 @@ pub async fn test_repeated_promotion_converges(store: &BlobStore) {
     assert_eq!(store.read(&first).await.unwrap(), content);
 
     let namespace = Namespace::new("test/setup").unwrap();
-    let uploads: Vec<String> = store
+    let uploads: Vec<UploadSessionId> = store
         .stream_uploads(&namespace)
         .try_collect()
         .await
@@ -241,13 +241,13 @@ pub async fn test_repeated_promotion_converges(store: &BlobStore) {
 /// so this guards that the marker is consumed before the multipart-complete.
 pub async fn test_complete_upload_fails_on_rerun(store: &BlobStore) {
     let namespace = Namespace::new("test/rerun").unwrap();
-    let uuid = Uuid::new_v4().to_string();
+    let session_id = UploadSessionId::generate();
     let content = b"one-shot completion";
-    store.create_upload(&namespace, &uuid).await.unwrap();
+    store.create_upload(&namespace, &session_id).await.unwrap();
     store
         .write_upload(
             &namespace,
-            &uuid,
+            &session_id,
             Box::new(Cursor::new(content.to_vec())),
             Some(content.len() as u64),
             Algorithm::Sha256,
@@ -256,12 +256,12 @@ pub async fn test_complete_upload_fails_on_rerun(store: &BlobStore) {
         .unwrap();
     let digest = Digest::sha256_of_bytes(content);
     store
-        .complete_upload(&namespace, &uuid, &digest, content.len() as u64)
+        .complete_upload(&namespace, &session_id, &digest, content.len() as u64)
         .await
         .unwrap();
 
     let rerun = store
-        .complete_upload(&namespace, &uuid, &digest, content.len() as u64)
+        .complete_upload(&namespace, &session_id, &digest, content.len() as u64)
         .await;
     assert!(
         matches!(rerun, Err(Error::BlobUploadUnknown)),
@@ -274,6 +274,29 @@ pub async fn test_complete_upload_fails_on_rerun(store: &BlobStore) {
     );
 }
 
+/// A directory naming no session is scrub's to quarantine, so the sweep that
+/// reaps live sessions must not report it as one.
+pub async fn test_datastore_stream_uploads_skips_a_non_session_name(store: &BlobStore) {
+    let namespace = &Namespace::new("test-raw-upload").unwrap();
+    let session = UploadSessionId::generate();
+    store.create_upload(namespace, &session).await.unwrap();
+
+    let stray = "v2/repositories/test-raw-upload/_uploads/not-a-session/startedat";
+    store
+        .object_store()
+        .put(stray, Bytes::from_static(b"2026-01-01T00:00:00Z"))
+        .await
+        .unwrap();
+
+    let uploads: Vec<UploadSessionId> =
+        store.stream_uploads(namespace).try_collect().await.unwrap();
+    assert_eq!(
+        uploads,
+        vec![session],
+        "only the opened session may be reported"
+    );
+}
+
 // Test entry points: run each helper against every backend fixture
 
 use crate::registry::test_utils::{FSRegistryTestCase, RegistryTestCase, for_each_backend};
@@ -282,6 +305,14 @@ use crate::registry::test_utils::{FSRegistryTestCase, RegistryTestCase, for_each
 async fn stream_uploads() {
     for_each_backend(async |tc| {
         test_datastore_stream_uploads(tc.blob_store().as_ref()).await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn stream_uploads_skips_a_non_session_name() {
+    for_each_backend(async |tc| {
+        test_datastore_stream_uploads_skips_a_non_session_name(tc.blob_store().as_ref()).await;
     })
     .await;
 }
@@ -374,13 +405,13 @@ async fn complete_upload_rejects_size_divergence() {
 pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
     let tail = b"orphaned tail".to_vec();
     let namespace = Namespace::new("test/divergence").unwrap();
-    let uuid = Uuid::new_v4().to_string();
+    let session_id = UploadSessionId::generate();
     let content = b"hashed prefix";
-    store.create_upload(&namespace, &uuid).await.unwrap();
+    store.create_upload(&namespace, &session_id).await.unwrap();
     store
         .write_upload(
             &namespace,
-            &uuid,
+            &session_id,
             Box::new(Cursor::new(content.to_vec())),
             Some(content.len() as u64),
             Algorithm::Sha256,
@@ -389,7 +420,7 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
         .unwrap();
 
     // Bytes the session hashed, then a tail it never did.
-    let upload_key = path_builder::upload_path(&namespace, &uuid);
+    let upload_key = path_builder::upload_path(&namespace, &session_id);
     store
         .object
         .write_upload(&upload_key, frame(tail.clone()), Some(tail.len() as u64))
@@ -398,7 +429,7 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
 
     let digest = Digest::sha256_of_bytes(content);
     let result = store
-        .complete_upload(&namespace, &uuid, &digest, content.len() as u64)
+        .complete_upload(&namespace, &session_id, &digest, content.len() as u64)
         .await;
 
     assert!(
@@ -416,14 +447,14 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
 /// finalize progressively more expensive.
 pub async fn test_checkpoints_supersede_rather_than_accumulate(store: &BlobStore) {
     let namespace = &Namespace::new("checkpoint-supersede").unwrap();
-    let uuid = &Uuid::new_v4().to_string();
-    store.create_upload(namespace, uuid).await.unwrap();
+    let session_id = &UploadSessionId::generate();
+    store.create_upload(namespace, session_id).await.unwrap();
 
     for chunk in ["one", "two", "three", "four"] {
         store
             .write_upload(
                 namespace,
-                uuid,
+                session_id,
                 Box::new(Cursor::new(chunk.as_bytes().to_vec())),
                 Some(chunk.len() as u64),
                 Algorithm::Sha256,
@@ -434,7 +465,7 @@ pub async fn test_checkpoints_supersede_rather_than_accumulate(store: &BlobStore
 
     let dir = format!(
         "{}/",
-        path_builder::upload_hash_context_dir(namespace, uuid)
+        path_builder::upload_hash_context_dir(namespace, session_id)
     );
     let page = store.object.list(&dir, 100, None).await.unwrap();
     assert_eq!(

@@ -40,13 +40,6 @@ pub async fn check_namespaces(
         .map_err(Error::from)?;
     stream::iter(namespaces)
         .for_each_concurrent(concurrency, |namespace| async move {
-            let namespace = match Namespace::new(&namespace) {
-                Ok(namespace) => namespace,
-                Err(e) => {
-                    warn!("Skipping invalid enumerated namespace '{namespace}': {e}");
-                    return;
-                }
-            };
             if let Err(e) = checker.check(&namespace, sink).await {
                 warn!("Check failed for namespace '{namespace}': {e}");
             }

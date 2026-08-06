@@ -1,10 +1,19 @@
 use futures_util::stream::TryStreamExt;
 use tracing::{instrument, warn};
 
+use angos_storage::Page;
+
 use crate::{
-    oci::{Descriptor, Digest, Manifest, Namespace, Tag},
+    oci::{Descriptor, Digest, Manifest, MediaType, Namespace, Tag},
     registry::{Error, Registry, metadata_store::LinkKind},
 };
+
+/// The referrers of one subject, and whether an `artifactType` filter was
+/// applied: the response must advertise the filter it honoured.
+pub struct Referrers {
+    pub manifests: Vec<Descriptor>,
+    pub filter_applied: bool,
+}
 
 /// Fan-out for resolving referrer candidates to descriptors: each candidate is
 /// an independent manifest read, so a bounded window keeps the listing and the
@@ -24,7 +33,7 @@ impl Registry {
         &self,
         n: Option<u16>,
         last: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
+    ) -> Result<Page<Namespace>, Error> {
         let n = n.unwrap_or(DEFAULT_PAGE_SIZE);
         self.metadata_store.list_namespaces(n, last).await
     }
@@ -37,7 +46,7 @@ impl Registry {
         namespace: &Namespace,
         n: Option<u16>,
         last: Option<String>,
-    ) -> Result<(Vec<Tag>, Option<String>), Error> {
+    ) -> Result<Page<Tag>, Error> {
         let n = n.unwrap_or(DEFAULT_PAGE_SIZE);
         self.metadata_store.list_tags(namespace, n, last).await
     }
@@ -50,14 +59,17 @@ impl Registry {
         &self,
         namespace: &Namespace,
         digest: &Digest,
-        artifact_type: Option<String>,
-    ) -> Result<(Vec<Descriptor>, bool), Error> {
-        let filtered = artifact_type.is_some();
+        artifact_type: Option<MediaType>,
+    ) -> Result<Referrers, Error> {
+        let filter_applied = artifact_type.is_some();
         let manifests = self
             .list_referrers(namespace, digest, artifact_type)
             .await?;
 
-        Ok((manifests, filtered))
+        Ok(Referrers {
+            manifests,
+            filter_applied,
+        })
     }
 
     /// Resolves every referrer of `digest` in `namespace` to a sorted
@@ -67,7 +79,7 @@ impl Registry {
         &self,
         namespace: &Namespace,
         digest: &Digest,
-        artifact_type: Option<String>,
+        artifact_type: Option<MediaType>,
     ) -> Result<Vec<Descriptor>, Error> {
         let artifact_type = artifact_type.as_ref();
 
@@ -106,9 +118,12 @@ impl Registry {
         namespace: &Namespace,
         subject_digest: &Digest,
         manifest_digest: Digest,
-        artifact_type: Option<&String>,
+        artifact_type: Option<&MediaType>,
     ) -> Option<Descriptor> {
-        let referrer_link = LinkKind::Referrer(subject_digest.clone(), manifest_digest.clone());
+        let referrer_link = LinkKind::Referrer {
+            subject: subject_digest.clone(),
+            referrer: manifest_digest.clone(),
+        };
 
         if let Ok(metadata) = self
             .metadata_store
@@ -117,7 +132,7 @@ impl Registry {
             && let Some(desc) = metadata.descriptor
         {
             match artifact_type {
-                Some(at) if desc.artifact_type.as_deref() == Some(at.as_str()) => {
+                Some(at) if desc.artifact_type.as_ref() == Some(at) => {
                     return Some(desc);
                 }
                 None => return Some(desc),
@@ -160,6 +175,8 @@ impl Registry {
 mod tests {
     use std::collections::HashMap;
 
+    use angos_storage::Page;
+
     use crate::{
         oci::{Descriptor, Digest, Manifest, MediaType, Namespace, Reference, Tag},
         registry::{
@@ -176,15 +193,24 @@ mod tests {
         for_each_backend(async |test_case| {
             let registry = test_case.registry();
 
-            let (namespaces, token) = registry.list_catalog_entries(None, None).await.unwrap();
+            let Page {
+                items: namespaces,
+                next_token: token,
+            } = registry.list_catalog_entries(None, None).await.unwrap();
             assert!(namespaces.is_empty());
             assert!(token.is_none());
 
-            let (namespaces, token) = registry.list_catalog_entries(Some(10), None).await.unwrap();
+            let Page {
+                items: namespaces,
+                next_token: token,
+            } = registry.list_catalog_entries(Some(10), None).await.unwrap();
             assert!(namespaces.is_empty());
             assert!(token.is_none());
 
-            let (namespaces, token) = registry
+            let Page {
+                items: namespaces,
+                next_token: token,
+            } = registry
                 .list_catalog_entries(Some(10), Some("test".to_string()))
                 .await
                 .unwrap();
@@ -218,7 +244,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (tags, token) = registry
+            let Page {
+                items: tags,
+                next_token: token,
+            } = registry
                 .list_tag_entries(namespace, None, None)
                 .await
                 .unwrap();
@@ -228,7 +257,10 @@ mod tests {
             assert!(tags.contains(&Tag::new("v2.0").unwrap()));
             assert!(token.is_none());
 
-            let (page1, token1) = registry
+            let Page {
+                items: page1,
+                next_token: token1,
+            } = registry
                 .list_tag_entries(namespace, Some(2), None)
                 .await
                 .unwrap();
@@ -237,14 +269,20 @@ mod tests {
 
             let last_tag = token1.unwrap();
 
-            let (page2, token2) = registry
+            let Page {
+                items: page2,
+                next_token: token2,
+            } = registry
                 .list_tag_entries(namespace, Some(2), Some(last_tag))
                 .await
                 .unwrap();
             assert_eq!(page2.len(), 1);
             assert!(token2.is_none());
 
-            let (page1, token1) = registry
+            let Page {
+                items: page1,
+                next_token: token1,
+            } = registry
                 .list_tag_entries(namespace, Some(1), None)
                 .await
                 .unwrap();
@@ -253,7 +291,10 @@ mod tests {
 
             let last_tag = token1.unwrap();
 
-            let (page2, token2) = registry
+            let Page {
+                items: page2,
+                next_token: token2,
+            } = registry
                 .list_tag_entries(namespace, Some(1), Some(last_tag))
                 .await
                 .unwrap();
@@ -262,14 +303,20 @@ mod tests {
 
             let last_tag = token2.unwrap();
 
-            let (page3, token3) = registry
+            let Page {
+                items: page3,
+                next_token: token3,
+            } = registry
                 .list_tag_entries(namespace, Some(1), Some(last_tag))
                 .await
                 .unwrap();
             assert_eq!(page3.len(), 1);
             assert!(token3.is_none());
 
-            let (tags, token) = registry
+            let Page {
+                items: tags,
+                next_token: token,
+            } = registry
                 .list_tag_entries(namespace, Some(10), Some("latest".to_string()))
                 .await
                 .unwrap();
@@ -315,11 +362,14 @@ mod tests {
         }
 
         // Fetch 2 at a time and collect all namespaces.
-        let mut all_collected: Vec<String> = Vec::new();
+        let mut all_collected: Vec<Namespace> = Vec::new();
         let mut last: Option<String> = None;
 
         loop {
-            let (page, token) = registry.list_catalog_entries(Some(2), last).await.unwrap();
+            let Page {
+                items: page,
+                next_token: token,
+            } = registry.list_catalog_entries(Some(2), last).await.unwrap();
             all_collected.extend(page);
 
             // The token is the continuation cursor: feed it straight back as `last`.
@@ -336,7 +386,7 @@ mod tests {
         );
         for ns in &namespaces {
             assert!(
-                all_collected.contains(&ns.to_string()),
+                all_collected.iter().any(|got| got == ns),
                 "namespace '{ns}' must appear in paginated results"
             );
         }
@@ -350,7 +400,10 @@ mod tests {
         let registry = test_case.registry();
         let unknown = Namespace::new("no-such-repo/no-such-image").unwrap();
 
-        let (tags, token) = registry
+        let Page {
+            items: tags,
+            next_token: token,
+        } = registry
             .list_tag_entries(&unknown, None, None)
             .await
             .unwrap();
@@ -396,10 +449,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let referrer_link = LinkKind::Referrer(
-                base_manifest_digest.clone(),
-                referrer_manifest_digest.clone(),
-            );
+            let referrer_link = LinkKind::Referrer { subject: base_manifest_digest.clone(), referrer: referrer_manifest_digest.clone(), };
             registry
                 .metadata_store
                 .update_links(
@@ -482,7 +532,10 @@ mod tests {
         descriptor: Option<Descriptor>,
     ) {
         let ops = vec![LinkOperation::Create {
-            link: LinkKind::Referrer(subject(), manifest.clone()),
+            link: LinkKind::Referrer {
+                subject: subject(),
+                referrer: manifest.clone(),
+            },
             target: manifest.clone(),
             referrer: None,
             media_type: None,
@@ -517,7 +570,7 @@ mod tests {
         let case = FSRegistryTestCase::with_split_backends();
         let registry = case.registry();
         let manifest_digest = upload_blob(registry, &referrer_namespace(), b"not json").await;
-        let at = "application/vnd.foo".to_string();
+        let at = media_type("application/vnd.foo");
         let desc = descriptor_with(Some(&at), &manifest_digest);
         create_referrer_link(
             &registry.metadata_store,
@@ -546,7 +599,7 @@ mod tests {
         let desc = descriptor_with(Some("application/vnd.foo"), &manifest_digest);
         create_referrer_link(&registry.metadata_store, &manifest_digest, Some(desc)).await;
 
-        let filter = "application/vnd.bar".to_string();
+        let filter = media_type("application/vnd.bar");
         let result = registry
             .resolve_referrer_descriptor(
                 &referrer_namespace(),
@@ -568,7 +621,7 @@ mod tests {
         let desc = descriptor_with(None, &manifest_digest);
         create_referrer_link(&registry.metadata_store, &manifest_digest, Some(desc)).await;
 
-        let at = "application/vnd.foo".to_string();
+        let at = media_type("application/vnd.foo");
         let result = registry
             .resolve_referrer_descriptor(
                 &referrer_namespace(),
@@ -608,7 +661,7 @@ mod tests {
         let (case, manifest_digest) = split_case_with_blob(Some("application/vnd.foo")).await;
         let registry = case.registry();
 
-        let at = "application/vnd.foo".to_string();
+        let at = media_type("application/vnd.foo");
         let result = registry
             .resolve_referrer_descriptor(
                 &referrer_namespace(),
@@ -629,7 +682,7 @@ mod tests {
         let (case, manifest_digest) = split_case_with_blob(Some("application/vnd.foo")).await;
         let registry = case.registry();
 
-        let filter = "application/vnd.bar".to_string();
+        let filter = media_type("application/vnd.bar");
         let result = registry
             .resolve_referrer_descriptor(
                 &referrer_namespace(),

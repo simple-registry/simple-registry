@@ -12,7 +12,7 @@ use crate::{
     jobs::Queue,
     jobs::store::JobStore,
     metrics_provider,
-    oci::{Digest, MediaType, Namespace, Tag, UploadSessionId},
+    oci::{Digest, MediaRange, MediaType, Namespace, Tag, UploadSessionId},
     policy::{RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::{
         CompleteUploadRequest, Error, Registry, RegistryConfig, Repository,
@@ -26,7 +26,7 @@ use crate::{
         s3_connection::S3ConnectionConfig,
     },
     registry_client::RegistryClient,
-    replication::{ReplicationDownstream, ReplicationMode, ReplicationPushPayload},
+    replication::{ReplicationDownstream, ReplicationJob, ReplicationMode},
     secret::Secret,
 };
 use angos_s3_client::Backend as S3HttpBackend;
@@ -206,7 +206,7 @@ pub async fn upload_blob(registry: &Registry, namespace: &Namespace, content: &[
     let session_id = UploadSessionId::generate();
     registry
         .blob_store
-        .create_upload(namespace, session_id.as_ref())
+        .create_upload(namespace, &session_id)
         .await
         .unwrap();
 
@@ -264,7 +264,7 @@ pub async fn put_blob_direct(store: &Store, content: &[u8]) -> Digest {
 pub async fn get_blob(
     registry: &Registry,
     repository: &Repository,
-    accepted_types: &[String],
+    accepted_types: &[MediaRange],
     namespace: &Namespace,
     digest: &Digest,
     range: Option<BlobRange>,
@@ -352,7 +352,7 @@ impl FSRegistryTestCase {
     /// `link_cache_ttl_secs`, for tests pinning which reads must bypass it.
     pub fn with_link_cache_ttl(link_cache_ttl_secs: u64) -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir for FSBackendConfig");
-        let path = temp_dir.path().to_string_lossy().to_string();
+        let path = temp_dir.path().to_path_buf();
 
         let config = BlobStoreConfig::FS(blob_store::FsBackendConfig {
             root_dir: path.clone(),
@@ -381,8 +381,8 @@ impl FSRegistryTestCase {
     /// cross-store-isolation regression this fixture exercises.
     pub fn with_split_backends() -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir for split backends");
-        let blob_path = temp_dir.path().join("blob").to_string_lossy().into_owned();
-        let meta_path = temp_dir.path().join("meta").to_string_lossy().into_owned();
+        let blob_path = temp_dir.path().join("blob");
+        let meta_path = temp_dir.path().join("meta");
 
         let config = BlobStoreConfig::FS(blob_store::FsBackendConfig {
             root_dir: blob_path,
@@ -558,7 +558,7 @@ pub fn repository_with_downstream(name: &str, client: Arc<RegistryClient>) -> Re
 
 /// Decode the payload of the sole pending replication job, panicking unless
 /// exactly one is pending.
-pub async fn sole_pending_payload(job_store: &JobStore) -> ReplicationPushPayload {
+pub async fn sole_pending_payload(job_store: &JobStore) -> ReplicationJob {
     let keys = job_store
         .list_pending(Queue::Replication, 16)
         .await
@@ -573,7 +573,7 @@ pub async fn sole_pending_payload(job_store: &JobStore) -> ReplicationPushPayloa
         .await
         .unwrap();
     assert_eq!(envelope.queue, Queue::Replication);
-    serde_json::from_value(envelope.payload).expect("decode ReplicationPushPayload")
+    serde_json::from_value(envelope.payload).expect("decode ReplicationJob")
 }
 
 /// Seed a config blob, a layer blob, a manifest referencing both, and a `v1`

@@ -2,7 +2,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, copy, sink};
 use tracing::{instrument, warn};
 
 use crate::{
-    event_webhook::event::{Event, EventActor, EventKind},
+    event_webhook::event::{Event, EventActor},
     oci::{Digest, Namespace, UploadSessionId},
     registry::{
         Error, Registry,
@@ -29,7 +29,7 @@ pub enum StartUploadResponse {
     },
     Session {
         namespace: Namespace,
-        session_uuid: String,
+        session_id: UploadSessionId,
     },
 }
 
@@ -45,13 +45,13 @@ pub struct BlobMount {
 
 pub struct GetUploadResponse {
     pub namespace: Namespace,
-    pub session_id: String,
+    pub session_id: UploadSessionId,
     pub size: u64,
 }
 
 pub struct PatchUploadResponse {
     pub namespace: Namespace,
-    pub session_id: String,
+    pub session_id: UploadSessionId,
     pub size: u64,
 }
 
@@ -131,10 +131,10 @@ impl Registry {
     async fn finish_completed_upload(
         &self,
         namespace: &Namespace,
-        session_key: &str,
+        session_id: &UploadSessionId,
         digest: &Digest,
     ) -> Result<CompleteUploadResponse, Error> {
-        if let Err(error) = self.blob_store.delete_upload(namespace, session_key).await {
+        if let Err(error) = self.blob_store.delete_upload(namespace, session_id).await {
             warn!("Failed to delete completed upload state: {error}");
         }
 
@@ -211,12 +211,12 @@ impl Registry {
     ) -> Result<StartUploadResponse, Error> {
         let session_id = UploadSessionId::generate();
         self.blob_store
-            .create_upload(namespace, session_id.as_ref())
+            .create_upload(namespace, &session_id)
             .await?;
 
         Ok(StartUploadResponse::Session {
             namespace: namespace.clone(),
-            session_uuid: session_id.as_ref().to_string(),
+            session_id,
         })
     }
 
@@ -256,9 +256,7 @@ impl Registry {
         source: &Namespace,
     ) -> Result<StartUploadResponse, Error> {
         let repository = self.repository_name_for(namespace);
-        let event = Event::new(EventKind::BlobPush, namespace.clone(), repository)
-            .digest(Some(mount.digest.to_string()))
-            .actor(actor);
+        let event = Event::push_blob(namespace, &repository, &mount.digest, actor.as_ref());
         self.dispatch_events(&[event]).await?;
 
         if let Some(digest) = self.try_cross_repo_mount(namespace, mount, source).await? {
@@ -277,7 +275,7 @@ impl Registry {
     async fn reject_oversized_known_length(
         &self,
         namespace: &Namespace,
-        session_key: &str,
+        session_id: &UploadSessionId,
         committed: u64,
         content_length: Option<u64>,
     ) -> Result<(), Error> {
@@ -285,7 +283,7 @@ impl Registry {
         if let Some(len) = content_length
             && committed.checked_add(len).is_none_or(|total| total > limit)
         {
-            self.abort_upload_quietly(namespace, session_key).await;
+            self.abort_upload_quietly(namespace, session_id).await;
             return Err(Error::BlobBodyTooLarge {
                 limit: usize::try_from(limit).unwrap_or(usize::MAX),
             });
@@ -322,12 +320,12 @@ impl Registry {
     async fn reject_if_oversized(
         &self,
         namespace: &Namespace,
-        session_key: &str,
+        session_id: &UploadSessionId,
         new_total: u64,
     ) -> Result<(), Error> {
         let limit = self.max_blob_size_bytes;
         if new_total > limit {
-            self.abort_upload_quietly(namespace, session_key).await;
+            self.abort_upload_quietly(namespace, session_id).await;
             return Err(Error::BlobBodyTooLarge {
                 limit: usize::try_from(limit).unwrap_or(usize::MAX),
             });
@@ -339,8 +337,8 @@ impl Registry {
     /// breached the size cap, or hashed to the wrong digest); a cleanup failure
     /// is logged, not surfaced, since the caller already has a terminal error to
     /// return.
-    async fn abort_upload_quietly(&self, namespace: &Namespace, session_key: &str) {
-        if let Err(error) = self.blob_store.delete_upload(namespace, session_key).await {
+    async fn abort_upload_quietly(&self, namespace: &Namespace, session_id: &UploadSessionId) {
+        if let Err(error) = self.blob_store.delete_upload(namespace, session_id).await {
             warn!("Failed to abort upload session: {error}");
         }
     }
@@ -357,11 +355,9 @@ impl Registry {
     where
         S: AsyncRead + Unpin + Send + Sync + 'static,
     {
-        let session_key = session_id.to_string();
-
         let summary = self
             .blob_store
-            .upload_summary(namespace, &session_key)
+            .upload_summary(namespace, session_id)
             .await?;
 
         if let Some(offset) = start_offset
@@ -370,7 +366,7 @@ impl Registry {
             return Err(Error::RangeNotSatisfiable);
         }
 
-        self.reject_oversized_known_length(namespace, &session_key, summary.size, content_length)
+        self.reject_oversized_known_length(namespace, session_id, summary.size, content_length)
             .await?;
 
         let bounded = self.bound_blob_stream(summary.size, content_length, stream);
@@ -379,15 +375,15 @@ impl Registry {
         // them unsupported); the PUT's digest check catches any interleaving.
         let (_, size) = self
             .blob_store
-            .append_upload(namespace, &session_key, Box::new(bounded), content_length)
+            .append_upload(namespace, session_id, Box::new(bounded), content_length)
             .await?;
 
-        self.reject_if_oversized(namespace, &session_key, size)
+        self.reject_if_oversized(namespace, session_id, size)
             .await?;
 
         Ok(PatchUploadResponse {
             namespace: namespace.clone(),
-            session_id: session_key,
+            session_id: session_id.clone(),
             size,
         })
     }
@@ -416,28 +412,22 @@ impl Registry {
             start_offset,
             content_length,
         } = request;
-        let session_key = session_id.to_string();
 
         // Intent-first emission: the event fires before the finalize, so a
         // completed blob can never go unnotified; a completion that fails
         // past this point leaves a false-positive notification instead.
         let repository = self.repository_name_for(namespace);
-        let event = Event::new(EventKind::BlobPush, namespace.clone(), repository)
-            .digest(Some(digest.to_string()))
-            .actor(actor);
+        let event = Event::push_blob(namespace, &repository, digest, actor.as_ref());
         self.dispatch_events(&[event]).await?;
 
         // An unknown session reads as empty only so the blob-exists path below
         // can answer a retry whose 201 was lost; anything else it reaches 404s.
-        let (committed, session_known) = match self
-            .blob_store
-            .upload_summary(namespace, &session_key)
-            .await
-        {
-            Ok(summary) => (summary.size, true),
-            Err(Error::BlobUploadUnknown) => (0, false),
-            Err(e) => return Err(e),
-        };
+        let (committed, session_known) =
+            match self.blob_store.upload_summary(namespace, session_id).await {
+                Ok(summary) => (summary.size, true),
+                Err(Error::BlobUploadUnknown) => (0, false),
+                Err(e) => return Err(e),
+            };
         let has_prior_writes = committed > 0;
 
         // A final-chunk PUT carrying a Content-Range must resume from the
@@ -449,7 +439,7 @@ impl Registry {
             return Err(Error::RangeNotSatisfiable);
         }
 
-        self.reject_oversized_known_length(namespace, &session_key, committed, content_length)
+        self.reject_oversized_known_length(namespace, session_id, committed, content_length)
             .await?;
 
         // Bound the final chunk so a chunked (`None` content-length) PUT that
@@ -461,7 +451,7 @@ impl Registry {
                 .await?
         {
             return self
-                .finish_completed_upload(namespace, &session_key, digest)
+                .finish_completed_upload(namespace, session_id, digest)
                 .await;
         }
 
@@ -476,7 +466,7 @@ impl Registry {
             self.blob_store
                 .write_upload(
                     namespace,
-                    &session_key,
+                    session_id,
                     Box::new(stream),
                     content_length,
                     digest.algorithm(),
@@ -486,7 +476,7 @@ impl Registry {
             self.blob_store
                 .write_monolithic_upload(
                     namespace,
-                    &session_key,
+                    session_id,
                     Box::new(stream),
                     content_length,
                     digest.algorithm(),
@@ -494,7 +484,7 @@ impl Registry {
                 .await?
         };
 
-        self.reject_if_oversized(namespace, &session_key, new_total)
+        self.reject_if_oversized(namespace, session_id, new_total)
             .await?;
 
         if &upload_digest != digest {
@@ -502,7 +492,7 @@ impl Registry {
             // The session can never complete now: its bytes hash to something
             // the client did not ask for, so reclaim them here rather than
             // leaving a full upload for scrub.
-            self.abort_upload_quietly(namespace, &session_key).await;
+            self.abort_upload_quietly(namespace, session_id).await;
             return Err(Error::DigestInvalid);
         }
 
@@ -510,13 +500,13 @@ impl Registry {
             &self.blob_store,
             self.metadata_store.as_ref(),
             namespace,
-            &session_key,
+            session_id,
             digest,
             new_total,
         )
         .await?;
 
-        self.finish_completed_upload(namespace, &session_key, digest)
+        self.finish_completed_upload(namespace, session_id, digest)
             .await
     }
 
@@ -526,9 +516,7 @@ impl Registry {
         namespace: &Namespace,
         session_id: &UploadSessionId,
     ) -> Result<(), Error> {
-        self.blob_store
-            .delete_upload(namespace, session_id.as_ref())
-            .await?;
+        self.blob_store.delete_upload(namespace, session_id).await?;
 
         Ok(())
     }
@@ -539,12 +527,14 @@ impl Registry {
         namespace: &Namespace,
         session_id: &UploadSessionId,
     ) -> Result<GetUploadResponse, Error> {
-        let uuid = session_id.as_ref();
-        let summary = self.blob_store.upload_summary(namespace, uuid).await?;
+        let summary = self
+            .blob_store
+            .upload_summary(namespace, session_id)
+            .await?;
 
         Ok(GetUploadResponse {
             namespace: namespace.clone(),
-            session_id: uuid.to_string(),
+            session_id: session_id.clone(),
             size: summary.size,
         })
     }
@@ -623,10 +613,9 @@ mod tests {
             match response {
                 StartUploadResponse::Session {
                     namespace: session_namespace,
-                    session_uuid,
+                    ..
                 } => {
                     assert_eq!(&session_namespace, namespace);
-                    assert!(!session_uuid.is_empty());
                 }
                 StartUploadResponse::ExistingBlob { .. } => panic!("Expected Session response"),
             }
@@ -639,10 +628,9 @@ mod tests {
             match response {
                 StartUploadResponse::Session {
                     namespace: session_namespace,
-                    session_uuid,
+                    ..
                 } => {
                     assert_eq!(&session_namespace, namespace);
-                    assert!(!session_uuid.is_empty());
                 }
                 StartUploadResponse::ExistingBlob { .. } => {
                     panic!("Expected unowned blob to start a new session")
@@ -749,10 +737,9 @@ mod tests {
             match response {
                 StartUploadResponse::Session {
                     namespace: session_namespace,
-                    session_uuid,
+                    ..
                 } => {
                     assert_eq!(&session_namespace, target);
-                    assert!(!session_uuid.is_empty());
                 }
                 StartUploadResponse::ExistingBlob { .. } => {
                     panic!("Expected a fall-back session when the source does not own the blob")
@@ -984,7 +971,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, session_id.as_ref())
+                .create_upload(namespace, &session_id)
                 .await
                 .unwrap();
 
@@ -1020,7 +1007,7 @@ mod tests {
 
             let summary = registry
                 .blob_store
-                .upload_summary(namespace, session_id.as_ref())
+                .upload_summary(namespace, &session_id)
                 .await
                 .unwrap();
             assert_eq!(
@@ -1045,7 +1032,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, session_id.as_ref())
+                .create_upload(namespace, &session_id)
                 .await
                 .unwrap();
 
@@ -1088,7 +1075,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, session_id.as_ref())
+                .create_upload(namespace, &session_id)
                 .await
                 .unwrap();
 
@@ -1152,7 +1139,7 @@ mod tests {
 
                 registry
                     .blob_store
-                    .create_upload(namespace, session_id.as_ref())
+                    .create_upload(namespace, &session_id)
                     .await
                     .unwrap();
 
@@ -1253,7 +1240,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, session_id.as_ref())
+                .create_upload(namespace, &session_id)
                 .await
                 .unwrap();
 
@@ -1314,7 +1301,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, session_id.as_ref())
+                .create_upload(namespace, &session_id)
                 .await
                 .unwrap();
 
@@ -1365,7 +1352,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, session_id.as_ref())
+            .create_upload(namespace, &session_id)
             .await
             .unwrap();
 
@@ -1427,7 +1414,7 @@ mod tests {
         let session_id = UploadSessionId::generate();
         registry
             .blob_store
-            .create_upload(second_namespace, session_id.as_ref())
+            .create_upload(second_namespace, &session_id)
             .await
             .unwrap();
         registry
@@ -1467,7 +1454,7 @@ mod tests {
         assert!(
             registry
                 .blob_store
-                .upload_summary(second_namespace, session_id.as_ref())
+                .upload_summary(second_namespace, &session_id)
                 .await
                 .is_err()
         );
@@ -1499,7 +1486,7 @@ mod tests {
         let session_id = UploadSessionId::generate();
         registry
             .blob_store
-            .create_upload(second_namespace, session_id.as_ref())
+            .create_upload(second_namespace, &session_id)
             .await
             .unwrap();
 
@@ -1528,7 +1515,7 @@ mod tests {
         assert!(
             registry
                 .blob_store
-                .upload_summary(second_namespace, session_id.as_ref())
+                .upload_summary(second_namespace, &session_id)
                 .await
                 .is_err()
         );
@@ -1545,14 +1532,14 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, session_id.as_ref())
+                .create_upload(namespace, &session_id)
                 .await
                 .unwrap();
 
             assert!(
                 registry
                     .blob_store
-                    .upload_summary(namespace, session_id.as_ref())
+                    .upload_summary(namespace, &session_id)
                     .await
                     .is_ok()
             );
@@ -1565,7 +1552,7 @@ mod tests {
             assert!(
                 registry
                     .blob_store
-                    .upload_summary(namespace, session_id.as_ref())
+                    .upload_summary(namespace, &session_id)
                     .await
                     .is_err()
             );
@@ -1583,7 +1570,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, session_id.as_ref())
+                .create_upload(namespace, &session_id)
                 .await
                 .unwrap();
 
@@ -1623,7 +1610,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, session_id.as_ref())
+                .create_upload(namespace, &session_id)
                 .await
                 .unwrap();
 
@@ -1652,7 +1639,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, session_id.as_ref())
+                .create_upload(namespace, &session_id)
                 .await
                 .unwrap();
 
@@ -1686,7 +1673,7 @@ mod tests {
             assert!(
                 registry
                     .blob_store
-                    .upload_summary(namespace, session_id.as_ref())
+                    .upload_summary(namespace, &session_id)
                     .await
                     .is_err(),
                 "a completion whose bytes hash to the wrong digest must abort its session"
@@ -1708,7 +1695,7 @@ mod tests {
             let session_id = UploadSessionId::generate();
             registry
                 .blob_store
-                .create_upload(namespace, session_id.as_ref())
+                .create_upload(namespace, &session_id)
                 .await
                 .unwrap();
 
@@ -1742,7 +1729,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, session_id.as_ref())
+                .create_upload(namespace, &session_id)
                 .await
                 .unwrap();
 
@@ -1752,7 +1739,7 @@ mod tests {
                 .blob_store
                 .write_upload(
                     namespace,
-                    session_id.as_ref(),
+                    &session_id,
                     stream,
                     Some(content.len() as u64),
                     Algorithm::Sha256,
@@ -1765,7 +1752,7 @@ mod tests {
 
             let summary = registry
                 .blob_store
-                .upload_summary(namespace, session_id.as_ref())
+                .upload_summary(namespace, &session_id)
                 .await
                 .unwrap();
 
@@ -1784,13 +1771,13 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, session_id.as_ref())
+                .create_upload(namespace, &session_id)
                 .await
                 .unwrap();
 
             let summary = registry
                 .blob_store
-                .upload_summary(namespace, session_id.as_ref())
+                .upload_summary(namespace, &session_id)
                 .await
                 .unwrap();
             assert_eq!(summary.size, 0);
@@ -1801,7 +1788,7 @@ mod tests {
                 .blob_store
                 .write_upload(
                     namespace,
-                    session_id.as_ref(),
+                    &session_id,
                     stream,
                     Some(content.len() as u64),
                     Algorithm::Sha256,
@@ -1811,7 +1798,7 @@ mod tests {
 
             let summary = registry
                 .blob_store
-                .upload_summary(namespace, session_id.as_ref())
+                .upload_summary(namespace, &session_id)
                 .await
                 .unwrap();
             assert_eq!(summary.size, content.len() as u64);
@@ -1829,7 +1816,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, session_id.as_ref())
+            .create_upload(namespace, &session_id)
             .await
             .unwrap();
 
@@ -1847,7 +1834,7 @@ mod tests {
 
         let summary = registry
             .blob_store
-            .upload_summary(namespace, session_id.as_ref())
+            .upload_summary(namespace, &session_id)
             .await
             .unwrap();
 
@@ -1862,7 +1849,7 @@ mod tests {
                 .path()
                 .join(path_builder::upload_hash_context_dir(
                     namespace,
-                    session_id.as_ref(),
+                    &session_id,
                 ));
         for entry in std::fs::read_dir(&hashstates_dir).unwrap() {
             let checkpoint = entry.unwrap().path();
@@ -1889,7 +1876,7 @@ mod tests {
             "complete_upload should return error when hash state is corrupted"
         );
 
-        let upload_path = path_builder::upload_path(namespace, session_id.as_ref());
+        let upload_path = path_builder::upload_path(namespace, &session_id);
         let upload_file_path = test_case.temp_dir().path().join(&upload_path);
         assert!(
             upload_file_path.exists(),
@@ -1934,7 +1921,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, session_id.as_ref())
+            .create_upload(namespace, &session_id)
             .await
             .unwrap();
 
@@ -1956,7 +1943,7 @@ mod tests {
         assert!(
             registry
                 .blob_store
-                .upload_summary(namespace, session_id.as_ref())
+                .upload_summary(namespace, &session_id)
                 .await
                 .is_err(),
             "the oversized upload session must be aborted, not committed"
@@ -1972,7 +1959,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, session_id.as_ref())
+            .create_upload(namespace, &session_id)
             .await
             .unwrap();
 
@@ -1996,7 +1983,7 @@ mod tests {
         assert!(
             registry
                 .blob_store
-                .upload_summary(namespace, session_id.as_ref())
+                .upload_summary(namespace, &session_id)
                 .await
                 .is_err(),
             "the oversized chunked upload session must be aborted, not committed"
@@ -2012,7 +1999,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, session_id.as_ref())
+            .create_upload(namespace, &session_id)
             .await
             .unwrap();
 
@@ -2040,7 +2027,7 @@ mod tests {
         assert!(
             registry
                 .blob_store
-                .upload_summary(namespace, session_id.as_ref())
+                .upload_summary(namespace, &session_id)
                 .await
                 .is_err(),
             "the oversized chunked PUT session must be aborted, not committed"
@@ -2056,7 +2043,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, session_id.as_ref())
+            .create_upload(namespace, &session_id)
             .await
             .unwrap();
 
@@ -2084,7 +2071,7 @@ mod tests {
 
         let summary = registry
             .blob_store
-            .upload_summary(namespace, session_id.as_ref())
+            .upload_summary(namespace, &session_id)
             .await
             .unwrap();
         assert_eq!(

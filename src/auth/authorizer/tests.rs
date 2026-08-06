@@ -10,7 +10,7 @@ use crate::{
     cache,
     command::bootstrap,
     configuration::Configuration,
-    identity::{ClientCertificate, ManifestPutTarget, OidcClaims},
+    identity::{AuthMethod, ClientCertificate, ManifestPutTarget, OidcClaims},
     oci::{Digest, Namespace, Reference, Tag},
     registry::{
         BlobMount, RegistryConfig, Repository,
@@ -453,7 +453,7 @@ fn log_denial_uses_audit_identity_without_oidc_claims() {
             ]),
         }),
         client_ip: Some("192.0.2.10".to_string()),
-        auth_method: Some("mtls"),
+        auth_method: AuthMethod::Mtls,
     };
 
     tracing::subscriber::with_default(subscriber, || log_denial("test reason", &identity));

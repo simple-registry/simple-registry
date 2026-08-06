@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Deserializer};
 
 use angos_tx_engine::lock::{
@@ -11,7 +13,7 @@ use crate::registry::{blob_store, s3_connection::S3ConnectionConfig};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MetadataFsConfig {
-    pub root_dir: String,
+    pub root_dir: PathBuf,
     pub lock_strategy: LockStrategy,
     pub sync_to_disk: bool,
 }
@@ -19,7 +21,7 @@ pub struct MetadataFsConfig {
 impl Default for MetadataFsConfig {
     fn default() -> Self {
         Self {
-            root_dir: String::new(),
+            root_dir: PathBuf::new(),
             lock_strategy: LockStrategy::Memory,
             sync_to_disk: false,
         }
@@ -33,7 +35,7 @@ impl<'de> Deserialize<'de> for MetadataFsConfig {
     {
         #[derive(Deserialize)]
         struct Raw {
-            root_dir: String,
+            root_dir: PathBuf,
             #[serde(default)]
             redis: Option<LockConfig>,
             #[serde(default)]
@@ -229,12 +231,12 @@ mod tests {
     #[test]
     fn test_from_blob_store_fs_copies_paths_and_sync() {
         let blob = blob_store::BlobStoreConfig::FS(blob_store::FsBackendConfig {
-            root_dir: "/var/lib/registry".to_string(),
+            root_dir: PathBuf::from("/var/lib/registry"),
             sync_to_disk: true,
         });
         match ResolvedStorageConfig::from_blob_store(&blob) {
             ResolvedStorageConfig::FS(c) => {
-                assert_eq!(c.root_dir, "/var/lib/registry");
+                assert_eq!(c.root_dir, PathBuf::from("/var/lib/registry"));
                 assert!(c.sync_to_disk);
             }
             ResolvedStorageConfig::S3(_) => {

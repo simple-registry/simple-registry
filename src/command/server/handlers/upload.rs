@@ -24,27 +24,35 @@ fn blob_location_headers(namespace: &Namespace, digest: &Digest) -> HeaderMap {
         .into_inner()
 }
 
-fn upload_session_headers(namespace: &Namespace, session_uuid: &str) -> HeaderMap {
+fn upload_session_headers(namespace: &Namespace, session_id: &UploadSessionId) -> HeaderMap {
     ResponseHeaders::new()
-        .location(format!("/v2/{namespace}/blobs/uploads/{session_uuid}"))
+        .location(format!("/v2/{namespace}/blobs/uploads/{session_id}"))
         .range("0-0")
-        .with(DOCKER_UPLOAD_UUID, session_uuid)
+        .with(DOCKER_UPLOAD_UUID, session_id.as_ref())
         .into_inner()
 }
 
-fn upload_status_headers(namespace: &Namespace, session_id: &str, range_max: u64) -> HeaderMap {
+fn upload_status_headers(
+    namespace: &Namespace,
+    session_id: &UploadSessionId,
+    range_max: u64,
+) -> HeaderMap {
     ResponseHeaders::new()
         .location(format!("/v2/{namespace}/blobs/uploads/{session_id}"))
         .range(format!("0-{range_max}"))
-        .with(DOCKER_UPLOAD_UUID, session_id)
+        .with(DOCKER_UPLOAD_UUID, session_id.as_ref())
         .into_inner()
 }
 
-fn patch_upload_headers(namespace: &Namespace, session_id: &str, range_max: u64) -> HeaderMap {
+fn patch_upload_headers(
+    namespace: &Namespace,
+    session_id: &UploadSessionId,
+    range_max: u64,
+) -> HeaderMap {
     ResponseHeaders::new()
         .location(format!("/v2/{namespace}/blobs/uploads/{session_id}"))
         .range(format!("0-{range_max}"))
-        .with(DOCKER_UPLOAD_UUID, session_id)
+        .with(DOCKER_UPLOAD_UUID, session_id.as_ref())
         .content_length(0)
         .into_inner()
 }
@@ -97,10 +105,10 @@ fn upload_start_response(response: StartUploadResponse) -> Result<Response<Respo
         ),
         StartUploadResponse::Session {
             namespace,
-            session_uuid,
+            session_id,
         } => build_response(
             StatusCode::ACCEPTED,
-            upload_session_headers(&namespace, &session_uuid),
+            upload_session_headers(&namespace, &session_id),
             ResponseBody::empty(),
         ),
     }
@@ -129,7 +137,7 @@ pub async fn handle_patch_upload(
     uuid: UploadSessionId,
 ) -> Result<Response<ResponseBody>, Error> {
     let headers = RequestHeaders::new(&parts.headers);
-    let start_offset = headers.range(CONTENT_RANGE)?.map(|(start, _)| start);
+    let start_offset = headers.range(CONTENT_RANGE)?.map(|range| range.start);
     // A missing Content-Length is a chunked (Transfer-Encoding: chunked) upload,
     // which docker push sends; the body is then streamed to EOF.
     let content_length = headers.content_length()?;
@@ -155,7 +163,7 @@ pub async fn handle_put_upload(
     digest: &Digest,
 ) -> Result<Response<ResponseBody>, Error> {
     let headers = RequestHeaders::new(&request.parts.headers);
-    let start_offset = headers.range(CONTENT_RANGE)?.map(|(start, _)| start);
+    let start_offset = headers.range(CONTENT_RANGE)?.map(|range| range.start);
     let content_length = headers.content_length()?;
     let body_reader = incoming_into_async_read(request.incoming);
 
@@ -199,7 +207,7 @@ mod tests {
     use hyper::header::{CONTENT_LENGTH, LOCATION, RANGE};
 
     use crate::{
-        oci::{Digest, Namespace},
+        oci::{Digest, Namespace, UploadSessionId},
         registry::{DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID},
     };
 
@@ -207,8 +215,14 @@ mod tests {
         blob_location_headers, patch_upload_headers, upload_session_headers, upload_status_headers,
     };
 
+    const SAMPLE_SESSION: &str = "067e6162-3b6f-4ae2-a171-2470b63dff00";
+
     fn sample_namespace() -> Namespace {
         Namespace::new("test-repo").unwrap()
+    }
+
+    fn sample_session_id() -> UploadSessionId {
+        UploadSessionId::new(SAMPLE_SESSION).unwrap()
     }
 
     fn sample_digest() -> Digest {
@@ -232,37 +246,37 @@ mod tests {
     #[test]
     fn upload_session_headers_start_at_zero_range() {
         let namespace = sample_namespace();
-        let headers = upload_session_headers(&namespace, "session-uuid");
+        let headers = upload_session_headers(&namespace, &sample_session_id());
         assert_eq!(
             headers[LOCATION.as_str()],
-            format!("/v2/{namespace}/blobs/uploads/session-uuid")
+            format!("/v2/{namespace}/blobs/uploads/{SAMPLE_SESSION}")
         );
         assert_eq!(headers[RANGE.as_str()], "0-0");
-        assert_eq!(headers[DOCKER_UPLOAD_UUID], "session-uuid");
+        assert_eq!(headers[DOCKER_UPLOAD_UUID], SAMPLE_SESSION);
     }
 
     #[test]
     fn upload_status_headers_reports_current_range() {
         let namespace = sample_namespace();
-        let headers = upload_status_headers(&namespace, "session-uuid", 41);
+        let headers = upload_status_headers(&namespace, &sample_session_id(), 41);
         assert_eq!(
             headers[LOCATION.as_str()],
-            format!("/v2/{namespace}/blobs/uploads/session-uuid")
+            format!("/v2/{namespace}/blobs/uploads/{SAMPLE_SESSION}")
         );
         assert_eq!(headers[RANGE.as_str()], "0-41");
-        assert_eq!(headers[DOCKER_UPLOAD_UUID], "session-uuid");
+        assert_eq!(headers[DOCKER_UPLOAD_UUID], SAMPLE_SESSION);
     }
 
     #[test]
     fn patch_upload_headers_include_zero_content_length() {
         let namespace = sample_namespace();
-        let headers = patch_upload_headers(&namespace, "session-uuid", 41);
+        let headers = patch_upload_headers(&namespace, &sample_session_id(), 41);
         assert_eq!(
             headers[LOCATION.as_str()],
-            format!("/v2/{namespace}/blobs/uploads/session-uuid")
+            format!("/v2/{namespace}/blobs/uploads/{SAMPLE_SESSION}")
         );
         assert_eq!(headers[RANGE.as_str()], "0-41");
-        assert_eq!(headers[DOCKER_UPLOAD_UUID], "session-uuid");
+        assert_eq!(headers[DOCKER_UPLOAD_UUID], SAMPLE_SESSION);
         assert_eq!(headers[CONTENT_LENGTH.as_str()], "0");
     }
 }

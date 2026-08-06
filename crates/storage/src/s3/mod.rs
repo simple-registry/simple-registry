@@ -59,7 +59,7 @@ use tokio::{
 use tokio_util::{io::StreamReader, task::AbortOnDropHandle};
 
 use crate::{
-    BoxedReader, ByteStream, ChildrenPage, ConditionalStore, Error, Etag, KeyStream,
+    BoxedReader, ByteStream, Children, ChildrenPage, ConditionalStore, Error, Etag, KeyStream,
     MultipartUploadPage, ObjectMeta, ObjectStore, Page, PendingMultipartUpload, PresignedStore,
     channel_stream, object::dir_prefix,
 };
@@ -421,7 +421,7 @@ impl ObjectStore for Backend {
         })
     }
 
-    async fn list_all_children(&self, prefix: &str) -> Result<(Vec<String>, Vec<String>), Error> {
+    async fn list_all_children(&self, prefix: &str) -> Result<Children, Error> {
         range_scan::scan_all_children(&self.client, prefix, self.range_concurrency).await
     }
 

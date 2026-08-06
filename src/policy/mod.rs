@@ -12,4 +12,4 @@ pub use access_policy::AccessMode;
 pub use cel_rule::{CelRule, RuleOutcome, evaluate_rules};
 pub use clock::SystemClock;
 pub use error::{Error, PolicyDecision, PolicyError};
-pub use retention_policy::{EpochSeconds, ManifestImage, RetentionPolicy, RetentionPolicyConfig};
+pub use retention_policy::{ManifestImage, RetentionPolicy, RetentionPolicyConfig};

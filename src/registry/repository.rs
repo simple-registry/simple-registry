@@ -9,10 +9,10 @@ pub use crate::registry_client::RegistryClientConfig;
 use crate::{
     cache::Cache,
     configuration::RegexPattern,
-    oci::{Digest, Error as OciError, MediaType, Namespace, Reference},
+    oci::{Digest, Error as OciError, MediaRange, Namespace, Reference},
     policy::{AccessPolicyConfig, RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::{Error, blob_store::BoxedReader},
-    registry_client::{FetchedManifest, RegistryClient},
+    registry_client::{FetchedManifest, ManifestHead, RegistryClient},
     replication::{ReplicationDownstream, ReplicationDownstreamConfig},
 };
 
@@ -295,21 +295,21 @@ impl Repository {
     /// to be current.
     pub async fn is_upstream_digest_match(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: &Reference,
         local_digest: &Digest,
     ) -> Result<bool, Error> {
-        let (_, upstream_digest, _) = self
+        let head = self
             .head_manifest(accepted_types, namespace, reference)
             .await?;
-        Ok(upstream_digest.is_some_and(|digest| digest == *local_digest))
+        Ok(head.digest.is_some_and(|digest| digest == *local_digest))
     }
 
     #[instrument(skip(self))]
     pub async fn head_blob(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<(Digest, u64), Error> {
@@ -327,7 +327,7 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn get_blob(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<(u64, BoxedReader), Error> {
@@ -345,10 +345,10 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn head_manifest(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: &Reference,
-    ) -> Result<(Option<MediaType>, Option<Digest>, u64), Error> {
+    ) -> Result<ManifestHead, Error> {
         self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
             Box::pin(async move {
                 let location = upstream
@@ -366,7 +366,7 @@ impl Repository {
     #[instrument(skip(self))]
     pub async fn get_manifest(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: &Reference,
     ) -> Result<FetchedManifest, Error> {
@@ -598,7 +598,7 @@ mod tests {
         let cache = cache::Config::Memory.to_backend().unwrap();
         let config = Config {
             upstream: vec![RegistryClientConfig {
-                server_ca_bundle: Some(ca_bundle_path.to_string_lossy().to_string()),
+                server_ca_bundle: Some(ca_bundle_path.clone()),
                 ..test_client_config("https://registry.example.test")
             }],
             ..Default::default()
@@ -646,11 +646,11 @@ mod tests {
         let result = repo.head_manifest(&[], &namespace, &reference).await;
         assert!(result.is_ok());
 
-        let (content_type, digest, size) = result.unwrap();
-        assert_eq!(content_type, None);
-        assert_eq!(size, 1234);
+        let head = result.unwrap();
+        assert_eq!(head.media_type, None);
+        assert_eq!(head.size, 1234);
         assert_eq!(
-            digest,
+            head.digest,
             Some(
                 Digest::try_from(
                     "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
@@ -703,9 +703,12 @@ mod tests {
         let result = repo.head_manifest(&[], &namespace, &reference).await;
         assert!(result.is_ok());
 
-        let (_content_type, digest, size) = result.unwrap();
-        assert_eq!(size, 5678);
-        assert_eq!(digest, Some(Digest::try_from(FALLBACK_DIGEST).unwrap()));
+        let head = result.unwrap();
+        assert_eq!(head.size, 5678);
+        assert_eq!(
+            head.digest,
+            Some(Digest::try_from(FALLBACK_DIGEST).unwrap())
+        );
 
         let manifest_content = b"{\"schemaVersion\":2}";
         let (repo, _first, _second) = fallback_repository(
@@ -719,7 +722,7 @@ mod tests {
         let result = repo.get_manifest(&[], &namespace, &reference).await;
         assert!(result.is_ok());
 
-        let (_content_type, _digest, body) = result.unwrap();
+        let body = result.unwrap().body;
         assert_eq!(body, manifest_content);
 
         let digest = Digest::try_from(TEST_DIGEST).unwrap();
@@ -817,7 +820,7 @@ mod tests {
         let result = repo.get_manifest(&[], &namespace, &reference).await;
         assert!(result.is_ok());
 
-        let (_content_type, _digest, body) = result.unwrap();
+        let body = result.unwrap().body;
         assert_eq!(body, manifest_content);
     }
 

@@ -10,7 +10,7 @@ use chrono::Duration;
 use crate::{
     command::maintenance::{Error, action::Action, check::NamespaceChecker, executor::ActionSink},
     oci::{Digest, Namespace, Tag},
-    policy::{EpochSeconds, ManifestImage, RetentionPolicy},
+    policy::{ManifestImage, RetentionPolicy},
     registry::{
         Error as RegistryError, Repository,
         blob_store::BlobStore,
@@ -45,14 +45,6 @@ fn has_link_kind(
         .namespace
         .get(namespace)
         .is_some_and(|refs| refs.iter().any(predicate))
-}
-
-/// Push time for retention: an unknown timestamp is treated as the current
-/// instant so an age rule keeps content of unknown age (a migrated legacy link
-/// carries none) rather than deleting it as if pushed at the Unix epoch. An
-/// unknown pull time stays 0, since never-pulled is legitimately cold.
-fn pushed_at_epoch(created_at: Option<DateTime<Utc>>) -> i64 {
-    created_at.map_or_else(|| Utc::now().timestamp(), |t| t.timestamp())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -142,13 +134,7 @@ fn decide_orphan_fate(
         return Ok(Fate::Skip);
     };
 
-    let manifest = ManifestImage {
-        tag: None,
-        pushed_at: EpochSeconds::from_seconds(pushed_at_epoch(metadata.created_at)),
-        last_pulled_at: EpochSeconds::from_seconds(
-            metadata.accessed_at.map_or(0, |t| t.timestamp()),
-        ),
-    };
+    let manifest = ManifestImage::new(None, metadata.created_at, metadata.accessed_at, Utc::now());
 
     let global = check_global_policy(global_policy, &manifest, last_pushed, last_pulled)?;
     let repo = check_repo_policy(repository, &manifest, last_pushed, last_pulled)?;
@@ -229,11 +215,7 @@ async fn sweep_grants_for_blob(ctx: &GrantSweep<'_>, blob: &Digest) -> Result<()
         Err(RegistryError::NotFound) => return Ok(()),
         Err(e) => return Err(e.into()),
     };
-    let subject = ManifestImage {
-        tag: None,
-        pushed_at: EpochSeconds::from_seconds(last_modified.timestamp()),
-        last_pulled_at: EpochSeconds::from_seconds(0),
-    };
+    let subject = ManifestImage::new(None, Some(last_modified), None, Utc::now());
     let grant = LinkKind::Blob(blob.clone());
     for (namespace, links) in index.namespace {
         // A namespace that no longer resolves to any configured repository is
@@ -391,13 +373,12 @@ impl RetentionChecker {
     ) -> Result<bool, Error> {
         debug!("'{namespace}': Checking tag '{}' for retention", tag.name);
 
-        let manifest = ManifestImage {
-            tag: Some(tag.name.to_string()),
-            pushed_at: EpochSeconds::from_seconds(pushed_at_epoch(tag.metadata.created_at)),
-            last_pulled_at: EpochSeconds::from_seconds(
-                tag.metadata.accessed_at.map_or(0, |t| t.timestamp()),
-            ),
-        };
+        let manifest = ManifestImage::new(
+            Some(tag.name.to_string()),
+            tag.metadata.created_at,
+            tag.metadata.accessed_at,
+            Utc::now(),
+        );
 
         self.evaluate_retention_policies(namespace, &tag.name, &manifest, last_pushed, last_pulled)
     }
@@ -528,7 +509,7 @@ impl RetentionChecker {
     ) -> Result<bool, Error> {
         if blob_index.is_some_and(|index| {
             has_link_kind(index, namespace, |link| {
-                matches!(link, LinkKind::Manifest(_, _))
+                matches!(link, LinkKind::Manifest { index: _, child: _ })
             })
         }) {
             return Ok(true);
@@ -632,7 +613,10 @@ mod tests {
                         index_digest.clone(),
                     ),
                     LinkOperation::create(
-                        LinkKind::Manifest(index_digest.clone(), child_digest.clone()),
+                        LinkKind::Manifest {
+                            index: index_digest.clone(),
+                            child: child_digest.clone(),
+                        },
                         child_digest.clone(),
                     ),
                 ],
@@ -652,10 +636,10 @@ mod tests {
                 namespace,
                 &[
                     LinkOperation::delete(LinkKind::Tag(Tag::new("latest").unwrap())),
-                    LinkOperation::delete(LinkKind::Manifest(
-                        index_digest.clone(),
-                        child_digest.clone(),
-                    )),
+                    LinkOperation::delete(LinkKind::Manifest {
+                        index: index_digest.clone(),
+                        child: child_digest.clone(),
+                    }),
                     LinkOperation::delete(LinkKind::Digest(index_digest)),
                 ],
             )
@@ -1195,11 +1179,8 @@ mod tests {
     }
 
     fn make_manifest(tag: &Tag) -> ManifestImage {
-        ManifestImage {
-            tag: Some(tag.to_string()),
-            pushed_at: EpochSeconds::from_seconds(0),
-            last_pulled_at: EpochSeconds::from_seconds(0),
-        }
+        // `now` at the epoch reproduces the 0/0 this helper has always used.
+        ManifestImage::new(Some(tag.to_string()), None, None, DateTime::UNIX_EPOCH)
     }
 
     #[test]

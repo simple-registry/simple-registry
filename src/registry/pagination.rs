@@ -1,6 +1,10 @@
 use std::collections::VecDeque;
 use std::future::Future;
 
+use angos_storage::Page;
+
+use crate::oci::Namespace;
+
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 /// Fan-out for the concurrent namespace walk: up to this many directories are
@@ -36,7 +40,7 @@ pub async fn collect_namespaces_with_marker<E, List, ListFut>(
     marker: &str,
     concurrency: usize,
     children_of: List,
-) -> Result<Vec<String>, E>
+) -> Result<Vec<Namespace>, E>
 where
     List: Fn(String) -> ListFut,
     ListFut: Future<Output = Result<Vec<String>, E>>,
@@ -57,7 +61,10 @@ where
             break;
         };
         let scan = scan?;
-        if let Some(namespace) = scan.namespace {
+        // A directory whose name is not a namespace is dropped rather than
+        // surfaced, as `stream_tags` does for tags: scrub reports and reclaims
+        // such directories, so the drop is silent.
+        if let Some(namespace) = scan.namespace.and_then(|name| Namespace::new(&name).ok()) {
             namespaces.push(namespace);
         }
         backlog.extend(scan.children);
@@ -105,29 +112,28 @@ where
 ///
 /// Returns the page and a continuation token (the last entry's `ToString`)
 /// when more items remain after this page; otherwise the token is `None`.
-fn slice_page<T: Clone + ToString>(
-    items: &[T],
-    start_idx: usize,
-    n: u16,
-) -> (Vec<T>, Option<String>) {
+fn slice_page<T: Clone + ToString>(items: &[T], start_idx: usize, n: u16) -> Page<T> {
     let start_idx = start_idx.min(items.len());
     let end_idx = (start_idx + n as usize).min(items.len());
-    let result = items[start_idx..end_idx].to_vec();
+    let items_page = items[start_idx..end_idx].to_vec();
 
     let next_token = if end_idx < items.len() {
-        result.last().map(ToString::to_string)
+        items_page.last().map(ToString::to_string)
     } else {
         None
     };
 
-    (result, next_token)
+    Page {
+        items: items_page,
+        next_token,
+    }
 }
 
 pub fn paginate_sorted<T: Clone + ToString + Ord>(
     items: &[T],
     n: u16,
     last: Option<&str>,
-) -> (Vec<T>, Option<String>) {
+) -> Page<T> {
     let start_idx = last.map_or(0, |last_item| {
         items
             .iter()
@@ -144,7 +150,10 @@ mod tests {
     #[test]
     fn test_paginate_sorted_empty() {
         let items: Vec<String> = vec![];
-        let (result, token) = paginate_sorted(&items, 10, None);
+        let Page {
+            items: result,
+            next_token: token,
+        } = paginate_sorted(&items, 10, None);
         assert!(result.is_empty());
         assert!(token.is_none());
     }
@@ -152,7 +161,10 @@ mod tests {
     #[test]
     fn test_paginate_sorted_all_items() {
         let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let (result, token) = paginate_sorted(&items, 10, None);
+        let Page {
+            items: result,
+            next_token: token,
+        } = paginate_sorted(&items, 10, None);
         assert_eq!(result.len(), 3);
         assert!(token.is_none());
     }
@@ -160,7 +172,10 @@ mod tests {
     #[test]
     fn test_paginate_sorted_first_page() {
         let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let (result, token) = paginate_sorted(&items, 2, None);
+        let Page {
+            items: result,
+            next_token: token,
+        } = paginate_sorted(&items, 2, None);
         assert_eq!(result, vec!["a", "b"]);
         assert_eq!(token, Some("b".to_string()));
     }
@@ -168,7 +183,10 @@ mod tests {
     #[test]
     fn test_paginate_sorted_second_page() {
         let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let (result, token) = paginate_sorted(&items, 2, Some("b"));
+        let Page {
+            items: result,
+            next_token: token,
+        } = paginate_sorted(&items, 2, Some("b"));
         assert_eq!(result, vec!["c"]);
         assert!(token.is_none());
     }
@@ -176,7 +194,10 @@ mod tests {
     #[test]
     fn test_paginate_sorted_with_greater_than_semantics() {
         let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let (result, token) = paginate_sorted(&items, 10, Some("a"));
+        let Page {
+            items: result,
+            next_token: token,
+        } = paginate_sorted(&items, 10, Some("a"));
         assert_eq!(result, vec!["b", "c"]);
         assert!(token.is_none());
     }
@@ -184,7 +205,10 @@ mod tests {
     #[test]
     fn test_slice_page_empty_input() {
         let items: Vec<String> = vec![];
-        let (result, token) = slice_page(&items, 0, 10);
+        let Page {
+            items: result,
+            next_token: token,
+        } = slice_page(&items, 0, 10);
         assert!(result.is_empty());
         assert!(token.is_none());
     }
@@ -192,7 +216,10 @@ mod tests {
     #[test]
     fn test_slice_page_zero_size() {
         let items = vec!["a".to_string(), "b".to_string()];
-        let (result, token) = slice_page(&items, 0, 0);
+        let Page {
+            items: result,
+            next_token: token,
+        } = slice_page(&items, 0, 0);
         assert!(result.is_empty());
         // No items emitted, but more remain after start_idx. The contract here
         // is that an empty page implies no last-element token.
@@ -202,7 +229,10 @@ mod tests {
     #[test]
     fn test_slice_page_start_past_end() {
         let items = vec!["a".to_string(), "b".to_string()];
-        let (result, token) = slice_page(&items, 5, 10);
+        let Page {
+            items: result,
+            next_token: token,
+        } = slice_page(&items, 5, 10);
         assert!(result.is_empty());
         assert!(token.is_none());
     }
@@ -210,7 +240,10 @@ mod tests {
     #[test]
     fn test_slice_page_partial_page() {
         let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let (result, token) = slice_page(&items, 0, 2);
+        let Page {
+            items: result,
+            next_token: token,
+        } = slice_page(&items, 0, 2);
         assert_eq!(result, vec!["a", "b"]);
         assert_eq!(token, Some("b".to_string()));
     }
@@ -218,7 +251,10 @@ mod tests {
     #[test]
     fn test_slice_page_exact_remaining() {
         let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let (result, token) = slice_page(&items, 1, 2);
+        let Page {
+            items: result,
+            next_token: token,
+        } = slice_page(&items, 1, 2);
         assert_eq!(result, vec!["b", "c"]);
         assert!(token.is_none());
     }

@@ -1,7 +1,8 @@
 //! Janitors that reap engine bookkeeping prefixes:
 //!
 //! - [`BodyJanitor`] sweeps `.tx-bodies/<tx-id>/` prefixes whose intent never
-//!   landed in `.tx-log/`, bounded by an age threshold.
+//!   landed in `.tx-log/`, and `.tx-log/` records that no longer decode,
+//!   both bounded by an age threshold.
 //! - [`LockJanitor`] sweeps `.tx-locks/` for lock objects whose declared TTL has
 //!   elapsed by more than `orphan_age`: the cold-key counterpart to the lock
 //!   primitive's acquire-path stale-lock recovery.
@@ -18,7 +19,7 @@ use uuid::Uuid;
 
 use angos_storage::{ConditionalStore, Error as StorageError, ObjectStore};
 
-use crate::intent::{INTENT_BODIES_PREFIX, INTENT_LOG_PREFIX};
+use crate::intent::{INTENT_BODIES_PREFIX, INTENT_LOG_PREFIX, IntentRecord};
 use crate::lock::primitive::MAX_LOCK_TTL_SECS;
 use crate::lock::storage::{LOCK_OBJECTS_PREFIX, LockBody};
 use crate::periodic::run_periodic;
@@ -31,12 +32,20 @@ pub const DEFAULT_ORPHAN_AGE_SECS: u64 = 3600; // 1 hour
 /// is bound by backend latency, not item count.
 const SWEEP_CONCURRENCY: usize = 8;
 
+/// Page size when listing `.tx-bodies/` children and `.tx-log/` records.
+const SWEEP_LIST_PAGE_SIZE: u16 = 100;
+
 /// Orphan-body janitor.
 ///
 /// On each tick, lists `.tx-bodies/` children and for each `tx-id` prefix
 /// that has no corresponding `.tx-log/<tx-id>.json`, heads the first staged
 /// body object inside the prefix and deletes the entire prefix when that
 /// object's `last_modified` is older than the configured age.
+///
+/// It then sweeps `.tx-log/` for records that no longer decode. Recovery skips
+/// a record it cannot read and nothing else parses one, so an undecodable
+/// record would otherwise sit there forever while scrub reads it as a
+/// transaction still in flight and holds off every repair.
 ///
 /// Constructed via [`BodyJanitor::builder`].
 pub struct BodyJanitor {
@@ -122,15 +131,21 @@ impl BodyJanitor {
         .await;
     }
 
-    /// Run a single sweep of `.tx-bodies/`.
+    /// Run a single sweep of `.tx-bodies/` and `.tx-log/`.
     pub async fn sweep(&self) {
+        self.sweep_bodies().await;
+        self.sweep_intents().await;
+    }
+
+    /// Reclaim staged bodies whose intent never landed.
+    async fn sweep_bodies(&self) {
         let mut token: Option<String> = None;
         loop {
             match self
                 .store
                 .list_children(
                     &format!("{INTENT_BODIES_PREFIX}/"),
-                    100,
+                    SWEEP_LIST_PAGE_SIZE,
                     token.clone(),
                     None,
                 )
@@ -152,6 +167,81 @@ impl BodyJanitor {
                     break;
                 }
             }
+        }
+    }
+
+    /// Reap `.tx-log/` records that no longer decode into an [`IntentRecord`].
+    /// A record that still decodes is recovery's to replay and reap, so it is
+    /// left alone here.
+    async fn sweep_intents(&self) {
+        let mut token: Option<String> = None;
+        loop {
+            match self
+                .store
+                .list(INTENT_LOG_PREFIX, SWEEP_LIST_PAGE_SIZE, token.clone())
+                .await
+            {
+                Ok(page) => {
+                    stream::iter(&page.items)
+                        .for_each_concurrent(SWEEP_CONCURRENCY, |name| self.process_intent(name))
+                        .await;
+                    if page.next_token.is_none() {
+                        break;
+                    }
+                    token = page.next_token;
+                }
+                Err(e) => {
+                    warn!(error = %e, "BodyJanitor: failed to list .tx-log/");
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Examine one `.tx-log/` record, deleting it only when it fails to decode
+    /// and its last write is older than the orphan age. The age gate is what
+    /// keeps a partially written record safe: an in-flight write is young, and
+    /// the writer finishes it long before the threshold.
+    ///
+    /// The staged bodies are left to [`Self::sweep_bodies`]: with the intent
+    /// gone they read as orphans on the next tick.
+    async fn process_intent(&self, name: &str) {
+        let key = format!("{INTENT_LOG_PREFIX}/{name}");
+        let raw = match self.store.get(&key).await {
+            Ok(raw) => raw,
+            // Reaped between the listing and the read.
+            Err(StorageError::NotFound) => return,
+            Err(e) => {
+                warn!(key, error = %e, "BodyJanitor: failed to read intent");
+                return;
+            }
+        };
+        if serde_json::from_slice::<IntentRecord>(&raw).is_ok() {
+            return;
+        }
+        if !self.older_than_orphan_age(&key).await {
+            return;
+        }
+
+        info!(key, "BodyJanitor: deleting undecodable intent record");
+        if let Err(e) = self.store.delete(&key).await {
+            warn!(key, error = %e, "BodyJanitor: failed to delete undecodable intent");
+        }
+    }
+
+    /// Whether `key` was last written longer ago than the orphan age. An object
+    /// whose age cannot be established counts as young, so live data is never
+    /// deleted on a failed probe.
+    async fn older_than_orphan_age(&self, key: &str) -> bool {
+        match self.store.head(key).await {
+            Ok(meta) => meta.last_modified.is_some_and(|written| {
+                Utc::now()
+                    .signed_duration_since(written)
+                    .to_std()
+                    .unwrap_or(Duration::ZERO)
+                    >= self.orphan_age
+            }),
+            Err(_) => false,
         }
     }
 
@@ -205,21 +295,7 @@ impl BodyJanitor {
         // `list` returns keys relative to the prefix; reconstruct the full key
         // so `head` resolves correctly on every backend.
         let first_child = format!("{prefix_key}{suffix}");
-        let is_old_enough = match self.store.head(&first_child).await {
-            Ok(meta) => meta.last_modified.is_some_and(|t| {
-                Utc::now()
-                    .signed_duration_since(t)
-                    .to_std()
-                    .unwrap_or(Duration::ZERO)
-                    >= self.orphan_age
-            }),
-            Err(_) => {
-                // Can't determine age; skip to avoid deleting live data.
-                false
-            }
-        };
-
-        if !is_old_enough {
+        if !self.older_than_orphan_age(&first_child).await {
             return;
         }
 
@@ -469,6 +545,7 @@ mod tests {
     use crate::janitor::{BodyJanitor, LockJanitor};
     use crate::lock::primitive::MAX_LOCK_TTL_SECS;
     use crate::lock::storage::LockBody;
+    use crate::test_util::{put_intent, stale_intent};
 
     fn body_janitor(store: Arc<dyn ObjectStore>) -> BodyJanitor {
         BodyJanitor::builder(store)
@@ -511,13 +588,7 @@ mod tests {
         let store = Arc::new(MemoryObjectStore::new());
         let tx_id = Uuid::new_v4();
         write_body(&store, tx_id, 0).await;
-        store
-            .put(
-                &format!("{INTENT_LOG_PREFIX}/{tx_id}.json"),
-                Bytes::from_static(b"{}"),
-            )
-            .await
-            .expect("put intent");
+        put_intent(store.as_ref(), &stale_intent(tx_id, vec![], vec![])).await;
 
         body_janitor(store.clone()).sweep().await;
 
@@ -525,6 +596,95 @@ mod tests {
             .head(&format!("{INTENT_BODIES_PREFIX}/{tx_id}/0"))
             .await
             .expect("a body with a live intent must survive");
+    }
+
+    /// Recovery skips a record it cannot decode and nothing else parses one, so
+    /// without this sweep it sits in `.tx-log/` forever while scrub reads it as
+    /// a transaction still in flight and holds off every repair.
+    #[tokio::test]
+    async fn undecodable_intent_is_reaped() {
+        let store = Arc::new(MemoryObjectStore::new());
+        let key = format!("{INTENT_LOG_PREFIX}/{}.json", Uuid::new_v4());
+        store
+            .put(&key, Bytes::from_static(b"{\"truncated\": "))
+            .await
+            .expect("put intent");
+
+        body_janitor(store.clone()).sweep().await;
+
+        assert!(
+            matches!(store.head(&key).await, Err(StorageError::NotFound)),
+            "an undecodable intent record must be reaped"
+        );
+    }
+
+    /// A record that still decodes is recovery's to replay and reap; the
+    /// janitor must not race it.
+    #[tokio::test]
+    async fn decodable_intent_is_left_to_recovery() {
+        let store = Arc::new(MemoryObjectStore::new());
+        let intent = stale_intent(Uuid::new_v4(), vec![], vec![]);
+        put_intent(store.as_ref(), &intent).await;
+
+        body_janitor(store.clone()).sweep().await;
+
+        store
+            .head(&intent.log_key())
+            .await
+            .expect("a decodable intent belongs to recovery, not the janitor");
+    }
+
+    /// The age gate is what makes reaping safe: a record still being written is
+    /// young, and deleting it would destroy a transaction that is about to
+    /// commit.
+    #[tokio::test]
+    async fn a_freshly_written_undecodable_intent_is_kept() {
+        let store = Arc::new(MemoryObjectStore::new());
+        let key = format!("{INTENT_LOG_PREFIX}/{}.json", Uuid::new_v4());
+        store
+            .put(&key, Bytes::from_static(b"{\"partial\""))
+            .await
+            .expect("put intent");
+
+        BodyJanitor::builder(store.clone() as Arc<dyn ObjectStore>)
+            .orphan_age(Duration::from_hours(1))
+            .build()
+            .sweep()
+            .await;
+
+        store
+            .head(&key)
+            .await
+            .expect("a partially written record must survive its write");
+    }
+
+    /// Reaping the record leaves its staged bodies parentless, which the body
+    /// sweep already reclaims on the next tick.
+    #[tokio::test]
+    async fn bodies_follow_their_reaped_intent() {
+        let store = Arc::new(MemoryObjectStore::new());
+        let tx_id = Uuid::new_v4();
+        write_body(&store, tx_id, 0).await;
+        store
+            .put(
+                &format!("{INTENT_LOG_PREFIX}/{tx_id}.json"),
+                Bytes::from_static(b"not json"),
+            )
+            .await
+            .expect("put intent");
+
+        body_janitor(store.clone()).sweep().await;
+        body_janitor(store.clone()).sweep().await;
+
+        assert!(
+            matches!(
+                store
+                    .head(&format!("{INTENT_BODIES_PREFIX}/{tx_id}/0"))
+                    .await,
+                Err(StorageError::NotFound)
+            ),
+            "the staged bodies must be reclaimed once their intent is gone"
+        );
     }
 
     #[tokio::test]

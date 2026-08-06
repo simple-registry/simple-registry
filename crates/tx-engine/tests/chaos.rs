@@ -502,8 +502,8 @@ async fn progress_vector_reflects_apply_state_locked() {
 
         let _ = executor.execute(tx).await;
         let intent = read_only_intent(&inner).await;
-        assert_eq!(intent.progress.len(), 3);
-        for (idx, p) in intent.progress.iter().enumerate() {
+        assert_eq!(intent.mutations.len(), 3);
+        for (idx, p) in intent.mutations.iter().map(|m| m.progress).enumerate() {
             assert!(
                 matches!(p, MutationProgress::Applied),
                 "progress[{idx}] expected Applied, got {p:?}"
@@ -541,10 +541,19 @@ async fn progress_vector_reflects_apply_state_locked() {
 
         let _ = executor.execute(tx).await;
         let intent = read_only_intent(&inner).await;
-        assert_eq!(intent.progress.len(), 3);
-        assert!(matches!(intent.progress[0], MutationProgress::Applied));
-        assert!(matches!(intent.progress[1], MutationProgress::Pending));
-        assert!(matches!(intent.progress[2], MutationProgress::Pending));
+        assert_eq!(intent.mutations.len(), 3);
+        assert!(matches!(
+            intent.mutations[0].progress,
+            MutationProgress::Applied
+        ));
+        assert!(matches!(
+            intent.mutations[1].progress,
+            MutationProgress::Pending
+        ));
+        assert!(matches!(
+            intent.mutations[2].progress,
+            MutationProgress::Pending
+        ));
     }
 }
 
@@ -581,8 +590,8 @@ async fn progress_vector_reflects_apply_state_cas() {
 
         let _ = executor.execute(tx).await;
         let intent = read_only_intent(&inner).await;
-        assert_eq!(intent.progress.len(), 3);
-        for (idx, p) in intent.progress.iter().enumerate() {
+        assert_eq!(intent.mutations.len(), 3);
+        for (idx, p) in intent.mutations.iter().map(|m| m.progress).enumerate() {
             assert!(
                 matches!(p, MutationProgress::Applied),
                 "progress[{idx}] expected Applied, got {p:?}"
@@ -618,9 +627,18 @@ async fn progress_vector_reflects_apply_state_cas() {
 
         let _ = executor.execute(tx).await;
         let intent = read_only_intent(&inner).await;
-        assert_eq!(intent.progress.len(), 3);
-        assert!(matches!(intent.progress[0], MutationProgress::Applied));
-        assert!(matches!(intent.progress[1], MutationProgress::Pending));
-        assert!(matches!(intent.progress[2], MutationProgress::Pending));
+        assert_eq!(intent.mutations.len(), 3);
+        assert!(matches!(
+            intent.mutations[0].progress,
+            MutationProgress::Applied
+        ));
+        assert!(matches!(
+            intent.mutations[1].progress,
+            MutationProgress::Pending
+        ));
+        assert!(matches!(
+            intent.mutations[2].progress,
+            MutationProgress::Pending
+        ));
     }
 }

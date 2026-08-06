@@ -332,7 +332,11 @@ async fn test_build_registry_components_integration() {
 
     let registry = Registry::new(blob_backend, metadata_store, repositories, registry_config);
 
-    let (namespaces, _) = registry.list_catalog_entries(None, None).await.unwrap();
+    let namespaces = registry
+        .list_catalog_entries(None, None)
+        .await
+        .unwrap()
+        .items;
     assert!(
         namespaces.is_empty(),
         "a freshly built registry must serve an empty catalog"

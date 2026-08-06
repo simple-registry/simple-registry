@@ -25,6 +25,7 @@
 use std::sync::Arc;
 
 use cel_interpreter::Context;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 use tracing::{debug, warn};
 
@@ -47,29 +48,31 @@ impl RetentionPolicyConfig {
     }
 }
 
-/// Seconds since the Unix epoch, guaranteed non-negative.
+/// Seconds since the Unix epoch, or [`Self::NEVER`] for a timestamp the link
+/// does not carry. Negative inputs (pre-epoch dates) are saturated to zero.
 ///
-/// Constructed from `i64` values returned by `chrono::DateTime::timestamp()`.
-/// Negative inputs (pre-epoch dates) are saturated to zero.
-///
-/// Serializes as `i64` so that CEL expressions using integer arithmetic
-/// (e.g. `image.pushed_at > now() - days(30)`) continue to work without
+/// Serializes as `i64`, `NEVER` as `0`, so CEL expressions using integer
+/// arithmetic (e.g. `image.pushed_at > now() - days(30)`) keep working without
 /// cross-type coercion.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct EpochSeconds(u64);
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EpochSeconds(Option<u64>);
 
 impl EpochSeconds {
+    /// No timestamp: an image that was never pulled.
+    pub const NEVER: Self = Self(None);
+
     /// Constructs an `EpochSeconds` from a signed timestamp.
     ///
     /// Negative values (pre-epoch) are saturated to zero.
     pub fn from_seconds(s: i64) -> Self {
-        Self(u64::try_from(s).unwrap_or(0))
+        Self(Some(u64::try_from(s).unwrap_or(0)))
     }
 }
 
 impl Serialize for EpochSeconds {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_i64(i64::try_from(self.0).unwrap_or(i64::MAX))
+        let seconds = self.0.unwrap_or(0);
+        serializer.serialize_i64(i64::try_from(seconds).unwrap_or(i64::MAX))
     }
 }
 
@@ -79,6 +82,28 @@ pub struct ManifestImage {
     pub tag: Option<String>,
     pub pushed_at: EpochSeconds,
     pub last_pulled_at: EpochSeconds,
+}
+
+impl ManifestImage {
+    /// Builds the CEL-facing image from the optional timestamps a link carries.
+    /// An unknown push time becomes `now`, so an age rule keeps content of
+    /// unknown age instead of deleting it as if pushed at the epoch; an unknown
+    /// pull time stays [`EpochSeconds::NEVER`] and reaches CEL as `0`.
+    #[must_use]
+    pub fn new(
+        tag: Option<String>,
+        pushed_at: Option<DateTime<Utc>>,
+        last_pulled_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            tag,
+            pushed_at: EpochSeconds::from_seconds(pushed_at.unwrap_or(now).timestamp()),
+            last_pulled_at: last_pulled_at.map_or(EpochSeconds::NEVER, |t| {
+                EpochSeconds::from_seconds(t.timestamp())
+            }),
+        }
+    }
 }
 
 /// Retention policy engine.
@@ -544,5 +569,30 @@ mod tests {
             ],
         };
         assert!(!push_only.uses_pull_time());
+    }
+
+    /// The two absences resolve differently and both are operator-visible:
+    /// `doc/reference/cel-expressions.md` documents `last_pulled_at` as "0 if
+    /// never pulled", while an unknown push time must not read as 1970.
+    #[test]
+    fn absent_timestamps_resolve_to_now_and_zero() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+
+        let never_pulled = ManifestImage::new(None, None, None, now);
+        assert_eq!(
+            never_pulled.last_pulled_at,
+            EpochSeconds::NEVER,
+            "never pulled must be an absence, not a timestamp at the epoch"
+        );
+        let unknown = serde_json::to_value(never_pulled).unwrap();
+        assert_eq!(unknown["pushed_at"], now.timestamp());
+        assert_eq!(unknown["last_pulled_at"], 0);
+
+        let pushed = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
+        let pulled = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
+        let known = serde_json::to_value(ManifestImage::new(None, Some(pushed), Some(pulled), now))
+            .unwrap();
+        assert_eq!(known["pushed_at"], pushed.timestamp());
+        assert_eq!(known["last_pulled_at"], pulled.timestamp());
     }
 }

@@ -140,7 +140,7 @@ fn intent_lock_set(intent: &IntentRecord) -> Vec<String> {
                 intent
                     .mutations
                     .iter()
-                    .flat_map(|m| m.all_keys().map(ToOwned::to_owned)),
+                    .flat_map(|planned| planned.record.all_keys().map(ToOwned::to_owned)),
             )
             .chain(intent.coarse_lock_keys.iter().cloned()),
     )
@@ -341,11 +341,11 @@ impl RecoveryLoop {
     /// mutation is left `Pending` and the error is surfaced so the caller stops
     /// replay and leaves the intent for the next sweep.
     async fn apply_mutation(&self, intent: &mut IntentRecord, idx: usize) -> Result<(), Error> {
-        if matches!(intent.progress.get(idx), Some(MutationProgress::Applied)) {
+        if matches!(intent.progress(idx), Some(MutationProgress::Applied)) {
             return Ok(());
         }
 
-        let mutation = intent.mutations[idx].clone();
+        let mutation = intent.mutations[idx].record.clone();
         if let Some(cs) = &self.conditional_store {
             apply_cas(cs.as_ref(), &mutation, ApplyMode::Reconcile).await?;
         } else {

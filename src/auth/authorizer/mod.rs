@@ -85,7 +85,7 @@ impl<'a> From<&'a ClientIdentity> for AuditIdentity<'a> {
         Self {
             // The single classification the authenticator computed, so the
             // audit log and the request span never disagree.
-            auth_type: identity.auth_method.unwrap_or("anonymous"),
+            auth_type: identity.auth_method.as_str(),
             id: identity.id.as_deref(),
             username: identity.username.as_deref(),
             client_ip: identity.client_ip.as_deref(),

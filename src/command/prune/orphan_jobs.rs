@@ -15,7 +15,7 @@ use crate::{
     jobs::store::{Error as JobStoreError, JobStore},
     jobs::{JobState, Queue},
     registry::{Repository, repository_resolver::RepositoryResolver},
-    replication::ReplicationPushPayload,
+    replication::ReplicationJob,
 };
 
 /// Keyset page size for the pending and failed scans; pages are looped to
@@ -58,19 +58,20 @@ impl OrphanQueue {
             // A downstream whose mode changed still resolves, so it is not an
             // orphan.
             OrphanQueue::Replication => {
-                let payload: ReplicationPushPayload = serde_json::from_value(payload)?;
+                let job: ReplicationJob = serde_json::from_value(payload)?;
+                let target = job.target();
                 let configured = resolver
-                    .resolve(&payload.namespace)
+                    .resolve(&target.namespace)
                     .is_some_and(|repository| {
                         repository
                             .replication
                             .iter()
-                            .any(|d| d.name == payload.downstream)
+                            .any(|d| d.name == target.downstream)
                     });
                 Ok((!configured).then(|| {
                     format!(
                         "downstream '{}' is not configured for '{}'",
-                        payload.downstream, payload.namespace
+                        target.downstream, target.namespace
                     )
                 }))
             }
@@ -166,7 +167,7 @@ impl OrphanJobChecker {
         let mut orphans: u64 = 0;
         let mut after: Option<String> = None;
         loop {
-            let (keys, next) = match state {
+            let page = match state {
                 JobState::Pending => {
                     self.job_store
                         .list_pending_page(queue, PAGE_SIZE, after.as_deref())
@@ -182,7 +183,7 @@ impl OrphanJobChecker {
 
             // Payload reads fan out; classification and the sink stay serial
             // in key order.
-            let payloads: Vec<(String, Option<Value>)> = stream::iter(keys)
+            let payloads: Vec<(String, Option<Value>)> = stream::iter(page.items)
                 .map(|storage_key| async move {
                     let payload = self.read_payload(state, &storage_key).await?;
                     Ok::<_, Error>((storage_key, payload))
@@ -219,7 +220,7 @@ impl OrphanJobChecker {
                 .await?;
             }
 
-            let Some(cursor) = next else {
+            let Some(cursor) = page.next_token else {
                 break;
             };
             after = Some(cursor);
@@ -288,8 +289,8 @@ mod tests {
         },
         registry_client::RegistryClient,
         replication::{
-            REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream, ReplicationMode,
-            ReplicationPushPayload, build_envelope,
+            REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream, ReplicationJob, ReplicationMode,
+            ReplicationTarget, build_envelope,
         },
     };
 
@@ -366,15 +367,15 @@ mod tests {
         OrphanJobChecker::new(job_store, resolver(), queue)
     }
 
-    fn push_payload(downstream: &str, namespace: &str) -> ReplicationPushPayload {
-        ReplicationPushPayload {
-            downstream: downstream.to_string(),
-            namespace: Namespace::new(namespace).unwrap(),
-            tag: Some(Tag::new("v1").unwrap()),
-            digest: None,
-            kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
-            source_ts: None,
-            subject: None,
+    fn push_payload(downstream: &str, namespace: &str) -> ReplicationJob {
+        ReplicationJob::Push {
+            target: ReplicationTarget {
+                downstream: downstream.to_string(),
+                namespace: Namespace::new(namespace).unwrap(),
+                tag: Some(Tag::new("v1").unwrap()),
+                digest: None,
+                source_ts: None,
+            },
         }
     }
 
@@ -404,7 +405,7 @@ mod tests {
     /// Enqueues a single-attempt job and fails it once so it dead-letters under
     /// its original storage key.
     async fn dead_letter(job_store: &JobStore, queue: Queue, mut envelope: JobEnvelope) {
-        envelope.max_attempts = 1;
+        envelope.max_attempts = Some(1);
         job_store.enqueue(envelope).await.unwrap();
         let claimed = job_store
             .claim_one(queue)
@@ -414,6 +415,25 @@ mod tests {
             .expect("the enqueued job must be claimable");
         let outcome = job_store.fail(claimed, "simulated failure").await.unwrap();
         assert!(matches!(outcome, FailOutcome::MovedToDeadLetter));
+    }
+
+    /// The conformance gate seeds this payload by hand; decoding it here keeps
+    /// the fixture honest about what the queue actually stores.
+    #[test]
+    fn the_gate_orphan_fixture_decodes_and_classifies() {
+        let payload = json!({
+            "downstream": "gate-ghost-downstream",
+            "namespace": "conformance/gate",
+            "tag": "gate",
+            "kind": "replication.push_manifest",
+        });
+        let reason = OrphanQueue::Replication
+            .classify(&resolver(), payload)
+            .expect("the seeded payload must decode");
+        assert!(
+            reason.is_some_and(|r| r.contains("gate-ghost-downstream")),
+            "an unconfigured downstream must classify as an orphan"
+        );
     }
 
     #[tokio::test]
@@ -617,9 +637,10 @@ mod tests {
             .read_pending(Queue::Replication, &keys[0])
             .await
             .unwrap();
-        let payload: ReplicationPushPayload = serde_json::from_value(survivor.payload).unwrap();
+        let payload: ReplicationJob = serde_json::from_value(survivor.payload).unwrap();
         assert_eq!(
-            payload.downstream, DOWNSTREAM,
+            payload.target().downstream,
+            DOWNSTREAM,
             "the configured downstream's job must survive"
         );
     }

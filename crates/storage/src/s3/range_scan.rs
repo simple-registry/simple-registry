@@ -31,7 +31,7 @@ use futures_util::stream::{self, StreamExt, TryStreamExt};
 
 use angos_s3_client::Backend as S3Backend;
 
-use crate::{KeyStream, error::Error, pagination::paginated};
+use crate::{Children, KeyStream, error::Error, pagination::paginated};
 
 /// One S3 list page per range scan.
 const RANGE_PAGE_SIZE: u16 = 1000;
@@ -46,15 +46,18 @@ pub async fn scan_all_children(
     client: &S3Backend,
     prefix: &str,
     concurrency: usize,
-) -> Result<(Vec<String>, Vec<String>), Error> {
+) -> Result<Children, Error> {
     // Probe: a single page settles any listing that fits in one.
     let (sub_prefixes, objects, next_token) = children_page(client, prefix, None, None).await?;
     if next_token.is_none() {
-        return Ok((sub_prefixes, objects));
+        return Ok(Children {
+            sub_prefixes,
+            objects,
+        });
     }
 
     let ranges = partition_ranges(None, split_bounds(""), None);
-    let parts: Vec<(Vec<String>, Vec<String>)> = stream::iter(ranges)
+    let parts: Vec<Children> = stream::iter(ranges)
         .map(|(lo, hi)| async move {
             scan_children_range_split(client, prefix, lo.as_deref(), hi.as_deref(), concurrency)
                 .await
@@ -92,7 +95,7 @@ async fn scan_children_range(
     prefix: &str,
     lo: Option<&str>,
     hi: Option<&str>,
-) -> Result<(Vec<String>, Vec<String>), Error> {
+) -> Result<Children, Error> {
     let (mut sub_prefixes, mut objects, mut next) = children_page(client, prefix, None, lo).await?;
     let mut stop = retain_range(&mut sub_prefixes, &mut objects, lo, hi);
     while let Some(token) = next {
@@ -106,7 +109,10 @@ async fn scan_children_range(
         objects.append(&mut page_objects);
         next = page_next;
     }
-    Ok((sub_prefixes, objects))
+    Ok(Children {
+        sub_prefixes,
+        objects,
+    })
 }
 
 /// Like [`scan_children_range`], but a range whose first page truncates is
@@ -119,11 +125,14 @@ async fn scan_children_range_split(
     lo: Option<&str>,
     hi: Option<&str>,
     concurrency: usize,
-) -> Result<(Vec<String>, Vec<String>), Error> {
+) -> Result<Children, Error> {
     let (mut sub_prefixes, mut objects, next) = children_page(client, prefix, None, lo).await?;
     let stop = retain_range(&mut sub_prefixes, &mut objects, lo, hi);
     if next.is_none() || stop {
-        return Ok((sub_prefixes, objects));
+        return Ok(Children {
+            sub_prefixes,
+            objects,
+        });
     }
     // The range below the first boundary has no name to anchor sub-splits on;
     // only names below '0' land there, so finish it serially.
@@ -136,7 +145,7 @@ async fn scan_children_range_split(
         split_bounds(lo),
         hi.map(str::to_string),
     );
-    let parts: Vec<(Vec<String>, Vec<String>)> = stream::iter(ranges)
+    let parts: Vec<Children> = stream::iter(ranges)
         .map(|(sub_lo, sub_hi)| async move {
             scan_children_range(client, prefix, sub_lo.as_deref(), sub_hi.as_deref()).await
         })
@@ -146,15 +155,14 @@ async fn scan_children_range_split(
     Ok(merge_parts(parts))
 }
 
-/// Concatenate per-range `(sub_prefixes, objects)` results into one pair.
-fn merge_parts(parts: Vec<(Vec<String>, Vec<String>)>) -> (Vec<String>, Vec<String>) {
-    let mut sub_prefixes = Vec::new();
-    let mut objects = Vec::new();
-    for (range_prefixes, range_objects) in parts {
-        sub_prefixes.extend(range_prefixes);
-        objects.extend(range_objects);
+/// Concatenate the per-range results into one set.
+fn merge_parts(parts: Vec<Children>) -> Children {
+    let mut merged = Children::default();
+    for part in parts {
+        merged.sub_prefixes.extend(part.sub_prefixes);
+        merged.objects.extend(part.objects);
     }
-    (sub_prefixes, objects)
+    merged
 }
 
 /// Keep the children in the name range `[lo, hi)`, plus an object named exactly

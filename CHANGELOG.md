@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A transaction intent record that no longer decodes is reclaimed by the engine janitor once it ages out, instead of sitting in the log forever and holding off every scrub repair as though a transaction were still in flight.
+- A manifest declaring both image content (`config`/`layers`) and index content (`manifests`) is refused on push, since the image spec makes the two mutually exclusive; one already stored stays readable as the index it lists.
+- A malformed `?artifactType=` on the referrers endpoint is rejected rather than silently dropped, which used to turn a bad filter into an unfiltered listing of every referrer.
+- A transaction read that recorded a key as absent now conflicts when a zero-length object appears at that key, instead of mistaking it for the absence it recorded and writing over another writer's fresh entry.
 - A multipart part upload whose response carries no `ETag` now fails at that part, naming it, instead of defaulting to an empty string that the S3 backend rejects later at `CompleteMultipartUpload` with no clue which part was at fault.
 - `angos migrate` now rewrites each link inside a transaction that reads it, so a tag push landing mid-run is kept instead of being silently reverted to its pre-push target.
 - A blob PUT naming a session the registry does not hold is refused at the upload endpoint rather than relying on the storage layer to reject the write.
@@ -36,6 +40,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A replication push whose blob or child-manifest transfer fails now lets its siblings finish instead of dropping them mid-transfer, which left their upload sessions open on the downstream until its own garbage collection.
 - A replication delete job now carries the referrer's subject, so a retry that finds the manifest already gone downstream can still drop its stale descriptor from the OCI 1.0 referrers fallback index.
 - Pushing a manifest whose `schemaVersion` is not 2 is now refused instead of stored with none of its blobs linked, leaving them to be reclaimed as orphans.
+- A malformed `?from=` on a blob-upload POST is now refused instead of ignored when no `?mount=` accompanies it, matching the `?mount=` and `?digest=` values on the same request.
+- An upload directory whose name is not a session id is now quarantined by scrub like any other unrecognized key, instead of being reported as a session that only prune could reach.
+- A directory whose name is not a valid namespace no longer appears in the `_catalog` listing or the admin namespace listing, matching how a malformed tag directory is already dropped; scrub still reports and reclaims it.
+- An `Accept` member that is not a media range is dropped instead of being relayed verbatim to an upstream on a pull-through request; the wildcard forms clients actually send (`*/*`, `type/*`) are unaffected.
+- An upload session whose stored state no longer decodes is now reaped by prune instead of kept forever, since re-reading it returns the same bytes; a session whose read failed transiently is still kept.
 
 ## 1.4.4
 

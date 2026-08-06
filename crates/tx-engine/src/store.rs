@@ -50,24 +50,6 @@ use crate::{
     transaction::{Mutation, Transaction},
 };
 
-/// A point-in-time read used to build a read-for-update transaction.
-///
-/// `body` is the raw bytes observed for `key`; the engine derives a
-/// content-fingerprint from them when a *present* snapshot is folded into a
-/// transaction's read set by [`Store::update`]. An absent key yields
-/// `present: false` with an empty `body` and is *not* added to the read set
-/// (the executor treats a read of an absent key as an unconditional conflict);
-/// callers express create-only intent with a [`Mutation::PutIfAbsent`] instead.
-#[derive(Clone, Debug)]
-pub struct Snapshot {
-    /// The storage key that was read.
-    pub key: String,
-    /// The bytes observed at `key` (empty when absent).
-    pub body: Bytes,
-    /// Whether the key existed at read time.
-    pub present: bool,
-}
-
 /// Storage façade composing storage capabilities with the transaction
 /// executor. Construct via [`Store::new`].
 #[derive(Clone)]
@@ -207,13 +189,6 @@ impl Store {
         self.lock.storage_label()
     }
 
-    /// `true` when writes coordinate through storage-level conditional
-    /// operations (the CAS executor).
-    #[must_use]
-    pub fn cas_enabled(&self) -> bool {
-        self.conditional.is_some()
-    }
-
     /// `true` when the coordination lock serializes across processes (Redis or
     /// S3), so separate `angos` processes claim the same work safely; `false`
     /// for the in-process `memory` lock. Callers that need cross-process
@@ -321,30 +296,23 @@ impl Store {
 
     // Read-for-update
 
-    /// Read `key` as a [`Snapshot`]. A missing key is not an error: it yields
-    /// `present: false` with an empty body.
+    /// Read the bytes at `key` for a read-for-update transaction. A missing key
+    /// is not an error: it reads as `None`, and the caller expresses create-only
+    /// intent with a [`Mutation::PutIfAbsent`] rather than a read.
     ///
     /// # Errors
     ///
     /// Propagates the backend [`StorageError`] (other than `NotFound`, which is
-    /// folded into `present: false`).
-    pub async fn read_for_update(&self, key: &str) -> Result<Snapshot, StorageError> {
+    /// folded into `None`).
+    pub async fn read_for_update(&self, key: &str) -> Result<Option<Bytes>, StorageError> {
         match self.object.get(key).await {
-            Ok(body) => Ok(Snapshot {
-                key: key.to_string(),
-                body: Bytes::from(body),
-                present: true,
-            }),
-            Err(StorageError::NotFound) => Ok(Snapshot {
-                key: key.to_string(),
-                body: Bytes::new(),
-                present: false,
-            }),
+            Ok(body) => Ok(Some(Bytes::from(body))),
+            Err(StorageError::NotFound) => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    /// Read several keys as [`Snapshot`]s, preserving input order.
+    /// Read several keys for update, one entry per key in input order.
     ///
     /// # Errors
     ///
@@ -352,7 +320,7 @@ impl Store {
     pub async fn read_many_for_update(
         &self,
         keys: &[String],
-    ) -> Result<Vec<Snapshot>, StorageError> {
+    ) -> Result<Vec<Option<Bytes>>, StorageError> {
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
             out.push(self.read_for_update(key).await?);
@@ -362,9 +330,9 @@ impl Store {
 
     /// Read-modify-write helper that owns the re-read + conflict-retry loop.
     ///
-    /// On each attempt the store reads fresh [`Snapshot`]s for `keys`, folds
-    /// them into the transaction's read set, and calls `map` with those
-    /// snapshots to produce the mutations to apply. `map` is async so callers
+    /// On each attempt the store re-reads `keys`, folds the ones that exist
+    /// into the transaction's read set, and calls `map` with the bodies, one
+    /// entry per key in the order given, to produce the mutations to apply. `map` is async so callers
     /// may perform additional ad-hoc reads (e.g. derived shard keys) while
     /// building the mutation set. The transaction is then committed; on
     /// [`Error::Conflict`] or [`Error::Precondition`] the whole attempt is
@@ -382,14 +350,14 @@ impl Store {
         max_attempts: u32,
     ) -> Result<Outcome, Error>
     where
-        F: FnMut(Vec<Snapshot>) -> Fut + Send,
+        F: FnMut(Vec<Option<Bytes>>) -> Fut + Send,
         Fut: Future<Output = Result<Vec<Mutation>, Error>> + Send,
     {
         let (outcome, ()) = self
             .update_with_payload(
                 keys,
-                move |snaps| {
-                    let fut = map(snaps);
+                move |bodies| {
+                    let fut = map(bodies);
                     async move { fut.await.map(|m| (m, ())) }
                 },
                 max_attempts,
@@ -417,24 +385,24 @@ impl Store {
         max_attempts: u32,
     ) -> Result<(Outcome, T), Error>
     where
-        F: FnMut(Vec<Snapshot>) -> Fut + Send,
+        F: FnMut(Vec<Option<Bytes>>) -> Fut + Send,
         Fut: Future<Output = Result<(Vec<Mutation>, T), Error>> + Send,
         T: Send,
     {
         let mut attempts = 0u32;
         loop {
-            let snaps = self.read_many_for_update(keys).await?;
+            let bodies = self.read_many_for_update(keys).await?;
             let mut builder = Transaction::builder();
-            for snap in &snaps {
+            for (key, body) in keys.iter().zip(&bodies) {
                 // Only present keys enter the read set: the executor treats a
                 // read of an absent key as an unconditional conflict, so
                 // create-only protection is expressed by the caller's mutation
                 // (`PutIfAbsent`), not by a read fingerprint.
-                if snap.present {
-                    builder = builder.read(snap.key.clone(), snap.body.clone());
+                if let Some(body) = body {
+                    builder = builder.read(key.clone(), body.clone());
                 }
             }
-            let (mutations, payload) = map(snaps).await?;
+            let (mutations, payload) = map(bodies).await?;
             for mutation in mutations {
                 builder = builder.mutation(mutation);
             }
@@ -501,11 +469,11 @@ impl Store {
         let (_outcome, payload) = self
             .update_with_payload(
                 &[key.to_string()],
-                move |snaps| {
+                move |bodies| {
                     // `map` is synchronous, so the whole attempt is computed
                     // here and the returned future only carries the result.
-                    let attempt = match snaps.into_iter().next().filter(|snap| snap.present) {
-                        Some(snap) => map(snap.body).map(|(mapped, payload)| {
+                    let attempt = match bodies.into_iter().next().flatten() {
+                        Some(body) => map(body).map(|(mapped, payload)| {
                             (
                                 vec![Mutation::Put {
                                     key: key.to_string(),
@@ -574,7 +542,7 @@ mod tests {
         store
             .update(
                 &["k".to_string()],
-                |_snaps| async {
+                |_bodies| async {
                     Ok(vec![Mutation::Put {
                         key: "k".to_string(),
                         body: Bytes::from_static(b"v"),
@@ -590,7 +558,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_observes_current_snapshot() {
+    async fn update_observes_the_current_bytes() {
         let backend = Arc::new(MemoryObjectStore::new());
         let store = store_over(backend);
         store
@@ -602,10 +570,13 @@ mod tests {
         store
             .update(
                 &["k".to_string()],
-                |snaps| async move {
-                    assert_eq!(snaps.len(), 1);
-                    assert!(snaps[0].present);
-                    assert_eq!(&snaps[0].body[..], b"v1");
+                |bodies| async move {
+                    assert_eq!(bodies.len(), 1);
+                    assert_eq!(
+                        bodies[0].as_deref(),
+                        Some(&b"v1"[..]),
+                        "a present key must carry its bytes"
+                    );
                     Ok(vec![Mutation::Put {
                         key: "k".to_string(),
                         body: Bytes::from_static(b"v2"),
@@ -620,14 +591,35 @@ mod tests {
         assert_eq!(store.object_store().get("k").await.expect("get"), b"v2");
     }
 
+    /// A key that did not exist carries no body, so it never joins the read
+    /// set. Folding it in would record it as observed-empty, and the executor
+    /// reads a missing key against that as a conflict, so a create over a fresh
+    /// key would never commit.
     #[tokio::test]
-    async fn read_for_update_absent_key() {
+    async fn an_absent_key_stays_out_of_the_read_set() {
         let backend = Arc::new(MemoryObjectStore::new());
         let store = store_over(backend);
 
-        let snap = store.read_for_update("missing").await.expect("snapshot");
-        assert!(!snap.present);
-        assert!(snap.body.is_empty());
+        store
+            .update(
+                &["fresh".to_string()],
+                |bodies| async move {
+                    assert!(bodies[0].is_none(), "the key must read as absent");
+                    Ok(vec![Mutation::Put {
+                        key: "fresh".to_string(),
+                        body: Bytes::from_static(b"created"),
+                        expected: None,
+                    }])
+                },
+                1,
+            )
+            .await
+            .expect("a create over an absent key must commit on the first attempt");
+
+        assert_eq!(
+            store.object_store().get("fresh").await.expect("get"),
+            b"created"
+        );
     }
 
     #[tokio::test]
@@ -742,7 +734,7 @@ mod tests {
         let (_outcome, payload) = store
             .update_with_payload(
                 &["k".to_string()],
-                |_snaps| async {
+                |_bodies| async {
                     Ok((
                         vec![Mutation::Put {
                             key: "k".to_string(),

@@ -6,7 +6,7 @@ mod error;
 mod write;
 
 use std::{
-    collections::HashSet, fmt::Display, future::Future, io, path::Path, str::FromStr, sync::Arc,
+    collections::HashSet, fmt::Display, future::Future, io, path::PathBuf, str::FromStr, sync::Arc,
     time::Duration,
 };
 
@@ -25,13 +25,13 @@ use url::Url;
 
 pub use crate::registry_client::{
     error::Error,
-    write::{DeleteManifestOutcome, PutManifestResult, UploadSession},
+    write::{DeleteManifestOutcome, PutManifestOutcome, UploadSession},
 };
 
 use crate::{
     cache::Cache,
     http_client::apply_tls_files,
-    oci::{Digest, MediaType, Reference, Tag},
+    oci::{Digest, MediaRange, MediaType, Reference, Tag},
     registry::{
         DOCKER_CONTENT_DIGEST, blob_store::BoxedReader, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
     },
@@ -94,6 +94,14 @@ fn parse_header<T: FromStr>(
         .ok_or_else(|| Error::Internal(format!("missing or invalid '{name}' response header")))
 }
 
+/// The mTLS client identity. Holding both files together is what makes a
+/// certificate without its key unrepresentable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MtlsIdentity {
+    pub client_certificate: PathBuf,
+    pub client_private_key: PathBuf,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(try_from = "RegistryClientConfigFields")]
 pub struct RegistryClientConfig {
@@ -104,11 +112,8 @@ pub struct RegistryClientConfig {
     /// Bounds inactivity between reads during a transfer; a long but
     /// progressing blob transfer is never capped by a total deadline.
     pub read_timeout_secs: u64,
-    pub server_ca_bundle: Option<String>,
-    /// Note: named `client_certificate` (without `_bundle`) to match the existing config key;
-    /// renaming would break operator configs.
-    pub client_certificate: Option<String>,
-    pub client_private_key: Option<String>,
+    pub server_ca_bundle: Option<PathBuf>,
+    pub mtls: Option<MtlsIdentity>,
     pub username: Option<String>,
     pub password: Option<Secret<String>>,
 }
@@ -122,9 +127,11 @@ struct RegistryClientConfigFields {
     connect_timeout_secs: u64,
     #[serde(default = "RegistryClientConfig::default_read_timeout_secs")]
     read_timeout_secs: u64,
-    server_ca_bundle: Option<String>,
-    client_certificate: Option<String>,
-    client_private_key: Option<String>,
+    server_ca_bundle: Option<PathBuf>,
+    /// Named without `_bundle` to match the existing config key; renaming would
+    /// break operator configs.
+    client_certificate: Option<PathBuf>,
+    client_private_key: Option<PathBuf>,
     username: Option<String>,
     password: Option<Secret<String>>,
 }
@@ -133,19 +140,26 @@ impl TryFrom<RegistryClientConfigFields> for RegistryClientConfig {
     type Error = String;
 
     fn try_from(fields: RegistryClientConfigFields) -> Result<Self, Self::Error> {
-        if fields.client_certificate.is_some() != fields.client_private_key.is_some() {
-            return Err(
-                "both client_certificate and client_private_key are required for mTLS".to_string(),
-            );
-        }
+        let mtls = match (fields.client_certificate, fields.client_private_key) {
+            (Some(client_certificate), Some(client_private_key)) => Some(MtlsIdentity {
+                client_certificate,
+                client_private_key,
+            }),
+            (None, None) => None,
+            _ => {
+                return Err(
+                    "both client_certificate and client_private_key are required for mTLS"
+                        .to_string(),
+                );
+            }
+        };
         Ok(Self {
             url: fields.url,
             max_redirect: fields.max_redirect,
             connect_timeout_secs: fields.connect_timeout_secs,
             read_timeout_secs: fields.read_timeout_secs,
             server_ca_bundle: fields.server_ca_bundle,
-            client_certificate: fields.client_certificate,
-            client_private_key: fields.client_private_key,
+            mtls,
             username: fields.username,
             password: fields.password,
         })
@@ -166,13 +180,30 @@ impl RegistryClientConfig {
     }
 }
 
-/// Resolved basic-auth credentials: `(username, password)`.
-type BasicAuth = (String, Secret<String>);
+/// Resolved basic-auth credentials.
+#[derive(Clone, Debug)]
+pub struct BasicAuth {
+    pub username: String,
+    pub password: Secret<String>,
+}
 
-/// A fetched manifest: `(media type, digest, body)`. The digest is absent when
-/// the upstream omits `Docker-Content-Digest`, which the OCI spec states as
-/// optional.
-pub type FetchedManifest = (Option<MediaType>, Option<Digest>, Vec<u8>);
+/// A fetched manifest. The `digest` is absent when the upstream omits
+/// `Docker-Content-Digest`, which the OCI spec states as optional.
+/// What a manifest `HEAD` reports. The `digest` is absent when the upstream
+/// omits `Docker-Content-Digest`, which the OCI spec states as optional.
+#[derive(Clone, Debug)]
+pub struct ManifestHead {
+    pub media_type: Option<MediaType>,
+    pub digest: Option<Digest>,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct FetchedManifest {
+    pub media_type: Option<MediaType>,
+    pub digest: Option<Digest>,
+    pub body: Vec<u8>,
+}
 
 #[derive(Debug)]
 pub struct RegistryClient {
@@ -195,7 +226,7 @@ impl RegistryClient {
     /// Configured basic-auth username, `None` when the client is anonymous.
     /// Scopes cached bearer tokens so clients never share across identities.
     fn auth_username(&self) -> Option<&str> {
-        self.basic_auth.as_ref().map(|(user, _)| user.as_str())
+        self.basic_auth.as_ref().map(|auth| auth.username.as_str())
     }
 
     /// Starts building a registry client from individual resolved fields. The
@@ -233,16 +264,19 @@ impl RegistryClient {
             .read_timeout(Duration::from_secs(config.read_timeout_secs));
         let client = apply_tls_files(
             builder,
-            config.server_ca_bundle.as_deref().map(Path::new),
-            config.client_certificate.as_deref().map(Path::new),
-            config.client_private_key.as_deref().map(Path::new),
+            config.server_ca_bundle.as_deref(),
+            config.mtls.as_ref().map(|m| m.client_certificate.as_path()),
+            config.mtls.as_ref().map(|m| m.client_private_key.as_path()),
         )
         .map_err(Error::Initialization)?
         .build()
         .map_err(|e| Error::Initialization(format!("Failed to create HTTP client: {e}")))?;
 
         let basic_auth = match (&config.username, &config.password) {
-            (Some(username), Some(password)) => Some((username.clone(), password.clone())),
+            (Some(username), Some(password)) => Some(BasicAuth {
+                username: username.clone(),
+                password: password.clone(),
+            }),
             (Some(_), None) | (None, Some(_)) => {
                 warn!("Username and password must be both provided");
                 None
@@ -300,7 +334,7 @@ impl RegistryClient {
     async fn query(
         &self,
         method: &Method,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
     ) -> Result<Response, Error> {
         debug!("Requesting from upstream: {}", without_query(location));
@@ -431,7 +465,7 @@ impl RegistryClient {
     async fn send(
         &self,
         method: &Method,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
         auth_header: Option<&str>,
     ) -> Result<Response, Error> {
@@ -444,13 +478,13 @@ impl RegistryClient {
     fn build_request(
         &self,
         method: &Method,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
         auth_header: Option<&str>,
     ) -> RequestBuilder {
         let mut request = self.client.request(method.clone(), location);
         for accepted_type in accepted_types {
-            request = request.header(ACCEPT, accepted_type);
+            request = request.header(ACCEPT, accepted_type.as_str());
         }
         if let Some(auth) = auth_header {
             request = request.header(AUTHORIZATION, auth);
@@ -466,7 +500,7 @@ impl RegistryClient {
     /// headers, or reports that the blob is unknown.
     pub async fn head_blob(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
     ) -> Result<(Digest, u64), Error> {
         let response = self.query(&Method::HEAD, accepted_types, location).await?;
@@ -596,7 +630,7 @@ impl RegistryClient {
     /// headers, or reports that the blob is unknown.
     pub async fn get_blob(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
     ) -> Result<(u64, BoxedReader), Error> {
         let response = self.query(&Method::GET, accepted_types, location).await?;
@@ -627,9 +661,9 @@ impl RegistryClient {
     /// headers, or reports that the manifest is unknown.
     pub async fn head_manifest(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
-    ) -> Result<(Option<MediaType>, Option<Digest>, u64), Error> {
+    ) -> Result<ManifestHead, Error> {
         let response = self.query(&Method::HEAD, accepted_types, location).await?;
 
         if !response.status().is_success() {
@@ -644,7 +678,11 @@ impl RegistryClient {
         let digest = parse_header(&response, DOCKER_CONTENT_DIGEST).ok();
         let size = parse_header(&response, CONTENT_LENGTH)?;
 
-        Ok((media_type, digest, size))
+        Ok(ManifestHead {
+            media_type,
+            digest,
+            size,
+        })
     }
 
     /// Fetches a manifest body from the upstream registry. The digest is absent
@@ -658,7 +696,7 @@ impl RegistryClient {
     /// headers, reports that the manifest is unknown, or the response body cannot be read.
     pub async fn get_manifest(
         &self,
-        accepted_types: &[String],
+        accepted_types: &[MediaRange],
         location: &str,
     ) -> Result<FetchedManifest, Error> {
         let response = self.query(&Method::GET, accepted_types, location).await?;
@@ -697,7 +735,11 @@ impl RegistryClient {
             return Err(Error::ManifestBodyTooLarge { limit });
         }
 
-        Ok((media_type, digest, content))
+        Ok(FetchedManifest {
+            media_type,
+            digest,
+            body: content,
+        })
     }
 }
 

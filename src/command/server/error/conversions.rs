@@ -73,7 +73,9 @@ impl From<registry::Error> for Error {
                 oci_error(StatusCode::CONFLICT, REPLICATION_SUPERSEDED_CODE, Some(msg))
             }
             registry::Error::EventDelivery(msg) => Error::Execution(msg),
-            registry::Error::Internal(msg) => oci_error(
+            // Corrupt content is a 500 like any other internal failure; only
+            // the reclaim paths inside angos act on the distinction.
+            registry::Error::Internal(msg) | registry::Error::Corrupt(msg) => oci_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
                 Some(msg),

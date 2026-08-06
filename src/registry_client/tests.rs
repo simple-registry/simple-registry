@@ -1,4 +1,4 @@
-use std::{io::Cursor, time::Duration};
+use std::{io::Cursor, path::PathBuf, time::Duration};
 
 use futures_util::future::join_all;
 use serde_json::json;
@@ -14,8 +14,9 @@ use crate::{
     oci::{Digest, MediaType, Reference, Tag},
     registry::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES},
     registry_client::{
-        DeleteManifestOutcome, Error, REPLICATION_SUPERSEDED_CODE, RegistryClient,
-        RegistryClientConfig, X_ANGOS_SOURCE_TIMESTAMP,
+        DeleteManifestOutcome, Error, MtlsIdentity, PutManifestOutcome,
+        REPLICATION_SUPERSEDED_CODE, RegistryClient, RegistryClientConfig,
+        X_ANGOS_SOURCE_TIMESTAMP,
         auth::{token_cache_key, token_index_cache_key},
         without_query,
     },
@@ -283,13 +284,13 @@ async fn test_head_manifest_success() {
         .await;
 
     assert!(result.is_ok());
-    let (media_type, digest, size) = result.unwrap();
+    let head = result.unwrap();
     assert_eq!(
-        media_type,
+        head.media_type,
         Some(MediaType::new("application/vnd.docker.distribution.manifest.v2+json").unwrap())
     );
-    assert_eq!(digest, Some(Digest::try_from(test_digest).unwrap()));
-    assert_eq!(size, 5678);
+    assert_eq!(head.digest, Some(Digest::try_from(test_digest).unwrap()));
+    assert_eq!(head.size, 5678);
 }
 
 /// `Docker-Content-Digest` is a SHOULD, so a conformant upstream may omit it.
@@ -312,7 +313,7 @@ async fn head_manifest_without_content_digest_reports_an_unknown_digest() {
         .mount(&mock_server)
         .await;
 
-    let (media_type, digest, size) = client_for(&mock_server)
+    let head = client_for(&mock_server)
         .head_manifest(
             &[],
             &format!("{}/v2/test/manifests/latest", mock_server.uri()),
@@ -320,12 +321,12 @@ async fn head_manifest_without_content_digest_reports_an_unknown_digest() {
         .await
         .expect("a manifest HEAD without Docker-Content-Digest must still succeed");
 
-    assert_eq!(digest, None);
+    assert_eq!(head.digest, None);
     assert_eq!(
-        media_type,
+        head.media_type,
         Some(MediaType::new("application/vnd.docker.distribution.manifest.v2+json").unwrap())
     );
-    assert_eq!(size, 5678);
+    assert_eq!(head.size, 5678);
 }
 
 /// The GET counterpart: the digest is unknown to the client, and the body it
@@ -348,7 +349,7 @@ async fn get_manifest_without_content_digest_still_returns_the_body() {
         .mount(&mock_server)
         .await;
 
-    let (_, digest, body) = client_for(&mock_server)
+    let fetched = client_for(&mock_server)
         .get_manifest(
             &[],
             &format!("{}/v2/test/manifests/latest", mock_server.uri()),
@@ -356,8 +357,8 @@ async fn get_manifest_without_content_digest_still_returns_the_body() {
         .await
         .expect("a manifest GET without Docker-Content-Digest must still succeed");
 
-    assert_eq!(digest, None);
-    assert_eq!(body, manifest_body);
+    assert_eq!(fetched.digest, None);
+    assert_eq!(fetched.body, manifest_body);
 }
 
 #[tokio::test]
@@ -390,13 +391,13 @@ async fn test_get_manifest_success() {
         .await;
 
     assert!(result.is_ok());
-    let (media_type, digest, body) = result.unwrap();
+    let fetched = result.unwrap();
     assert_eq!(
-        media_type,
+        fetched.media_type,
         Some(MediaType::new("application/vnd.docker.distribution.manifest.v2+json").unwrap())
     );
-    assert_eq!(digest, Some(Digest::try_from(test_digest).unwrap()));
-    assert_eq!(body, manifest_body);
+    assert_eq!(fetched.digest, Some(Digest::try_from(test_digest).unwrap()));
+    assert_eq!(fetched.body, manifest_body);
 }
 
 #[tokio::test]
@@ -1078,7 +1079,7 @@ async fn test_get_blob_not_found() {
 #[test]
 fn test_new_with_invalid_ca_bundle() {
     let config = RegistryClientConfig {
-        server_ca_bundle: Some("/nonexistent/ca.pem".to_string()),
+        server_ca_bundle: Some(PathBuf::from("/nonexistent/ca.pem")),
         ..test_client_config("https://example.com")
     };
 
@@ -1122,8 +1123,10 @@ fn test_registry_client_config_key_without_cert_rejected_at_deserialize() {
 #[test]
 fn test_new_with_both_certificate_and_key_invalid_files() {
     let config = RegistryClientConfig {
-        client_certificate: Some("/nonexistent/cert.pem".to_string()),
-        client_private_key: Some("/nonexistent/key.pem".to_string()),
+        mtls: Some(MtlsIdentity {
+            client_certificate: PathBuf::from("/nonexistent/cert.pem"),
+            client_private_key: PathBuf::from("/nonexistent/key.pem"),
+        }),
         ..test_client_config("https://example.com")
     };
 
@@ -1600,9 +1603,15 @@ async fn test_put_manifest_with_oci_subject() {
         .await
         .unwrap();
 
-    assert_eq!(result.digest, Some(Digest::try_from(digest).unwrap()));
-    assert_eq!(result.subject, Some(subject.to_string()));
-    assert!(!result.superseded);
+    let PutManifestOutcome::Stored {
+        digest: echoed,
+        subject: echoed_subject,
+    } = result
+    else {
+        panic!("a 2xx push must report the manifest as stored, got {result:?}");
+    };
+    assert_eq!(echoed, Some(Digest::try_from(digest).unwrap()));
+    assert_eq!(echoed_subject, Some(subject.to_string()));
 }
 
 /// A push the downstream accepted must not fail over a bad echo, but the echo
@@ -1641,7 +1650,10 @@ async fn put_manifest_warns_on_an_unparseable_advertised_digest() {
 
     drop(guard);
 
-    assert_eq!(result.digest, None);
+    assert!(
+        matches!(result, PutManifestOutcome::Stored { digest: None, .. }),
+        "an unparseable echo must drop the digest, got {result:?}"
+    );
     let logs = log_capture.contents();
     assert!(
         logs.contains("put_manifest") && logs.contains(DOCKER_CONTENT_DIGEST),
@@ -1671,12 +1683,18 @@ async fn test_put_manifest_without_oci_subject() {
         .await
         .unwrap();
 
-    assert_eq!(result.digest, Some(Digest::try_from(digest).unwrap()));
+    let PutManifestOutcome::Stored {
+        digest: echoed,
+        subject,
+    } = result
+    else {
+        panic!("a 2xx push must report the manifest as stored, got {result:?}");
+    };
+    assert_eq!(echoed, Some(Digest::try_from(digest).unwrap()));
     assert!(
-        result.subject.is_none(),
+        subject.is_none(),
         "OCI-1.0 downstream must not report an OCI-Subject header"
     );
-    assert!(!result.superseded);
 }
 
 #[tokio::test]
@@ -1727,8 +1745,10 @@ async fn test_put_manifest_superseded_409() {
         .put_manifest(&location, Some("application/json"), b"{}".to_vec(), None)
         .await
         .unwrap();
-    assert!(result.superseded, "an LWW-superseded 409 sets superseded");
-    assert!(result.digest.is_none());
+    assert!(
+        matches!(result, PutManifestOutcome::Superseded),
+        "an LWW-superseded 409 must converge rather than report a store, got {result:?}"
+    );
 }
 
 #[tokio::test]

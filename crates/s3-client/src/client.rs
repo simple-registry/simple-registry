@@ -345,19 +345,6 @@ impl S3Client {
         .await
     }
 
-    /// Send an empty-body request and collect the response into `Bytes`.
-    pub async fn send_empty(
-        &self,
-        method: Method,
-        key: &str,
-        query: Vec<QueryParam>,
-        headers: HeaderMap,
-        opts: SendOpts,
-    ) -> Result<S3Response, S3Error> {
-        self.send(method, key, query, headers, Bytes::new(), opts)
-            .await
-    }
-
     /// Send a request whose body is produced by a `Stream`. The body is one-shot
     /// (no retries) and signed as UNSIGNED-PAYLOAD so it never has to be
     /// buffered. Uses the operation-level timeout but a single attempt.

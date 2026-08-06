@@ -25,10 +25,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use tokio::time::sleep;
 use tracing::warn;
 
-use angos_tx_engine::{
-    INTENT_LOG_PREFIX, StorageError,
-    intent::{IntentRecord, MutationRecord},
-};
+use angos_tx_engine::{INTENT_LOG_PREFIX, StorageError, intent::IntentRecord};
 
 use crate::{
     command::maintenance::{
@@ -155,11 +152,10 @@ impl Validator {
                 Pass::Blob,
                 KeyCategory::UploadArtifact {
                     namespace,
-                    uuid,
                     artifact,
                 },
             ) => {
-                self.validate_upload_artifact(key, &namespace, &uuid, artifact)
+                self.validate_upload_artifact(key, &namespace, artifact)
                     .await
             }
             (pass, KeyCategory::Unknown) => self.quarantine(walked_store(pass), key).await,
@@ -365,7 +361,7 @@ impl From<&IntentRecord> for CachedIntent {
         let touched_keys = intent
             .mutations
             .iter()
-            .flat_map(MutationRecord::all_keys)
+            .flat_map(|planned| planned.record.all_keys())
             .map(str::to_string)
             .collect();
         Self {

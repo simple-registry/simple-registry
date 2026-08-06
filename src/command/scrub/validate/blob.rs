@@ -61,7 +61,6 @@ impl Validator {
         &self,
         key: &str,
         namespace_raw: &str,
-        _uuid: &str,
         artifact: UploadArtifact,
     ) -> Result<(), Error> {
         if Namespace::new(namespace_raw).is_err() {

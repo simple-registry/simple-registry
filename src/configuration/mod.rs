@@ -322,6 +322,8 @@ fn validate_event_webhook_refs(
 
 #[cfg(test)]
 mod metadata_resolver_tests {
+    use std::path::PathBuf;
+
     use angos_tx_engine::lock::LockStrategy;
 
     use crate::configuration::{Configuration, RegistryStorageConfig, ResolvedStorageConfig};
@@ -346,7 +348,7 @@ mod metadata_resolver_tests {
         let resolved = config.resolve_registry_storage();
         match resolved {
             ResolvedStorageConfig::FS(fs_config) => {
-                assert_eq!(fs_config.root_dir, "/data/blobs");
+                assert_eq!(fs_config.root_dir, PathBuf::from("/data/blobs"));
                 assert!(fs_config.sync_to_disk);
                 assert_eq!(fs_config.lock_strategy, LockStrategy::Memory);
             }
@@ -382,7 +384,7 @@ mod metadata_resolver_tests {
         let resolved = config.resolve_registry_storage();
         match resolved {
             ResolvedStorageConfig::FS(fs_config) => {
-                assert_eq!(fs_config.root_dir, "/custom/metadata");
+                assert_eq!(fs_config.root_dir, PathBuf::from("/custom/metadata"));
             }
             other @ ResolvedStorageConfig::S3(_) => {
                 panic!("expected explicit FS storage config, got {other:?}")

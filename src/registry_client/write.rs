@@ -25,16 +25,20 @@ use crate::{
 };
 
 /// Outcome of a manifest push.
-///
-/// A missing `subject` echo on a subject-bearing manifest signals an OCI-1.0
-/// downstream needing the referrers fallback tag; `superseded` is `true` only
-/// for a `409` with [`REPLICATION_SUPERSEDED_CODE`], which is convergence, not
-/// failure.
 #[derive(Debug)]
-pub struct PutManifestResult {
-    pub digest: Option<Digest>,
-    pub subject: Option<String>,
-    pub superseded: bool,
+pub enum PutManifestOutcome {
+    /// Downstream stored the manifest (2xx), echoing what it saw.
+    Stored {
+        /// The `Docker-Content-Digest` echo, absent when the downstream sent
+        /// none or an unparseable one.
+        digest: Option<Digest>,
+        /// The `OCI-Subject` echo. Absent on an OCI-1.0 downstream, which does
+        /// not auto-index the subject and so needs the referrers fallback tag.
+        subject: Option<String>,
+    },
+    /// Push rejected by last-writer-wins (`409` with the
+    /// replication-superseded OCI code): convergence, not failure.
+    Superseded,
 }
 
 /// An open downstream blob-upload session: the server-assigned continuation
@@ -444,18 +448,14 @@ impl RegistryClient {
         content_type: Option<&str>,
         body: Vec<u8>,
         source_ts: Option<&str>,
-    ) -> Result<PutManifestResult, Error> {
+    ) -> Result<PutManifestOutcome, Error> {
         let response = self
             .send_body(&Method::PUT, location, content_type, body, source_ts)
             .await?;
 
         if response.status() == StatusCode::CONFLICT {
             Self::classify_conflict(response, "put_manifest").await?;
-            return Ok(PutManifestResult {
-                digest: None,
-                subject: None,
-                superseded: true,
-            });
+            return Ok(PutManifestOutcome::Superseded);
         }
 
         if !response.status().is_success() {
@@ -474,11 +474,7 @@ impl RegistryClient {
             .and_then(|h| h.to_str().ok())
             .map(ToString::to_string);
 
-        Ok(PutManifestResult {
-            digest,
-            subject,
-            superseded: false,
-        })
+        Ok(PutManifestOutcome::Stored { digest, subject })
     }
 
     /// Deletes a manifest by reference, stamping the `X-Angos-Source-Timestamp`

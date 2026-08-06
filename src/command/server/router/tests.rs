@@ -247,6 +247,18 @@ fn test_parse_mount_blob_with_malformed_from_is_rejected() {
 }
 
 #[test]
+fn test_parse_malformed_from_without_mount_is_rejected() {
+    let uri: Uri = "/v2/myrepo/target/blobs/uploads/?from=Invalid"
+        .parse()
+        .unwrap();
+    let route = parse(&Method::POST, &uri);
+    assert!(
+        route.is_none(),
+        "a malformed ?from= must not route even unused (POST -> 400), got: {route:?}"
+    );
+}
+
+#[test]
 fn test_parse_start_upload_with_malformed_digest_is_rejected() {
     let uri: Uri = "/v2/myrepo/app/blobs/uploads?digest=not-a-digest"
         .parse()
@@ -641,7 +653,7 @@ fn test_parse_get_referrer_with_artifact_type() {
         );
         assert_eq!(
             artifact_type,
-            Some("application/vnd.oci.image.manifest.v1+json".to_string())
+            Some(MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap())
         );
     } else {
         panic!("Expected GetReferrer route");
@@ -1215,4 +1227,54 @@ fn test_parse_jobs_rejects_malformed_query_instead_of_defaulting_queue() {
         )
         .is_none()
     );
+}
+
+/// The filter is a media type, so its `+json` style suffix must survive the
+/// query decoding, in either spelling a client percent-encodes it as.
+#[test]
+fn artifact_type_filter_keeps_an_encoded_media_type_suffix() {
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let expected = MediaType::new("application/vnd.in-toto+json").unwrap();
+
+    for query in [
+        "artifactType=application%2Fvnd.in-toto%2Bjson",
+        "artifactType=application/vnd.in-toto%2Bjson",
+    ] {
+        let uri: Uri = format!("/v2/lib/nginx/referrers/{digest}?{query}")
+            .parse()
+            .unwrap();
+        match parse(&Method::GET, &uri) {
+            Some(Action::GetReferrer { artifact_type, .. }) => assert_eq!(
+                artifact_type.as_ref(),
+                Some(&expected),
+                "filter must survive {query}"
+            ),
+            other => panic!("{query} must route to a referrers listing, got {other:?}"),
+        }
+    }
+}
+
+/// A value that is not a media type is a bad filter, not an absent one: it must
+/// never degrade into an unfiltered listing of every referrer.
+#[test]
+fn artifact_type_filter_rejects_a_malformed_value() {
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let uri: Uri = format!("/v2/lib/nginx/referrers/{digest}?artifactType=not-a-media-type")
+        .parse()
+        .unwrap();
+    assert!(
+        parse(&Method::GET, &uri).is_none(),
+        "a malformed artifactType must not resolve to an unfiltered listing"
+    );
+}
+
+/// No filter at all still lists every referrer.
+#[test]
+fn artifact_type_filter_is_optional() {
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let uri: Uri = format!("/v2/lib/nginx/referrers/{digest}").parse().unwrap();
+    match parse(&Method::GET, &uri) {
+        Some(Action::GetReferrer { artifact_type, .. }) => assert!(artifact_type.is_none()),
+        other => panic!("an unfiltered referrers listing must route, got {other:?}"),
+    }
 }

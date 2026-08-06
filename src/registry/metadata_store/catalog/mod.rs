@@ -4,7 +4,7 @@
 use futures_util::stream::{self, Stream, StreamExt, TryStreamExt};
 use tracing::{debug, instrument};
 
-use angos_storage::paginated;
+use angos_storage::{Page, paginated};
 
 use crate::{
     oci::{Algorithm, Digest, Namespace, Tag},
@@ -27,7 +27,7 @@ impl MetadataStore {
         &self,
         n: u16,
         last: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
+    ) -> Result<Page<Namespace>, Error> {
         debug!("Fetching {n} namespace(s) with continuation token: {last:?}");
 
         let mut namespaces = self.collect_namespaces(None).await?;
@@ -40,7 +40,7 @@ impl MetadataStore {
     /// every namespace, unpaginated and unsorted. `scope` restricts the walk to
     /// one repository's subtree; `None` walks the whole store.
     #[instrument(skip(self))]
-    pub async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<String>, Error> {
+    pub async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<Namespace>, Error> {
         let (root, prefix) = path_builder::namespace_walk_root(scope);
 
         pagination::collect_namespaces_with_marker(
@@ -49,8 +49,12 @@ impl MetadataStore {
             "_manifests",
             self.namespace_walk_concurrency,
             |path| async move {
-                let (sub_prefixes, _) =
-                    self.store().object_store().list_all_children(&path).await?;
+                let sub_prefixes = self
+                    .store()
+                    .object_store()
+                    .list_all_children(&path)
+                    .await?
+                    .sub_prefixes;
                 Ok(sub_prefixes)
             },
         )
@@ -63,7 +67,7 @@ impl MetadataStore {
         namespace: &Namespace,
         n: u16,
         last: Option<String>,
-    ) -> Result<(Vec<Tag>, Option<String>), Error> {
+    ) -> Result<Page<Tag>, Error> {
         debug!("Listing {n} tag(s) for namespace '{namespace}' starting with last '{last:?}'");
 
         let mut tags: Vec<Tag> = self.stream_tags(namespace).try_collect().await?;
@@ -84,11 +88,12 @@ impl MetadataStore {
     ) -> impl Stream<Item = Result<Tag, Error>> + Send + '_ {
         let tags_dir = path_builder::manifest_tags_dir(namespace);
         stream::once(async move {
-            let (tag_dirs, _) = self
+            let tag_dirs = self
                 .store()
                 .object_store()
                 .list_all_children(&tags_dir)
-                .await?;
+                .await?
+                .sub_prefixes;
             Ok::<_, Error>(stream::iter(
                 tag_dirs
                     .into_iter()
@@ -109,7 +114,7 @@ impl MetadataStore {
         namespace: &Namespace,
         n: u16,
         last: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>), Error> {
+    ) -> Result<Page<String>, Error> {
         debug!("Listing {n} tag name(s) for namespace '{namespace}' starting with last '{last:?}'");
 
         let mut names = self.collect_tag_dir_names(namespace).await?;
@@ -123,12 +128,12 @@ impl MetadataStore {
     #[cfg(test)]
     async fn collect_tag_dir_names(&self, namespace: &Namespace) -> Result<Vec<String>, Error> {
         let tags_dir = path_builder::manifest_tags_dir(namespace);
-        let (tag_dirs, _) = self
+        let children = self
             .store()
             .object_store()
             .list_all_children(&tags_dir)
             .await?;
-        Ok(tag_dirs)
+        Ok(children.sub_prefixes)
     }
 
     /// Returns the `LinkKind::Tag` entries in `namespace` that currently point at

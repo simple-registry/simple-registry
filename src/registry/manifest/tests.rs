@@ -219,7 +219,7 @@ async fn test_put_manifest() {
         let stored_manifest = registry
             .get_manifest(
                 registry.get_repository_for_namespace(namespace).unwrap(),
-                &[media_type.to_string()],
+                &[MediaRange::from(media_type.clone())],
                 namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
                 false,
@@ -289,7 +289,7 @@ async fn accept_put_manifest_by_sha512_digest_with_tag_params_creates_tags() {
         let head = registry
             .head_manifest(
                 repository,
-                &[media_type.to_string()],
+                &[MediaRange::from(media_type.clone())],
                 &namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
                 false,
@@ -341,7 +341,7 @@ async fn accept_put_manifest_by_tag_ignores_tag_params() {
     let ignored = registry
         .head_manifest(
             repository,
-            &[media_type.to_string()],
+            &[MediaRange::from(media_type.clone())],
             &namespace,
             Reference::Tag(Tag::new("ignored").unwrap()),
             false,
@@ -526,7 +526,10 @@ async fn put_manifest_allows_missing_subject_reference() {
 
         let subject = MISSING_SUBJECT_DIGEST.parse().unwrap();
         let digest = response.digest.clone();
-        let link = LinkKind::Referrer(subject, digest.clone());
+        let link = LinkKind::Referrer {
+            subject,
+            referrer: digest.clone(),
+        };
         let metadata = registry
             .metadata_store
             .read_link(namespace, &link)
@@ -857,7 +860,7 @@ async fn pull_through_computes_the_digest_when_the_upstream_omits_the_header() {
         .registry()
         .get_manifest(
             &repository,
-            &[IMAGE_MANIFEST_MEDIA_TYPE.to_string()],
+            &[MediaRange::from(MediaType::docker_manifest())],
             &namespace,
             Reference::Tag(Tag::new("latest").unwrap()),
             false,
@@ -890,7 +893,7 @@ async fn pull_through_recomputes_under_the_requested_digest_algorithm() {
         .registry()
         .get_manifest(
             &repository,
-            &[IMAGE_MANIFEST_MEDIA_TYPE.to_string()],
+            &[MediaRange::from(MediaType::docker_manifest())],
             &namespace,
             Reference::Digest(requested.clone()),
             false,
@@ -974,7 +977,7 @@ async fn test_get_manifest() {
         let manifest = registry
             .get_manifest(
                 registry.get_repository_for_namespace(namespace).unwrap(),
-                &[media_type.to_string()],
+                &[MediaRange::from(media_type.clone())],
                 namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
                 false,
@@ -989,7 +992,7 @@ async fn test_get_manifest() {
         let manifest = registry
             .get_manifest(
                 registry.get_repository_for_namespace(namespace).unwrap(),
-                &[media_type.to_string()],
+                &[MediaRange::from(media_type.clone())],
                 namespace,
                 Reference::Digest(response.digest.clone()),
                 false,
@@ -1025,7 +1028,7 @@ async fn test_head_manifest() {
         let manifest = registry
             .head_manifest(
                 registry.get_repository_for_namespace(namespace).unwrap(),
-                &[media_type.to_string()],
+                &[MediaRange::from(media_type.clone())],
                 namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
                 false,
@@ -1040,7 +1043,7 @@ async fn test_head_manifest() {
         let manifest = registry
             .head_manifest(
                 registry.get_repository_for_namespace(namespace).unwrap(),
-                &[media_type.to_string()],
+                &[MediaRange::from(media_type.clone())],
                 namespace,
                 Reference::Digest(response.digest.clone()),
                 false,
@@ -1087,7 +1090,7 @@ async fn test_delete_manifest() {
             registry
                 .get_manifest(
                     registry.get_repository_for_namespace(namespace).unwrap(),
-                    &[media_type.to_string()],
+                    &[MediaRange::from(media_type.clone())],
                     namespace,
                     Reference::Tag(Tag::new(tag).unwrap()),
                     false,
@@ -1110,7 +1113,7 @@ async fn test_delete_manifest() {
             registry
                 .get_manifest(
                     registry.get_repository_for_namespace(namespace).unwrap(),
-                    &[media_type.to_string()],
+                    &[MediaRange::from(media_type.clone())],
                     namespace,
                     Reference::Digest(response.digest.clone()),
                     false,
@@ -1712,7 +1715,7 @@ async fn test_handle_put_manifest() {
         let stored_manifest = registry
             .get_manifest(
                 repository,
-                &[media_type.to_string()],
+                &[MediaRange::from(media_type.clone())],
                 namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
                 false,
@@ -1770,7 +1773,7 @@ async fn test_delete_manifest_by_digest_removes_multiple_tags() {
             registry
                 .get_manifest(
                     repository,
-                    &[media_type.to_string()],
+                    &[MediaRange::from(media_type.clone())],
                     namespace,
                     Reference::Tag(Tag::new("latest").unwrap()),
                     false,
@@ -1783,7 +1786,7 @@ async fn test_delete_manifest_by_digest_removes_multiple_tags() {
             registry
                 .get_manifest(
                     repository,
-                    &[media_type.to_string()],
+                    &[MediaRange::from(media_type.clone())],
                     namespace,
                     Reference::Tag(Tag::new("v1.0").unwrap()),
                     false,
@@ -1796,7 +1799,7 @@ async fn test_delete_manifest_by_digest_removes_multiple_tags() {
             registry
                 .get_manifest(
                     repository,
-                    &[media_type.to_string()],
+                    &[MediaRange::from(media_type.clone())],
                     namespace,
                     Reference::Digest(response.digest.clone()),
                     false,
@@ -1863,7 +1866,7 @@ async fn test_delete_manifest_by_digest_preserves_unrelated_tags() {
             registry
                 .get_manifest(
                     repository,
-                    &[media_type_a.to_string()],
+                    &[MediaRange::from(media_type_a.clone())],
                     namespace,
                     Reference::Tag(Tag::new("v1.0").unwrap()),
                     false,
@@ -1876,7 +1879,7 @@ async fn test_delete_manifest_by_digest_preserves_unrelated_tags() {
             registry
                 .get_manifest(
                     repository,
-                    &[media_type_a.to_string()],
+                    &[MediaRange::from(media_type_a.clone())],
                     namespace,
                     Reference::Tag(Tag::new("v1.1").unwrap()),
                     false,
@@ -1888,7 +1891,7 @@ async fn test_delete_manifest_by_digest_preserves_unrelated_tags() {
         let manifest_b = registry
             .get_manifest(
                 repository,
-                &[media_type_b.to_string()],
+                &[MediaRange::from(media_type_b.clone())],
                 namespace,
                 Reference::Tag(Tag::new("v2.0").unwrap()),
                 false,
@@ -1961,7 +1964,7 @@ async fn test_delete_manifest_with_many_tags() {
                 registry
                     .get_manifest(
                         repository,
-                        &[media_type_a.to_string()],
+                        &[MediaRange::from(media_type_a.clone())],
                         namespace,
                         Reference::Tag(Tag::new(&format!("tag-{i}")).unwrap()),
                         false,
@@ -1977,7 +1980,7 @@ async fn test_delete_manifest_with_many_tags() {
                 registry
                     .get_manifest(
                         repository,
-                        &[media_type_b.to_string()],
+                        &[MediaRange::from(media_type_b.clone())],
                         namespace,
                         Reference::Tag(Tag::new(&format!("other-{i}")).unwrap()),
                         false,
@@ -1988,11 +1991,12 @@ async fn test_delete_manifest_with_many_tags() {
             );
         }
 
-        let (tags, _) = registry
+        let tags = registry
             .metadata_store
             .list_tags(namespace, 100, None)
             .await
-            .unwrap();
+            .unwrap()
+            .items;
         assert_eq!(tags.len(), 20, "expected exactly 20 remaining tags");
     })
     .await;
@@ -3897,10 +3901,10 @@ mod noop_suppression_tests {
             .expect("replicated delete newer than the tag must proceed");
 
         let payload = sole_pending_payload(&job_store).await;
-        assert_eq!(payload.kind, REPLICATION_DELETE_MANIFEST_KIND);
+        assert_eq!(payload.kind(), REPLICATION_DELETE_MANIFEST_KIND);
         assert_eq!(
-            payload.source_ts.as_deref(),
-            Some(delete_ts.to_rfc3339().as_str()),
+            payload.target().source_ts,
+            Some(delete_ts),
             "the delete job must carry the author timestamp verbatim, \
              not a re-stamped now()"
         );
@@ -4059,7 +4063,7 @@ mod dispatch_replication_tests {
 
     use tempfile::TempDir;
 
-    use chrono::{DateTime, Duration, Utc};
+    use chrono::{Duration, Utc};
     use regex::Regex;
 
     use super::{DispatchTarget, MISSING_SUBJECT_DIGEST, create_test_manifest_with_subject};
@@ -4075,7 +4079,7 @@ mod dispatch_replication_tests {
         },
         replication::{
             REPLICATION_DELETE_MANIFEST_KIND, REPLICATION_PUSH_MANIFEST_KIND,
-            ReplicationDownstream, ReplicationMode, ReplicationPushPayload,
+            ReplicationDownstream, ReplicationJob, ReplicationMode,
         },
     };
 
@@ -4197,15 +4201,18 @@ mod dispatch_replication_tests {
             .await;
 
         let payload = sole_pending_payload(&job_store).await;
-        assert_eq!(payload.downstream, DOWNSTREAM);
-        assert_eq!(payload.namespace, NAMESPACE);
-        assert_eq!(payload.tag.as_deref(), Some("v1"));
-        assert_eq!(payload.digest.as_deref(), Some(SAMPLE_DIGEST));
-        assert_eq!(payload.kind, REPLICATION_PUSH_MANIFEST_KIND);
-        let source_ts = payload.source_ts.expect("source_ts must be present");
+        let target = payload.target();
+        assert_eq!(target.downstream, DOWNSTREAM);
+        assert_eq!(target.namespace, NAMESPACE);
+        assert_eq!(target.tag.as_deref(), Some("v1"));
+        assert_eq!(
+            target.digest.as_ref().map(ToString::to_string).as_deref(),
+            Some(SAMPLE_DIGEST)
+        );
+        assert_eq!(payload.kind(), REPLICATION_PUSH_MANIFEST_KIND);
         assert!(
-            DateTime::parse_from_rfc3339(&source_ts).is_ok(),
-            "source_ts must be a valid RFC 3339 timestamp; got {source_ts}"
+            target.source_ts.is_some(),
+            "source_ts must be present for receiver-side LWW"
         );
     }
 
@@ -4251,9 +4258,9 @@ mod dispatch_replication_tests {
                 .read_pending(Queue::Replication, key)
                 .await
                 .unwrap();
-            let payload: ReplicationPushPayload =
-                serde_json::from_value(envelope.payload).expect("decode ReplicationPushPayload");
-            downstreams.push(payload.downstream);
+            let payload: ReplicationJob =
+                serde_json::from_value(envelope.payload).expect("decode ReplicationJob");
+            downstreams.push(payload.target().downstream.clone());
         }
         downstreams.sort();
         assert_eq!(
@@ -4299,10 +4306,10 @@ mod dispatch_replication_tests {
                 .read_pending(Queue::Replication, &key)
                 .await
                 .unwrap();
-            let payload: ReplicationPushPayload =
+            let payload: ReplicationJob =
                 serde_json::from_value(envelope.payload).expect("decode payload");
-            if payload.kind == REPLICATION_DELETE_MANIFEST_KIND {
-                deletes.push(payload.subject);
+            if let ReplicationJob::Delete { subject, .. } = payload {
+                deletes.push(subject.map(|digest| digest.to_string()));
             }
         }
         assert_eq!(
@@ -4335,10 +4342,10 @@ mod dispatch_replication_tests {
             .await;
 
         let payload = sole_pending_payload(&job_store).await;
-        assert_eq!(payload.kind, REPLICATION_DELETE_MANIFEST_KIND);
+        assert_eq!(payload.kind(), REPLICATION_DELETE_MANIFEST_KIND);
         assert_eq!(
-            payload.source_ts.as_deref(),
-            Some(author_ts.to_rfc3339().as_str()),
+            payload.target().source_ts,
+            Some(author_ts),
             "a provided source_ts must propagate verbatim, not be re-stamped"
         );
     }

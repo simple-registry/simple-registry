@@ -36,7 +36,7 @@ use crate::lock::{
     Error,
     storage::{
         DeleteIfMatchOutcome, LOCK_OBJECTS_PREFIX, LockStorage, PutIfAbsentOutcome,
-        PutIfMatchOutcome,
+        PutIfMatchOutcome, TaggedObject,
     },
 };
 
@@ -236,21 +236,18 @@ impl LockStorage for S3LockStorage {
         }
     }
 
-    async fn get_with_etag(
-        &self,
-        key: &str,
-    ) -> Result<(Vec<u8>, String, Option<DateTime<Utc>>), Error> {
+    async fn get_with_etag(&self, key: &str) -> Result<TaggedObject, Error> {
         let path = lock_path(key);
         let mut attempts: u32 = 0;
         loop {
             attempts += 1;
             match self.store.get_with_metadata(&path).await {
                 Ok((body, etag, last_modified)) => {
-                    return Ok((
+                    return Ok(TaggedObject {
                         body,
-                        require_etag(etag.map(Etag::into_inner))?,
+                        etag: require_etag(etag.map(Etag::into_inner))?,
                         last_modified,
-                    ));
+                    });
                 }
                 Err(StorageError::NotFound) => return Err(Error::NotFound),
                 Err(e) => {
@@ -403,10 +400,10 @@ mod tests {
             panic!("expected Created");
         };
 
-        let (body, read_etag, _last_modified) = s.get_with_etag("k").await.unwrap();
-        assert_eq!(body, b"the-body");
+        let observed = s.get_with_etag("k").await.unwrap();
+        assert_eq!(observed.body, b"the-body");
         assert_eq!(
-            read_etag, etag,
+            observed.etag, etag,
             "get_with_etag must surface the same ETag the put returned"
         );
     }
@@ -439,8 +436,8 @@ mod tests {
         );
 
         // Delete with the current ETag succeeds, then the key is gone.
-        let (_body, current_etag, _) = s.get_with_etag("k").await.unwrap();
-        let deleted = s.delete_if_match("k", &current_etag).await.unwrap();
+        let observed = s.get_with_etag("k").await.unwrap();
+        let deleted = s.delete_if_match("k", &observed.etag).await.unwrap();
         assert!(
             matches!(deleted, DeleteIfMatchOutcome::Deleted),
             "delete_if_match against the current ETag must delete"
@@ -885,10 +882,10 @@ mod tests {
         store.hook().set_get_faults(&[Fault::ErrorNoLand]);
         let lock = S3LockStorage::new(store.clone(), MAX_CONDITIONAL_ATTEMPTS);
 
-        let (body, _etag, _) = lock.get_with_etag("k").await.unwrap();
+        let observed = lock.get_with_etag("k").await.unwrap();
 
         assert_eq!(
-            body, b"held",
+            observed.body, b"held",
             "the read must recover after a transient blip"
         );
         assert_eq!(

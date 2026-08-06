@@ -18,8 +18,9 @@ use angos_tx_engine::store::Store;
 use crate::{
     metrics_provider,
     oci::{
-        DOCKER_MANIFEST_LIST_MEDIA_TYPE, DOCKER_MANIFEST_MEDIA_TYPE, Digest, MediaType, Namespace,
-        OCI_INDEX_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, Reference, Tag,
+        Digest, MediaType, Namespace, OCI_INDEX_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, Reference,
+        Tag,
+        constants::{DOCKER_MANIFEST_LIST_MEDIA_TYPE, DOCKER_MANIFEST_MEDIA_TYPE},
     },
     registry::{
         DOCKER_CONTENT_DIGEST, OCI_SUBJECT, ParsedManifestDigests,

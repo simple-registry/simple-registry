@@ -13,7 +13,7 @@ use crate::{
     },
     cache::Cache,
     configuration::Configuration,
-    identity::ClientIdentity,
+    identity::{AuthMethod, ClientIdentity},
     metrics_provider::metrics_provider,
 };
 
@@ -30,17 +30,17 @@ pub struct AuthConfig {
 type OidcValidators = Vec<(String, Arc<dyn AuthMiddleware>)>;
 
 /// Returns the strongest method that succeeded, using first-wins priority: mTLS > OIDC > Basic.
-fn select_auth_method(mtls: bool, oidc: bool, basic: bool) -> Option<&'static str> {
+fn select_auth_method(mtls: bool, oidc: bool, basic: bool) -> AuthMethod {
     if mtls {
-        return Some("mtls");
+        return AuthMethod::Mtls;
     }
     if oidc {
-        return Some("oidc");
+        return AuthMethod::Oidc;
     }
     if basic {
-        return Some("basic");
+        return AuthMethod::Basic;
     }
-    None
+    AuthMethod::Anonymous
 }
 
 /// Coordinates all authentication methods and handles the authentication chain
@@ -111,7 +111,7 @@ impl Authenticator {
         };
 
         identity.auth_method = select_auth_method(mtls_ok, oidc_ok, basic_ok);
-        Span::current().record("auth_method", identity.auth_method.unwrap_or("anonymous"));
+        Span::current().record("auth_method", identity.auth_method.as_str());
         Ok(identity)
     }
 
@@ -449,33 +449,36 @@ mod tests {
 
     #[test]
     fn select_auth_method_returns_mtls_when_only_mtls_succeeds() {
-        assert_eq!(select_auth_method(true, false, false), Some("mtls"));
+        assert_eq!(select_auth_method(true, false, false), AuthMethod::Mtls);
     }
 
     #[test]
     fn select_auth_method_keeps_mtls_when_basic_also_succeeds() {
         // Bug: basic-auth success used to overwrite mtls. Must not.
-        assert_eq!(select_auth_method(true, false, true), Some("mtls"));
+        assert_eq!(select_auth_method(true, false, true), AuthMethod::Mtls);
     }
 
     #[test]
     fn select_auth_method_keeps_mtls_when_oidc_also_succeeds() {
-        assert_eq!(select_auth_method(true, true, false), Some("mtls"));
+        assert_eq!(select_auth_method(true, true, false), AuthMethod::Mtls);
     }
 
     #[test]
     fn select_auth_method_returns_oidc_when_no_mtls() {
-        assert_eq!(select_auth_method(false, true, false), Some("oidc"));
+        assert_eq!(select_auth_method(false, true, false), AuthMethod::Oidc);
     }
 
     #[test]
     fn select_auth_method_returns_basic_when_no_mtls_no_oidc() {
-        assert_eq!(select_auth_method(false, false, true), Some("basic"));
+        assert_eq!(select_auth_method(false, false, true), AuthMethod::Basic);
     }
 
     #[test]
-    fn select_auth_method_returns_none_when_nothing_succeeded() {
-        assert_eq!(select_auth_method(false, false, false), None);
+    fn select_auth_method_returns_anonymous_when_nothing_succeeded() {
+        assert_eq!(
+            select_auth_method(false, false, false),
+            AuthMethod::Anonymous
+        );
     }
 
     #[tokio::test]
@@ -670,7 +673,7 @@ mod tests {
 
     /// mTLS succeeds + all OIDC providers return `NoCredentials`.
     /// The identity must carry certificate info and no OIDC claims.
-    /// `select_auth_method(true, false, false)` → "mtls"; certificate not downgraded.
+    /// `select_auth_method(true, false, false)` is `Mtls`; certificate not downgraded.
     #[tokio::test]
     async fn method_tracking_mtls_success_oidc_no_credentials_preserves_cert() {
         metrics_provider::init_for_tests();
@@ -702,7 +705,7 @@ mod tests {
 
     /// mTLS has no certificate (`NoCredentials`) + one OIDC provider succeeds.
     /// The identity must carry OIDC claims and no certificate info.
-    /// `select_auth_method(false, true, false)` → "oidc".
+    /// `select_auth_method(false, true, false)` is `Oidc`.
     #[tokio::test]
     async fn method_tracking_no_mtls_oidc_success_sets_oidc_identity() {
         metrics_provider::init_for_tests();

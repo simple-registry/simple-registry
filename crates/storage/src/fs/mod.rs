@@ -34,7 +34,8 @@ use tokio::{
 use tokio_util::io::StreamReader;
 
 use crate::{
-    BoxedReader, ByteStream, ChildrenPage, Error, ObjectMeta, ObjectStore, Page, object::dir_prefix,
+    BoxedReader, ByteStream, Children, ChildrenPage, Error, ObjectMeta, ObjectStore, Page,
+    object::dir_prefix,
 };
 
 /// Filename prefix for the temp files [`atomic_write`] creates next to their
@@ -465,7 +466,7 @@ impl ObjectStore for Backend {
 
     /// One directory read instead of the default page drain, which re-reads
     /// the directory once per page.
-    async fn list_all_children(&self, prefix: &str) -> Result<(Vec<String>, Vec<String>), Error> {
+    async fn list_all_children(&self, prefix: &str) -> Result<Children, Error> {
         let entries = read_dir_sorted(&self.full_path(prefix)).await?;
         let mut sub_prefixes = Vec::new();
         let mut objects = Vec::new();
@@ -476,7 +477,10 @@ impl ObjectStore for Backend {
                 objects.push(name);
             }
         }
-        Ok((sub_prefixes, objects))
+        Ok(Children {
+            sub_prefixes,
+            objects,
+        })
     }
 
     async fn copy(&self, source: &str, destination: &str) -> Result<(), Error> {

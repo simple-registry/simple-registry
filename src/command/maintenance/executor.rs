@@ -16,16 +16,16 @@ use crate::{
     event_webhook::event::EventActor,
     jobs::store::{Error as JobStoreError, JobEnvelope, JobStore},
     jobs::{JobState, Queue},
-    oci::{Digest, Namespace, Reference, Tag},
+    oci::{Digest, Namespace, Reference, Tag, UploadSessionId},
     registry::{
         Error as RegistryError, Registry,
-        blob_store::{self, BlobStore, MultipartCleanup},
+        blob_store::{BlobStore, MultipartCleanup, OrphanMultipartUpload},
         metadata_store::{BlobIndexOperation, LinkKind, LinkOperation, MetadataStore},
         path_builder,
     },
     replication::{
-        REPLICATION_DELETE_MANIFEST_KIND, REPLICATION_PUSH_MANIFEST_KIND, ReplicationPushPayload,
-        build_envelope, build_prune_delete_envelope, record_reconcile_outcome,
+        ReplicationJob, ReplicationTarget, build_envelope, build_prune_delete_envelope,
+        record_reconcile_outcome,
     },
 };
 
@@ -398,8 +398,14 @@ impl Executor {
         Ok(())
     }
 
-    async fn delete_expired_upload(&self, namespace: Namespace, uuid: String) -> Result<(), Error> {
-        self.blob_store.delete_upload(&namespace, &uuid).await?;
+    async fn delete_expired_upload(
+        &self,
+        namespace: Namespace,
+        session_id: UploadSessionId,
+    ) -> Result<(), Error> {
+        self.blob_store
+            .delete_upload(&namespace, &session_id)
+            .await?;
         Ok(())
     }
 
@@ -412,7 +418,10 @@ impl Executor {
         self.metadata_store
             .update_links(
                 &namespace,
-                &[LinkOperation::delete(LinkKind::Referrer(subject, referrer))],
+                &[LinkOperation::delete(LinkKind::Referrer {
+                    subject,
+                    referrer,
+                })],
             )
             .await?;
         Ok(())
@@ -433,9 +442,9 @@ impl Executor {
         Ok(())
     }
 
-    async fn abort_multipart_upload(&self, key: String, upload_id: String) -> Result<(), Error> {
+    async fn abort_multipart_upload(&self, upload: OrphanMultipartUpload) -> Result<(), Error> {
         self.blob_store
-            .abort_orphan_multipart_upload(&blob_store::OrphanMultipartUpload { key, upload_id })
+            .abort_orphan_multipart_upload(&upload)
             .await?;
         Ok(())
     }
@@ -447,19 +456,19 @@ impl Executor {
         tag: Tag,
         digest: Digest,
     ) -> Result<(), Error> {
-        let payload = ReplicationPushPayload {
-            downstream,
-            namespace,
-            tag: Some(tag),
-            digest: Some(digest.to_string()),
-            kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
-            // The handler stamps source_ts from the tag's created_at at execute
-            // time, so the push carries the same last-writer-wins version as the
-            // event path.
-            source_ts: None,
-            subject: None,
+        // The handler stamps source_ts from the tag's created_at at execute
+        // time, so the push carries the same last-writer-wins version as the
+        // event path.
+        let job = ReplicationJob::Push {
+            target: ReplicationTarget {
+                downstream,
+                namespace,
+                tag: Some(tag),
+                digest: Some(digest),
+                source_ts: None,
+            },
         };
-        self.enqueue_replication(build_envelope(&payload)).await
+        self.enqueue_replication(build_envelope(&job)).await
     }
 
     async fn enqueue_replication_delete(
@@ -473,18 +482,19 @@ impl Executor {
         // decision (clock skew, or a push racing the listing). That does NOT
         // make prune active-active safe: a peer's newer tag created before this
         // run is still deleted, so `prune = true` is one-way-mirror-only.
-        let payload = ReplicationPushPayload {
-            downstream,
-            namespace,
-            tag: Some(tag),
-            digest: None,
-            kind: REPLICATION_DELETE_MANIFEST_KIND.to_string(),
-            source_ts: Some(Utc::now().to_rfc3339()),
+        let job = ReplicationJob::Delete {
+            target: ReplicationTarget {
+                downstream,
+                namespace,
+                tag: Some(tag),
+                digest: None,
+                source_ts: Some(Utc::now()),
+            },
             subject: None,
         };
         // The prune envelope keys on the bare reference so repeated runs
         // coalesce instead of stacking one fresh-ts job per run.
-        self.enqueue_replication(build_prune_delete_envelope(&payload))
+        self.enqueue_replication(build_prune_delete_envelope(&job))
             .await
     }
 
@@ -589,9 +599,10 @@ impl ActionSink for Executor {
             Action::DeleteOrphanManifest { namespace, digest } => {
                 self.delete_orphan_manifest(namespace, digest).await
             }
-            Action::DeleteExpiredUpload { namespace, uuid } => {
-                self.delete_expired_upload(namespace, uuid).await
-            }
+            Action::DeleteExpiredUpload {
+                namespace,
+                session_id,
+            } => self.delete_expired_upload(namespace, session_id).await,
             Action::DeleteOrphanReferrer {
                 namespace,
                 subject,
@@ -605,9 +616,7 @@ impl ActionSink for Executor {
                 link,
                 referrer,
             } => self.remove_referrer(namespace, link, referrer).await,
-            Action::AbortMultipartUpload { key, upload_id } => {
-                self.abort_multipart_upload(key, upload_id).await
-            }
+            Action::AbortMultipartUpload { upload } => self.abort_multipart_upload(upload).await,
             Action::EnqueueReplicationPush {
                 downstream,
                 namespace,
@@ -1092,7 +1101,10 @@ mod tests {
                             subject_digest.clone(),
                         ),
                         LinkOperation::create(
-                            LinkKind::Referrer(subject_digest.clone(), referrer_digest.clone()),
+                            LinkKind::Referrer {
+                                subject: subject_digest.clone(),
+                                referrer: referrer_digest.clone(),
+                            },
                             referrer_digest.clone(),
                         ),
                     ],
@@ -1104,7 +1116,10 @@ mod tests {
                 metadata_store
                     .read_link(
                         &namespace,
-                        &LinkKind::Referrer(subject_digest.clone(), referrer_digest.clone())
+                        &LinkKind::Referrer {
+                            subject: subject_digest.clone(),
+                            referrer: referrer_digest.clone()
+                        }
                     )
                     .await
                     .is_ok(),
@@ -1126,7 +1141,10 @@ mod tests {
                 metadata_store
                     .read_link(
                         &namespace,
-                        &LinkKind::Referrer(subject_digest.clone(), referrer_digest.clone())
+                        &LinkKind::Referrer {
+                            subject: subject_digest.clone(),
+                            referrer: referrer_digest.clone()
+                        }
                     )
                     .await
                     .is_err(),
@@ -1277,16 +1295,16 @@ mod tests {
 
     /// Builds an orphan-shaped replication push envelope.
     fn orphan_push_envelope() -> JobEnvelope {
-        let payload = ReplicationPushPayload {
-            downstream: "removed".to_string(),
-            namespace: Namespace::new("ns/app").unwrap(),
-            tag: Some(Tag::new("v1").unwrap()),
-            digest: None,
-            kind: REPLICATION_PUSH_MANIFEST_KIND.to_string(),
-            source_ts: None,
-            subject: None,
+        let job = ReplicationJob::Push {
+            target: ReplicationTarget {
+                downstream: "removed".to_string(),
+                namespace: Namespace::new("ns/app").unwrap(),
+                tag: Some(Tag::new("v1").unwrap()),
+                digest: None,
+                source_ts: None,
+            },
         };
-        build_envelope(&payload).unwrap()
+        build_envelope(&job).unwrap()
     }
 
     /// Builds an orphan-shaped pull-through cache-fill envelope.
@@ -1365,7 +1383,7 @@ mod tests {
             ] {
                 // A single-attempt job failed once dead-letters under its
                 // original key.
-                envelope.max_attempts = 1;
+                envelope.max_attempts = Some(1);
                 job_store.enqueue(envelope).await.unwrap();
                 let claimed = job_store
                     .claim_one(queue)
@@ -1376,7 +1394,11 @@ mod tests {
                 let outcome = job_store.fail(claimed, "simulated failure").await.unwrap();
                 assert!(matches!(outcome, FailOutcome::MovedToDeadLetter));
 
-                let (failed_keys, _) = job_store.list_failed_page(queue, 10, None).await.unwrap();
+                let failed_keys = job_store
+                    .list_failed_page(queue, 10, None)
+                    .await
+                    .unwrap()
+                    .items;
                 assert_eq!(failed_keys.len(), 1);
 
                 executor
@@ -1388,7 +1410,11 @@ mod tests {
                     .await
                     .unwrap();
 
-                let (failed_keys, _) = job_store.list_failed_page(queue, 10, None).await.unwrap();
+                let failed_keys = job_store
+                    .list_failed_page(queue, 10, None)
+                    .await
+                    .unwrap()
+                    .items;
                 assert!(
                     failed_keys.is_empty(),
                     "the dead-lettered orphan job on '{queue}' must be deleted"
@@ -1436,7 +1462,7 @@ mod tests {
             .unwrap();
         sink.apply(Action::DeleteExpiredUpload {
             namespace: Namespace::new("ns").unwrap(),
-            uuid: "uuid".to_string(),
+            session_id: UploadSessionId::generate(),
         })
         .await
         .unwrap();

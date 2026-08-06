@@ -15,8 +15,8 @@ use crate::{
     jobs::store as job_store,
     jobs::{JobState, Queue},
     oci::{
-        DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest, MediaType,
-        Namespace, Platform as OciPlatform, Tag, namespace_belongs_to,
+        Content, DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
+        MediaType, Namespace, Platform as OciPlatform, Tag, UploadSessionId, namespace_belongs_to,
     },
     registry::{Error, Registry, metadata_store::LinkKind},
 };
@@ -134,7 +134,7 @@ pub struct RevisionsBody {
 
 #[derive(Serialize, Debug)]
 pub struct UploadEntry {
-    uuid: String,
+    session_id: UploadSessionId,
     size: u64,
     started_at: DateTime<Utc>,
 }
@@ -230,8 +230,10 @@ fn extract_docker_referrer(descriptor: &Descriptor) -> Option<DockerReferrerCand
 /// Returns the in-toto predicate type annotation value from the first
 /// layer that carries it, if any. Pure, no I/O.
 fn extract_in_toto_predicate(child_manifest: &Manifest) -> Option<String> {
-    child_manifest
-        .layers
+    let Content::Image { layers, .. } = &child_manifest.content else {
+        return None;
+    };
+    layers
         .iter()
         .find_map(|layer| layer.annotations.get(IN_TOTO_PREDICATE_TYPE).cloned())
 }
@@ -252,14 +254,16 @@ struct ManifestAnalysis {
 fn analyze_manifest(manifest: &Manifest) -> ManifestAnalysis {
     let mut parent_links = Vec::new();
     let mut referrer_candidates = Vec::new();
-    for child in &manifest.manifests {
-        if let Some(referrer) = extract_docker_referrer(child) {
-            referrer_candidates.push(referrer);
-        } else {
-            parent_links.push((
-                child.digest.clone(),
-                child.platform.clone().map(ExtPlatform::from),
-            ));
+    if let Content::Index { manifests } = &manifest.content {
+        for child in manifests {
+            if let Some(referrer) = extract_docker_referrer(child) {
+                referrer_candidates.push(referrer);
+            } else {
+                parent_links.push((
+                    child.digest.clone(),
+                    child.platform.clone().map(ExtPlatform::from),
+                ));
+            }
         }
     }
     ManifestAnalysis {
@@ -406,24 +410,24 @@ impl Registry {
 
     #[instrument(skip(self))]
     pub async fn get_uploads_info(&self, namespace: &Namespace) -> Result<UploadsBody, Error> {
-        let mut uuids: Vec<String> = self
+        let mut session_ids: Vec<UploadSessionId> = self
             .blob_store
             .stream_uploads(namespace)
             .try_collect()
             .await?;
-        uuids.sort();
+        session_ids.sort();
 
         // Summary reads fan out; `buffered` keeps the sorted uuid order. An
         // upload whose summary read fails (e.g. reaped mid-listing) is skipped.
-        let all_uploads: Vec<UploadEntry> = stream::iter(uuids)
-            .map(|uuid| async move {
+        let all_uploads: Vec<UploadEntry> = stream::iter(session_ids)
+            .map(|session_id| async move {
                 let summary = self
                     .blob_store
-                    .upload_summary(namespace, &uuid)
+                    .upload_summary(namespace, &session_id)
                     .await
                     .ok()?;
                 Some(UploadEntry {
-                    uuid,
+                    session_id,
                     size: summary.size,
                     started_at: summary.started_at,
                 })
@@ -450,13 +454,13 @@ impl Registry {
         after: Option<String>,
     ) -> Result<JobsBody, Error> {
         let n = n.unwrap_or(DEFAULT_JOBS_PAGE);
-        let (keys, next) = self
+        let page = self
             .job_queue
             .list_pending_page(queue, n, after.as_deref())
             .await?;
 
         // Envelope reads fan out; `buffered` keeps the keyset (time) order.
-        let jobs: Vec<JobEntry> = stream::iter(keys)
+        let jobs: Vec<JobEntry> = stream::iter(page.items)
             .map(|storage_key| async move {
                 match self.job_queue.read_pending(queue, &storage_key).await {
                     Ok(envelope) => {
@@ -468,7 +472,7 @@ impl Registry {
                             kind: envelope.kind,
                             lock_key: envelope.lock_key.to_string(),
                             attempts: envelope.attempts,
-                            max_attempts: envelope.max_attempts,
+                            max_attempts: envelope.max_attempts.unwrap_or_default(),
                             created_at: envelope.created_at,
                             not_before,
                         }))
@@ -482,7 +486,10 @@ impl Registry {
             .try_collect()
             .await?;
 
-        Ok(JobsBody { jobs, next })
+        Ok(JobsBody {
+            jobs,
+            next: page.next_token,
+        })
     }
 
     /// One keyset page of dead-letter (exhausted-retry) jobs on `queue`. See
@@ -495,13 +502,13 @@ impl Registry {
         after: Option<String>,
     ) -> Result<FailedJobsBody, Error> {
         let n = n.unwrap_or(DEFAULT_JOBS_PAGE);
-        let (keys, next) = self
+        let page = self
             .job_queue
             .list_failed_page(queue, n, after.as_deref())
             .await?;
 
         // Record reads fan out; `buffered` keeps the keyset (time) order.
-        let failed: Vec<FailedJobEntry> = stream::iter(keys)
+        let failed: Vec<FailedJobEntry> = stream::iter(page.items)
             .map(|storage_key| async move {
                 match self.job_queue.read_failed(queue, &storage_key).await {
                     Ok(record) => Ok(Some(FailedJobEntry {
@@ -510,7 +517,7 @@ impl Registry {
                         kind: record.envelope.kind,
                         lock_key: record.envelope.lock_key.to_string(),
                         attempts: record.envelope.attempts,
-                        max_attempts: record.envelope.max_attempts,
+                        max_attempts: record.envelope.max_attempts.unwrap_or_default(),
                         created_at: record.envelope.created_at,
                         failed_at: record.failed_at,
                         last_error: record.last_error,
@@ -524,7 +531,10 @@ impl Registry {
             .try_collect()
             .await?;
 
-        Ok(FailedJobsBody { failed, next })
+        Ok(FailedJobsBody {
+            failed,
+            next: page.next_token,
+        })
     }
 
     /// Requeue a dead-letter job (attempts reset to zero) on `queue`. Delegates
@@ -723,7 +733,7 @@ impl Registry {
         Ok(build_digest_to_tags_map_from_pairs(tag_links))
     }
 
-    async fn list_repository_namespaces(&self, repository: &str) -> Result<Vec<String>, Error> {
+    async fn list_repository_namespaces(&self, repository: &str) -> Result<Vec<Namespace>, Error> {
         if !self.resolver.contains_key(repository) {
             return Err(Error::NameUnknown);
         }
@@ -736,7 +746,7 @@ impl Registry {
     /// store. The manifest catalog keys namespaces off `_manifests`, so a
     /// namespace holding only in-progress uploads is absent from it; the blob
     /// store's `_uploads`-keyed listing is merged so pending uploads surface.
-    async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<String>, Error> {
+    async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<Namespace>, Error> {
         let (mut namespaces, upload_namespaces) = try_join!(
             self.metadata_store.collect_namespaces(scope),
             self.blob_store.collect_upload_namespaces(scope),
@@ -810,10 +820,7 @@ mod tests {
                 platform: None,
             })
             .collect();
-        Manifest {
-            layers,
-            ..Manifest::default()
-        }
+        Manifest::image(None, layers)
     }
 
     // extract_in_toto_predicate
@@ -937,8 +944,7 @@ mod tests {
             platform: Some(platform),
         };
         let manifest = Manifest {
-            manifests: vec![child],
-            ..Manifest::default()
+            ..Manifest::index(vec![child])
         };
 
         let analysis = analyze_manifest(&manifest);
@@ -967,8 +973,7 @@ mod tests {
             platform: None,
         };
         let manifest = Manifest {
-            manifests: vec![child],
-            ..Manifest::default()
+            ..Manifest::index(vec![child])
         };
 
         let analysis = analyze_manifest(&manifest);
@@ -1004,8 +1009,7 @@ mod tests {
             platform: None,
         };
         let manifest = Manifest {
-            manifests: vec![referrer_child, index_child],
-            ..Manifest::default()
+            ..Manifest::index(vec![referrer_child, index_child])
         };
 
         let analysis = analyze_manifest(&manifest);
@@ -1153,7 +1157,7 @@ mod tests {
             let upload_only = Namespace::new("test-repo/upload-only").unwrap();
             registry
                 .blob_store
-                .create_upload(&upload_only, UploadSessionId::generate().as_ref())
+                .create_upload(&upload_only, &UploadSessionId::generate())
                 .await
                 .unwrap();
 
@@ -1161,7 +1165,7 @@ mod tests {
             create_test_blob(registry, &mixed, b"mixed content").await;
             registry
                 .blob_store
-                .create_upload(&mixed, UploadSessionId::generate().as_ref())
+                .create_upload(&mixed, &UploadSessionId::generate())
                 .await
                 .unwrap();
 
@@ -1254,7 +1258,7 @@ mod tests {
         let namespace = Namespace::new("test-repo/upload-only").unwrap();
         registry
             .blob_store
-            .create_upload(&namespace, UploadSessionId::generate().as_ref())
+            .create_upload(&namespace, &UploadSessionId::generate())
             .await
             .unwrap();
 

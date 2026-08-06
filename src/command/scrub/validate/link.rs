@@ -60,7 +60,7 @@ impl Validator {
                     .await
             }
             ParsedLink::ManifestIndex { index, child } => {
-                self.validate_tracked_link(key, &namespace, LinkKind::Manifest(index, child))
+                self.validate_tracked_link(key, &namespace, LinkKind::Manifest { index, child })
                     .await
             }
         }

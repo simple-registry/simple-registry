@@ -6,7 +6,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use crate::{
     identity::{Action, ManifestPutTarget},
     jobs::{JobState, Queue},
-    oci::{Digest, Namespace, Reference, Tag, UploadSessionId},
+    oci::{Digest, MediaType, Namespace, Reference, Tag, UploadSessionId},
 };
 
 /// Deserializes a query string, returning `None` when a value fails to
@@ -36,7 +36,7 @@ pub fn parse(method: &Method, uri: &Uri) -> Option<Action> {
             return Some(Action::ApiVersion);
         }
         "/v2/_catalog" if method == Method::GET => {
-            let (n, last) = parse_pagination(params);
+            let PaginationQuery { n, last } = parse_pagination(params);
             return Some(Action::ListCatalog { n, last });
         }
         _ => {}
@@ -89,15 +89,18 @@ struct TagQuery {
 
 #[derive(Deserialize, Default)]
 struct MountQuery {
-    mount: Option<String>,
-    from: Option<String>,
+    mount: Option<Digest>,
+    from: Option<Namespace>,
     digest: Option<Digest>,
 }
 
+/// The referrers `?artifactType=` filter. The value is a media type per the
+/// image spec, so it deserializes through [`MediaType`] and a malformed one
+/// rejects the route instead of silently filtering nothing.
 #[derive(Deserialize, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 struct ArtifactTypeQuery {
-    artifact_type: Option<String>,
+    artifact_type: Option<MediaType>,
 }
 
 #[derive(Deserialize, Default)]
@@ -106,32 +109,35 @@ struct PaginationQuery {
     last: Option<String>,
 }
 
-fn parse_pagination(params: Option<&str>) -> (Option<u16>, Option<String>) {
-    let query: PaginationQuery = params.and_then(parse_query).unwrap_or_default();
-    (query.n, query.last)
+fn parse_pagination(params: Option<&str>) -> PaginationQuery {
+    params.and_then(parse_query).unwrap_or_default()
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct JobsQuery {
     n: Option<u16>,
     after: Option<String>,
-    queue: Option<String>,
+    #[serde(default = "default_jobs_queue")]
+    queue: Queue,
+}
+
+fn default_jobs_queue() -> Queue {
+    Queue::Cache
 }
 
 /// Parses the `?n=&after=&queue=` of a `_jobs` admin route strictly: a lenient
 /// parse would reset the whole struct on one bad value and silently administer
 /// the default `cache` queue. Returns `None` on a malformed value or unknown
 /// queue; an absent selector defaults to `cache`.
-fn parse_jobs_query(params: Option<&str>) -> Option<(Option<u16>, Option<String>, Queue)> {
-    let query: JobsQuery = match params {
-        Some(params) => parse_query(params)?,
-        None => JobsQuery::default(),
-    };
-    let queue = match query.queue.as_deref() {
-        None => Queue::Cache,
-        Some(name) => name.parse().ok()?,
-    };
-    Some((query.n, query.after, queue))
+fn parse_jobs_query(params: Option<&str>) -> Option<JobsQuery> {
+    match params {
+        Some(params) => parse_query(params),
+        None => Some(JobsQuery {
+            n: None,
+            after: None,
+            queue: default_jobs_queue(),
+        }),
+    }
 }
 
 /// Parse the angos-specific extension API routes. `path` is relative to the
@@ -147,11 +153,11 @@ fn try_parse_extension(method: &Method, path: &str, params: Option<&str>) -> Opt
         Method::GET => match path {
             "_repositories" => Some(Action::ListRepositories),
             "_jobs" => {
-                let (n, after, queue) = parse_jobs_query(params)?;
+                let JobsQuery { n, after, queue } = parse_jobs_query(params)?;
                 Some(Action::ListJobs { queue, n, after })
             }
             "_jobs/failed" => {
-                let (n, after, queue) = parse_jobs_query(params)?;
+                let JobsQuery { n, after, queue } = parse_jobs_query(params)?;
                 Some(Action::ListFailedJobs { queue, n, after })
             }
             _ => {
@@ -175,7 +181,7 @@ fn try_parse_extension(method: &Method, path: &str, params: Option<&str>) -> Opt
                 .strip_prefix("_jobs/failed/")
                 .and_then(|rest| rest.strip_suffix("/retry"))
                 .filter(|key| is_job_key(key))?;
-            let (_, _, queue) = parse_jobs_query(params)?;
+            let queue = parse_jobs_query(params)?.queue;
             Some(Action::RetryJob {
                 queue,
                 storage_key: key.to_string(),
@@ -183,7 +189,7 @@ fn try_parse_extension(method: &Method, path: &str, params: Option<&str>) -> Opt
         }
         Method::DELETE => {
             if let Some(key) = path.strip_prefix("_jobs/failed/").filter(|k| is_job_key(k)) {
-                let (_, _, queue) = parse_jobs_query(params)?;
+                let queue = parse_jobs_query(params)?.queue;
                 return Some(Action::DeleteJob {
                     queue,
                     state: JobState::Failed,
@@ -193,7 +199,7 @@ fn try_parse_extension(method: &Method, path: &str, params: Option<&str>) -> Opt
             let key = path
                 .strip_prefix("_jobs/pending/")
                 .filter(|k| is_job_key(k))?;
-            let (_, _, queue) = parse_jobs_query(params)?;
+            let queue = parse_jobs_query(params)?.queue;
             Some(Action::DeleteJob {
                 queue,
                 state: JobState::Pending,
@@ -219,27 +225,18 @@ fn try_parse_upload(method: &Method, path: &str, params: Option<&str>) -> Option
         if *method != Method::POST {
             return None;
         }
-        // Strict parse: a malformed query rejects the POST as a 400 instead of
-        // silently starting a session.
+        // The OCI fall-back-to-session rule covers unsatisfiable mounts, not
+        // syntactically invalid ones, so a malformed query is a 400.
         let query: MountQuery = match params {
             Some(p) => parse_query(p)?,
             None => MountQuery::default(),
         };
 
-        // A malformed `?mount=` rejects the POST: the OCI fall-back-to-session
-        // rule covers unsatisfiable mounts, not syntactically invalid ones.
-        if let Some(value) = &query.mount {
-            let digest = value.parse::<Digest>().ok()?;
-            // A malformed `?from=` is rejected rather than treated as from-less
-            // auto-discovery, which would widen the authorized source set.
-            let from = match &query.from {
-                Some(repo) => Some(Namespace::new(repo).ok()?),
-                None => None,
-            };
+        if let Some(digest) = query.mount {
             return Some(Action::MountBlob {
                 namespace,
                 digest,
-                from,
+                from: query.from,
             });
         }
 
@@ -338,9 +335,12 @@ fn try_find_referrers(method: &Method, path: &str, params: Option<&str>) -> Opti
         let namespace = Namespace::new(namespace_str).ok()?;
         let digest = Digest::from_str(digest).ok()?;
 
-        let artifact_type = params
-            .and_then(parse_query::<ArtifactTypeQuery>)
-            .and_then(|f| f.artifact_type);
+        // Strict parse: a malformed `?artifactType=` is a bad filter, not an
+        // absent one, so it must not degrade into an unfiltered listing.
+        let artifact_type = match params {
+            Some(params) => parse_query::<ArtifactTypeQuery>(params)?.artifact_type,
+            None => None,
+        };
 
         if *method == Method::GET {
             return Some(Action::GetReferrer {
@@ -359,7 +359,7 @@ fn try_find_tags(method: &Method, path: &str, params: Option<&str>) -> Option<Ac
         && *method == Method::GET
     {
         let namespace = Namespace::new(namespace_str).ok()?;
-        let (n, last) = parse_pagination(params);
+        let PaginationQuery { n, last } = parse_pagination(params);
         return Some(Action::ListTags { namespace, n, last });
     }
 

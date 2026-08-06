@@ -173,15 +173,16 @@ pub async fn metadata_store(
 ) -> Result<Arc<MetadataStore>, Error> {
     let store = build_store(config).await?;
 
-    let s3_ttl = if let ResolvedStorageConfig::S3(s3_cfg) = config {
-        (s3_cfg.link_cache_ttl, s3_cfg.access_time_debounce_secs)
-    } else {
-        (0, 0)
-    };
+    let (link_cache_ttl, access_time_debounce_secs) =
+        if let ResolvedStorageConfig::S3(s3_cfg) = config {
+            (s3_cfg.link_cache_ttl, s3_cfg.access_time_debounce_secs)
+        } else {
+            (0, 0)
+        };
 
     let mut builder = MetadataStore::builder(store)
-        .link_cache_ttl(s3_ttl.0)
-        .access_time_debounce_secs(s3_ttl.1)
+        .link_cache_ttl(link_cache_ttl)
+        .access_time_debounce_secs(access_time_debounce_secs)
         .namespace_walk_concurrency(namespace_walk_concurrency);
 
     // Wire in the auth cache for link-metadata caching (only meaningful on S3,
@@ -289,7 +290,7 @@ pub async fn repositories(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, path::PathBuf};
 
     use angos_tx_engine::lock::{LockStrategy, S3LockConfig};
 
@@ -454,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn test_probe_fs_config_is_noop() {
         let config = ResolvedStorageConfig::FS(MetadataFsConfig {
-            root_dir: "/tmp/probe-test".to_string(),
+            root_dir: PathBuf::from("/tmp/probe-test"),
             lock_strategy: LockStrategy::Memory,
             sync_to_disk: false,
         });

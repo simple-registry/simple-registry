@@ -17,7 +17,7 @@ use crate::{
         metadata_store::{LinkKind, MetadataStore},
         repository_resolver::RepositoryResolver,
     },
-    registry_client::Error as ClientError,
+    registry_client::{Error as ClientError, ManifestHead},
     replication::{ReplicationDownstream, manifest_accept_types, record_reconcile_outcome},
 };
 
@@ -97,7 +97,7 @@ impl ReplicationChecker {
         &self,
         downstream: &ReplicationDownstream,
         namespace: &Namespace,
-        local_tags: &[(Tag, Option<Digest>)],
+        local_tags: &[LocalTag],
         sink: &dyn ActionSink,
     ) {
         reconcile_push_step(downstream, namespace, local_tags, sink).await;
@@ -134,9 +134,12 @@ impl ReplicationChecker {
             }
         };
 
-        // Tags whose digest read failed (`None`) still count as local: prune
-        // must never delete a tag that exists locally.
-        let local_set: HashSet<&str> = local_tags.iter().map(|(tag, _)| tag.as_ref()).collect();
+        // An unresolved tag still counts as local: prune must never delete a
+        // tag that exists locally.
+        let local_set: HashSet<&str> = local_tags
+            .iter()
+            .map(|local| local.tag().as_ref())
+            .collect();
         for tag in downstream_tags {
             if local_set.contains(tag.as_ref()) {
                 continue;
@@ -169,12 +172,12 @@ impl ReplicationChecker {
 /// Push step of a reconcile: HEAD every local tag against the downstream
 /// (concurrently, bounded by `max_concurrent_pushes`) and enqueue a push for
 /// each diverging or absent one. The probe phase fans out; the enqueues are
-/// applied serially in probe order. A tag whose local read failed (`None`) is
-/// skipped here but still counts as local for the prune step.
+/// applied serially in probe order. An unresolved tag is skipped here but still
+/// counts as local for the prune step.
 async fn reconcile_push_step(
     downstream: &ReplicationDownstream,
     namespace: &Namespace,
-    local_tags: &[(Tag, Option<Digest>)],
+    local_tags: &[LocalTag],
     sink: &dyn ActionSink,
 ) {
     enum Probe {
@@ -198,7 +201,10 @@ async fn reconcile_push_step(
 
     let candidates: Vec<(Tag, Digest)> = local_tags
         .iter()
-        .filter_map(|(tag, local)| local.as_ref().map(|digest| (tag.clone(), digest.clone())))
+        .filter_map(|local| match local {
+            LocalTag::Resolved { tag, digest } => Some((tag.clone(), digest.clone())),
+            LocalTag::Unresolved { .. } => None,
+        })
         .collect();
     let probes = stream::iter(candidates)
         .map(|(tag, local)| async move {
@@ -213,7 +219,10 @@ async fn reconcile_push_step(
                 .head_manifest(&manifest_accept_types(), &location)
                 .await
             {
-                Ok((_, Some(digest), _)) if digest == local => {
+                Ok(ManifestHead {
+                    digest: Some(digest),
+                    ..
+                }) if digest == local => {
                     debug!(
                         "Tag '{namespace}:{tag}' already converged on downstream '{}'",
                         downstream.name
@@ -280,6 +289,27 @@ async fn reconcile_push_step(
     }
 }
 
+/// A local tag as the reconcile snapshot saw it. Both variants count as local,
+/// so the prune step never deletes either; only a resolved one can be pushed.
+enum LocalTag {
+    Resolved {
+        tag: Tag,
+        digest: Digest,
+    },
+    /// The link read failed, so the digest is unknown for this pass.
+    Unresolved {
+        tag: Tag,
+    },
+}
+
+impl LocalTag {
+    fn tag(&self) -> &Tag {
+        match self {
+            LocalTag::Resolved { tag, .. } | LocalTag::Unresolved { tag } => tag,
+        }
+    }
+}
+
 #[async_trait]
 impl NamespaceChecker for ReplicationChecker {
     async fn check(&self, namespace: &Namespace, sink: &dyn ActionSink) -> Result<(), Error> {
@@ -298,16 +328,16 @@ impl NamespaceChecker for ReplicationChecker {
         }
 
         // Collect and digest-resolve the tag set once to avoid O(downstreams x
-        // tags) metadata reads; the link reads fan out. A failed link read
-        // resolves to `None`: skipped for push but still counted as local so
-        // prune never deletes a live tag.
-        let local_tags: Vec<(Tag, Option<Digest>)> = self
+        // tags) metadata reads; the link reads fan out.
+        let local_tags: Vec<LocalTag> = self
             .metadata_store
             .stream_tags(namespace)
             .err_into::<Error>()
             .map_ok(|tag| async move {
-                let digest = self.local_digest(namespace, &tag).await;
-                Ok((tag, digest))
+                Ok(match self.local_digest(namespace, &tag).await {
+                    Some(digest) => LocalTag::Resolved { tag, digest },
+                    None => LocalTag::Unresolved { tag },
+                })
             })
             .try_buffered(self.tag_resolve_concurrency)
             .try_collect()

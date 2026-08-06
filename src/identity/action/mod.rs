@@ -4,7 +4,7 @@ use serde::{Serialize, Serializer, ser::SerializeMap};
 
 use crate::{
     jobs::{JobState, Queue},
-    oci::{Digest, Namespace, Reference, Tag, UploadSessionId},
+    oci::{Digest, MediaType, Namespace, Reference, Tag, UploadSessionId},
 };
 
 /// Action represents a parsed HTTP request: both the domain operation (for CEL policies)
@@ -150,11 +150,13 @@ pub enum Action {
         reference: Reference,
     },
     #[serde(rename = "get-referrers")]
+    /// `artifact_type` is the validated `?artifactType=` filter; a malformed
+    /// value is refused by the router rather than reaching the listing.
     GetReferrer {
         namespace: Namespace,
         digest: Digest,
         #[serde(skip_serializing_if = "Option::is_none")]
-        artifact_type: Option<String>,
+        artifact_type: Option<MediaType>,
     },
     #[serde(rename = "list-revisions")]
     ListRevisions {
