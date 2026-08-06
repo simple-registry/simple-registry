@@ -44,6 +44,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - An upload directory whose name is not a session id is now quarantined by scrub like any other unrecognized key, instead of being reported as a session that only prune could reach.
 - A directory whose name is not a valid namespace no longer appears in the `_catalog` listing or the admin namespace listing, matching how a malformed tag directory is already dropped; scrub still reports and reclaims it.
 - An `Accept` member that is not a media range is dropped instead of being relayed verbatim to an upstream on a pull-through request; the wildcard forms clients actually send (`*/*`, `type/*`) are unaffected.
+- An upload session whose stored state no longer decodes is now reaped by prune instead of kept forever, since re-reading it returns the same bytes; a session whose read failed transiently is still kept.
 
 ## 1.4.4
 

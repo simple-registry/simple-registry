@@ -47,12 +47,16 @@ fn classify_upload(
     match summary {
         Ok(s) if now.signed_duration_since(s.started_at) > window => UploadVerdict::DeleteObsolete,
         Ok(_) => UploadVerdict::Keep,
+        // A corrupt record never decodes on a retry, so the session can never
+        // complete and is safe to reap.
         Err(
-            RegistryError::BlobUploadUnknown | RegistryError::NotFound | RegistryError::BlobUnknown,
+            RegistryError::BlobUploadUnknown
+            | RegistryError::NotFound
+            | RegistryError::BlobUnknown
+            | RegistryError::Corrupt(_),
         ) => UploadVerdict::DeleteInconsistent,
-        // A corrupt session record and a transient backend read both collapse
-        // to `Internal`; err on the safe side and keep the upload rather than
-        // risk deleting one on a transient error.
+        // A transient backend read is kept: deleting on one would destroy a
+        // live upload.
         Err(_) => UploadVerdict::Keep,
     }
 }
@@ -269,6 +273,7 @@ mod tests {
             RegistryError::BlobUploadUnknown,
             RegistryError::NotFound,
             RegistryError::BlobUnknown,
+            RegistryError::Corrupt("hash state deserialization error".to_string()),
         ] {
             let verdict = classify_upload(Err(&error), Duration::hours(1), fixed_now());
             assert!(matches!(verdict, UploadVerdict::DeleteInconsistent));
