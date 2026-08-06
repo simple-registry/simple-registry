@@ -226,22 +226,6 @@ impl Transaction {
         TransactionBuilder::new()
     }
 
-    /// Construct a `Transaction` from pre-computed `reads` and `mutations`.
-    ///
-    /// Use this when the caller already has [`Read`] fingerprints captured
-    /// from a prior read (e.g. via a planner that exposes its mutation set)
-    /// and would otherwise have to re-hash the bodies to feed the builder.
-    /// Coarse lock keys default to empty; add via direct field access if
-    /// needed.
-    #[must_use]
-    pub fn from_parts(reads: Vec<Read>, mutations: Vec<Mutation>) -> Self {
-        Self {
-            reads,
-            mutations,
-            coarse_lock_keys: Vec::new(),
-        }
-    }
-
     /// Collect the full set of keys that must be locked for this transaction
     /// (reads ∪ mutations ∪ coarse lock keys), sorted and de-duplicated.
     #[must_use]

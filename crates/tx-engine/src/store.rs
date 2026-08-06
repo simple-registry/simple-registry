@@ -189,13 +189,6 @@ impl Store {
         self.lock.storage_label()
     }
 
-    /// `true` when writes coordinate through storage-level conditional
-    /// operations (the CAS executor).
-    #[must_use]
-    pub fn cas_enabled(&self) -> bool {
-        self.conditional.is_some()
-    }
-
     /// `true` when the coordination lock serializes across processes (Redis or
     /// S3), so separate `angos` processes claim the same work safely; `false`
     /// for the in-process `memory` lock. Callers that need cross-process

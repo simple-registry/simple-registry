@@ -21,7 +21,7 @@ use reqwest::{
     header::{HeaderMap, HeaderName},
 };
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
 
 use crate::{
@@ -34,7 +34,6 @@ use crate::{
 };
 
 const MAX_MULTIPART_COPY_PARTS: u32 = 10_000;
-const STREAM_BODY_PREALLOC_CAP: usize = 8 * 1024 * 1024;
 
 /// A streaming `GetObject` result. The body pulls bytes off the HTTP socket on
 /// demand (no full-payload buffering), and `content_length` reports the size
@@ -198,19 +197,6 @@ impl Backend {
             body: Box::new(reader),
             content_length,
         })
-    }
-
-    /// # Errors
-    /// Same as [`get_object`](Self::get_object), plus [`Error`] from
-    /// draining the body stream into memory.
-    pub async fn get_object_body(&self, path: &str, offset: Option<u64>) -> Result<Vec<u8>, Error> {
-        let mut res = self.get_object(path, offset).await?;
-        let capacity = usize::try_from(res.content_length)
-            .unwrap_or(STREAM_BODY_PREALLOC_CAP)
-            .min(STREAM_BODY_PREALLOC_CAP);
-        let mut buf = Vec::with_capacity(capacity);
-        res.body.read_to_end(&mut buf).await?;
-        Ok(buf)
     }
 
     /// # Errors
@@ -976,7 +962,10 @@ mod tests {
     use std::net::SocketAddr;
 
     use bytesize::ByteSize;
-    use tokio::{io::AsyncWriteExt, net::TcpListener};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path, query_param},
