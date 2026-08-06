@@ -25,6 +25,7 @@
 use std::sync::Arc;
 
 use cel_interpreter::Context;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 use tracing::{debug, warn};
 
@@ -79,6 +80,26 @@ pub struct ManifestImage {
     pub tag: Option<String>,
     pub pushed_at: EpochSeconds,
     pub last_pulled_at: EpochSeconds,
+}
+
+impl ManifestImage {
+    /// Builds the CEL-facing image from the optional timestamps a link carries.
+    /// An unknown push time becomes `now`, so an age rule keeps content of
+    /// unknown age instead of deleting it as if pushed at the epoch; an unknown
+    /// pull time becomes the `0` the CEL reference documents.
+    #[must_use]
+    pub fn new(
+        tag: Option<String>,
+        pushed_at: Option<DateTime<Utc>>,
+        last_pulled_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            tag,
+            pushed_at: EpochSeconds::from_seconds(pushed_at.unwrap_or(now).timestamp()),
+            last_pulled_at: EpochSeconds::from_seconds(last_pulled_at.map_or(0, |t| t.timestamp())),
+        }
+    }
 }
 
 /// Retention policy engine.
@@ -544,5 +565,24 @@ mod tests {
             ],
         };
         assert!(!push_only.uses_pull_time());
+    }
+
+    /// The two absences resolve differently and both are operator-visible:
+    /// `doc/reference/cel-expressions.md` documents `last_pulled_at` as "0 if
+    /// never pulled", while an unknown push time must not read as 1970.
+    #[test]
+    fn absent_timestamps_resolve_to_now_and_zero() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+
+        let unknown = serde_json::to_value(ManifestImage::new(None, None, None, now)).unwrap();
+        assert_eq!(unknown["pushed_at"], now.timestamp());
+        assert_eq!(unknown["last_pulled_at"], 0);
+
+        let pushed = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
+        let pulled = Utc.with_ymd_and_hms(2025, 7, 1, 0, 0, 0).unwrap();
+        let known = serde_json::to_value(ManifestImage::new(None, Some(pushed), Some(pulled), now))
+            .unwrap();
+        assert_eq!(known["pushed_at"], pushed.timestamp());
+        assert_eq!(known["last_pulled_at"], pulled.timestamp());
     }
 }
