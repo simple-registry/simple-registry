@@ -13,6 +13,7 @@ use crate::{
     },
     cache::Cache,
     configuration::Configuration,
+    http_client::apply_tls_files,
     identity::{AuthMethod, ClientIdentity},
     metrics_provider::metrics_provider,
 };
@@ -43,16 +44,9 @@ impl Authenticator {
     pub fn new(config: &Configuration, cache: &Arc<Cache>) -> Result<Self, Error> {
         let auth_config = &config.auth;
         reject_provider_name_collision(auth_config)?;
-        // No client-level timeout: each OIDC fetch carries a per-request
-        // timeout from its provider config (`http_request_timeout_secs`,
-        // `jwks_refresh_timeout_secs`).
-        let oidc_client =
-            Arc::new(Client::builder().build().map_err(|e| {
-                Error::Initialization(format!("Failed to create HTTP client: {e}"))
-            })?);
 
         let mtls_validator = MtlsValidator::new();
-        let oidc_validators = Self::build_oidc_validators(auth_config, &oidc_client, cache);
+        let oidc_validators = Self::build_oidc_validators(auth_config, cache)?;
         let basic_auth_validator = BasicAuthValidator::new(&auth_config.identity)?;
 
         let provider_names: Vec<String> = oidc_validators
@@ -77,23 +71,22 @@ impl Authenticator {
 
     fn build_oidc_validators(
         auth_config: &AuthConfig,
-        client: &Arc<Client>,
         cache: &Arc<Cache>,
-    ) -> OidcValidators {
+    ) -> Result<OidcValidators, Error> {
         let mut validators = Vec::with_capacity(auth_config.oidc.len());
 
         for (name, oidc_config) in &auth_config.oidc {
             let validator = OidcValidator::new(
                 name.clone(),
                 oidc_config,
-                Arc::clone(client),
+                build_oidc_client(name, oidc_config)?,
                 Arc::clone(cache),
             );
             validators.push((name.clone(), Arc::new(validator) as Arc<dyn AuthMiddleware>));
         }
 
         validators.sort_by(|a, b| a.0.cmp(&b.0));
-        validators
+        Ok(validators)
     }
 
     /// Authentication order: mTLS → Registry token → OIDC → Basic Auth
@@ -276,6 +269,29 @@ impl Authenticator {
     }
 }
 
+/// One client per provider: a CA bundle is baked into a client when it is built,
+/// so a provider trusting its own issuer cannot share one with the others.
+fn build_oidc_client(name: &str, config: &oidc::Config) -> Result<Arc<Client>, Error> {
+    let initialization_error = |e: String| {
+        Error::Initialization(format!(
+            "Failed to create HTTP client for auth.oidc.{name}: {e}"
+        ))
+    };
+
+    // No client-level timeout: each fetch carries a per-request timeout from the
+    // provider config (`http_request_timeout_secs`, `jwks_refresh_timeout_secs`).
+    apply_tls_files(
+        Client::builder(),
+        config.server_ca_bundle.as_deref(),
+        None,
+        None,
+    )
+    .map_err(initialization_error)?
+    .build()
+    .map(Arc::new)
+    .map_err(|e| initialization_error(e.to_string()))
+}
+
 /// A Basic credential whose username names a provider is read as that provider's
 /// token, and the validation failure ends the chain before basic auth runs, so
 /// the user could never authenticate. Refused at startup rather than at runtime.
@@ -316,11 +332,14 @@ fn reject_algorithm_collision(providers: &HashMap<String, oidc::Config>) -> Resu
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use argon2::{
         Algorithm, Argon2, Params, PasswordHasher, Version,
         password_hash::{SaltString, rand_core::OsRng},
     };
     use async_trait::async_trait;
+    use tempfile::tempdir;
 
     use super::*;
     use crate::{
@@ -335,16 +354,13 @@ mod tests {
             mtls::cert_der,
             oidc::KID,
             requests::{empty_parts, parts_with_authorization, parts_with_basic_auth},
+            webhook::ca_bundle_pem,
         },
     };
 
     fn create_minimal_config() -> Configuration {
         metrics_provider::init_for_tests();
         minimal_config()
-    }
-
-    fn test_http_client() -> Arc<Client> {
-        Arc::new(Client::new())
     }
 
     #[test]
@@ -455,8 +471,7 @@ mod tests {
         let auth_config = AuthConfig::default();
         let cache = cache::Config::Memory.to_backend().unwrap();
 
-        let validators =
-            Authenticator::build_oidc_validators(&auth_config, &test_http_client(), &cache);
+        let validators = Authenticator::build_oidc_validators(&auth_config, &cache).unwrap();
 
         assert!(validators.is_empty());
     }
@@ -472,8 +487,7 @@ mod tests {
 
         let cache = cache::Config::Memory.to_backend().unwrap();
 
-        let validators =
-            Authenticator::build_oidc_validators(&config.auth, &test_http_client(), &cache);
+        let validators = Authenticator::build_oidc_validators(&config.auth, &cache).unwrap();
 
         assert_eq!(validators.len(), 1);
         assert_eq!(validators[0].0, "github");
@@ -490,11 +504,57 @@ mod tests {
 
         let cache = cache::Config::Memory.to_backend().unwrap();
 
-        let validators =
-            Authenticator::build_oidc_validators(&config.auth, &test_http_client(), &cache);
+        let validators = Authenticator::build_oidc_validators(&config.auth, &cache).unwrap();
 
         assert_eq!(validators.len(), 1);
         assert_eq!(validators[0].0, "custom");
+    }
+
+    /// An issuer whose certificate the system roots do not cover, such as a
+    /// kube-apiserver, is reachable only through its own CA bundle.
+    #[test]
+    fn a_provider_may_trust_its_own_ca_bundle() {
+        let bundle = tempdir().unwrap();
+        let bundle_path = bundle.path().join("ca.pem");
+        fs::write(&bundle_path, ca_bundle_pem()).unwrap();
+
+        let config = load_config(&format!(
+            r#"
+            [auth.oidc.kube]
+            issuer = "https://kubernetes.default.svc"
+            server_ca_bundle = "{}"
+        "#,
+            bundle_path.display()
+        ));
+
+        let cache = cache::Config::Memory.to_backend().unwrap();
+
+        assert_eq!(
+            config.auth.oidc["kube"].server_ca_bundle.as_deref(),
+            Some(bundle_path.as_path())
+        );
+        assert!(Authenticator::build_oidc_validators(&config.auth, &cache).is_ok());
+    }
+
+    #[test]
+    fn a_ca_bundle_that_does_not_load_is_refused_at_startup() {
+        let config = load_config(
+            r#"
+            [auth.oidc.kube]
+            issuer = "https://kubernetes.default.svc"
+            server_ca_bundle = "/nonexistent/ca.pem"
+        "#,
+        );
+
+        let cache = cache::Config::Memory.to_backend().unwrap();
+
+        let Err(error) = Authenticator::build_oidc_validators(&config.auth, &cache) else {
+            panic!("an unreadable CA bundle must be refused");
+        };
+        assert!(
+            matches!(&error, Error::Initialization(msg) if msg.contains("auth.oidc.kube")),
+            "got: {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -602,8 +662,7 @@ mod tests {
 
         let cache = cache::Config::Memory.to_backend().unwrap();
 
-        let validators =
-            Authenticator::build_oidc_validators(&config.auth, &test_http_client(), &cache);
+        let validators = Authenticator::build_oidc_validators(&config.auth, &cache).unwrap();
 
         assert_eq!(validators.len(), 2);
         assert_eq!(validators[0].0, "custom");

@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - An optional token service exchanges a client's credential for a registry-signed bearer token at `GET /token`, so a short-lived CI credential no longer has to outlive the push it starts.
 - `auth.oidc.<name>.required_claims` rejects a token that does not carry the claims listed, before any access policy runs.
+- `auth.oidc.<name>.server_ca_bundle` trusts a private CA for that provider's discovery and JWKS fetches, so an issuer such as a kube-apiserver needs no host-wide trust.
 
 ### Changed
 

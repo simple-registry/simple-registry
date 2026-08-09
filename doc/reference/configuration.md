@@ -432,6 +432,7 @@ tokens are validated, so there is no provider type to select.
 |-------------------------|--------|------------|----------------------------------------------|
 | `issuer`                | string | required   | OIDC issuer URL                              |
 | `jwks_uri`              | string | -          | Custom JWKS URI (auto-discovered if not set) |
+| `server_ca_bundle`      | string | -          | PEM CA bundle trusted for this provider's HTTPS fetches |
 | `required_claims`       | array  | `[]`       | Claims a token must carry; a missing or null one is rejected |
 | `jwks_refresh_interval` | u64    | `3600`     | JWKS refresh interval (seconds)              |
 | `required_audience`     | string | -          | Required audience claim                      |
@@ -448,6 +449,11 @@ issuer = "https://token.actions.githubusercontent.com"
 jwks_uri = "https://token.actions.githubusercontent.com/.well-known/jwks"
 required_claims = ["repository", "actor"]
 ```
+
+Set `server_ca_bundle` for an issuer whose certificate the system roots do not
+cover, such as a kube-apiserver signed by the cluster CA. It applies to the
+discovery and JWKS fetches for that provider alone; other providers keep the
+system roots.
 
 `required_claims` checks presence only. Predicates over claim *values* belong in
 the access policy, which sees the whole claim map.

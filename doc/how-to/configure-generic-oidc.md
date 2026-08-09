@@ -41,6 +41,7 @@ jwks_uri = "https://auth.example.com/.well-known/jwks.json"  # Override discover
 jwks_refresh_interval = 3600             # Refresh keys hourly (default)
 clock_skew_tolerance = 60                # Allow 60s clock drift (default)
 allowed_algorithms = ["RS256"]           # Restrict accepted JWT algorithms (default)
+server_ca_bundle = "/certs/ca.pem"       # Trust a private CA for this issuer
 ```
 
 `required_claims` checks presence only. To test a claim's *value*, use an access
@@ -98,6 +99,18 @@ required_audience = "registry-client"
 [auth.oidc.azure]
 issuer = "https://login.microsoftonline.com/your-tenant-id/v2.0"
 required_audience = "api://your-app-id"
+```
+
+### Kubernetes API Server
+
+The cluster CA signs the issuer, so point `server_ca_bundle` at it rather than
+trusting that CA for every outbound connection.
+
+```toml
+[auth.oidc.kube]
+issuer = "https://kubernetes.default.svc"
+server_ca_bundle = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+required_audience = "angos"
 ```
 
 ---

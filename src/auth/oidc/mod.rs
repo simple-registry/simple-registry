@@ -1,7 +1,7 @@
 pub mod jwk;
 pub mod validator;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use hyper::http::request::Parts;
@@ -28,6 +28,10 @@ use crate::{
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     pub issuer: String,
+    /// CA bundle trusted for the discovery and JWKS fetches, for an issuer whose
+    /// certificate the system roots do not cover, such as a kube-apiserver.
+    #[serde(default)]
+    pub server_ca_bundle: Option<PathBuf>,
     /// Discovered from the issuer's `.well-known/openid-configuration` when omitted.
     #[serde(default)]
     pub jwks_uri: Option<String>,
