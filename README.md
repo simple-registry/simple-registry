@@ -74,6 +74,7 @@ The complete documentation index lives in [doc/index.md](doc/index.md).
 - [Deploy on Kubernetes](doc/how-to/deploy-kubernetes.md)
 - [Configure mTLS](doc/how-to/configure-mtls.md)
 - [Configure GitHub Actions OIDC](doc/how-to/configure-github-actions-oidc.md)
+- [Push from GitHub Actions](doc/how-to/push-from-github-actions.md)
 - [Configure OIDC](doc/how-to/configure-generic-oidc.md)
 - [Set Up Access Control](doc/how-to/set-up-access-control.md)
 - [Configure Retention Policies](doc/how-to/configure-retention-policies.md)

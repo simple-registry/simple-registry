@@ -101,6 +101,9 @@ jobs:
 
 The username must match the provider name (`github-actions` in this example).
 
+For Kaniko, Buildx and the rest of the workflow side, see
+[Push from GitHub Actions](push-from-github-actions.md).
+
 ---
 
 ## Long-Running Pushes
