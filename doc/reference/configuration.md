@@ -458,7 +458,7 @@ system roots.
 `required_claims` checks presence only. Predicates over claim *values* belong in
 the access policy, which sees the whole claim map.
 
-`allowed_algorithms` accepts JWT algorithm names such as `"RS256"`, `"RS384"`, `"RS512"`, `"ES256"`, and `"ES384"`. Angos rejects tokens whose header claims an algorithm outside the provider allowlist before signature verification to prevent algorithm-confusion attacks. With `auth.token_service` configured, `HS256` is refused at startup: the token validator claims every bearer signed with it, so a provider allowing the same algorithm would have its own tokens rejected there instead of reaching it.
+`allowed_algorithms` accepts JWT algorithm names such as `"RS256"`, `"RS384"`, `"RS512"`, `"ES256"`, and `"ES384"`. Angos rejects tokens whose header claims an algorithm outside the provider allowlist before signature verification to prevent algorithm-confusion attacks.
 
 ### Token Service (`auth.token_service`)
 

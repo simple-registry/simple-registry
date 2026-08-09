@@ -531,7 +531,7 @@ The endpoint is advertised in the `WWW-Authenticate` header of a `401`, and OCI 
 {"token":"<jwt>","expires_in":3600}
 ```
 
-Present it as `Authorization: Bearer <jwt>` on subsequent requests. The token carries the identity, never the client certificate or IP: those are read from the live request, so an mTLS client keeps its certificate identity while using a token.
+Present it as `Authorization: Bearer <token>` on subsequent requests. The token declares its own type, `angos+jwt`, which is what tells it apart from a provider's bearer on the same header. The token carries the identity, never the client certificate or IP: those are read from the live request, so an mTLS client keeps its certificate identity while using a token.
 
 The response is `Cache-Control: no-store`, and presenting a registry token here is refused with a `401`: renewing one would let a token outlive the credential it was minted from for as long as a client kept asking, and `ttl_secs` would bound nothing.
 
@@ -546,6 +546,14 @@ Authorization: Basic base64(username:password)
 ```
 Authorization: Bearer <jwt-token>
 ```
+
+**Bearer Token (registry):**
+```
+Authorization: Bearer <token from GET /token>
+```
+
+Both bearers share the header. Angos tells them apart by the type each declares,
+so a token it did not issue is left for the OIDC providers to validate.
 
 **OIDC via Basic Auth (Docker compatibility):**
 ```
@@ -569,7 +577,8 @@ Present a client certificate during TLS handshake.
 
 1. Client makes unauthenticated request
 2. Server returns `401 Unauthorized` with `WWW-Authenticate` header
-3. Client retries with credentials
+3. Client retries with credentials, or, when the header names a `Bearer` realm,
+   exchanges them at that realm for a registry token and retries with it
 4. Server validates and processes request
 
 ---

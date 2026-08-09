@@ -53,13 +53,11 @@ impl Authenticator {
             .iter()
             .map(|(name, _)| name.clone())
             .collect();
-        let token_validator = match &auth_config.token_service {
-            Some(config) => {
-                reject_algorithm_collision(&auth_config.oidc)?;
-                Some(TokenValidator::new(config, &provider_names)?)
-            }
-            None => None,
-        };
+        let token_validator = auth_config
+            .token_service
+            .as_ref()
+            .map(|config| TokenValidator::new(config, &provider_names))
+            .transpose()?;
 
         Ok(Self {
             mtls_validator,
@@ -126,7 +124,6 @@ impl Authenticator {
         Ok(identity)
     }
 
-    /// Attempts mTLS authentication, returning the method on success.
     /// Errors are logged and suppressed: mTLS is non-fatal so other methods can follow.
     async fn try_mtls_authentication(
         &self,
@@ -158,7 +155,6 @@ impl Authenticator {
         None
     }
 
-    /// Attempts registry token authentication, returning the method on success.
     /// Returns `Err` when the bearer is one of ours but no longer valid; a bearer
     /// belonging to another scheme is left for the OIDC middlewares.
     async fn try_token_authentication(
@@ -191,8 +187,8 @@ impl Authenticator {
         }
     }
 
-    /// Tries each OIDC provider in sorted order, returning the method on first success.
-    /// A failure from one provider does not prevent subsequent providers from being tried.
+    /// Providers are tried in sorted order, and a failure from one does not stop
+    /// the next from being tried.
     /// If no provider succeeds and at least one returned an error, the first error is returned.
     /// First rather than last so that deterministic sort order also makes error reporting deterministic.
     ///
@@ -236,7 +232,6 @@ impl Authenticator {
         }
     }
 
-    /// Attempts basic auth authentication, returning the method on success.
     /// Returns `Err` if credentials were presented but invalid.
     async fn try_basic_authentication(
         &self,
@@ -305,26 +300,6 @@ fn reject_provider_name_collision(auth_config: &AuthConfig) -> Result<(), Error>
         Some(identity) => Err(Error::Initialization(format!(
             "basic-auth username '{}' is also an OIDC provider name",
             identity.username
-        ))),
-        None => Ok(()),
-    }
-}
-
-/// The token validator claims every bearer signed with the token service's own
-/// algorithm, so a provider allowing it would have its tokens rejected there
-/// instead of reaching its middleware. Refused at startup rather than turning
-/// into a blanket 401 at runtime.
-fn reject_algorithm_collision(providers: &HashMap<String, oidc::Config>) -> Result<(), Error> {
-    let collision = providers.iter().find(|(_, config)| {
-        config
-            .allowed_algorithms
-            .contains(&token_service::ALGORITHM)
-    });
-
-    match collision {
-        Some((name, _)) => Err(Error::Initialization(format!(
-            "auth.oidc.{name}.allowed_algorithms cannot contain {:?} while auth.token_service is configured",
-            token_service::ALGORITHM
         ))),
         None => Ok(()),
     }
@@ -876,7 +851,6 @@ mod tests {
         assert_eq!(identity.username.as_deref(), Some("ci-bot"));
     }
 
-    /// A provider's own bearer must still reach the OIDC middlewares.
     #[tokio::test]
     async fn a_bearer_that_is_not_ours_still_reaches_oidc() {
         metrics_provider::init_for_tests();
@@ -988,7 +962,6 @@ mod tests {
 
     /// mTLS has no certificate (`NoCredentials`) + one OIDC provider succeeds.
     /// The identity must carry OIDC claims and no certificate info.
-    /// The reported method is `Oidc`.
     #[tokio::test]
     async fn method_tracking_no_mtls_oidc_success_sets_oidc_identity() {
         metrics_provider::init_for_tests();
@@ -1101,7 +1074,6 @@ mod tests {
         assert_eq!(identity.auth_method, AuthMethod::Oidc);
     }
 
-    /// The same request with no OIDC provider to claim it falls to basic auth.
     #[tokio::test]
     async fn basic_auth_is_reported_when_nothing_stronger_succeeds() {
         metrics_provider::init_for_tests();
@@ -1143,27 +1115,5 @@ mod tests {
 
         assert_eq!(identity.auth_method, AuthMethod::Mtls);
         assert!(!identity.certificate.organizations.is_empty());
-    }
-
-    /// A shared algorithm would make the token validator claim that provider's
-    /// bearers and reject every one of them.
-    #[test]
-    fn a_provider_allowing_the_token_algorithm_is_refused_at_startup() {
-        let config = load_config(
-            r#"
-            [auth.oidc.custom]
-            issuer = "https://auth.example.com"
-            allowed_algorithms = ["HS256"]
-
-            [auth.token_service]
-            secret_key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
-        "#,
-        );
-        let cache = cache::Config::Memory.to_backend().unwrap();
-
-        assert!(matches!(
-            Authenticator::new(&config, &cache),
-            Err(Error::Initialization(_))
-        ));
     }
 }

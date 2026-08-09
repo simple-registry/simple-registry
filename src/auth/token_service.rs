@@ -41,9 +41,12 @@ const MAX_TTL_SECS: u64 = 86400;
 /// end with it, or clients follow the challenge to a 404.
 const TOKEN_PATH: &str = "/token";
 
-/// Public so the authenticator can refuse an OIDC provider that allows the same
-/// algorithm, which would make the validator claim that provider's bearers.
-pub const ALGORITHM: Algorithm = Algorithm::HS256;
+const ALGORITHM: Algorithm = Algorithm::HS256;
+
+/// The type a registry token declares in its own JOSE header. RFC 8725 asks for
+/// explicit typing so one application's JWTs cannot be taken for another's,
+/// which is what tells our bearer apart from a provider's.
+const TOKEN_TYPE: &str = "angos+jwt";
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
@@ -88,7 +91,6 @@ struct TokenClaims {
     oidc: Option<OidcClaims>,
 }
 
-/// Mints tokens and advertises where to get one.
 pub struct TokenIssuer {
     encoding: EncodingKey,
     ttl_secs: u64,
@@ -129,7 +131,10 @@ impl TokenIssuer {
             oidc: identity.oidc.clone(),
         };
 
-        let token = encode(&Header::new(ALGORITHM), &claims, &self.encoding)
+        let mut header = Header::new(ALGORITHM);
+        header.typ = Some(TOKEN_TYPE.to_string());
+
+        let token = encode(&header, &claims, &self.encoding)
             .map_err(|e| Error::Execution(format!("Failed to sign token: {e}")))?;
         Ok((token, self.ttl_secs))
     }
@@ -177,8 +182,6 @@ fn build_challenge(realm: &str) -> Result<HeaderValue, Error> {
         .map_err(|e| Error::Initialization(format!("auth.token_service.realm is unusable: {e}")))
 }
 
-/// Restores the identity an issued token carries, as one link of the
-/// authentication chain.
 pub struct TokenValidator {
     decoding: DecodingKey,
     validation: Validation,
@@ -208,12 +211,13 @@ impl AuthMiddleware for TokenValidator {
         parts: &Parts,
         identity: &mut ClientIdentity,
     ) -> Result<AuthResult, Error> {
+        // A bearer typed as anything else belongs to an OIDC provider and must
+        // reach those middlewares untouched.
         let Some(token) = bearer_token(&parts.headers) else {
             return Ok(AuthResult::NoCredentials);
         };
-        // Only an HS256 token can be ours. Any other bearer belongs to an OIDC
-        // provider and must reach those middlewares untouched.
-        if !matches!(decode_header(&token), Ok(header) if header.alg == ALGORITHM) {
+        if !matches!(decode_header(&token), Ok(header) if header.typ.as_deref() == Some(TOKEN_TYPE))
+        {
             return Ok(AuthResult::NoCredentials);
         }
 
@@ -246,7 +250,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        auth::oidc::validator::tests::make_token,
+        auth::oidc::validator::tests::{encoding_key, make_token},
         identity::{ClientCertificate, OidcClaims},
         test_fixtures::{oidc::KID, requests::parts_with_authorization},
     };
@@ -260,6 +264,13 @@ mod tests {
             realm: None,
             ttl_secs: default_ttl_secs(),
         }
+    }
+
+    /// The header a forger must reproduce: our declared type, any algorithm.
+    fn our_header(algorithm: Algorithm) -> Header {
+        let mut header = Header::new(algorithm);
+        header.typ = Some(TOKEN_TYPE.to_string());
+        header
     }
 
     fn issuer() -> TokenIssuer {
@@ -374,7 +385,7 @@ mod tests {
             username: Some("ci-bot".to_string()),
             oidc: None,
         };
-        let token = encode(&Header::new(ALGORITHM), &claims, &issuer().encoding).unwrap();
+        let token = encode(&our_header(ALGORITHM), &claims, &issuer().encoding).unwrap();
         let parts = parts_with_authorization(&format!("Bearer {token}"));
 
         let error = validator()
@@ -419,7 +430,7 @@ mod tests {
     /// A provider's own bearer must fall through rather than error, or the OIDC
     /// middlewares never get to see it.
     #[tokio::test]
-    async fn a_non_hs256_bearer_yields_no_credentials() {
+    async fn a_bearer_typed_as_another_scheme_yields_no_credentials() {
         let mut claims = HashMap::new();
         claims.insert("sub".to_string(), json!("someone"));
         let token = make_token(&claims, KID);
@@ -432,17 +443,39 @@ mod tests {
         assert!(matches!(result, AuthResult::NoCredentials));
     }
 
+    /// The type marks a token as ours, so refusing a forgery that claims the type
+    /// rests on the algorithm `Validation` pins at verification.
     #[tokio::test]
-    async fn an_unsigned_token_yields_no_credentials() {
-        let parts = parts_with_authorization(
-            "Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjk5OTk5OTk5OTl9.",
+    async fn a_token_typed_as_ours_but_signed_otherwise_is_refused() {
+        let mut claims = HashMap::new();
+        claims.insert("exp".to_string(), json!(9_999_999_999_u64));
+        let token = encode(&our_header(Algorithm::ES256), &claims, &encoding_key()).unwrap();
+        let parts = parts_with_authorization(&format!("Bearer {token}"));
+
+        let error = validator()
+            .authenticate(&parts, &mut ClientIdentity::default())
+            .await
+            .expect_err("only the token service's own algorithm may verify");
+        assert!(matches!(error, Error::Unauthorized(_)), "got: {error:?}");
+    }
+
+    /// `alg=none` has no `Algorithm` to decode into, so such a token is dropped
+    /// before its type is read and can never authenticate.
+    #[tokio::test]
+    async fn an_unsigned_token_never_authenticates() {
+        let token = concat!(
+            "eyJ0eXAiOiJhbmdvcy10b2tlbitqd3QiLCJhbGciOiJub25lIn0",
+            ".eyJleHAiOjk5OTk5OTk5OTl9."
         );
+        let parts = parts_with_authorization(&format!("Bearer {token}"));
 
         let result = validator()
             .authenticate(&parts, &mut ClientIdentity::default())
-            .await
-            .expect("an alg=none token must not authenticate");
-        assert!(matches!(result, AuthResult::NoCredentials));
+            .await;
+        assert!(
+            !matches!(result, Ok(AuthResult::Authenticated)),
+            "got: {result:?}"
+        );
     }
 
     /// Both halves take the key from the same place, so neither can be built

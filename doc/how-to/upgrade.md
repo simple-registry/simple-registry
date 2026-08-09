@@ -403,7 +403,7 @@ Run it once after upgrading. The command is idempotent and leaves links that alr
 
 ---
 
-## 1.4.5 → 1.4.6
+## 1.4.5 → 1.5.0
 
 ### OIDC Providers Are No Longer Typed (Breaking Change)
 
@@ -433,7 +433,7 @@ jwks_uri = "https://token.actions.githubusercontent.com/.well-known/jwks"
 required_claims = ["repository", "actor"]
 ```
 
-`jwks_uri` is optional; without it the registry discovers the endpoint from the issuer. `required_claims` preserves the repository/actor check the GitHub provider performed on every token — drop it only if you want tokens missing those claims to reach your access policy.
+`jwks_uri` is optional; without it the registry discovers the endpoint from the issuer. `required_claims` preserves the repository/actor check the GitHub provider performed on every token; drop it only if you want tokens missing those claims to reach your access policy.
 
 #### Migrate a Generic Provider
 

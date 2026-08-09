@@ -104,9 +104,7 @@ pub mod tests {
         requests::empty_parts,
     };
 
-    /// A certificate the TLS layer accepted but angos cannot parse yields no
-    /// certificate identity instead of failing the request. This must remain the
-    /// ONLY test driving the parse-error branch: `tracing` caches callsite
+    /// This must remain the ONLY test driving the parse-error branch: `tracing` caches callsite
     /// interest process-globally, so a second test under a non-capturing
     /// subscriber could cache the `error!` as disabled and make the log
     /// assertion flaky.
