@@ -101,13 +101,16 @@ Tokens are validated by:
 2. Issuer claim matching
 3. Audience claim (if configured)
 4. Time-based claims (exp, nbf)
+5. Presence of every claim listed in `required_claims`
+
+Providers differ only by configuration; there is no provider type to select.
 
 ```toml
 [auth.oidc.github-actions]
-provider = "github"
+issuer = "https://token.actions.githubusercontent.com"
+required_claims = ["repository", "actor"]
 
 [auth.oidc.corporate]
-provider = "generic"
 issuer = "https://auth.example.com"
 ```
 
@@ -119,7 +122,6 @@ Authorization schemes are case-insensitive; for example, `bearer` and `Bearer` a
 
 **Identity fields:**
 - `identity.oidc.provider_name`
-- `identity.oidc.provider_type`
 - `identity.oidc.claims["claim_name"]`
 
 ### Basic Auth (Password)
@@ -221,7 +223,6 @@ identity = {
 
   oidc: {                          // OIDC info (null if not OIDC)
     provider_name: "github-actions",
-    provider_type: "GitHub Actions",
     claims: {
       "repository": "org/repo",
       "ref": "refs/heads/main",

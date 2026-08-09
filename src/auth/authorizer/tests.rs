@@ -445,7 +445,6 @@ fn log_denial_uses_audit_identity_without_oidc_claims() {
         },
         oidc: Some(OidcClaims {
             provider_name: "github-actions".to_string(),
-            provider_type: "GitHub Actions".to_string(),
             claims: HashMap::from([
                 ("sub".to_string(), json!("repo:private/repo:ref:main")),
                 ("email".to_string(), json!("person@example.com")),
@@ -468,7 +467,6 @@ fn log_denial_uses_audit_identity_without_oidc_claims() {
     assert!(logs.contains("BuildOrg"), "logs were: {logs}");
     assert!(logs.contains("build-cert"), "logs were: {logs}");
     assert!(logs.contains("github-actions"), "logs were: {logs}");
-    assert!(logs.contains("GitHub Actions"), "logs were: {logs}");
     assert!(!logs.contains("person@example.com"), "logs were: {logs}");
     assert!(!logs.contains("repo:private/repo"), "logs were: {logs}");
     assert!(!logs.contains("internal-secret"), "logs were: {logs}");

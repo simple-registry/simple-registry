@@ -11,8 +11,7 @@ use wiremock::{
 use crate::{
     auth::Error,
     auth::oidc::{
-        Jwk, OidcProvider,
-        provider::{BaseConfig, generic::Provider},
+        Config, Jwk,
         validator::{
             Jwks, OpenIdConfiguration, fetch_jwks, fetch_oidc_configuration, jwks_cache_key,
             oidc_configuration_cache_key, validate_oidc_token, verify_allowed_algorithm,
@@ -27,10 +26,11 @@ use crate::{
     },
 };
 
-pub fn build_test_provider_config(uri: &str) -> BaseConfig {
-    BaseConfig {
+pub fn build_test_provider_config(uri: &str) -> Config {
+    Config {
         issuer: uri.to_string(),
         jwks_uri: Some(format!("{uri}/.well-known/jwks")),
+        required_claims: Vec::new(),
         jwks_refresh_interval: 3600,
         required_audience: Some("test-audience".to_string()),
         clock_skew_tolerance: 60,
@@ -44,7 +44,7 @@ fn verify_jwt(
     token: &str,
     jwks: &Jwks,
     provider_name: &str,
-    provider: &dyn OidcProvider,
+    provider: &Config,
 ) -> Result<OidcClaims, Error> {
     let header = decode_header(token)
         .map_err(|e| Error::Unauthorized(format!("Failed to decode JWT header: {e}")))?;
@@ -68,12 +68,11 @@ async fn test_fetch_jwks_with_explicit_uri() {
 
     mount_jwks(&mock_server, jwks_response).await;
 
-    let config = BaseConfig {
+    let provider = Config {
         required_audience: None,
         ..build_test_provider_config(&mock_server.uri())
     };
 
-    let provider = Provider::new(config);
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -112,13 +111,12 @@ async fn test_fetch_jwks_with_discovery() {
 
     mount_jwks(&mock_server, jwks_response).await;
 
-    let config = BaseConfig {
+    let provider = Config {
         jwks_uri: None,
         required_audience: None,
         ..build_test_provider_config(&mock_server.uri())
     };
 
-    let provider = Provider::new(config);
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -151,12 +149,11 @@ async fn test_fetch_jwks_uses_cache() {
         .mount(&mock_server)
         .await;
 
-    let config = BaseConfig {
+    let provider = Config {
         required_audience: None,
         ..build_test_provider_config(&mock_server.uri())
     };
 
-    let provider = Provider::new(config);
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -178,12 +175,11 @@ async fn test_fetch_jwks_http_error() {
         .mount(&mock_server)
         .await;
 
-    let config = BaseConfig {
+    let provider = Config {
         required_audience: None,
         ..build_test_provider_config(&mock_server.uri())
     };
 
-    let provider = Provider::new(config);
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -212,13 +208,12 @@ async fn test_fetch_oidc_configuration_success() {
         .mount(&mock_server)
         .await;
 
-    let config = BaseConfig {
+    let provider = Config {
         jwks_uri: None,
         required_audience: None,
         ..build_test_provider_config(&mock_server.uri())
     };
 
-    let provider = Provider::new(config);
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -249,13 +244,12 @@ async fn test_fetch_oidc_configuration_uses_cache() {
         .mount(&mock_server)
         .await;
 
-    let config = BaseConfig {
+    let provider = Config {
         jwks_uri: None,
         required_audience: None,
         ..build_test_provider_config(&mock_server.uri())
     };
 
-    let provider = Provider::new(config);
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -281,13 +275,12 @@ async fn test_fetch_oidc_configuration_issuer_mismatch() {
         .mount(&mock_server)
         .await;
 
-    let config = BaseConfig {
+    let provider = Config {
         jwks_uri: None,
         required_audience: None,
         ..build_test_provider_config(&mock_server.uri())
     };
 
-    let provider = Provider::new(config);
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -318,13 +311,12 @@ async fn test_fetch_oidc_configuration_http_error() {
         .mount(&mock_server)
         .await;
 
-    let config = BaseConfig {
+    let provider = Config {
         jwks_uri: None,
         required_audience: None,
         ..build_test_provider_config(&mock_server.uri())
     };
 
-    let provider = Provider::new(config);
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -343,12 +335,11 @@ async fn test_fetch_jwks_network_error_returns_provider_unavailable() {
     let url = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);
 
-    let config = BaseConfig {
+    let provider = Config {
         required_audience: None,
         ..build_test_provider_config(&url)
     };
 
-    let provider = Provider::new(config);
     let client = Client::builder()
         .timeout(Duration::from_millis(200))
         .build()
@@ -375,7 +366,7 @@ async fn test_validate_oidc_token_success() {
 
     let token = make_token(&claims, KID);
 
-    let provider = Provider::new(build_test_provider_config(&mock_server.uri()));
+    let provider = build_test_provider_config(&mock_server.uri());
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -385,7 +376,6 @@ async fn test_validate_oidc_token_success() {
     assert!(result.is_ok());
     let oidc_claims = result.unwrap();
     assert_eq!(oidc_claims.provider_name, "test-provider");
-    assert_eq!(oidc_claims.provider_type, "Generic OIDC");
     assert_eq!(oidc_claims.claims.get("sub").unwrap(), "test-user");
 }
 
@@ -400,7 +390,7 @@ async fn test_validate_oidc_token_refreshes_jwks_once_when_cached_kid_is_missing
         .mount(&mock_server)
         .await;
 
-    let provider = Provider::new(build_test_provider_config(&mock_server.uri()));
+    let provider = build_test_provider_config(&mock_server.uri());
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
     let stale_jwks = Jwks {
@@ -450,7 +440,7 @@ async fn unknown_kids_cost_one_jwks_fetch_per_cooldown_not_one_per_request() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider::new(build_test_provider_config(&mock_server.uri()));
+    let provider = build_test_provider_config(&mock_server.uri());
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
     let stale_jwks = Jwks {
@@ -501,7 +491,7 @@ async fn test_validate_oidc_token_returns_unauthorized_when_refreshed_jwks_still
         .mount(&mock_server)
         .await;
 
-    let provider = Provider::new(build_test_provider_config(&mock_server.uri()));
+    let provider = build_test_provider_config(&mock_server.uri());
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
     let stale_jwks = Jwks { keys: Vec::new() };
@@ -538,7 +528,7 @@ async fn test_validate_oidc_token_invalid_signature() {
         EncodingKey::from_ec_pem(alt_private_key_pem().as_bytes()).expect("alt key must parse");
     let token = encode(&header, &claims, &alt_key).unwrap();
 
-    let provider = Provider::new(build_test_provider_config(&mock_server.uri()));
+    let provider = build_test_provider_config(&mock_server.uri());
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -560,12 +550,11 @@ async fn test_validate_oidc_token_rejects_disallowed_algorithm_before_jwks_fetch
     let claims = valid_claims(&mock_server.uri(), "test-audience");
 
     let token = make_token(&claims, KID);
-    let config = BaseConfig {
+    let provider = Config {
         allowed_algorithms: vec![Algorithm::RS256],
         ..build_test_provider_config(&mock_server.uri())
     };
 
-    let provider = Provider::new(config);
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -596,7 +585,7 @@ async fn test_validate_oidc_token_expired() {
 
     let token = make_token(&claims, KID);
 
-    let provider = Provider::new(build_test_provider_config(&mock_server.uri()));
+    let provider = build_test_provider_config(&mock_server.uri());
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -622,7 +611,7 @@ async fn test_validate_oidc_token_wrong_issuer() {
 
     let token = make_token(&claims, KID);
 
-    let provider = Provider::new(build_test_provider_config(&mock_server.uri()));
+    let provider = build_test_provider_config(&mock_server.uri());
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -642,7 +631,7 @@ async fn test_validate_oidc_token_wrong_audience() {
 
     let token = make_token(&claims, KID);
 
-    let provider = Provider::new(build_test_provider_config(&mock_server.uri()));
+    let provider = build_test_provider_config(&mock_server.uri());
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -664,7 +653,7 @@ async fn test_validate_oidc_token_missing_kid() {
     let header = Header::new(Algorithm::ES256);
     let token = encode(&header, &claims, &encoding_key()).unwrap();
 
-    let provider = Provider::new(build_test_provider_config(&mock_server.uri()));
+    let provider = build_test_provider_config(&mock_server.uri());
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -691,12 +680,11 @@ async fn test_validate_oidc_token_no_audience_validation() {
 
     let token = make_token(&claims, KID);
 
-    let config = BaseConfig {
+    let provider = Config {
         required_audience: None,
         ..build_test_provider_config(&mock_server.uri())
     };
 
-    let provider = Provider::new(config);
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -713,12 +701,11 @@ async fn test_validate_oidc_token_invalid_jwt_format() {
     let jwks_response = json!({ "keys": [] });
     mount_jwks(&mock_server, jwks_response).await;
 
-    let config = BaseConfig {
+    let provider = Config {
         required_audience: None,
         ..build_test_provider_config(&mock_server.uri())
     };
 
-    let provider = Provider::new(config);
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -775,51 +762,19 @@ pub fn valid_claims(issuer: &str, audience: &str) -> HashMap<String, serde_json:
     claims
 }
 
-struct TestProvider {
-    base: BaseConfig,
-    claim_error: Option<String>,
-}
-
-impl TestProvider {
-    fn new(issuer: &str, audience: Option<&str>) -> Self {
-        Self {
-            base: BaseConfig {
-                issuer: issuer.to_string(),
-                jwks_uri: None,
-                jwks_refresh_interval: 3600,
-                required_audience: audience.map(str::to_string),
-                clock_skew_tolerance: 0,
-                allowed_algorithms: vec![Algorithm::ES256],
-                http_request_timeout_secs: 30,
-                jwks_refresh_timeout_secs: 5,
-            },
-            claim_error: None,
-        }
-    }
-
-    fn with_claim_error(mut self, msg: &str) -> Self {
-        self.claim_error = Some(msg.to_string());
-        self
-    }
-}
-
-impl OidcProvider for TestProvider {
-    fn base_config(&self) -> &BaseConfig {
-        &self.base
-    }
-
-    fn name(&self) -> &'static str {
-        "Test"
-    }
-
-    fn validate_provider_claims(
-        &self,
-        _claims: &HashMap<String, serde_json::Value>,
-    ) -> Result<(), Error> {
-        match &self.claim_error {
-            Some(msg) => Err(Error::Unauthorized(msg.clone())),
-            None => Ok(()),
-        }
+/// A provider with no JWKS URI and no clock skew, for the tests that verify a
+/// token against a JWKS they hold rather than one they fetch.
+fn test_provider(issuer: &str, audience: Option<&str>) -> Config {
+    Config {
+        issuer: issuer.to_string(),
+        jwks_uri: None,
+        required_claims: Vec::new(),
+        jwks_refresh_interval: 3600,
+        required_audience: audience.map(str::to_string),
+        clock_skew_tolerance: 0,
+        allowed_algorithms: vec![Algorithm::ES256],
+        http_request_timeout_secs: 30,
+        jwks_refresh_timeout_secs: 5,
     }
 }
 
@@ -827,7 +782,7 @@ impl OidcProvider for TestProvider {
 fn verify_jwt_accepts_valid_token() {
     let issuer = "https://issuer.example.com";
     let audience = "my-audience";
-    let provider = TestProvider::new(issuer, Some(audience));
+    let provider = test_provider(issuer, Some(audience));
     let jwks = test_jwks();
     let claims = valid_claims(issuer, audience);
     let token = make_token(&claims, KID);
@@ -837,7 +792,6 @@ fn verify_jwt_accepts_valid_token() {
     assert!(result.is_ok(), "expected Ok, got {result:?}");
     let oidc = result.unwrap();
     assert_eq!(oidc.provider_name, "test-provider");
-    assert_eq!(oidc.provider_type, "Test");
     assert_eq!(
         oidc.claims.get("sub").and_then(|v| v.as_str()),
         Some("unit-test-subject")
@@ -847,7 +801,7 @@ fn verify_jwt_accepts_valid_token() {
 #[test]
 fn verify_jwt_rejects_unknown_kid() {
     let issuer = "https://issuer.example.com";
-    let provider = TestProvider::new(issuer, None);
+    let provider = test_provider(issuer, None);
     let jwks = test_jwks();
     let claims = valid_claims(issuer, "any");
     let token = make_token(&claims, "unknown-kid-that-is-not-in-jwks");
@@ -864,7 +818,7 @@ fn verify_jwt_rejects_unknown_kid() {
 fn verify_jwt_rejects_expired_token() {
     let issuer = "https://issuer.example.com";
     // clock_skew = 0 so even a 1-second-old exp is rejected
-    let provider = TestProvider::new(issuer, None);
+    let provider = test_provider(issuer, None);
     let jwks = test_jwks();
 
     let mut claims = HashMap::new();
@@ -890,7 +844,7 @@ fn verify_jwt_rejects_expired_token() {
 
 #[test]
 fn verify_jwt_rejects_wrong_issuer() {
-    let provider = TestProvider::new("https://expected-issuer.example.com", None);
+    let provider = test_provider("https://expected-issuer.example.com", None);
     let jwks = test_jwks();
     let claims = valid_claims("https://wrong-issuer.example.com", "any");
     let token = make_token(&claims, KID);
@@ -903,7 +857,7 @@ fn verify_jwt_rejects_wrong_issuer() {
 #[test]
 fn verify_jwt_rejects_wrong_audience() {
     let issuer = "https://issuer.example.com";
-    let provider = TestProvider::new(issuer, Some("required-audience"));
+    let provider = test_provider(issuer, Some("required-audience"));
     let jwks = test_jwks();
     let claims = valid_claims(issuer, "wrong-audience");
     let token = make_token(&claims, KID);
@@ -917,7 +871,7 @@ fn verify_jwt_rejects_wrong_audience() {
 fn verify_jwt_skips_audience_when_provider_has_none() {
     let issuer = "https://issuer.example.com";
     // required_audience = None → validate_aud is disabled
-    let provider = TestProvider::new(issuer, None);
+    let provider = test_provider(issuer, None);
     let jwks = test_jwks();
     // Token has an audience claim, but the provider doesn't require a specific one
     let claims = valid_claims(issuer, "any-audience-value");
@@ -934,7 +888,7 @@ fn verify_jwt_skips_audience_when_provider_has_none() {
 #[test]
 fn verify_jwt_rejects_invalid_signature() {
     let issuer = "https://issuer.example.com";
-    let provider = TestProvider::new(issuer, None);
+    let provider = test_provider(issuer, None);
     let jwks = test_jwks(); // contains public key for private_key_pem()
 
     // Sign with the alt key: kid matches, but signature won't verify against JWKS.
@@ -959,7 +913,7 @@ fn verify_jwt_rejects_invalid_signature() {
 
 #[test]
 fn verify_jwt_rejects_malformed_header() {
-    let provider = TestProvider::new("https://issuer.example.com", None);
+    let provider = test_provider("https://issuer.example.com", None);
     let jwks = test_jwks();
 
     let result = verify_jwt("not-a-valid-jwt", &jwks, "test-provider", &provider);
@@ -973,18 +927,64 @@ fn verify_jwt_rejects_malformed_header() {
     }
 }
 
+/// `required_claims` is what replaced the GitHub provider's hard-coded
+/// repository/actor check, so the rejection it used to perform is pinned here.
 #[test]
-fn verify_jwt_propagates_provider_claim_validation_error() {
+fn verify_jwt_rejects_token_missing_a_required_claim() {
     let issuer = "https://issuer.example.com";
-    let provider = TestProvider::new(issuer, None).with_claim_error("custom claim check failed");
+    let provider = Config {
+        required_claims: vec!["repository".to_string(), "actor".to_string()],
+        ..test_provider(issuer, None)
+    };
     let jwks = test_jwks();
-    let claims = valid_claims(issuer, "any");
+    let mut claims = valid_claims(issuer, "any");
+    claims.insert("repository".to_string(), json!("myorg/myapp"));
     let token = make_token(&claims, KID);
 
     let result = verify_jwt(&token, &jwks, "test-provider", &provider);
 
     match result.unwrap_err() {
-        Error::Unauthorized(msg) => assert_eq!(msg, "custom claim check failed"),
+        Error::Unauthorized(msg) => assert_eq!(msg, "token is missing required claim 'actor'"),
+        e => panic!("expected Unauthorized, got {e:?}"),
+    }
+}
+
+#[test]
+fn verify_jwt_accepts_token_carrying_every_required_claim() {
+    let issuer = "https://issuer.example.com";
+    let provider = Config {
+        required_claims: vec!["repository".to_string(), "actor".to_string()],
+        ..test_provider(issuer, None)
+    };
+    let jwks = test_jwks();
+    let mut claims = valid_claims(issuer, "any");
+    claims.insert("repository".to_string(), json!("myorg/myapp"));
+    claims.insert("actor".to_string(), json!("octocat"));
+    let token = make_token(&claims, KID);
+
+    let result = verify_jwt(&token, &jwks, "test-provider", &provider);
+
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+}
+
+/// A null claim carries no more identity than an absent one, so it must not
+/// satisfy the requirement just by having the key present.
+#[test]
+fn verify_jwt_rejects_a_required_claim_present_but_null() {
+    let issuer = "https://issuer.example.com";
+    let provider = Config {
+        required_claims: vec!["repository".to_string()],
+        ..test_provider(issuer, None)
+    };
+    let jwks = test_jwks();
+    let mut claims = valid_claims(issuer, "any");
+    claims.insert("repository".to_string(), json!(null));
+    let token = make_token(&claims, KID);
+
+    let result = verify_jwt(&token, &jwks, "test-provider", &provider);
+
+    match result.unwrap_err() {
+        Error::Unauthorized(msg) => assert_eq!(msg, "token is missing required claim 'repository'"),
         e => panic!("expected Unauthorized, got {e:?}"),
     }
 }
@@ -995,7 +995,7 @@ fn verify_jwt_propagates_provider_claim_validation_error() {
 fn verify_jwt_rejects_future_nbf() {
     let issuer = "https://issuer.example.com";
     // clock_skew = 0 so a future nbf is not tolerated
-    let provider = TestProvider::new(issuer, None);
+    let provider = test_provider(issuer, None);
     let jwks = test_jwks();
 
     let mut claims = HashMap::new();
@@ -1024,7 +1024,7 @@ fn verify_jwt_rejects_future_nbf() {
 fn verify_jwt_selects_correct_key_from_multi_key_jwks() {
     let issuer = "https://issuer.example.com";
     let audience = "my-audience";
-    let provider = TestProvider::new(issuer, Some(audience));
+    let provider = test_provider(issuer, Some(audience));
 
     // Add a second EC key with a different kid as a decoy.
     // The x/y values below are from the JWK.rs test; they form a valid
@@ -1074,7 +1074,7 @@ fn verify_jwt_selects_correct_key_from_multi_key_jwks() {
 #[test]
 fn verify_jwt_preserves_custom_claims() {
     let issuer = "https://token.actions.githubusercontent.com";
-    let provider = TestProvider::new(issuer, None);
+    let provider = test_provider(issuer, None);
     let jwks = test_jwks();
 
     let mut claims = valid_claims(issuer, "any");

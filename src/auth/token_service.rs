@@ -286,7 +286,6 @@ mod tests {
 
         OidcClaims {
             provider_name: PROVIDER.to_string(),
-            provider_type: "GitHub Actions".to_string(),
             claims,
         }
     }

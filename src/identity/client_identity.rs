@@ -56,7 +56,6 @@ pub struct ClientCertificate {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct OidcClaims {
     pub provider_name: String,
-    pub provider_type: String,
     pub claims: HashMap<String, serde_json::Value>,
 }
 

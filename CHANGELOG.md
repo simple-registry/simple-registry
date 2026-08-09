@@ -9,6 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - An optional token service exchanges a client's credential for a registry-signed bearer token at `GET /token`, so a short-lived CI credential no longer has to outlive the push it starts.
+- `auth.oidc.<name>.required_claims` rejects a token that does not carry the claims listed, before any access policy runs.
+
+### Changed
+
+- **Breaking:** OIDC providers are no longer typed. `provider = "github"` and `provider = "generic"` are gone; a provider is now an issuer plus how its tokens are validated, so every entry takes the same options. A GitHub Actions entry spells out the issuer it used to get for free — see [Upgrade Angos](doc/how-to/upgrade.md).
+- **Breaking:** `identity.oidc.provider_type` is removed from access policies and the denial audit log. It only ever distinguished the two built-in provider types; `identity.oidc.provider_name`, the entry's own name, tells providers apart.
+- Cached JWKS and discovery documents are keyed by issuer alone rather than by issuer and provider type, so two entries trusting one issuer share a fetch. Existing entries are refetched once on upgrade.
 
 ### Fixed
 

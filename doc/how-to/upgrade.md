@@ -400,3 +400,59 @@ angos migrate
 ```
 
 Run it once after upgrading. The command is idempotent and leaves links that already carry a `media_type` untouched; native angos pushes have always stored it, so a registry that never imported a raw `distribution` layout needs no action.
+
+---
+
+## 1.4.5 → 1.4.6
+
+### OIDC Providers Are No Longer Typed (Breaking Change)
+
+#### What Changed
+
+`auth.oidc.<name>.provider` is gone. A provider is an issuer plus how its tokens are validated, so every entry takes the same options and nothing selects between provider types.
+
+**Who is affected:** every deployment with an `[auth.oidc.*]` table, and any access policy reading `identity.oidc.provider_type`.
+
+The `provider` key is now an unknown field, which TOML ignores rather than rejects. An entry that relied on the GitHub defaults therefore fails to load with `missing field 'issuer'` instead of naming `provider` as the cause.
+
+#### Migrate a GitHub Actions Provider
+
+**Before:**
+
+```toml
+[auth.oidc.github-actions]
+provider = "github"
+```
+
+**After:**
+
+```toml
+[auth.oidc.github-actions]
+issuer = "https://token.actions.githubusercontent.com"
+jwks_uri = "https://token.actions.githubusercontent.com/.well-known/jwks"
+required_claims = ["repository", "actor"]
+```
+
+`jwks_uri` is optional; without it the registry discovers the endpoint from the issuer. `required_claims` preserves the repository/actor check the GitHub provider performed on every token — drop it only if you want tokens missing those claims to reach your access policy.
+
+#### Migrate a Generic Provider
+
+Delete the `provider = "generic"` line. Nothing else changes.
+
+### `identity.oidc.provider_type` Is Removed (Breaking Change)
+
+It only ever held `"GitHub Actions"` or `"Generic OIDC"`, a distinction that no longer exists. Rewrite any policy rule using it to test `identity.oidc.provider_name`, which is the name of the `[auth.oidc.<name>]` entry that authenticated the token:
+
+```toml
+# Before
+'identity.oidc != null && identity.oidc.provider_type == "GitHub Actions"'
+
+# After
+'identity.oidc != null && identity.oidc.provider_name == "github-actions"'
+```
+
+The field is also gone from the denial audit log, and from the payload of registry tokens issued by `auth.token_service`. Tokens minted before the upgrade stay valid: the extra field is ignored when they are validated.
+
+### Cached JWKS Refetched Once
+
+JWKS and discovery documents are now cached by issuer alone rather than by issuer and provider type. Existing cache entries are not read after the upgrade, so each issuer is fetched once more than usual on the first requests. No action is required.

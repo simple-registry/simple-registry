@@ -3,7 +3,6 @@ use std::{num::NonZeroUsize, path::PathBuf};
 use angos_tx_engine::lock::LockStrategy;
 
 use crate::{
-    auth::oidc,
     cache,
     configuration::listeners::ClientAuth,
     configuration::{
@@ -115,7 +114,6 @@ fn test_auth_section() {
     password = "$argon2id$v=19$m=19456,t=2,p=1$9pxWwg0VtZzDXno/25417Q$e+cuKy9VisJVxec/EEuKvvfIIIOy5yDGRzYKiuDLjx0"
 
     [auth.oidc.generic]
-    provider = "generic"
     issuer = "https://example.com"
     discovery_url = "https://example.com/.well-known/openid-configuration"
     "#;
@@ -124,10 +122,7 @@ fn test_auth_section() {
     assert_eq!(config.auth.identity.len(), 1);
     assert_eq!(config.auth.identity["user1"].username, "bob");
     assert_eq!(config.auth.oidc.len(), 1);
-    assert!(matches!(
-        config.auth.oidc.get("generic"),
-        Some(oidc::Config::Generic(_))
-    ));
+    assert_eq!(config.auth.oidc["generic"].issuer, "https://example.com");
 }
 
 #[test]

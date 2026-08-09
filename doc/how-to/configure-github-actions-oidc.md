@@ -17,15 +17,20 @@ Set up Angos to accept GitHub Actions OIDC tokens for passwordless authenticatio
 
 ### Step 1: Add OIDC Provider
 
-Add the GitHub provider to `config.toml`:
+Add GitHub's issuer to `config.toml`:
 
 ```toml
 [auth.oidc.github-actions]
-provider = "github"
+issuer = "https://token.actions.githubusercontent.com"
+jwks_uri = "https://token.actions.githubusercontent.com/.well-known/jwks"
+required_claims = ["repository", "actor"]
 ```
 
-That's it for basic configuration. The registry automatically uses GitHub's default issuer and JWKS endpoints.
-OIDC tokens must use an allowed JWT signing algorithm; the default allowlist is `["RS256"]`.
+`jwks_uri` is optional: leave it out and the registry discovers it from the
+issuer's `.well-known/openid-configuration`. `required_claims` rejects a token
+that does not carry the claims a workflow token always has, before any access
+policy runs. OIDC tokens must use an allowed JWT signing algorithm; the default
+allowlist is `["RS256"]`.
 
 ### Step 2: Add Access Policy
 
@@ -209,7 +214,8 @@ server_private_key = "/tls/server.key"
 root_dir = "/data"
 
 [auth.oidc.github-actions]
-provider = "github"
+issuer = "https://token.actions.githubusercontent.com"
+required_claims = ["repository", "actor"]
 
 # Production: only main branch from specific repos
 [repository."production".access_policy]
@@ -321,5 +327,5 @@ The log only includes the provider name/type and the `sub`/`iss` claims; the ful
 
 ## Next Steps
 
-- [Configure Generic OIDC](configure-generic-oidc.md) for other identity providers
+- [Configure OIDC](configure-generic-oidc.md) for other identity providers
 - [Set Up Access Control](set-up-access-control.md) for comprehensive policies

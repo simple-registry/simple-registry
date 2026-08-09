@@ -282,7 +282,7 @@ impl Authenticator {
 fn reject_algorithm_collision(providers: &HashMap<String, oidc::Config>) -> Result<(), Error> {
     let collision = providers.iter().find(|(_, config)| {
         config
-            .allowed_algorithms()
+            .allowed_algorithms
             .contains(&token_service::ALGORITHM)
     });
 
@@ -355,7 +355,7 @@ mod tests {
         let config = load_config(
             r#"
             [auth.oidc.github]
-            provider = "github"
+            issuer = "https://token.actions.githubusercontent.com"
         "#,
         );
 
@@ -420,7 +420,7 @@ mod tests {
         let config = load_config(
             r#"
             [auth.oidc.github]
-            provider = "github"
+            issuer = "https://token.actions.githubusercontent.com"
         "#,
         );
 
@@ -438,7 +438,6 @@ mod tests {
         let config = load_config(
             r#"
             [auth.oidc.custom]
-            provider = "generic"
             issuer = "https://auth.example.com"
         "#,
         );
@@ -548,10 +547,9 @@ mod tests {
         let config = load_config(
             r#"
             [auth.oidc.github]
-            provider = "github"
+            issuer = "https://token.actions.githubusercontent.com"
 
             [auth.oidc.custom]
-            provider = "generic"
             issuer = "https://auth.example.com"
         "#,
         );
@@ -592,7 +590,6 @@ mod tests {
                 MockOutcome::Authenticated => {
                     identity.oidc = Some(OidcClaims {
                         provider_name: "mock".to_string(),
-                        provider_type: "Mock".to_string(),
                         claims: HashMap::new(),
                     });
                     Ok(AuthResult::Authenticated)
@@ -1050,7 +1047,6 @@ mod tests {
         let config = load_config(
             r#"
             [auth.oidc.custom]
-            provider = "generic"
             issuer = "https://auth.example.com"
             allowed_algorithms = ["HS256"]
 

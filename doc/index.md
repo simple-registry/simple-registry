@@ -21,7 +21,7 @@ Step-by-step instructions for specific tasks:
 ### Authentication
 - [Configure mTLS](how-to/configure-mtls.md)
 - [Configure GitHub Actions OIDC](how-to/configure-github-actions-oidc.md)
-- [Configure Generic OIDC](how-to/configure-generic-oidc.md)
+- [Configure OIDC](how-to/configure-generic-oidc.md)
 
 ### Policies
 - [Set Up Access Control](how-to/set-up-access-control.md)

@@ -39,7 +39,6 @@ Available when client authenticates with OIDC token. **Always check for null bef
 |-------------------------------|---------|----------------------------------------------------|
 | `identity.oidc`               | object? | OIDC context (null if not OIDC)                    |
 | `identity.oidc.provider_name` | string  | Configured provider name                           |
-| `identity.oidc.provider_type` | string  | Provider type ("GitHub Actions" or "Generic OIDC") |
 | `identity.oidc.claims`        | map     | JWT claims (access with bracket notation)          |
 
 **GitHub Actions Claims:**
@@ -57,7 +56,7 @@ Available when client authenticates with OIDC token. **Always check for null bef
 | `repository_owner`      | Repository owner                              |
 | `repository_visibility` | Repository visibility (public/private)        |
 
-**Generic OIDC Claims:**
+**Standard OIDC Claims:**
 
 | Claim    | Description                     |
 |----------|---------------------------------|

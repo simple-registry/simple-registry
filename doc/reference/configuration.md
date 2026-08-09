@@ -423,33 +423,32 @@ Usernames must be unique across all `auth.identity` entries; a duplicate causes 
 
 ### OIDC (`auth.oidc.<name>`)
 
-#### GitHub Provider
-
-| Option                  | Type   | Default                                                          | Description                     |
-|-------------------------|--------|------------------------------------------------------------------|---------------------------------|
-| `provider`              | string | required                                                         | Must be `"github"`              |
-| `issuer`                | string | `"https://token.actions.githubusercontent.com"`                  | Issuer URL                      |
-| `jwks_uri`              | string | `"https://token.actions.githubusercontent.com/.well-known/jwks"` | JWKS URI                        |
-| `jwks_refresh_interval` | u64    | `3600`                                                           | JWKS refresh interval (seconds) |
-| `required_audience`     | string | -                                                                | Required audience claim         |
-| `clock_skew_tolerance`  | u64    | `60`                                                             | Clock skew tolerance (seconds)  |
-| `allowed_algorithms`    | array  | `["RS256"]`                                                       | Allowed JWT signing algorithms  |
-| `http_request_timeout_secs` | u64 | `30`                                                          | Timeout for a JWKS or discovery HTTP fetch (seconds) |
-| `jwks_refresh_timeout_secs` | u64 | `5`                                                           | Timeout for the forced JWKS refetch on key rotation (seconds) |
-
-#### Generic Provider
+Every provider takes the same options: a provider is an issuer plus how its
+tokens are validated, so there is no provider type to select.
 
 | Option                  | Type   | Default    | Description                                  |
 |-------------------------|--------|------------|----------------------------------------------|
-| `provider`              | string | required   | Must be `"generic"`                          |
 | `issuer`                | string | required   | OIDC issuer URL                              |
 | `jwks_uri`              | string | -          | Custom JWKS URI (auto-discovered if not set) |
+| `required_claims`       | array  | `[]`       | Claims a token must carry; a missing or null one is rejected |
 | `jwks_refresh_interval` | u64    | `3600`     | JWKS refresh interval (seconds)              |
 | `required_audience`     | string | -          | Required audience claim                      |
 | `clock_skew_tolerance`  | u64    | `60`       | Clock skew tolerance (seconds)               |
 | `allowed_algorithms`    | array  | `["RS256"]` | Allowed JWT signing algorithms              |
 | `http_request_timeout_secs` | u64 | `30`     | Timeout for a JWKS or discovery HTTP fetch (seconds) |
 | `jwks_refresh_timeout_secs` | u64 | `5`      | Timeout for the forced JWKS refetch on key rotation (seconds) |
+
+GitHub Actions, for example, is one such entry:
+
+```toml
+[auth.oidc.github-actions]
+issuer = "https://token.actions.githubusercontent.com"
+jwks_uri = "https://token.actions.githubusercontent.com/.well-known/jwks"
+required_claims = ["repository", "actor"]
+```
+
+`required_claims` checks presence only. Predicates over claim *values* belong in
+the access policy, which sees the whole claim map.
 
 `allowed_algorithms` accepts JWT algorithm names such as `"RS256"`, `"RS384"`, `"RS512"`, `"ES256"`, and `"ES384"`. Angos rejects tokens whose header claims an algorithm outside the provider allowlist before signature verification to prevent algorithm-confusion attacks. With `auth.token_service` configured, `HS256` is refused at startup: the token validator claims every bearer signed with it, so a provider allowing the same algorithm would have its own tokens rejected there instead of reaching it.
 
@@ -679,7 +678,8 @@ username = "admin"
 password = "$argon2id$v=19$m=19456,t=2,p=1$..."
 
 [auth.oidc.github-actions]
-provider = "github"
+issuer = "https://token.actions.githubusercontent.com"
+required_claims = ["repository", "actor"]
 
 [global.access_policy]
 default = "deny"
