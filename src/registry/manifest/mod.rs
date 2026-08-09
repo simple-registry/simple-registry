@@ -97,7 +97,7 @@ impl Registry {
     #[instrument(skip(repository))]
     pub async fn head_manifest(
         &self,
-        repository: &Repository,
+        repository: Option<&Repository>,
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: Reference,
@@ -108,7 +108,7 @@ impl Registry {
             .serveable_local(
                 namespace,
                 &reference,
-                repository.is_pull_through(),
+                repository.is_some_and(Repository::is_pull_through),
                 local,
                 async |meta| {
                     self.needs_upstream_pull_manifest(
@@ -198,7 +198,7 @@ impl Registry {
     #[instrument(skip(repository))]
     pub async fn get_manifest(
         &self,
-        repository: &Repository,
+        repository: Option<&Repository>,
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: Reference,
@@ -209,7 +209,7 @@ impl Registry {
             .serveable_local(
                 namespace,
                 &reference,
-                repository.is_pull_through(),
+                repository.is_some_and(Repository::is_pull_through),
                 local,
                 async |body| {
                     self.needs_upstream_pull_manifest(
@@ -228,6 +228,9 @@ impl Registry {
             return Ok(manifest);
         }
 
+        let Some(repository) = repository else {
+            return Err(Error::ManifestUnknown);
+        };
         let fetched = repository
             .get_manifest(accepted_types, namespace, &reference)
             .await?;
@@ -317,17 +320,18 @@ impl Registry {
 
     async fn needs_upstream_pull_manifest(
         &self,
-        repository: &Repository,
+        repository: Option<&Repository>,
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: &Reference,
         is_tag_immutable: bool,
         local_digest: &Digest,
     ) -> Result<bool, Error> {
-        if !repository.is_pull_through()
-            || !matches!(reference, Reference::Tag(_))
-            || is_tag_immutable
-        {
+        let upstream = repository.filter(|repository| repository.is_pull_through());
+        let Some(repository) = upstream else {
+            return Ok(false);
+        };
+        if !matches!(reference, Reference::Tag(_)) || is_tag_immutable {
             return Ok(false);
         }
 
@@ -728,8 +732,8 @@ impl Registry {
         is_tag_immutable: bool,
         allow_redirect: bool,
     ) -> Result<GetManifestResponse, Error> {
-        let repository = self.get_repository_for_namespace(namespace)?;
-        let repository_name = repository.name.to_string();
+        let repository = self.get_repository_for_namespace(namespace).ok();
+        let repository_name = self.repository_name_for(namespace);
         let event_reference = reference.clone();
 
         let response = self
@@ -757,14 +761,14 @@ impl Registry {
 
     async fn resolve_get_manifest_response(
         &self,
-        repository: &Repository,
+        repository: Option<&Repository>,
         namespace: &Namespace,
         reference: Reference,
         mime_types: &[MediaRange],
         is_tag_immutable: bool,
         allow_redirect: bool,
     ) -> Result<GetManifestResponse, Error> {
-        let redirect_is_authoritative = !repository.is_pull_through()
+        let redirect_is_authoritative = !repository.is_some_and(Repository::is_pull_through)
             || matches!(reference, Reference::Digest(_))
             || is_tag_immutable;
 

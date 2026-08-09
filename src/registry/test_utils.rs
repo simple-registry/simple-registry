@@ -275,7 +275,7 @@ pub async fn get_blob(
         .await?;
     registry
         .get_blob_with_access(
-            repository,
+            Some(repository),
             accepted_types,
             namespace,
             digest,

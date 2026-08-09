@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Content pushed to a namespace no `[repository]` entry matches can now be pulled back: retrieval required a configured repository while every other route did not, so such a namespace was writable, listable, and unreadable.
 - A JWKS key angos cannot turn into a decoding key now reports the provider unavailable, as the fetch and parse before it already did, instead of surfacing as an internal error.
 - A basic-auth username matching an OIDC provider name is refused at startup instead of locking that user out, since a Basic credential naming a provider is read as that provider's token.
 - An authorization webhook now receives the caller's OIDC provider and subject, so it can decide per user and its decision cache no longer serves one answer to every OIDC caller performing the same action.

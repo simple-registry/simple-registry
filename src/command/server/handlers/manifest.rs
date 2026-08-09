@@ -74,7 +74,10 @@ pub async fn handle_head_manifest(
 ) -> Result<Response<ResponseBody>, Error> {
     let mime_types = RequestHeaders::new(&parts.headers).accepted_content_types();
     let is_tag_immutable = context.is_reference_immutable(namespace, &reference);
-    let repository = context.registry.get_repository_for_namespace(namespace)?;
+    let repository = context
+        .registry
+        .get_repository_for_namespace(namespace)
+        .ok();
     let response = context
         .registry
         .head_manifest(
@@ -443,7 +446,7 @@ mod tests {
         let kept_digest = context
             .registry
             .get_manifest(
-                repo,
+                Some(repo),
                 std::slice::from_ref(&media_range()),
                 &namespace,
                 tag(),
@@ -495,7 +498,7 @@ mod tests {
         let after = context
             .registry
             .get_manifest(
-                repo,
+                Some(repo),
                 std::slice::from_ref(&media_range()),
                 &namespace,
                 tag(),

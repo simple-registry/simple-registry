@@ -60,7 +60,10 @@ pub async fn handle_head_blob(
     digest: &Digest,
 ) -> Result<Response<ResponseBody>, Error> {
     let mime_types = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let repository = context.registry.get_repository_for_namespace(namespace)?;
+    let repository = context
+        .registry
+        .get_repository_for_namespace(namespace)
+        .ok();
     let response = context
         .registry
         .head_blob(repository, &mime_types, namespace, digest)

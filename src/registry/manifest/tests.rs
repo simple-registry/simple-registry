@@ -198,6 +198,41 @@ async fn create_test_manifest_with_subject(
     )
 }
 
+/// `[repository]` entries configure namespaces rather than admitting them, so a
+/// namespace none of them match is pushable and pullable like any other.
+#[tokio::test]
+async fn an_unconfigured_namespace_round_trips() {
+    for_each_backend(async |test_case| {
+        let registry = test_case.registry();
+        let namespace = &Namespace::new("never/configured").unwrap();
+        assert!(registry.get_repository_for_namespace(namespace).is_err());
+
+        let (content, media_type) = create_test_manifest(registry, namespace).await;
+        let tag = Reference::Tag(Tag::new("latest").unwrap());
+        registry
+            .put_manifest(namespace, &tag, Some(&media_type), &content)
+            .await
+            .unwrap();
+
+        let stored = registry
+            .resolve_get_manifest(
+                None,
+                namespace,
+                tag,
+                &[MediaRange::from(media_type)],
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(stored, GetManifestResponse::Body { content: served, .. } if served == content)
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn test_put_manifest() {
     for_each_backend(async |test_case| {
@@ -218,7 +253,7 @@ async fn test_put_manifest() {
 
         let stored_manifest = registry
             .get_manifest(
-                registry.get_repository_for_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).ok(),
                 &[MediaRange::from(media_type.clone())],
                 namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
@@ -288,7 +323,7 @@ async fn accept_put_manifest_by_sha512_digest_with_tag_params_creates_tags() {
     for tag in ["1.2.3", "latest"] {
         let head = registry
             .head_manifest(
-                repository,
+                Some(repository),
                 &[MediaRange::from(media_type.clone())],
                 &namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
@@ -340,7 +375,7 @@ async fn accept_put_manifest_by_tag_ignores_tag_params() {
     let repository = registry.get_repository_for_namespace(&namespace).unwrap();
     let ignored = registry
         .head_manifest(
-            repository,
+            Some(repository),
             &[MediaRange::from(media_type.clone())],
             &namespace,
             Reference::Tag(Tag::new("ignored").unwrap()),
@@ -714,7 +749,7 @@ async fn permissive_push_does_not_grant_read_of_unowned_child_manifest() {
     let repository = permissive.get_repository_for_namespace(&attacker).unwrap();
     let outcome = permissive
         .get_manifest(
-            repository,
+            Some(repository),
             &[],
             &attacker,
             Reference::Digest(child_digest.clone()),
@@ -783,7 +818,7 @@ async fn permissive_push_of_owned_references_yields_a_pullable_manifest() {
     let repository = permissive.get_repository_for_namespace(&namespace).unwrap();
     permissive
         .get_manifest(
-            repository,
+            Some(repository),
             &[],
             &namespace,
             Reference::Tag(Tag::new("latest").unwrap()),
@@ -859,7 +894,7 @@ async fn pull_through_computes_the_digest_when_the_upstream_omits_the_header() {
     let manifest = case
         .registry()
         .get_manifest(
-            &repository,
+            Some(&repository),
             &[MediaRange::from(MediaType::docker_manifest())],
             &namespace,
             Reference::Tag(Tag::new("latest").unwrap()),
@@ -892,7 +927,7 @@ async fn pull_through_recomputes_under_the_requested_digest_algorithm() {
     let manifest = case
         .registry()
         .get_manifest(
-            &repository,
+            Some(&repository),
             &[MediaRange::from(MediaType::docker_manifest())],
             &namespace,
             Reference::Digest(requested.clone()),
@@ -945,7 +980,13 @@ async fn a_backend_fault_is_not_reported_as_a_missing_manifest() {
     let repository = registry.get_repository_for_namespace(&namespace).unwrap();
 
     let error = registry
-        .get_manifest(repository, &[], &namespace, Reference::Tag(tag), false)
+        .get_manifest(
+            Some(repository),
+            &[],
+            &namespace,
+            Reference::Tag(tag),
+            false,
+        )
         .await
         .err()
         .expect("a failing metadata store must not read as a successful lookup");
@@ -976,7 +1017,7 @@ async fn test_get_manifest() {
 
         let manifest = registry
             .get_manifest(
-                registry.get_repository_for_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).ok(),
                 &[MediaRange::from(media_type.clone())],
                 namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
@@ -991,7 +1032,7 @@ async fn test_get_manifest() {
 
         let manifest = registry
             .get_manifest(
-                registry.get_repository_for_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).ok(),
                 &[MediaRange::from(media_type.clone())],
                 namespace,
                 Reference::Digest(response.digest.clone()),
@@ -1027,7 +1068,7 @@ async fn test_head_manifest() {
 
         let manifest = registry
             .head_manifest(
-                registry.get_repository_for_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).ok(),
                 &[MediaRange::from(media_type.clone())],
                 namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
@@ -1042,7 +1083,7 @@ async fn test_head_manifest() {
 
         let manifest = registry
             .head_manifest(
-                registry.get_repository_for_namespace(namespace).unwrap(),
+                registry.get_repository_for_namespace(namespace).ok(),
                 &[MediaRange::from(media_type.clone())],
                 namespace,
                 Reference::Digest(response.digest.clone()),
@@ -1089,7 +1130,7 @@ async fn test_delete_manifest() {
         assert!(
             registry
                 .get_manifest(
-                    registry.get_repository_for_namespace(namespace).unwrap(),
+                    registry.get_repository_for_namespace(namespace).ok(),
                     &[MediaRange::from(media_type.clone())],
                     namespace,
                     Reference::Tag(Tag::new(tag).unwrap()),
@@ -1112,7 +1153,7 @@ async fn test_delete_manifest() {
         assert!(
             registry
                 .get_manifest(
-                    registry.get_repository_for_namespace(namespace).unwrap(),
+                    registry.get_repository_for_namespace(namespace).ok(),
                     &[MediaRange::from(media_type.clone())],
                     namespace,
                     Reference::Digest(response.digest.clone()),
@@ -1714,7 +1755,7 @@ async fn test_handle_put_manifest() {
             .expect("get repository failed");
         let stored_manifest = registry
             .get_manifest(
-                repository,
+                Some(repository),
                 &[MediaRange::from(media_type.clone())],
                 namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
@@ -1772,7 +1813,7 @@ async fn test_delete_manifest_by_digest_removes_multiple_tags() {
         assert!(
             registry
                 .get_manifest(
-                    repository,
+                    Some(repository),
                     &[MediaRange::from(media_type.clone())],
                     namespace,
                     Reference::Tag(Tag::new("latest").unwrap()),
@@ -1785,7 +1826,7 @@ async fn test_delete_manifest_by_digest_removes_multiple_tags() {
         assert!(
             registry
                 .get_manifest(
-                    repository,
+                    Some(repository),
                     &[MediaRange::from(media_type.clone())],
                     namespace,
                     Reference::Tag(Tag::new("v1.0").unwrap()),
@@ -1798,7 +1839,7 @@ async fn test_delete_manifest_by_digest_removes_multiple_tags() {
         assert!(
             registry
                 .get_manifest(
-                    repository,
+                    Some(repository),
                     &[MediaRange::from(media_type.clone())],
                     namespace,
                     Reference::Digest(response.digest.clone()),
@@ -1865,7 +1906,7 @@ async fn test_delete_manifest_by_digest_preserves_unrelated_tags() {
         assert!(
             registry
                 .get_manifest(
-                    repository,
+                    Some(repository),
                     &[MediaRange::from(media_type_a.clone())],
                     namespace,
                     Reference::Tag(Tag::new("v1.0").unwrap()),
@@ -1878,7 +1919,7 @@ async fn test_delete_manifest_by_digest_preserves_unrelated_tags() {
         assert!(
             registry
                 .get_manifest(
-                    repository,
+                    Some(repository),
                     &[MediaRange::from(media_type_a.clone())],
                     namespace,
                     Reference::Tag(Tag::new("v1.1").unwrap()),
@@ -1890,7 +1931,7 @@ async fn test_delete_manifest_by_digest_preserves_unrelated_tags() {
 
         let manifest_b = registry
             .get_manifest(
-                repository,
+                Some(repository),
                 &[MediaRange::from(media_type_b.clone())],
                 namespace,
                 Reference::Tag(Tag::new("v2.0").unwrap()),
@@ -1963,7 +2004,7 @@ async fn test_delete_manifest_with_many_tags() {
             assert!(
                 registry
                     .get_manifest(
-                        repository,
+                        Some(repository),
                         &[MediaRange::from(media_type_a.clone())],
                         namespace,
                         Reference::Tag(Tag::new(&format!("tag-{i}")).unwrap()),
@@ -1979,7 +2020,7 @@ async fn test_delete_manifest_with_many_tags() {
             assert!(
                 registry
                     .get_manifest(
-                        repository,
+                        Some(repository),
                         &[MediaRange::from(media_type_b.clone())],
                         namespace,
                         Reference::Tag(Tag::new(&format!("other-{i}")).unwrap()),
