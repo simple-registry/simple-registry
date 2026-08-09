@@ -126,13 +126,19 @@ password = "$argon2id$v=19$m=16,t=2,p=1$MTIzNDU2Nzg$lurg6dYCXXrJP3zaFwu35w" # te
 
 # OIDC provider configuration
 # [auth.oidc.github]
-# provider = "github"
 # issuer = "https://token.actions.githubusercontent.com"
+# jwks_uri = "https://token.actions.githubusercontent.com/.well-known/jwks"
+# required_claims = ["repository", "actor"]  # reject a token that does not carry them
 #
 # [auth.oidc.generic]
-# provider = "generic"
 # issuer = "https://auth.example.com"
 # jwks_uri = "https://auth.example.com/.well-known/jwks.json"  # discovered from the issuer when omitted
+
+# Token service -- exchange a short-lived credential for a registry-signed token
+# [auth.token_service]
+# secret_key = "base64 of 32 random bytes, from `openssl rand -base64 32`"
+# realm = "https://registry.example.com/token"  # derived from the request Host when omitted
+# ttl_secs = 3600
 
 # Event webhooks -- notify external systems on registry operations
 # Define webhooks with [event_webhook.<name>], then reference them in global or repository config.

@@ -1,10 +1,10 @@
 ---
 displayed_sidebar: howto
 sidebar_position: 5
-title: "Generic OIDC"
+title: "OIDC"
 ---
 
-# Configure Generic OIDC
+# Configure OIDC
 
 Set up Angos to accept tokens from any OIDC-compliant identity provider (Google, Okta, Auth0, Keycloak, etc.).
 
@@ -19,11 +19,12 @@ Set up Angos to accept tokens from any OIDC-compliant identity provider (Google,
 
 ### Step 1: Add OIDC Provider
 
-Add a generic provider to `config.toml`:
+Add a provider to `config.toml`. A provider is an issuer plus how its tokens are
+validated, so every provider takes the same options; the issuer is what tells
+them apart.
 
 ```toml
 [auth.oidc.my-provider]
-provider = "generic"
 issuer = "https://auth.example.com"
 ```
 
@@ -33,14 +34,18 @@ The registry automatically discovers the JWKS endpoint from the issuer's `.well-
 
 ```toml
 [auth.oidc.my-provider]
-provider = "generic"
 issuer = "https://auth.example.com"
 required_audience = "my-registry"        # Validate audience claim
+required_claims = ["email"]              # Reject a token that does not carry them
 jwks_uri = "https://auth.example.com/.well-known/jwks.json"  # Override discovery
 jwks_refresh_interval = 3600             # Refresh keys hourly (default)
 clock_skew_tolerance = 60                # Allow 60s clock drift (default)
 allowed_algorithms = ["RS256"]           # Restrict accepted JWT algorithms (default)
+server_ca_bundle = "/certs/ca.pem"       # Trust a private CA for this issuer
 ```
+
+`required_claims` checks presence only. To test a claim's *value*, use an access
+policy rule, which sees the whole claim map.
 
 ### Step 3: Add Access Policy
 
@@ -60,7 +65,6 @@ rules = [
 
 ```toml
 [auth.oidc.google]
-provider = "generic"
 issuer = "https://accounts.google.com"
 required_audience = "your-client-id.apps.googleusercontent.com"
 ```
@@ -69,7 +73,6 @@ required_audience = "your-client-id.apps.googleusercontent.com"
 
 ```toml
 [auth.oidc.okta]
-provider = "generic"
 issuer = "https://your-org.okta.com"
 required_audience = "your-client-id"
 ```
@@ -78,7 +81,6 @@ required_audience = "your-client-id"
 
 ```toml
 [auth.oidc.auth0]
-provider = "generic"
 issuer = "https://your-tenant.auth0.com/"
 required_audience = "your-api-identifier"
 ```
@@ -87,7 +89,6 @@ required_audience = "your-api-identifier"
 
 ```toml
 [auth.oidc.keycloak]
-provider = "generic"
 issuer = "https://keycloak.example.com/realms/myrealm"
 required_audience = "registry-client"
 ```
@@ -96,9 +97,20 @@ required_audience = "registry-client"
 
 ```toml
 [auth.oidc.azure]
-provider = "generic"
 issuer = "https://login.microsoftonline.com/your-tenant-id/v2.0"
 required_audience = "api://your-app-id"
+```
+
+### Kubernetes API Server
+
+The cluster CA signs the issuer, so point `server_ca_bundle` at it rather than
+trusting that CA for every outbound connection.
+
+```toml
+[auth.oidc.kube]
+issuer = "https://kubernetes.default.svc"
+server_ca_bundle = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+required_audience = "angos"
 ```
 
 ---
@@ -114,15 +126,14 @@ that actually signed it.
 
 ```toml
 [auth.oidc.github-actions]
-provider = "github"
+issuer = "https://token.actions.githubusercontent.com"
+required_claims = ["repository", "actor"]
 
 [auth.oidc.corporate]
-provider = "generic"
 issuer = "https://auth.corp.example.com"
 required_audience = "registry"
 
 [auth.oidc.cloud]
-provider = "generic"
 issuer = "https://accounts.google.com"
 ```
 

@@ -195,14 +195,17 @@ impl Registry {
     #[instrument(skip(repository))]
     pub async fn head_blob(
         &self,
-        repository: &Repository,
+        repository: Option<&Repository>,
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<HeadBlobResponse, Error> {
         let has_access = self.blob_ownership().can_read(namespace, digest).await?;
+        // A namespace no `[repository]` entry matches has no upstream, so it
+        // serves what it owns and nothing else.
+        let upstream = repository.filter(|repository| repository.is_pull_through());
 
-        if !repository.is_pull_through() && !has_access {
+        if upstream.is_none() && !has_access {
             return Err(Error::BlobUnknown);
         }
 
@@ -217,19 +220,18 @@ impl Registry {
                 // Mirror GET: a genuine miss on a pull-through repo re-heads
                 // upstream; every other error (a transient or internal fault)
                 // propagates instead of masquerading as a 404.
-                Err(Error::BlobUnknown) if repository.is_pull_through() => {}
+                Err(Error::BlobUnknown) if upstream.is_some() => {}
                 Err(error) => return Err(error),
             }
         }
 
-        if repository.is_pull_through() {
-            let (digest, size) = repository
-                .head_blob(accepted_types, namespace, digest)
-                .await?;
-            Ok(HeadBlobResponse { digest, size })
-        } else {
-            Err(Error::BlobUnknown)
-        }
+        let Some(repository) = upstream else {
+            return Err(Error::BlobUnknown);
+        };
+        let (digest, size) = repository
+            .head_blob(accepted_types, namespace, digest)
+            .await?;
+        Ok(HeadBlobResponse { digest, size })
     }
 
     /// Serve the blob locally when `has_access`, else fall back to the
@@ -238,21 +240,23 @@ impl Registry {
     /// for the blob-index read twice.
     pub async fn get_blob_with_access(
         &self,
-        repository: &Repository,
+        repository: Option<&Repository>,
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
         range: Option<BlobRange>,
         has_access: bool,
     ) -> Result<GetBlobResponse, Error> {
+        let upstream = repository.filter(|repository| repository.is_pull_through());
+
         if has_access {
             match self.get_local_blob(digest, range).await {
                 Ok(response) => return Ok(response),
                 // Owned but the bytes are gone: a pull-through repo re-fetches.
-                Err(Error::BlobUnknown) if repository.is_pull_through() => {}
+                Err(Error::BlobUnknown) if upstream.is_some() => {}
                 Err(error) => return Err(error),
             }
-        } else if !repository.is_pull_through() {
+        } else if upstream.is_none() {
             return Err(Error::BlobUnknown);
         }
 
@@ -261,6 +265,9 @@ impl Registry {
             return Err(Error::RangeNotSatisfiable);
         }
 
+        let Some(repository) = upstream else {
+            return Err(Error::BlobUnknown);
+        };
         let (total_length, client_stream) = repository
             .get_blob(accepted_types, namespace, digest)
             .await?;
@@ -379,15 +386,15 @@ impl Registry {
         range: Option<BlobRange>,
         allow_redirect: bool,
     ) -> Result<GetBlobResponse, Error> {
-        let repository = self.get_repository_for_namespace(namespace)?;
+        let repository = self.get_repository_for_namespace(namespace).ok();
 
         let has_access = self.blob_ownership().can_read(namespace, digest).await?;
 
-        if !repository.is_pull_through() && !has_access {
+        if !repository.is_some_and(Repository::is_pull_through) && !has_access {
             return Err(Error::BlobUnknown);
         }
 
-        let repository_name = repository.name.to_string();
+        let repository_name = self.repository_name_for(namespace);
         let response = if range.is_none()
             && allow_redirect
             && self.enable_blob_redirect
@@ -495,7 +502,7 @@ mod tests {
 
             let (digest, repository) = create_test_blob(registry, namespace, content).await;
             let response = registry
-                .head_blob(&repository, &[], namespace, &digest)
+                .head_blob(Some(&repository), &[], namespace, &digest)
                 .await
                 .unwrap();
 
@@ -550,7 +557,7 @@ mod tests {
         // A transient fault must surface (500), not masquerade as a missing blob
         // (404) the way GET already avoids.
         let result = registry
-            .head_blob(repository, &[], namespace, &digest)
+            .head_blob(Some(repository), &[], namespace, &digest)
             .await;
         assert!(
             matches!(result, Err(Error::Internal(_))),
@@ -599,7 +606,7 @@ mod tests {
             let repository = registry.get_repository_for_namespace(namespace).unwrap();
 
             let head_result = registry
-                .head_blob(repository, &[], namespace, &digest)
+                .head_blob(Some(repository), &[], namespace, &digest)
                 .await;
             assert!(matches!(head_result, Err(Error::BlobUnknown)));
 
@@ -1339,7 +1346,7 @@ mod tests {
             let (digest, repository) = create_test_blob(registry, namespace, content).await;
 
             let head_response = registry
-                .head_blob(&repository, &[], namespace, &digest)
+                .head_blob(Some(&repository), &[], namespace, &digest)
                 .await
                 .unwrap();
             assert_eq!(head_response.digest, digest);

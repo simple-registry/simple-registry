@@ -67,14 +67,21 @@ impl AuthMiddleware for MtlsValidator {
             return Ok(AuthResult::NoCredentials);
         };
 
-        let (_, cert) = X509Certificate::from_der(&peer_cert.0).map_err(|e| {
-            error!(
-                error = ?e,
-                certificate_len = peer_cert.0.len(),
-                "Failed to parse client certificate"
-            );
-            Error::Unauthorized("Invalid certificate".to_string())
-        })?;
+        // The TLS layer already accepted this certificate, so a parse failure is
+        // two parsers disagreeing rather than a bad credential. Carrying on
+        // without certificate identity leaves the refusal to a policy that needs
+        // one, which is where it belongs.
+        let cert = match X509Certificate::from_der(&peer_cert.0) {
+            Ok((_, cert)) => cert,
+            Err(e) => {
+                error!(
+                    error = ?e,
+                    certificate_len = peer_cert.0.len(),
+                    "Failed to parse client certificate"
+                );
+                return Ok(AuthResult::NoCredentials);
+            }
+        };
 
         debug!("Extracting identity from client certificate");
         let cert_info = Self::extract_certificate_identity(&cert);
@@ -88,26 +95,21 @@ impl AuthMiddleware for MtlsValidator {
 pub mod tests {
     use std::sync::Arc;
 
-    use hyper::StatusCode;
     use tracing::Level;
 
     use super::*;
-    use crate::{
-        command::server::Error as ServerError,
-        test_fixtures::{
-            logging::LogCapture,
-            mtls::{cert_der, minimal_cert_der},
-            requests::empty_parts,
-        },
+    use crate::test_fixtures::{
+        logging::LogCapture,
+        mtls::{cert_der, minimal_cert_der},
+        requests::empty_parts,
     };
 
-    /// The parse error is logged server-side while the client only sees the
-    /// generic "Invalid certificate". This must remain the ONLY test driving
-    /// the certificate-parse-error branch: `tracing` caches callsite interest
-    /// process-globally, so a second test under a non-capturing subscriber
-    /// could cache the `error!` as disabled and make the log assertion flaky.
+    /// This must remain the ONLY test driving the parse-error branch: `tracing` caches callsite
+    /// interest process-globally, so a second test under a non-capturing
+    /// subscriber could cache the `error!` as disabled and make the log
+    /// assertion flaky.
     #[test]
-    fn malformed_certificate_is_logged_but_not_leaked_to_client() {
+    fn malformed_certificate_is_logged_and_yields_no_identity() {
         let capture = LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(Level::DEBUG)
@@ -115,7 +117,7 @@ pub mod tests {
             .with_ansi(false)
             .finish();
 
-        let result = tracing::subscriber::with_default(subscriber, || {
+        let (result, identity) = tracing::subscriber::with_default(subscriber, || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .build()
                 .unwrap();
@@ -126,25 +128,14 @@ pub mod tests {
                     .extensions
                     .insert(PeerCertificate(Arc::new(vec![0u8; 100])));
                 let mut identity = ClientIdentity::new(None);
-                validator.authenticate(&parts, &mut identity).await
+                let result = validator.authenticate(&parts, &mut identity).await;
+                (result, identity)
             })
         });
 
-        match result.unwrap_err() {
-            Error::Unauthorized(msg) => {
-                assert_eq!(msg, "Invalid certificate");
-                let error = ServerError::from(Error::Unauthorized(msg));
-                assert_eq!(error.status_code(), StatusCode::UNAUTHORIZED);
-                let body = error.as_json(None).to_string();
-                assert!(body.contains("Invalid certificate"));
-                assert!(
-                    !body.contains("UnexpectedTag"),
-                    "raw parse error leaked: {body}"
-                );
-                assert!(!body.contains("Malformed client certificate"));
-            }
-            err => panic!("expected Unauthorized, got {err:?}"),
-        }
+        assert!(matches!(result.unwrap(), AuthResult::NoCredentials));
+        assert!(identity.certificate.common_names.is_empty());
+        assert!(identity.certificate.organizations.is_empty());
 
         let logs = capture.contents();
         assert!(

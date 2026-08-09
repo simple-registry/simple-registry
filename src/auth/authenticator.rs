@@ -8,11 +8,12 @@ use tracing::{Span, debug, info, instrument, warn};
 use crate::{
     auth::Error,
     auth::{
-        AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator, OidcValidator, basic_auth,
-        oidc, webhook,
+        AuthMiddleware, AuthResult, BasicAuthValidator, MtlsValidator, OidcValidator,
+        TokenValidator, basic_auth, oidc, token_service, webhook,
     },
     cache::Cache,
     configuration::Configuration,
+    http_client::apply_tls_files,
     identity::{AuthMethod, ClientIdentity},
     metrics_provider::metrics_provider,
 };
@@ -25,27 +26,16 @@ pub struct AuthConfig {
     pub oidc: HashMap<String, oidc::Config>,
     #[serde(default)]
     pub webhook: HashMap<String, webhook::Config>,
+    #[serde(default)]
+    pub token_service: Option<token_service::Config>,
 }
 
 type OidcValidators = Vec<(String, Arc<dyn AuthMiddleware>)>;
 
-/// Returns the strongest method that succeeded, using first-wins priority: mTLS > OIDC > Basic.
-fn select_auth_method(mtls: bool, oidc: bool, basic: bool) -> AuthMethod {
-    if mtls {
-        return AuthMethod::Mtls;
-    }
-    if oidc {
-        return AuthMethod::Oidc;
-    }
-    if basic {
-        return AuthMethod::Basic;
-    }
-    AuthMethod::Anonymous
-}
-
 /// Coordinates all authentication methods and handles the authentication chain
 pub struct Authenticator {
     mtls_validator: MtlsValidator,
+    token_validator: Option<TokenValidator>,
     oidc_validators: OidcValidators,
     basic_auth_validator: BasicAuthValidator,
 }
@@ -53,20 +43,25 @@ pub struct Authenticator {
 impl Authenticator {
     pub fn new(config: &Configuration, cache: &Arc<Cache>) -> Result<Self, Error> {
         let auth_config = &config.auth;
-        // No client-level timeout: each OIDC fetch carries a per-request
-        // timeout from its provider config (`http_request_timeout_secs`,
-        // `jwks_refresh_timeout_secs`).
-        let oidc_client =
-            Arc::new(Client::builder().build().map_err(|e| {
-                Error::Initialization(format!("Failed to create HTTP client: {e}"))
-            })?);
+        reject_provider_name_collision(auth_config)?;
 
         let mtls_validator = MtlsValidator::new();
-        let oidc_validators = Self::build_oidc_validators(auth_config, &oidc_client, cache);
+        let oidc_validators = Self::build_oidc_validators(auth_config, cache)?;
         let basic_auth_validator = BasicAuthValidator::new(&auth_config.identity)?;
+
+        let provider_names: Vec<String> = oidc_validators
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        let token_validator = auth_config
+            .token_service
+            .as_ref()
+            .map(|config| TokenValidator::new(config, &provider_names))
+            .transpose()?;
 
         Ok(Self {
             mtls_validator,
+            token_validator,
             oidc_validators,
             basic_auth_validator,
         })
@@ -74,26 +69,29 @@ impl Authenticator {
 
     fn build_oidc_validators(
         auth_config: &AuthConfig,
-        client: &Arc<Client>,
         cache: &Arc<Cache>,
-    ) -> OidcValidators {
+    ) -> Result<OidcValidators, Error> {
         let mut validators = Vec::with_capacity(auth_config.oidc.len());
 
         for (name, oidc_config) in &auth_config.oidc {
             let validator = OidcValidator::new(
                 name.clone(),
                 oidc_config,
-                Arc::clone(client),
+                build_oidc_client(name, oidc_config)?,
                 Arc::clone(cache),
             );
             validators.push((name.clone(), Arc::new(validator) as Arc<dyn AuthMiddleware>));
         }
 
         validators.sort_by(|a, b| a.0.cmp(&b.0));
-        validators
+        Ok(validators)
     }
 
-    /// Authentication order: mTLS → OIDC → Basic Auth
+    /// Authentication order: mTLS → Registry token → OIDC → Basic Auth
+    ///
+    /// A registry token short-circuits OIDC and Basic: the OIDC middlewares claim
+    /// any bearer header, so letting them run would reject the token they cannot
+    /// validate.
     #[instrument(skip(self, parts), fields(auth_method = tracing::field::Empty))]
     pub async fn authenticate_request(
         &self,
@@ -102,22 +100,36 @@ impl Authenticator {
     ) -> Result<ClientIdentity, Error> {
         let mut identity = ClientIdentity::new(remote_address);
 
-        let mtls_ok = self.try_mtls_authentication(parts, &mut identity).await;
-        let oidc_ok = self.try_oidc_authentication(parts, &mut identity).await?;
-        let basic_ok = if oidc_ok {
-            false
+        let mtls = self.try_mtls_authentication(parts, &mut identity).await;
+        let token = self.try_token_authentication(parts, &mut identity).await?;
+        let oidc = if token.is_none() {
+            self.try_oidc_authentication(parts, &mut identity).await?
         } else {
+            None
+        };
+        let basic = if token.is_none() && oidc.is_none() {
             self.try_basic_authentication(parts, &mut identity).await?
+        } else {
+            None
         };
 
-        identity.auth_method = select_auth_method(mtls_ok, oidc_ok, basic_ok);
+        // First-wins priority, strongest first: a request can satisfy several
+        // methods at once and the identity states one answer.
+        identity.auth_method = mtls
+            .or(token)
+            .or(oidc)
+            .or(basic)
+            .unwrap_or(AuthMethod::Anonymous);
         Span::current().record("auth_method", identity.auth_method.as_str());
         Ok(identity)
     }
 
-    /// Attempts mTLS authentication. Returns `true` if a valid certificate was extracted.
     /// Errors are logged and suppressed: mTLS is non-fatal so other methods can follow.
-    async fn try_mtls_authentication(&self, parts: &Parts, identity: &mut ClientIdentity) -> bool {
+    async fn try_mtls_authentication(
+        &self,
+        parts: &Parts,
+        identity: &mut ClientIdentity,
+    ) -> Option<AuthMethod> {
         match self.mtls_validator.authenticate(parts, identity).await {
             Ok(AuthResult::Authenticated) => {
                 debug!("mTLS authentication extracted certificate info");
@@ -128,7 +140,7 @@ impl Authenticator {
                         .auth_attempts
                         .with_label_values(&["mtls", "success"])
                         .inc();
-                    return true;
+                    return Some(AuthMethod::Mtls);
                 }
             }
             Ok(AuthResult::NoCredentials) => {}
@@ -140,11 +152,43 @@ impl Authenticator {
                     .inc();
             }
         }
-        false
+        None
     }
 
-    /// Tries each OIDC provider in sorted order, returning `true` on first success.
-    /// A failure from one provider does not prevent subsequent providers from being tried.
+    /// Returns `Err` when the bearer is one of ours but no longer valid; a bearer
+    /// belonging to another scheme is left for the OIDC middlewares.
+    async fn try_token_authentication(
+        &self,
+        parts: &Parts,
+        identity: &mut ClientIdentity,
+    ) -> Result<Option<AuthMethod>, Error> {
+        let Some(token_validator) = &self.token_validator else {
+            return Ok(None);
+        };
+
+        match token_validator.authenticate(parts, identity).await {
+            Ok(AuthResult::Authenticated) => {
+                debug!("Registry token authentication succeeded");
+                metrics_provider()
+                    .auth_attempts
+                    .with_label_values(&["token", "success"])
+                    .inc();
+                Ok(Some(AuthMethod::Token))
+            }
+            Ok(AuthResult::NoCredentials) => Ok(None),
+            Err(e) => {
+                info!("Registry token validation failed: {e}");
+                metrics_provider()
+                    .auth_attempts
+                    .with_label_values(&["token", "failed"])
+                    .inc();
+                Err(e)
+            }
+        }
+    }
+
+    /// Providers are tried in sorted order, and a failure from one does not stop
+    /// the next from being tried.
     /// If no provider succeeds and at least one returned an error, the first error is returned.
     /// First rather than last so that deterministic sort order also makes error reporting deterministic.
     ///
@@ -155,7 +199,7 @@ impl Authenticator {
         &self,
         parts: &Parts,
         identity: &mut ClientIdentity,
-    ) -> Result<bool, Error> {
+    ) -> Result<Option<AuthMethod>, Error> {
         let mut first_error: Option<Error> = None;
         for (provider_name, validator) in &self.oidc_validators {
             match validator.authenticate(parts, identity).await {
@@ -165,7 +209,7 @@ impl Authenticator {
                         .auth_attempts
                         .with_label_values(&["oidc", "success"])
                         .inc();
-                    return Ok(true);
+                    return Ok(Some(AuthMethod::Oidc));
                 }
                 Ok(AuthResult::NoCredentials) => {}
                 Err(e) => {
@@ -184,17 +228,16 @@ impl Authenticator {
                     .inc();
                 Err(e)
             }
-            None => Ok(false),
+            None => Ok(None),
         }
     }
 
-    /// Attempts basic auth authentication, returning `true` on success.
     /// Returns `Err` if credentials were presented but invalid.
     async fn try_basic_authentication(
         &self,
         parts: &Parts,
         identity: &mut ClientIdentity,
-    ) -> Result<bool, Error> {
+    ) -> Result<Option<AuthMethod>, Error> {
         match self
             .basic_auth_validator
             .authenticate(parts, identity)
@@ -206,9 +249,9 @@ impl Authenticator {
                     .auth_attempts
                     .with_label_values(&["basic", "success"])
                     .inc();
-                Ok(true)
+                Ok(Some(AuthMethod::Basic))
             }
-            Ok(AuthResult::NoCredentials) => Ok(false),
+            Ok(AuthResult::NoCredentials) => Ok(None),
             Err(e) => {
                 warn!("Basic auth validation failed: {e}");
                 metrics_provider()
@@ -221,35 +264,78 @@ impl Authenticator {
     }
 }
 
+/// One client per provider: a CA bundle is baked into a client when it is built,
+/// so a provider trusting its own issuer cannot share one with the others.
+fn build_oidc_client(name: &str, config: &oidc::Config) -> Result<Arc<Client>, Error> {
+    let initialization_error = |e: String| {
+        Error::Initialization(format!(
+            "Failed to create HTTP client for auth.oidc.{name}: {e}"
+        ))
+    };
+
+    // No client-level timeout: each fetch carries a per-request timeout from the
+    // provider config (`http_request_timeout_secs`, `jwks_refresh_timeout_secs`).
+    apply_tls_files(
+        Client::builder(),
+        config.server_ca_bundle.as_deref(),
+        None,
+        None,
+    )
+    .map_err(initialization_error)?
+    .build()
+    .map(Arc::new)
+    .map_err(|e| initialization_error(e.to_string()))
+}
+
+/// A Basic credential whose username names a provider is read as that provider's
+/// token, and the validation failure ends the chain before basic auth runs, so
+/// the user could never authenticate. Refused at startup rather than at runtime.
+fn reject_provider_name_collision(auth_config: &AuthConfig) -> Result<(), Error> {
+    let collision = auth_config
+        .identity
+        .values()
+        .find(|identity| auth_config.oidc.contains_key(&identity.username));
+
+    match collision {
+        Some(identity) => Err(Error::Initialization(format!(
+            "basic-auth username '{}' is also an OIDC provider name",
+            identity.username
+        ))),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use argon2::{
         Algorithm, Argon2, Params, PasswordHasher, Version,
         password_hash::{SaltString, rand_core::OsRng},
     };
     use async_trait::async_trait;
+    use tempfile::tempdir;
 
     use super::*;
     use crate::{
-        auth::PeerCertificate,
+        auth::{PeerCertificate, TokenIssuer, oidc::validator::tests::make_token},
         cache,
         configuration::Configuration,
         identity::OidcClaims,
         metrics_provider,
+        secret::Secret,
         test_fixtures::{
             configuration::{load_config, minimal_config},
             mtls::cert_der,
-            requests::{empty_parts, parts_with_basic_auth},
+            oidc::KID,
+            requests::{empty_parts, parts_with_authorization, parts_with_basic_auth},
+            webhook::ca_bundle_pem,
         },
     };
 
     fn create_minimal_config() -> Configuration {
         metrics_provider::init_for_tests();
         minimal_config()
-    }
-
-    fn test_http_client() -> Arc<Client> {
-        Arc::new(Client::new())
     }
 
     #[test]
@@ -279,7 +365,7 @@ mod tests {
         let config = load_config(
             r#"
             [auth.oidc.github]
-            provider = "github"
+            issuer = "https://token.actions.githubusercontent.com"
         "#,
         );
 
@@ -328,13 +414,39 @@ mod tests {
         assert!(authenticator.is_ok());
     }
 
+    /// The Basic username field selects the provider, so the two names cannot
+    /// both be honoured and the collision is a configuration mistake.
+    #[test]
+    fn a_basic_username_may_not_name_an_oidc_provider() {
+        let config = load_config(
+            r#"
+            [auth.identity.ci]
+            username = "github-actions"
+            password = "$argon2id$v=19$m=19456,t=2,p=1$test"
+
+            [auth.oidc.github-actions]
+            issuer = "https://token.actions.githubusercontent.com"
+        "#,
+        );
+
+        let cache = cache::Config::Memory.to_backend().unwrap();
+
+        let Err(error) = Authenticator::new(&config, &cache) else {
+            panic!("a colliding name must be refused at startup");
+        };
+
+        assert!(
+            matches!(&error, Error::Initialization(msg) if msg.contains("github-actions")),
+            "got: {error:?}"
+        );
+    }
+
     #[test]
     fn test_build_oidc_validators_empty() {
         let auth_config = AuthConfig::default();
         let cache = cache::Config::Memory.to_backend().unwrap();
 
-        let validators =
-            Authenticator::build_oidc_validators(&auth_config, &test_http_client(), &cache);
+        let validators = Authenticator::build_oidc_validators(&auth_config, &cache).unwrap();
 
         assert!(validators.is_empty());
     }
@@ -344,14 +456,13 @@ mod tests {
         let config = load_config(
             r#"
             [auth.oidc.github]
-            provider = "github"
+            issuer = "https://token.actions.githubusercontent.com"
         "#,
         );
 
         let cache = cache::Config::Memory.to_backend().unwrap();
 
-        let validators =
-            Authenticator::build_oidc_validators(&config.auth, &test_http_client(), &cache);
+        let validators = Authenticator::build_oidc_validators(&config.auth, &cache).unwrap();
 
         assert_eq!(validators.len(), 1);
         assert_eq!(validators[0].0, "github");
@@ -362,18 +473,63 @@ mod tests {
         let config = load_config(
             r#"
             [auth.oidc.custom]
-            provider = "generic"
             issuer = "https://auth.example.com"
         "#,
         );
 
         let cache = cache::Config::Memory.to_backend().unwrap();
 
-        let validators =
-            Authenticator::build_oidc_validators(&config.auth, &test_http_client(), &cache);
+        let validators = Authenticator::build_oidc_validators(&config.auth, &cache).unwrap();
 
         assert_eq!(validators.len(), 1);
         assert_eq!(validators[0].0, "custom");
+    }
+
+    /// An issuer whose certificate the system roots do not cover, such as a
+    /// kube-apiserver, is reachable only through its own CA bundle.
+    #[test]
+    fn a_provider_may_trust_its_own_ca_bundle() {
+        let bundle = tempdir().unwrap();
+        let bundle_path = bundle.path().join("ca.pem");
+        fs::write(&bundle_path, ca_bundle_pem()).unwrap();
+
+        let config = load_config(&format!(
+            r#"
+            [auth.oidc.kube]
+            issuer = "https://kubernetes.default.svc"
+            server_ca_bundle = "{}"
+        "#,
+            bundle_path.display()
+        ));
+
+        let cache = cache::Config::Memory.to_backend().unwrap();
+
+        assert_eq!(
+            config.auth.oidc["kube"].server_ca_bundle.as_deref(),
+            Some(bundle_path.as_path())
+        );
+        assert!(Authenticator::build_oidc_validators(&config.auth, &cache).is_ok());
+    }
+
+    #[test]
+    fn a_ca_bundle_that_does_not_load_is_refused_at_startup() {
+        let config = load_config(
+            r#"
+            [auth.oidc.kube]
+            issuer = "https://kubernetes.default.svc"
+            server_ca_bundle = "/nonexistent/ca.pem"
+        "#,
+        );
+
+        let cache = cache::Config::Memory.to_backend().unwrap();
+
+        let Err(error) = Authenticator::build_oidc_validators(&config.auth, &cache) else {
+            panic!("an unreadable CA bundle must be refused");
+        };
+        assert!(
+            matches!(&error, Error::Initialization(msg) if msg.contains("auth.oidc.kube")),
+            "got: {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -447,40 +603,6 @@ mod tests {
         assert!(matches!(result, Err(Error::Unauthorized(_))));
     }
 
-    #[test]
-    fn select_auth_method_returns_mtls_when_only_mtls_succeeds() {
-        assert_eq!(select_auth_method(true, false, false), AuthMethod::Mtls);
-    }
-
-    #[test]
-    fn select_auth_method_keeps_mtls_when_basic_also_succeeds() {
-        // Bug: basic-auth success used to overwrite mtls. Must not.
-        assert_eq!(select_auth_method(true, false, true), AuthMethod::Mtls);
-    }
-
-    #[test]
-    fn select_auth_method_keeps_mtls_when_oidc_also_succeeds() {
-        assert_eq!(select_auth_method(true, true, false), AuthMethod::Mtls);
-    }
-
-    #[test]
-    fn select_auth_method_returns_oidc_when_no_mtls() {
-        assert_eq!(select_auth_method(false, true, false), AuthMethod::Oidc);
-    }
-
-    #[test]
-    fn select_auth_method_returns_basic_when_no_mtls_no_oidc() {
-        assert_eq!(select_auth_method(false, false, true), AuthMethod::Basic);
-    }
-
-    #[test]
-    fn select_auth_method_returns_anonymous_when_nothing_succeeded() {
-        assert_eq!(
-            select_auth_method(false, false, false),
-            AuthMethod::Anonymous
-        );
-    }
-
     #[tokio::test]
     async fn test_authenticate_request_preserves_client_ip() {
         let config = create_minimal_config();
@@ -506,18 +628,16 @@ mod tests {
         let config = load_config(
             r#"
             [auth.oidc.github]
-            provider = "github"
+            issuer = "https://token.actions.githubusercontent.com"
 
             [auth.oidc.custom]
-            provider = "generic"
             issuer = "https://auth.example.com"
         "#,
         );
 
         let cache = cache::Config::Memory.to_backend().unwrap();
 
-        let validators =
-            Authenticator::build_oidc_validators(&config.auth, &test_http_client(), &cache);
+        let validators = Authenticator::build_oidc_validators(&config.auth, &cache).unwrap();
 
         assert_eq!(validators.len(), 2);
         assert_eq!(validators[0].0, "custom");
@@ -550,7 +670,6 @@ mod tests {
                 MockOutcome::Authenticated => {
                     identity.oidc = Some(OidcClaims {
                         provider_name: "mock".to_string(),
-                        provider_type: "Mock".to_string(),
                         claims: HashMap::new(),
                     });
                     Ok(AuthResult::Authenticated)
@@ -574,6 +693,7 @@ mod tests {
 
         Authenticator {
             mtls_validator: MtlsValidator::new(),
+            token_validator: None,
             oidc_validators,
             basic_auth_validator: BasicAuthValidator::new(&HashMap::new()).unwrap(),
         }
@@ -590,7 +710,7 @@ mod tests {
             .try_oidc_authentication(&parts, &mut identity)
             .await;
 
-        assert!(!result.unwrap());
+        assert!(result.unwrap().is_none());
         assert!(identity.oidc.is_none());
     }
 
@@ -611,7 +731,7 @@ mod tests {
             .try_oidc_authentication(&parts, &mut identity)
             .await;
 
-        assert!(result.unwrap());
+        assert_eq!(result.unwrap(), Some(AuthMethod::Oidc));
         assert!(identity.oidc.is_some());
     }
 
@@ -651,13 +771,30 @@ mod tests {
             .try_oidc_authentication(&parts, &mut identity)
             .await;
 
-        assert!(!result.unwrap());
+        assert!(result.unwrap().is_none());
         assert!(identity.oidc.is_none());
     }
 
     // ---------------------------------------------------------------------------
     // Helpers shared by method-tracking integration tests below.
     // ---------------------------------------------------------------------------
+
+    /// Built through `load_config` because `basic_auth::PasswordHash` is not
+    /// publicly constructible: its only path is deserialisation.
+    fn admin_basic_auth_validator() -> BasicAuthValidator {
+        let salt = SaltString::generate(OsRng);
+        let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::default());
+        let password_hash = argon.hash_password(b"secret", &salt).unwrap().to_string();
+        let config = load_config(&format!(
+            r#"
+            [auth.identity.admin]
+            username = "admin"
+            password = "{password_hash}"
+        "#,
+        ));
+
+        BasicAuthValidator::new(&config.auth.identity).unwrap()
+    }
 
     fn make_authenticator_with_cert_and_mocks(
         validators: Vec<(&'static str, MockOutcome)>,
@@ -667,13 +804,96 @@ mod tests {
         (authenticator, peer_cert)
     }
 
+    /// The two halves the token service splits into, built from one config so
+    /// the issued token is the one the chain's validator accepts.
+    fn make_authenticator_with_token_service(
+        validators: Vec<(&'static str, MockOutcome)>,
+    ) -> (Authenticator, TokenIssuer) {
+        let config = token_service::Config {
+            secret_key: Secret::new(vec![7; 32].into()),
+            realm: None,
+            ttl_secs: 3600,
+        };
+        let authenticator = Authenticator {
+            token_validator: Some(TokenValidator::new(&config, &["mock".to_string()]).unwrap()),
+            ..make_authenticator_with_mocks(validators)
+        };
+
+        (authenticator, TokenIssuer::new(&config).unwrap())
+    }
+
+    // ---------------------------------------------------------------------------
+    // Registry token tests.
+    // ---------------------------------------------------------------------------
+
+    /// The OIDC middlewares claim any bearer header and fail the request when they
+    /// cannot validate it, so without the short-circuit no reissued token works.
+    #[tokio::test]
+    async fn a_valid_token_skips_oidc_and_basic() {
+        metrics_provider::init_for_tests();
+        let (authenticator, issuer) = make_authenticator_with_token_service(vec![(
+            "mock",
+            MockOutcome::Fail("must not be reached".to_string()),
+        )]);
+        let issued_from = ClientIdentity {
+            username: Some("ci-bot".to_string()),
+            ..Default::default()
+        };
+        let (token, _) = issuer.issue(&issued_from).unwrap();
+
+        let parts = parts_with_authorization(&format!("Bearer {token}"));
+        let identity = authenticator
+            .authenticate_request(&parts, None)
+            .await
+            .unwrap();
+
+        assert_eq!(identity.auth_method, AuthMethod::Token);
+        assert_eq!(identity.username.as_deref(), Some("ci-bot"));
+    }
+
+    #[tokio::test]
+    async fn a_bearer_that_is_not_ours_still_reaches_oidc() {
+        metrics_provider::init_for_tests();
+        let (authenticator, _) =
+            make_authenticator_with_token_service(vec![("mock", MockOutcome::Authenticated)]);
+
+        let token = make_token(&HashMap::new(), KID);
+        let parts = parts_with_authorization(&format!("Bearer {token}"));
+        let identity = authenticator
+            .authenticate_request(&parts, None)
+            .await
+            .unwrap();
+
+        assert_eq!(identity.auth_method, AuthMethod::Oidc);
+    }
+
+    #[tokio::test]
+    async fn mtls_outranks_a_registry_token() {
+        metrics_provider::init_for_tests();
+        let (authenticator, issuer) =
+            make_authenticator_with_token_service(vec![("mock", MockOutcome::NoCredentials)]);
+        let (token, _) = issuer.issue(&ClientIdentity::default()).unwrap();
+
+        let mut parts = parts_with_authorization(&format!("Bearer {token}"));
+        parts
+            .extensions
+            .insert(PeerCertificate(Arc::new(cert_der())));
+
+        let identity = authenticator
+            .authenticate_request(&parts, None)
+            .await
+            .unwrap();
+
+        assert_eq!(identity.auth_method, AuthMethod::Mtls);
+    }
+
     // ---------------------------------------------------------------------------
     // Method-tracking integration tests.
     // ---------------------------------------------------------------------------
 
     /// mTLS succeeds + all OIDC providers return `NoCredentials`.
     /// The identity must carry certificate info and no OIDC claims.
-    /// `select_auth_method(true, false, false)` is `Mtls`; certificate not downgraded.
+    /// The reported method is `Mtls`; certificate not downgraded.
     #[tokio::test]
     async fn method_tracking_mtls_success_oidc_no_credentials_preserves_cert() {
         metrics_provider::init_for_tests();
@@ -701,11 +921,47 @@ mod tests {
             identity.oidc.is_none(),
             "oidc claims must not be set when no OIDC provider had credentials"
         );
+        assert_eq!(identity.auth_method, AuthMethod::Mtls);
+    }
+
+    /// mTLS and OIDC both succeed. The identity carries both credentials and
+    /// reports the stronger one.
+    #[tokio::test]
+    async fn mtls_outranks_a_successful_oidc_provider() {
+        metrics_provider::init_for_tests();
+        let (authenticator, peer_cert) =
+            make_authenticator_with_cert_and_mocks(vec![("provider", MockOutcome::Authenticated)]);
+
+        let mut parts = empty_parts();
+        parts.extensions.insert(peer_cert);
+
+        let identity = authenticator
+            .authenticate_request(&parts, None)
+            .await
+            .unwrap();
+
+        assert!(identity.oidc.is_some());
+        assert_eq!(identity.auth_method, AuthMethod::Mtls);
+    }
+
+    #[tokio::test]
+    async fn a_request_with_no_credentials_is_anonymous() {
+        metrics_provider::init_for_tests();
+        let authenticator = make_authenticator_with_mocks(vec![
+            ("alpha", MockOutcome::NoCredentials),
+            ("beta", MockOutcome::NoCredentials),
+        ]);
+
+        let identity = authenticator
+            .authenticate_request(&empty_parts(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(identity.auth_method, AuthMethod::Anonymous);
     }
 
     /// mTLS has no certificate (`NoCredentials`) + one OIDC provider succeeds.
     /// The identity must carry OIDC claims and no certificate info.
-    /// `select_auth_method(false, true, false)` is `Oidc`.
     #[tokio::test]
     async fn method_tracking_no_mtls_oidc_success_sets_oidc_identity() {
         metrics_provider::init_for_tests();
@@ -730,14 +986,15 @@ mod tests {
                 && identity.certificate.organizations.is_empty(),
             "certificate info must be empty when no mTLS cert was presented"
         );
+        assert_eq!(identity.auth_method, AuthMethod::Oidc);
     }
 
     /// mTLS succeeds + OIDC provider A fails, provider B also fails.
     /// The chain propagates the first OIDC error via `?`, so `authenticate_request`
     /// returns `Err`.  The test verifies the error is the one from the
-    /// alphabetically-first provider ("alpha"). The method-label computation
-    /// (`select_auth_method`) is never reached in this path, which is correct
-    /// behaviour: an explicit OIDC credential rejection overrides mTLS success.
+    /// alphabetically-first provider ("alpha"). The method label is never
+    /// computed in this path, which is correct behaviour: an explicit OIDC
+    /// credential rejection overrides mTLS success.
     #[tokio::test]
     async fn method_tracking_mtls_success_oidc_all_fail_returns_oidc_error() {
         metrics_provider::init_for_tests();
@@ -760,7 +1017,7 @@ mod tests {
 
     /// When OIDC succeeds, basic auth is skipped entirely.
     /// Even if valid basic-auth credentials are present in the request, the
-    /// OIDC success short-circuits the basic-auth path (`if oidc_ok { false }`).
+    /// OIDC success short-circuits the basic-auth path.
     /// The identity carries OIDC claims; username is None (basic never ran).
     #[tokio::test]
     async fn method_tracking_oidc_success_skips_basic_auth() {
@@ -791,6 +1048,7 @@ mod tests {
 
         let authenticator = Authenticator {
             mtls_validator: MtlsValidator::new(),
+            token_validator: None,
             oidc_validators,
             basic_auth_validator,
         };
@@ -813,5 +1071,49 @@ mod tests {
             identity.username.is_none(),
             "basic auth must be skipped when OIDC already succeeded; username must be None"
         );
+        assert_eq!(identity.auth_method, AuthMethod::Oidc);
+    }
+
+    #[tokio::test]
+    async fn basic_auth_is_reported_when_nothing_stronger_succeeds() {
+        metrics_provider::init_for_tests();
+
+        let authenticator = Authenticator {
+            basic_auth_validator: admin_basic_auth_validator(),
+            ..make_authenticator_with_mocks(vec![("provider", MockOutcome::NoCredentials)])
+        };
+
+        let parts = parts_with_basic_auth("admin", "secret");
+        let identity = authenticator
+            .authenticate_request(&parts, None)
+            .await
+            .unwrap();
+
+        assert_eq!(identity.username.as_deref(), Some("admin"));
+        assert_eq!(identity.auth_method, AuthMethod::Basic);
+    }
+
+    /// Bug: a basic-auth success used to overwrite mTLS. Must not.
+    #[tokio::test]
+    async fn mtls_outranks_successful_basic_auth() {
+        metrics_provider::init_for_tests();
+
+        let authenticator = Authenticator {
+            basic_auth_validator: admin_basic_auth_validator(),
+            ..make_authenticator_with_mocks(vec![("provider", MockOutcome::NoCredentials)])
+        };
+
+        let mut parts = parts_with_basic_auth("admin", "secret");
+        parts
+            .extensions
+            .insert(PeerCertificate(Arc::new(cert_der())));
+
+        let identity = authenticator
+            .authenticate_request(&parts, None)
+            .await
+            .unwrap();
+
+        assert_eq!(identity.auth_method, AuthMethod::Mtls);
+        assert!(!identity.certificate.organizations.is_empty());
     }
 }

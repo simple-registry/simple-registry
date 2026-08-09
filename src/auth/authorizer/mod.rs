@@ -60,7 +60,6 @@ struct AuditIdentity<'a> {
     certificate_organizations: &'a [String],
     certificate_common_names: &'a [String],
     oidc_provider_name: Option<&'a str>,
-    oidc_provider_type: Option<&'a str>,
 }
 
 // Debug is this projection's sole consumer; the manual impl (not a derive)
@@ -75,7 +74,6 @@ impl fmt::Debug for AuditIdentity<'_> {
             .field("certificate_organizations", &self.certificate_organizations)
             .field("certificate_common_names", &self.certificate_common_names)
             .field("oidc_provider_name", &self.oidc_provider_name)
-            .field("oidc_provider_type", &self.oidc_provider_type)
             .finish()
     }
 }
@@ -95,10 +93,6 @@ impl<'a> From<&'a ClientIdentity> for AuditIdentity<'a> {
                 .oidc
                 .as_ref()
                 .map(|oidc| oidc.provider_name.as_str()),
-            oidc_provider_type: identity
-                .oidc
-                .as_ref()
-                .map(|oidc| oidc.provider_type.as_str()),
         }
     }
 }

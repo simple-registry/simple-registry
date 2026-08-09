@@ -155,12 +155,18 @@ The registry sends GET requests with headers containing request context.
 
 ### Identity (when authenticated)
 
-| Header                      | Description                |
-|-----------------------------|----------------------------|
-| `X-Registry-Username`       | Basic auth or OIDC subject |
-| `X-Registry-Identity-ID`    | Identity identifier        |
-| `X-Registry-Certificate-CN` | Certificate Common Name    |
-| `X-Registry-Certificate-O`  | Certificate Organization   |
+| Header                      | Description                            |
+|-----------------------------|----------------------------------------|
+| `X-Registry-Username`       | Basic auth username                    |
+| `X-Registry-Identity-ID`    | Identity identifier                    |
+| `X-Registry-Certificate-CN` | Certificate Common Name                |
+| `X-Registry-Certificate-O`  | Certificate Organization               |
+| `X-Registry-OIDC-Provider`  | Name of the `auth.oidc` entry          |
+| `X-Registry-OIDC-Subject`   | The token's `sub` claim, if it has one |
+
+An OIDC caller carries the two OIDC headers and no username, so a webhook
+deciding per user must read `X-Registry-OIDC-Subject`. Every header here enters
+the decision cache key, so two subjects never share one cached answer.
 
 ---
 

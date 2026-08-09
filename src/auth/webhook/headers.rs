@@ -4,6 +4,7 @@ use hyper::{
     header::{HeaderName, HeaderValue},
     http::{HeaderMap, request::Parts},
 };
+use serde_json::Value;
 
 use crate::{
     auth::Error,
@@ -24,6 +25,8 @@ static X_REGISTRY_USERNAME: &str = "X-Registry-Username";
 static X_REGISTRY_IDENTITY_ID: &str = "X-Registry-Identity-ID";
 static X_REGISTRY_CERTIFICATE_CN: &str = "X-Registry-Certificate-CN";
 static X_REGISTRY_CERTIFICATE_O: &str = "X-Registry-Certificate-O";
+static X_REGISTRY_OIDC_PROVIDER: &str = "X-Registry-OIDC-Provider";
+static X_REGISTRY_OIDC_SUBJECT: &str = "X-Registry-OIDC-Subject";
 
 pub fn build_header_name(name: &str) -> Result<HeaderName, Error> {
     match HeaderName::from_str(name) {
@@ -100,6 +103,18 @@ pub fn build_headers(
     for org in &identity.certificate.organizations {
         headers.append(X_REGISTRY_CERTIFICATE_O, build_header_value(org)?);
     }
+    // Without these an OIDC caller reaches the webhook anonymous, and since the
+    // cache key digests exactly these headers, every OIDC user would share one
+    // decision.
+    if let Some(oidc) = &identity.oidc {
+        headers.insert(
+            X_REGISTRY_OIDC_PROVIDER,
+            build_header_value(&oidc.provider_name)?,
+        );
+        if let Some(subject) = oidc.claims.get("sub").and_then(Value::as_str) {
+            headers.insert(X_REGISTRY_OIDC_SUBJECT, build_header_value(subject)?);
+        }
+    }
 
     // Operator-selected client headers, forwarded verbatim. A repeated header
     // carries every one of its values, which the cache key then covers.
@@ -137,16 +152,17 @@ pub fn build_cache_key(name: &str, headers: &HeaderMap) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{collections::HashMap, str::FromStr};
 
     use hyper::{
         Request,
         http::{HeaderMap, HeaderName, HeaderValue, request::Parts},
     };
+    use serde_json::json;
 
     use super::{build_cache_key, build_headers};
     use crate::{
-        identity::{Action, ClientIdentity},
+        identity::{Action, ClientIdentity, OidcClaims},
         oci::{Namespace, Reference, Tag},
     };
 
@@ -157,6 +173,15 @@ mod tests {
     fn identity_with_username(username: &str) -> ClientIdentity {
         let mut id = ClientIdentity::new(None);
         id.username = Some(username.to_string());
+        id
+    }
+
+    fn identity_with_oidc(provider_name: &str, subject: &str) -> ClientIdentity {
+        let mut id = ClientIdentity::new(None);
+        id.oidc = Some(OidcClaims {
+            provider_name: provider_name.to_string(),
+            claims: HashMap::from([("sub".to_string(), json!(subject))]),
+        });
         id
     }
 
@@ -368,6 +393,61 @@ mod tests {
             ),
             "a cached allow must not replay onto a request carrying an extra value"
         );
+    }
+
+    #[test]
+    fn an_oidc_identity_reaches_the_webhook() {
+        let headers = build_headers(
+            &[],
+            &Action::ApiVersion,
+            &identity_with_oidc("github-actions", "repo:myorg/myapp:ref:refs/heads/main"),
+            &parts_with_headers(&[]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            headers.get("X-Registry-OIDC-Provider").unwrap(),
+            "github-actions"
+        );
+        assert_eq!(
+            headers.get("X-Registry-OIDC-Subject").unwrap(),
+            "repo:myorg/myapp:ref:refs/heads/main"
+        );
+    }
+
+    #[test]
+    fn two_oidc_subjects_do_not_share_one_cached_decision() {
+        let action = Action::ApiVersion;
+        assert_ne!(
+            simple_key("wh", &action, &identity_with_oidc("gh", "alice")),
+            simple_key("wh", &action, &identity_with_oidc("gh", "bob"))
+        );
+        assert_ne!(
+            simple_key("wh", &action, &identity_with_oidc("gh", "alice")),
+            simple_key("wh", &action, &identity_with_oidc("okta", "alice")),
+            "one subject name must not span two providers"
+        );
+    }
+
+    /// A provider is free to omit `sub`, which must leave the caller identified
+    /// by provider alone rather than failing the request.
+    #[test]
+    fn an_oidc_identity_without_a_subject_still_names_its_provider() {
+        let mut identity = identity_with_oidc("gh", "alice");
+        if let Some(oidc) = identity.oidc.as_mut() {
+            oidc.claims.remove("sub");
+        }
+
+        let headers = build_headers(
+            &[],
+            &Action::ApiVersion,
+            &identity,
+            &parts_with_headers(&[]),
+        )
+        .unwrap();
+
+        assert_eq!(headers.get("X-Registry-OIDC-Provider").unwrap(), "gh");
+        assert!(headers.get("X-Registry-OIDC-Subject").is_none());
     }
 
     #[test]

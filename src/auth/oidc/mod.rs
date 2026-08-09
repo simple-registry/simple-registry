@@ -1,13 +1,12 @@
 pub mod jwk;
-pub mod provider;
 pub mod validator;
 
-use std::sync::Arc;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use hyper::http::request::Parts;
+use jsonwebtoken::Algorithm;
 pub use jwk::Jwk;
-pub use provider::OidcProvider;
 use reqwest::Client;
 use serde::Deserialize;
 use tracing::debug;
@@ -16,31 +15,90 @@ use crate::{
     auth::{
         AuthMiddleware, AuthResult, Error,
         authorization::{basic_credentials, bearer_token},
-        oidc::provider::{BaseConfig, generic, github},
     },
     cache::Cache,
     identity::{ClientIdentity, OidcClaims},
 };
 
+/// An OIDC provider: the issuer to trust, and how tokens it signed are validated.
+///
+/// Providers differ only by configuration, so there is one type rather than one
+/// per vendor. What a vendor "is" reduces to its issuer, its JWKS location, and
+/// the claims its tokens are expected to carry.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "provider", rename_all = "lowercase")]
-pub enum Config {
-    Generic(BaseConfig),
-    GitHub(github::ProviderConfig),
+pub struct Config {
+    pub issuer: String,
+    /// CA bundle trusted for the discovery and JWKS fetches, for an issuer whose
+    /// certificate the system roots do not cover, such as a kube-apiserver.
+    #[serde(default)]
+    pub server_ca_bundle: Option<PathBuf>,
+    /// Discovered from the issuer's `.well-known/openid-configuration` when omitted.
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+    /// Claims a token must carry beyond the ones JWT validation itself checks.
+    /// Presence only: predicates over claim *values* belong in the access
+    /// policy, which sees the whole claim map.
+    #[serde(default)]
+    pub required_claims: Vec<String>,
+    #[serde(default = "Config::default_jwks_refresh_interval")]
+    pub jwks_refresh_interval: u64,
+    #[serde(default)]
+    pub required_audience: Option<String>,
+    #[serde(default = "Config::default_clock_skew_tolerance")]
+    pub clock_skew_tolerance: u64,
+    #[serde(default = "Config::default_allowed_algorithms")]
+    pub allowed_algorithms: Vec<Algorithm>,
+    /// Timeout for an OIDC HTTP fetch (JWKS or discovery document).
+    #[serde(default = "Config::default_http_request_timeout_secs")]
+    pub http_request_timeout_secs: u64,
+    /// Timeout for the forced JWKS refetch triggered when a cached JWKS is
+    /// missing the token's key id (a rotated signing key).
+    #[serde(default = "Config::default_jwks_refresh_timeout_secs")]
+    pub jwks_refresh_timeout_secs: u64,
 }
 
 impl Config {
-    pub fn to_backend(&self) -> Arc<dyn OidcProvider + Send + Sync> {
-        match self {
-            Config::Generic(config) => Arc::new(generic::Provider::new(config.clone())),
-            Config::GitHub(config) => Arc::new(github::Provider::new(config.clone())),
+    fn default_jwks_refresh_interval() -> u64 {
+        3600
+    }
+
+    fn default_clock_skew_tolerance() -> u64 {
+        60
+    }
+
+    fn default_allowed_algorithms() -> Vec<Algorithm> {
+        vec![Algorithm::RS256]
+    }
+
+    fn default_http_request_timeout_secs() -> u64 {
+        30
+    }
+
+    fn default_jwks_refresh_timeout_secs() -> u64 {
+        5
+    }
+
+    /// Rejects a token missing any claim the provider requires. A claim present
+    /// but null counts as missing: a null carries no more identity than an
+    /// absent key, and a policy reading it would see the same nothing.
+    pub(crate) fn verify_required_claims(
+        &self,
+        claims: &HashMap<String, serde_json::Value>,
+    ) -> Result<(), Error> {
+        for name in &self.required_claims {
+            if claims.get(name).is_none_or(serde_json::Value::is_null) {
+                return Err(Error::Unauthorized(format!(
+                    "token is missing required claim '{name}'"
+                )));
+            }
         }
+        Ok(())
     }
 }
 
 pub struct OidcValidator {
     provider_name: String,
-    provider: Arc<dyn OidcProvider>,
+    config: Config,
     client: Arc<Client>,
     cache: Arc<Cache>,
 }
@@ -48,15 +106,13 @@ pub struct OidcValidator {
 impl OidcValidator {
     pub fn new(
         provider_name: String,
-        provider_config: &Config,
+        config: &Config,
         client: Arc<Client>,
         cache: Arc<Cache>,
     ) -> Self {
-        let provider = provider_config.to_backend();
-
         Self {
             provider_name,
-            provider,
+            config: config.clone(),
             client,
             cache,
         }
@@ -65,7 +121,7 @@ impl OidcValidator {
     pub async fn validate_token(&self, token: &str) -> Result<OidcClaims, Error> {
         validator::validate_oidc_token(
             &self.provider_name,
-            &*self.provider,
+            &self.config,
             token,
             &self.client,
             self.cache.as_ref(),
@@ -91,8 +147,8 @@ impl AuthMiddleware for OidcValidator {
                 let subject = claims.claims.get("sub").and_then(|v| v.as_str());
                 let issuer = claims.claims.get("iss").and_then(|v| v.as_str());
                 debug!(
-                    "OIDC token validated for provider '{}' (type='{}', sub={:?}, iss={:?})",
-                    claims.provider_name, claims.provider_type, subject, issuer
+                    "OIDC token validated for provider '{}' (sub={:?}, iss={:?})",
+                    claims.provider_name, subject, issuer
                 );
                 identity.oidc = Some(claims);
                 Ok(AuthResult::Authenticated)
@@ -140,10 +196,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        auth::oidc::{
-            provider::github::tests::default_github_config,
-            validator::tests::{build_test_provider_config, make_token, valid_claims},
-        },
+        auth::oidc::validator::tests::{build_test_provider_config, make_token, valid_claims},
         cache,
         identity::ClientIdentity,
         test_fixtures::{
@@ -154,10 +207,10 @@ mod tests {
     };
 
     fn build_config(issuer: &str) -> Config {
-        Config::Generic(BaseConfig {
+        Config {
             required_audience: None,
             ..build_test_provider_config(issuer)
-        })
+        }
     }
 
     fn make_test_token(issuer: &str) -> String {
@@ -172,66 +225,69 @@ mod tests {
     }
 
     #[test]
-    fn test_config_deserialize_generic() {
+    fn test_config_deserialize_minimal() {
         let toml = r#"
-            provider = "generic"
+            issuer = "https://auth.example.com"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.issuer, "https://auth.example.com");
+        assert!(config.jwks_uri.is_none());
+        assert!(config.required_claims.is_empty());
+        assert_eq!(config.jwks_refresh_interval, 3600);
+        assert!(config.required_audience.is_none());
+        assert_eq!(config.clock_skew_tolerance, 60);
+        assert_eq!(config.allowed_algorithms, vec![Algorithm::RS256]);
+        assert_eq!(config.http_request_timeout_secs, 30);
+        assert_eq!(config.jwks_refresh_timeout_secs, 5);
+    }
+
+    #[test]
+    fn test_config_deserialize_full() {
+        let toml = r#"
             issuer = "https://auth.example.com"
             jwks_uri = "https://auth.example.com/jwks"
+            required_claims = ["repository", "actor"]
+            jwks_refresh_interval = 7200
+            required_audience = "my-app"
+            clock_skew_tolerance = 120
+            allowed_algorithms = ["RS256", "ES256"]
         "#;
 
         let config: Config = toml::from_str(toml).unwrap();
-        match config {
-            Config::Generic(cfg) => {
-                assert_eq!(cfg.issuer, "https://auth.example.com");
-                assert_eq!(
-                    cfg.jwks_uri,
-                    Some("https://auth.example.com/jwks".to_string())
-                );
-            }
-            Config::GitHub(_) => panic!("Expected Generic config"),
-        }
-    }
-
-    #[test]
-    fn test_config_deserialize_github() {
-        let toml = r#"
-            provider = "github"
-            issuer = "https://token.actions.githubusercontent.com"
-        "#;
-
-        let config: Config = toml::from_str(toml).unwrap();
-        match config {
-            Config::GitHub(cfg) => {
-                assert_eq!(cfg.issuer, "https://token.actions.githubusercontent.com");
-            }
-            Config::Generic(_) => panic!("Expected GitHub config"),
-        }
-    }
-
-    #[test]
-    fn test_config_to_backend_generic() {
-        let config = build_config("https://auth.example.com");
-
-        let provider = config.to_backend();
-        assert_eq!(provider.base_config().issuer, "https://auth.example.com");
-        assert_eq!(provider.name(), "Generic OIDC");
-    }
-
-    #[test]
-    fn test_config_to_backend_github() {
-        let config = Config::GitHub(default_github_config());
-
-        let provider = config.to_backend();
         assert_eq!(
-            provider.base_config().issuer,
-            "https://token.actions.githubusercontent.com"
+            config.jwks_uri,
+            Some("https://auth.example.com/jwks".to_string())
         );
-        assert_eq!(provider.name(), "GitHub Actions");
+        assert_eq!(config.required_claims, vec!["repository", "actor"]);
+        assert_eq!(config.jwks_refresh_interval, 7200);
+        assert_eq!(config.required_audience, Some("my-app".to_string()));
+        assert_eq!(config.clock_skew_tolerance, 120);
+        assert_eq!(
+            config.allowed_algorithms,
+            vec![Algorithm::RS256, Algorithm::ES256]
+        );
+    }
+
+    /// GitHub Actions used to be its own provider type. Its entire definition
+    /// is now a config entry, so this pins that the shape still loads without
+    /// a dedicated variant.
+    #[test]
+    fn test_config_deserialize_github_actions_shape() {
+        let toml = r#"
+            issuer = "https://token.actions.githubusercontent.com"
+            jwks_uri = "https://token.actions.githubusercontent.com/.well-known/jwks"
+            required_claims = ["repository", "actor"]
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.issuer, "https://token.actions.githubusercontent.com");
+        assert_eq!(config.required_claims, vec!["repository", "actor"]);
     }
 
     #[test]
-    fn test_oidc_validator_new_generic() {
-        let config = Config::Generic(build_test_provider_config("https://auth.example.com"));
+    fn test_oidc_validator_new() {
+        let config = build_test_provider_config("https://auth.example.com");
 
         let cache = cache::Config::Memory.to_backend().unwrap();
         let client = test_http_client();
@@ -239,26 +295,8 @@ mod tests {
             OidcValidator::new("test-provider".to_string(), &config, client.clone(), cache);
 
         assert_eq!(validator.provider_name, "test-provider");
-        assert_eq!(
-            validator.provider.base_config().issuer,
-            "https://auth.example.com"
-        );
+        assert_eq!(validator.config.issuer, "https://auth.example.com");
         assert!(Arc::ptr_eq(&validator.client, &client));
-    }
-
-    #[test]
-    fn test_oidc_validator_new_github() {
-        let config = Config::GitHub(default_github_config());
-
-        let cache = cache::Config::Memory.to_backend().unwrap();
-        let validator =
-            OidcValidator::new("github".to_string(), &config, test_http_client(), cache);
-
-        assert_eq!(validator.provider_name, "github");
-        assert_eq!(
-            validator.provider.base_config().issuer,
-            "https://token.actions.githubusercontent.com"
-        );
     }
 
     #[tokio::test]
@@ -282,7 +320,6 @@ mod tests {
         assert!(result.is_ok());
         let oidc_claims = result.unwrap();
         assert_eq!(oidc_claims.provider_name, "test-provider");
-        assert_eq!(oidc_claims.provider_type, "Generic OIDC");
         assert_eq!(oidc_claims.claims.get("sub").unwrap(), "test-user");
     }
 
@@ -452,7 +489,6 @@ mod tests {
 
         let oidc_claims = identity.oidc.unwrap();
         assert_eq!(oidc_claims.provider_name, "my-provider");
-        assert_eq!(oidc_claims.provider_type, "Generic OIDC");
         assert_eq!(oidc_claims.claims.get("sub").unwrap(), "user-123");
         assert_eq!(oidc_claims.claims.get("email").unwrap(), "user@example.com");
         assert_eq!(identity.client_ip, Some("192.168.1.1".to_string()));

@@ -17,15 +17,20 @@ Set up Angos to accept GitHub Actions OIDC tokens for passwordless authenticatio
 
 ### Step 1: Add OIDC Provider
 
-Add the GitHub provider to `config.toml`:
+Add GitHub's issuer to `config.toml`:
 
 ```toml
 [auth.oidc.github-actions]
-provider = "github"
+issuer = "https://token.actions.githubusercontent.com"
+jwks_uri = "https://token.actions.githubusercontent.com/.well-known/jwks"
+required_claims = ["repository", "actor"]
 ```
 
-That's it for basic configuration. The registry automatically uses GitHub's default issuer and JWKS endpoints.
-OIDC tokens must use an allowed JWT signing algorithm; the default allowlist is `["RS256"]`.
+`jwks_uri` is optional: leave it out and the registry discovers it from the
+issuer's `.well-known/openid-configuration`. `required_claims` rejects a token
+that does not carry the claims a workflow token always has, before any access
+policy runs. OIDC tokens must use an allowed JWT signing algorithm; the default
+allowlist is `["RS256"]`.
 
 ### Step 2: Add Access Policy
 
@@ -95,6 +100,38 @@ jobs:
 ```
 
 The username must match the provider name (`github-actions` in this example).
+
+For Kaniko, Buildx and the rest of the workflow side, see
+[Push from GitHub Actions](push-from-github-actions.md).
+
+---
+
+## Long-Running Pushes
+
+A GitHub Actions OIDC token is valid for about ten minutes and that lifetime cannot be extended. The registry checks it on every request, so a push still running when the token expires fails part-way through.
+
+Enable the [token service](../reference/configuration.md#token-service-authtoken_service) to decouple the two. The exchange is reactive rather than up front: the client's first request is refused with a 401 carrying the challenge, the client follows it to `/token`, and it uses the token it gets back for the rest of the push. Under a deny-by-default policy that refused request is the `GET /v2/` ping, so the OIDC token only has to be valid at the start of the push instead of for its whole duration:
+
+```toml
+[auth.token_service]
+secret_key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="  # openssl rand -base64 32
+ttl_secs = 3600
+```
+
+Under a default-deny policy, allow the exchange:
+
+```toml
+[global.access_policy]
+default = "deny"
+rules = [
+  "request.action == 'get-token' && identity.oidc != null",
+  "identity.oidc != null && identity.oidc.claims['repository'].startsWith('myorg/')",
+]
+```
+
+No workflow change is needed, and this is not Docker-specific: the exchange is the registry v2 bearer-token flow that every OCI client implements, so Docker, Podman, Buildah, Skopeo, containerd, BuildKit, Kaniko, crane and ORAS all discover the endpoint from the registry's `WWW-Authenticate` header on their own. Fetch the OIDC token close to the push rather than at the start of the job, so the ten minutes covers the build as well.
+
+A token that expires mid-push is answered with a fresh challenge and the client exchanges again, but only while the credential it started from is still valid, which here is the same ten minutes. Size `ttl_secs` to the longest push you expect rather than to the maximum allowed: a registry token cannot be revoked before it expires. A client whose credentials do not expire, such as basic auth, recovers from any expiry and is fine with a short one.
 
 ---
 
@@ -180,7 +217,8 @@ server_private_key = "/tls/server.key"
 root_dir = "/data"
 
 [auth.oidc.github-actions]
-provider = "github"
+issuer = "https://token.actions.githubusercontent.com"
+required_claims = ["repository", "actor"]
 
 # Production: only main branch from specific repos
 [repository."production".access_policy]
@@ -292,5 +330,5 @@ The log only includes the provider name/type and the `sub`/`iss` claims; the ful
 
 ## Next Steps
 
-- [Configure Generic OIDC](configure-generic-oidc.md) for other identity providers
+- [Configure OIDC](configure-generic-oidc.md) for other identity providers
 - [Set Up Access Control](set-up-access-control.md) for comprehensive policies
