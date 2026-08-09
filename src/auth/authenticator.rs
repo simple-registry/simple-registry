@@ -42,6 +42,7 @@ pub struct Authenticator {
 impl Authenticator {
     pub fn new(config: &Configuration, cache: &Arc<Cache>) -> Result<Self, Error> {
         let auth_config = &config.auth;
+        reject_provider_name_collision(auth_config)?;
         // No client-level timeout: each OIDC fetch carries a per-request
         // timeout from its provider config (`http_request_timeout_secs`,
         // `jwks_refresh_timeout_secs`).
@@ -275,6 +276,24 @@ impl Authenticator {
     }
 }
 
+/// A Basic credential whose username names a provider is read as that provider's
+/// token, and the validation failure ends the chain before basic auth runs, so
+/// the user could never authenticate. Refused at startup rather than at runtime.
+fn reject_provider_name_collision(auth_config: &AuthConfig) -> Result<(), Error> {
+    let collision = auth_config
+        .identity
+        .values()
+        .find(|identity| auth_config.oidc.contains_key(&identity.username));
+
+    match collision {
+        Some(identity) => Err(Error::Initialization(format!(
+            "basic-auth username '{}' is also an OIDC provider name",
+            identity.username
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// The token validator claims every bearer signed with the token service's own
 /// algorithm, so a provider allowing it would have its tokens rejected there
 /// instead of reaching its middleware. Refused at startup rather than turning
@@ -402,6 +421,33 @@ mod tests {
         let authenticator = Authenticator::new(&config, &cache);
 
         assert!(authenticator.is_ok());
+    }
+
+    /// The Basic username field selects the provider, so the two names cannot
+    /// both be honoured and the collision is a configuration mistake.
+    #[test]
+    fn a_basic_username_may_not_name_an_oidc_provider() {
+        let config = load_config(
+            r#"
+            [auth.identity.ci]
+            username = "github-actions"
+            password = "$argon2id$v=19$m=19456,t=2,p=1$test"
+
+            [auth.oidc.github-actions]
+            issuer = "https://token.actions.githubusercontent.com"
+        "#,
+        );
+
+        let cache = cache::Config::Memory.to_backend().unwrap();
+
+        let Err(error) = Authenticator::new(&config, &cache) else {
+            panic!("a colliding name must be refused at startup");
+        };
+
+        assert!(
+            matches!(&error, Error::Initialization(msg) if msg.contains("github-actions")),
+            "got: {error:?}"
+        );
     }
 
     #[test]
