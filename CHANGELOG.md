@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `auth.oidc.<name>.required_claims` rejects a token that does not carry the claims listed, before any access policy runs.
 - `auth.oidc.<name>.server_ca_bundle` trusts a private CA for that provider's discovery and JWKS fetches, so an issuer such as a kube-apiserver needs no host-wide trust.
 - `auth.oidc.<name>.client_certificate_bundle` and `client_private_key` present a client certificate on those fetches, so a cluster that keeps discovery closed to unauthenticated users can still back image pulls with projected service-account tokens.
+- EXPERIMENTAL: `contrib/kubelet-credential-provider` hands the kubelet the pulling pod's service-account token as its registry credential, so an image pull authenticates as the workload instead of a shared `imagePullSecret`. It ships as a released Linux binary, with a DaemonSet that installs it on every node and restarts the kubelet only when the binary changes.
 - The `has_repository_policy()` access-policy function lets a global rule admit only what a `[repository]` declaring its own `access_policy` will decide, instead of restating every repository rule globally.
 
 ### Changed

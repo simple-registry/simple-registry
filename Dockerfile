@@ -24,6 +24,7 @@ RUN if [ "$TARGETARCH" = "amd64" ] ; then export TOOLCHAIN="x86_64-unknown-linux
 
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY crates ./crates
+COPY contrib/kubelet-credential-provider ./contrib/kubelet-credential-provider
 COPY src ./src
 COPY ui ./ui
 

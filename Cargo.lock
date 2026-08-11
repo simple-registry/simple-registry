@@ -1522,6 +1522,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kubelet-credential-provider"
+version = "0.1.0"
+dependencies = [
+ "argh",
+ "base64",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

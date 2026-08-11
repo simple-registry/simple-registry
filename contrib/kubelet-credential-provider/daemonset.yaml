@@ -1,0 +1,132 @@
+# Installs the angos kubelet credential provider on every node from a GitHub
+# release, then restarts the kubelet so it picks the plugin up.
+#
+# Idempotent: the installer compares the checksum already on the node with the
+# one configured here and exits without downloading or restarting anything when
+# they match, so a rescheduled pod or a node reboot costs one checksum.
+#
+# Set VERSION and both checksums before applying. The kubelet flags
+# (--image-credential-provider-config, --image-credential-provider-bin-dir) stay
+# a node-bootstrap concern; this only keeps the binary current.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: angos-credential-provider-installer
+  namespace: kube-system
+data:
+  install.sh: |
+    #!/bin/sh
+    set -eu
+
+    case "$(uname -m)" in
+      x86_64)  asset="angos-credential-provider-linux-amd64"; expected="$SHA256_AMD64" ;;
+      aarch64) asset="angos-credential-provider-linux-arm64"; expected="$SHA256_ARM64" ;;
+      *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
+    esac
+
+    if [ -z "$expected" ]; then
+      echo "no checksum configured for $asset; refusing to install an unverified binary" >&2
+      exit 1
+    fi
+
+    target="/host${BIN_DIR}/angos-credential-provider"
+    installed=""
+    if [ -f "$target" ]; then
+      installed="$(sha256sum "$target" | cut -d' ' -f1)"
+    fi
+
+    if [ "$installed" = "$expected" ]; then
+      echo "$target is already ${VERSION}; leaving the kubelet alone"
+      exit 0
+    fi
+
+    work="$(mktemp -d)"
+    trap 'rm -rf "$work"' EXIT
+    wget -qO "$work/$asset" \
+      "https://github.com/project-angos/angos/releases/download/${VERSION}/${asset}"
+    echo "$expected  $asset" | (cd "$work" && sha256sum -c -)
+
+    # Install beside the target and rename: a pull racing the write never sees a
+    # half-written plugin.
+    mkdir -p "/host${BIN_DIR}"
+    install -m 0755 "$work/$asset" "$target.new"
+    mv "$target.new" "$target"
+
+    # The kubelet resolves the configured plugins once at startup, so a binary
+    # that appeared or changed since then is only used after a restart.
+    chroot /host systemctl restart kubelet
+    echo "installed ${VERSION} and restarted the kubelet"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: angos-credential-provider-installer
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: angos-credential-provider
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: angos-credential-provider
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: angos-credential-provider
+    spec:
+      priorityClassName: system-node-critical
+      automountServiceAccountToken: false
+      tolerations:
+        - operator: Exists
+      initContainers:
+        - name: install
+          image: alpine:3.22
+          command: ["/bin/sh", "/script/install.sh"]
+          env:
+            - name: VERSION
+              value: v1.5.0
+            - name: SHA256_AMD64
+              value: ""
+            - name: SHA256_ARM64
+              value: ""
+            - name: BIN_DIR
+              value: /var/lib/kubelet/credential-providers
+          securityContext:
+            # Writes into the kubelet's bin dir and restarts the host unit.
+            privileged: true
+          volumeMounts:
+            - name: host
+              mountPath: /host
+            - name: script
+              mountPath: /script
+              readOnly: true
+      containers:
+        # The install runs to completion in the init container; this only keeps
+        # the pod scheduled, so it holds no host access at all.
+        - name: idle
+          image: alpine:3.22
+          command: ["/bin/sh", "-c", "trap 'exit 0' TERM; sleep infinity & wait"]
+          resources:
+            requests:
+              cpu: 1m
+              memory: 8Mi
+            limits:
+              memory: 16Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+        - name: script
+          configMap:
+            name: angos-credential-provider-installer
+            defaultMode: 0755

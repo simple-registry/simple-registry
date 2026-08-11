@@ -105,60 +105,9 @@ required_audience = "api://your-app-id"
 
 ### Kubernetes API Server
 
-A pod pulls with its projected service-account token, which angos validates
-against the cluster's JWKS. The cluster CA signs the issuer, so point
-`server_ca_bundle` at it rather than trusting that CA for every outbound
-connection.
-
-```toml
-[auth.oidc.kube]
-issuer = "https://kubernetes.default.svc"
-server_ca_bundle = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-required_audience = "angos"
-```
-
-Project the token with that audience so the apiserver mints it for angos:
-
-```yaml
-volumes:
-  - name: angos-token
-    projected:
-      sources:
-        - serviceAccountToken:
-            audience: angos
-            expirationSeconds: 3600
-            path: token
-```
-
-Most clusters answer the `.well-known/openid-configuration` and JWKS fetches
-with `401`, because reading discovery takes the
-`system:service-account-issuer-discovery` role and no unauthenticated user holds
-it. Give angos an identity of its own and bind that role to it alone, rather
-than granting it to `system:unauthenticated`, which publishes the cluster's
-signing keys and issuer metadata to everyone who can reach the apiserver.
-
-Issue a client certificate through the `kubernetes.io/kube-apiserver-client`
-signer, or from any CA in the apiserver's `--client-ca-file`. Its subject `CN`
-becomes the username the apiserver authenticates, and its `O` values the groups,
-so the binding names the `CN` you signed:
-
-```bash
-kubectl create clusterrolebinding angos-issuer-discovery \
-  --clusterrole=system:service-account-issuer-discovery \
-  --user=angos
-```
-
-```toml
-[auth.oidc.kube]
-issuer = "https://kubernetes.default.svc"
-server_ca_bundle = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-client_certificate_bundle = "/certs/angos-client.pem"   # CN=angos
-client_private_key = "/certs/angos-client-key.pem"
-required_audience = "angos"
-```
-
-Configuring one of the two without the other fails startup, so a half-configured
-pair cannot degrade into an anonymous fetch.
+Validating a cluster's service-account tokens takes a private CA and an
+authenticated discovery fetch, and pulls take a kubelet plugin on top:
+[Configure Kubernetes OIDC](configure-kubernetes-oidc.md).
 
 ---
 
@@ -314,3 +263,4 @@ Subject: user@example.com
 
 - [Set Up Access Control](set-up-access-control.md) for comprehensive policies
 - [Configure GitHub Actions OIDC](configure-github-actions-oidc.md) for CI/CD
+- [Configure Kubernetes OIDC](configure-kubernetes-oidc.md) for service-account tokens and image pulls
