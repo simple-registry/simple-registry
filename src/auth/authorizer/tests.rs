@@ -41,23 +41,6 @@ fn test_authorizer_new_minimal() {
 }
 
 #[test]
-fn test_authorizer_new_with_global_access_policy() {
-    let config = load_config(
-        r#"
-            [global.access_policy]
-            default = "allow"
-            rules = ["identity.username == 'admin'"]
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-
-    let authorizer = Authorizer::new(&config, &cache);
-
-    assert!(authorizer.is_ok());
-}
-
-#[test]
 fn test_authorizer_new_with_global_immutable_tags() {
     let config = load_config(
         r#"
@@ -475,6 +458,69 @@ fn log_denial_uses_audit_identity_without_oidc_claims() {
     assert!(!logs.contains("sub"), "logs were: {logs}");
 }
 
+/// `has_repository_policy()` lets a global rule hand a request over to the
+/// repository that declares its own rules, and keeps the global decision for a
+/// namespace no such repository covers.
+#[tokio::test]
+async fn has_repository_policy_hands_the_decision_to_the_repository() {
+    let config = load_config(
+        r#"
+            [global.access_policy]
+            default = "deny"
+            rules = ["has_repository_policy()"]
+
+            [repository.guarded.access_policy]
+            default = "deny"
+            rules = ["identity.username == 'alice'"]
+
+            [repository.unguarded]
+        "#,
+    );
+    let (authorizer, registry) = authorizer_and_registry(&config).await;
+    let parts = parts_with_uri("/v2/");
+    let identity = |name: &str| ClientIdentity {
+        username: Some(name.to_string()),
+        ..ClientIdentity::new(None)
+    };
+    let pull = |namespace: &str| Action::GetManifest {
+        namespace: Namespace::new(namespace).unwrap(),
+        reference: Reference::Tag(Tag::new("latest").unwrap()),
+    };
+    let authorize = async |action, identity| {
+        authorizer
+            .authorize_request(&action, &identity, &parts, &registry)
+            .await
+    };
+
+    authorize(pull("guarded/app"), identity("alice"))
+        .await
+        .expect("the repository policy decides once the global rule defers to it");
+
+    for (action, identity, reason) in [
+        (
+            pull("guarded/app"),
+            identity("bob"),
+            "the repository policy still denies whoever its own rules exclude",
+        ),
+        (
+            pull("unguarded/app"),
+            identity("alice"),
+            "a repository declaring no policy has nothing to defer to",
+        ),
+        (
+            pull("undeclared/app"),
+            identity("alice"),
+            "a namespace no repository declares has nothing to defer to",
+        ),
+    ] {
+        let result = authorize(action, identity).await;
+        assert!(
+            matches!(result, Err(AuthError::Unauthorized(_))),
+            "{reason}"
+        );
+    }
+}
+
 fn create_pull_through_config() -> Configuration {
     load_config(
         r#"
@@ -805,6 +851,52 @@ async fn global_webhook_path_deny_when_webhook_returns_403() {
     );
 }
 
+// A namespace no `[repository]` declares has no repository webhook, so the
+// global one gates it rather than being skipped for the very namespaces no
+// repository policy covers.
+#[tokio::test]
+async fn global_webhook_gates_a_namespace_no_repository_declares() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&mock_server)
+        .await;
+
+    let config = load_config(&format!(
+        r#"
+            authorization_webhook = "gatekeeper"
+
+            [global.access_policy]
+            default = "allow"
+
+            [auth.webhook.gatekeeper]
+            url = "{url}"
+            timeout_ms = 1000
+            "#,
+        url = mock_server.uri()
+    ));
+
+    let (authorizer, registry) = authorizer_and_registry(&config).await;
+    let action = Action::GetManifest {
+        namespace: Namespace::new("no-such-repo/image").unwrap(),
+        reference: Reference::Tag(Tag::new("latest").unwrap()),
+    };
+
+    let result = authorizer
+        .authorize_request(
+            &action,
+            &ClientIdentity::new(None),
+            &parts_with_uri("/v2/"),
+            &registry,
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(AuthError::Unauthorized(_))),
+        "the global webhook must decide a namespace no repository declares, got: {result:?}"
+    );
+}
+
 // Invalid-regex unreachability.
 //
 // `RegexPattern` compiles the regex at TOML deserialise time. An invalid
@@ -825,7 +917,7 @@ fn regex_pattern_compile_rejects_invalid_pattern() {
 // A namespace that maps to no configured repository is passed through
 // without error or panic under an allow policy.
 //
-// `authorize_namespace_request` returns `Ok(())` early when
+// `authorize_request` skips the repository layer when
 // `get_repository_for_namespace` returns `Err`, so the default policy is
 // applied implicitly (allow here).
 #[tokio::test]

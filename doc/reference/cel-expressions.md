@@ -148,6 +148,14 @@ Information about the manifest being evaluated.
 | `hours(n)`   | Convert hours to seconds            |
 | `minutes(n)` | Convert minutes to seconds          |
 
+### Access Control Functions
+
+| Function                  | Description                                                                        |
+|---------------------------|------------------------------------------------------------------------------------|
+| `has_repository_policy()` | True if a `[repository]` declaring its own `access_policy` covers the request       |
+
+It is false for a namespace no `[repository]` declares and for a repository declaring no `access_policy`: in both cases nothing else would decide, so a global rule granting on it grants outright. Inside a repository policy it is always true.
+
 ### Retention Functions
 
 | Function        | Description                               |
@@ -244,6 +252,23 @@ rules = [
   "identity.oidc != null && identity.oidc.claims['repository'].startsWith('myorg/')"
 ]
 ```
+
+### Defer to Repository Policies
+
+```toml
+[global.access_policy]
+default = "deny"
+rules = [
+  "request.action in ['healthz', 'readyz', 'metrics']",
+  "has_repository_policy()"
+]
+
+[repository."myorg/website".access_policy]
+default = "deny"
+rules = ["identity.oidc.claims['repository'] == 'myorg/website-frontend'"]
+```
+
+The global rules admit a request only when the repository covering it declares rules of its own, which then decide; every other namespace is left to the global default.
 
 ### Read-Only for Guests
 

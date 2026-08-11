@@ -13,7 +13,7 @@ use crate::{
     identity::{Action, ClientIdentity},
     oci::{Namespace, Tag},
     policy::{AccessPolicy, PolicyDecision},
-    registry::{BlobMount, Registry},
+    registry::{BlobMount, Registry, Repository},
 };
 
 const ACCESS_DENIED: &str = "Access denied";
@@ -131,15 +131,26 @@ impl Authorizer {
         request: &Parts,
         registry: &Registry,
     ) -> Result<(), Error> {
+        let namespace = action.get_namespace();
+        let repository =
+            namespace.and_then(|namespace| registry.get_repository_for_namespace(namespace).ok());
+
         debug!("Evaluating global access policy");
         enforce_policy(
-            self.global_access_policy.evaluate(action, identity),
+            self.global_access_policy.evaluate(
+                action,
+                identity,
+                self.has_repository_policy(repository),
+            ),
             "global",
             identity,
         )?;
 
-        if let Some(namespace) = action.get_namespace() {
-            self.authorize_namespace_request(namespace, action, identity, request, registry)
+        // A namespace no `[repository]` declares has no repository policy and no
+        // repository webhook, so the global webhook gates it as it does a request
+        // carrying no namespace at all.
+        if let (Some(repository), Some(namespace)) = (repository, namespace) {
+            self.authorize_namespace_request(repository, namespace, action, identity, request)
                 .await?;
         } else if let Some(webhook) = &self.global_authorization_webhook {
             enforce_webhook(webhook, "global webhook", action, identity, request).await?;
@@ -180,18 +191,12 @@ impl Authorizer {
 
     async fn authorize_namespace_request(
         &self,
+        repository: &Repository,
         namespace: &Namespace,
         action: &Action,
         identity: &ClientIdentity,
         request: &Parts,
-        registry: &Registry,
     ) -> Result<(), Error> {
-        let Ok(repository) = registry.get_repository_for_namespace(namespace) else {
-            // Unconfigured namespaces have no repository policy or webhook to evaluate.
-            // The global policy was already enforced by authorize_request.
-            return Ok(());
-        };
-
         debug!(
             "Evaluating repository access policy for namespace: {namespace} ({})",
             repository.name
@@ -209,7 +214,7 @@ impl Authorizer {
 
         if let Some(access_policy) = &auth_repo.access_policy {
             enforce_policy(
-                access_policy.evaluate(action, identity),
+                access_policy.evaluate(action, identity, true),
                 &format!("repository '{}'", repository.name),
                 identity,
             )?;
@@ -234,6 +239,16 @@ impl Authorizer {
         }
 
         Ok(())
+    }
+
+    /// Whether the `[repository]` covering the request carries its own access
+    /// policy, so that policy decides it after the global one. Global rules read
+    /// it as `has_repository_policy()` to hand the decision over instead of
+    /// restating every repository rule globally.
+    fn has_repository_policy(&self, repository: Option<&Repository>) -> bool {
+        repository
+            .and_then(|repository| self.repositories.get(repository.name.as_ref()))
+            .is_some_and(|auth_repo| auth_repo.access_policy.is_some())
     }
 
     fn check_immutable_tag(&self, repository_name: &str, action: &Action) -> Result<(), Error> {
