@@ -32,6 +32,14 @@ pub struct Config {
     /// certificate the system roots do not cover, such as a kube-apiserver.
     #[serde(default)]
     pub server_ca_bundle: Option<PathBuf>,
+    /// Client certificate and key presented on those same fetches, for an issuer
+    /// that refuses an anonymous caller, such as a kube-apiserver whose
+    /// `system:service-account-issuer-discovery` role no unauthenticated user
+    /// holds. Both or neither; a lone one is refused at startup.
+    #[serde(default)]
+    pub client_certificate_bundle: Option<PathBuf>,
+    #[serde(default)]
+    pub client_private_key: Option<PathBuf>,
     /// Discovered from the issuer's `.well-known/openid-configuration` when omitted.
     #[serde(default)]
     pub jwks_uri: Option<String>,

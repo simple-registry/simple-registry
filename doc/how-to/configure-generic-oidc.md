@@ -42,6 +42,8 @@ jwks_refresh_interval = 3600             # Refresh keys hourly (default)
 clock_skew_tolerance = 60                # Allow 60s clock drift (default)
 allowed_algorithms = ["RS256"]           # Restrict accepted JWT algorithms (default)
 server_ca_bundle = "/certs/ca.pem"       # Trust a private CA for this issuer
+client_certificate_bundle = "/certs/client.pem"   # Authenticate to an issuer that
+client_private_key = "/certs/client-key.pem"      # refuses anonymous discovery
 ```
 
 `required_claims` checks presence only. To test a claim's *value*, use an access
@@ -103,8 +105,10 @@ required_audience = "api://your-app-id"
 
 ### Kubernetes API Server
 
-The cluster CA signs the issuer, so point `server_ca_bundle` at it rather than
-trusting that CA for every outbound connection.
+A pod pulls with its projected service-account token, which angos validates
+against the cluster's JWKS. The cluster CA signs the issuer, so point
+`server_ca_bundle` at it rather than trusting that CA for every outbound
+connection.
 
 ```toml
 [auth.oidc.kube]
@@ -112,6 +116,49 @@ issuer = "https://kubernetes.default.svc"
 server_ca_bundle = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 required_audience = "angos"
 ```
+
+Project the token with that audience so the apiserver mints it for angos:
+
+```yaml
+volumes:
+  - name: angos-token
+    projected:
+      sources:
+        - serviceAccountToken:
+            audience: angos
+            expirationSeconds: 3600
+            path: token
+```
+
+Most clusters answer the `.well-known/openid-configuration` and JWKS fetches
+with `401`, because reading discovery takes the
+`system:service-account-issuer-discovery` role and no unauthenticated user holds
+it. Give angos an identity of its own and bind that role to it alone, rather
+than granting it to `system:unauthenticated`, which publishes the cluster's
+signing keys and issuer metadata to everyone who can reach the apiserver.
+
+Issue a client certificate through the `kubernetes.io/kube-apiserver-client`
+signer, or from any CA in the apiserver's `--client-ca-file`. Its subject `CN`
+becomes the username the apiserver authenticates, and its `O` values the groups,
+so the binding names the `CN` you signed:
+
+```bash
+kubectl create clusterrolebinding angos-issuer-discovery \
+  --clusterrole=system:service-account-issuer-discovery \
+  --user=angos
+```
+
+```toml
+[auth.oidc.kube]
+issuer = "https://kubernetes.default.svc"
+server_ca_bundle = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+client_certificate_bundle = "/certs/angos-client.pem"   # CN=angos
+client_private_key = "/certs/angos-client-key.pem"
+required_audience = "angos"
+```
+
+Configuring one of the two without the other fails startup, so a half-configured
+pair cannot degrade into an anonymous fetch.
 
 ---
 

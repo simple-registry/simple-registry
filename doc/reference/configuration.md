@@ -433,6 +433,8 @@ tokens are validated, so there is no provider type to select.
 | `issuer`                | string | required   | OIDC issuer URL                              |
 | `jwks_uri`              | string | -          | Custom JWKS URI (auto-discovered if not set) |
 | `server_ca_bundle`      | string | -          | PEM CA bundle trusted for this provider's HTTPS fetches |
+| `client_certificate_bundle` | string | -      | PEM client certificate presented on those fetches, requires `client_private_key` |
+| `client_private_key`    | string | -          | PEM key for `client_certificate_bundle`      |
 | `required_claims`       | array  | `[]`       | Claims a token must carry; a missing or null one is rejected |
 | `jwks_refresh_interval` | u64    | `3600`     | JWKS refresh interval (seconds)              |
 | `required_audience`     | string | -          | Required audience claim                      |
@@ -454,6 +456,11 @@ Set `server_ca_bundle` for an issuer whose certificate the system roots do not
 cover, such as a kube-apiserver signed by the cluster CA. It applies to the
 discovery and JWKS fetches for that provider alone; other providers keep the
 system roots.
+
+Set `client_certificate_bundle` and `client_private_key` for an issuer that
+refuses an anonymous caller on those endpoints, a kube-apiserver serving
+discovery to authenticated users only being the usual case. Configuring one
+without the other fails startup rather than fetching anonymously.
 
 `required_claims` checks presence only. Predicates over claim *values* belong in
 the access policy, which sees the whole claim map.

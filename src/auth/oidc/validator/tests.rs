@@ -29,6 +29,8 @@ use crate::{
 pub fn build_test_provider_config(uri: &str) -> Config {
     Config {
         server_ca_bundle: None,
+        client_certificate_bundle: None,
+        client_private_key: None,
         issuer: uri.to_string(),
         jwks_uri: Some(format!("{uri}/.well-known/jwks")),
         required_claims: Vec::new(),
@@ -768,6 +770,8 @@ pub fn valid_claims(issuer: &str, audience: &str) -> HashMap<String, serde_json:
 fn test_provider(issuer: &str, audience: Option<&str>) -> Config {
     Config {
         server_ca_bundle: None,
+        client_certificate_bundle: None,
+        client_private_key: None,
         issuer: issuer.to_string(),
         jwks_uri: None,
         required_claims: Vec::new(),
