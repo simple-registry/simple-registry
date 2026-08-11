@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - An optional token service exchanges a client's credential for a registry-signed bearer token at `GET /token`, so a short-lived CI credential no longer has to outlive the push it starts.
 - `auth.oidc.<name>.required_claims` rejects a token that does not carry the claims listed, before any access policy runs.
 - `auth.oidc.<name>.server_ca_bundle` trusts a private CA for that provider's discovery and JWKS fetches, so an issuer such as a kube-apiserver needs no host-wide trust.
+- The `has_repository_policy()` access-policy function lets a global rule admit only what a `[repository]` declaring its own `access_policy` will decide, instead of restating every repository rule globally.
 
 ### Changed
 
@@ -21,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Content pushed to a namespace no `[repository]` entry matches can now be pulled back: retrieval required a configured repository while every other route did not, so such a namespace was writable, listable, and unreadable.
+- A global authorization webhook now also gates a request to a namespace no `[repository]` declares, which used to skip it entirely and be decided by the global access policy alone.
 - A JWKS key angos cannot turn into a decoding key now reports the provider unavailable, as the fetch and parse before it already did, instead of surfacing as an internal error.
 - A basic-auth username matching an OIDC provider name is refused at startup instead of locking that user out, since a Basic credential naming a provider is read as that provider's token.
 - An authorization webhook now receives the caller's OIDC provider and subject, so it can decide per user and its decision cache no longer serves one answer to every OIDC caller performing the same action.

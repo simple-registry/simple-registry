@@ -148,9 +148,7 @@ the credential only has to be valid when the push begins.
 ## Restricting Who May Push
 
 The token's claims reach the access policy, so a rule can name the repository,
-the branch, or the workflow that produced it. Policies apply in two layers: the
-global one gates every request, and the repository one then decides what that
-caller may do in its namespaces.
+the branch, or the workflow that produced it.
 
 ```toml
 [global.access_policy]
@@ -158,7 +156,7 @@ default = "deny"
 rules = [
   "request.action in ['healthz', 'readyz', 'metrics']",
   "identity.username != null",
-  "identity.oidc != null",
+  "has_repository_policy()",
 ]
 
 [repository."myorg/website".access_policy]
@@ -170,20 +168,11 @@ rules = [
 ]
 ```
 
-**A namespace with no matching `[repository]` entry is governed by the global
-policy alone.** In the example above that means any valid GitHub Actions token,
-from any repository on GitHub, may push to a namespace you have not configured.
-Either configure every namespace you serve, or make the global rules stand on
-their own, for example by naming the permitted repositories there too:
-
-```toml
-rules = [
-  "request.action in ['healthz', 'readyz', 'metrics']",
-  "identity.username != null",
-  '''identity.oidc != null &&
-     identity.oidc.claims["repository"].startsWith("myorg/")''',
-]
-```
+`has_repository_policy()` is what keeps the global rules from admitting a
+namespace no `[repository]` covers: a blanket `identity.oidc != null` there lets
+any GitHub Actions token, from any repository on GitHub, push to a namespace you
+never configured. See [Policy evaluation](../explanation/authentication-authorization.md#policy-evaluation)
+for how the two layers combine.
 
 More examples in [Configure GitHub Actions OIDC](configure-github-actions-oidc.md#policy-examples).
 

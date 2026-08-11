@@ -184,9 +184,13 @@ sequenceDiagram
 - Cannot override global denials
 - Applies only when the namespace matches a configured repository
 
-Namespaces that do not match any configured repository are governed only by the
-global policy, because there is no repository policy or repository webhook to
-evaluate for them.
+Namespaces that do not match any configured repository have no repository policy
+to evaluate, so the global policy decides them and the global webhook, if any,
+gates them. A global rule tells the two cases apart with
+`has_repository_policy()`, true only when a `[repository]` declaring its own
+`access_policy` covers the request: granting on it admits exactly what that
+repository policy then decides, and leaves every other namespace to the global
+default.
 
 **Webhook** runs last (if configured):
 - External authorization service
