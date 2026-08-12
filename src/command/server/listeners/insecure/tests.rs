@@ -121,6 +121,7 @@ async fn test_insecure_listener_new() {
             port: 8080,
             query_timeout: NonZeroU64::new(1800).unwrap(),
             query_timeout_grace_period: NonZeroU64::new(30).unwrap(),
+            handshake_timeout: NonZeroU64::new(10).unwrap(),
         },
     };
 
@@ -141,6 +142,7 @@ async fn test_insecure_listener_new_with_ipv6() {
             port: 9000,
             query_timeout: NonZeroU64::new(3600).unwrap(),
             query_timeout_grace_period: NonZeroU64::new(60).unwrap(),
+            handshake_timeout: NonZeroU64::new(10).unwrap(),
         },
     };
 
@@ -162,6 +164,7 @@ async fn test_insecure_listener_timeouts_initialization() {
             port: 8080,
             query_timeout: NonZeroU64::new(5000).unwrap(),
             query_timeout_grace_period: NonZeroU64::new(100).unwrap(),
+            handshake_timeout: NonZeroU64::new(10).unwrap(),
         },
     };
 

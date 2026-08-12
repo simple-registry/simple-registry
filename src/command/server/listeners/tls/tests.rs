@@ -237,6 +237,7 @@ async fn test_tls_listener_new() {
             port: 8443,
             query_timeout: NonZeroU64::new(3600).unwrap(),
             query_timeout_grace_period: NonZeroU64::new(60).unwrap(),
+            handshake_timeout: NonZeroU64::new(10).unwrap(),
         },
         tls,
     };
@@ -263,6 +264,7 @@ async fn test_tls_listener_new_with_ipv6() {
             port: 9443,
             query_timeout: NonZeroU64::new(3600).unwrap(),
             query_timeout_grace_period: NonZeroU64::new(60).unwrap(),
+            handshake_timeout: NonZeroU64::new(10).unwrap(),
         },
         tls,
     };
@@ -295,6 +297,7 @@ async fn test_tls_listener_new_with_invalid_certs() {
             port: 8443,
             query_timeout: NonZeroU64::new(3600).unwrap(),
             query_timeout_grace_period: NonZeroU64::new(60).unwrap(),
+            handshake_timeout: NonZeroU64::new(10).unwrap(),
         },
         tls,
     };
@@ -316,6 +319,7 @@ async fn test_tls_listener_notify_config_change() {
             port: 8443,
             query_timeout: NonZeroU64::new(3600).unwrap(),
             query_timeout_grace_period: NonZeroU64::new(60).unwrap(),
+            handshake_timeout: NonZeroU64::new(10).unwrap(),
         },
         tls,
     };
@@ -340,6 +344,7 @@ async fn test_tls_listener_notify_tls_config_change() {
             port: 8443,
             query_timeout: NonZeroU64::new(3600).unwrap(),
             query_timeout_grace_period: NonZeroU64::new(60).unwrap(),
+            handshake_timeout: NonZeroU64::new(10).unwrap(),
         },
         tls,
     };
@@ -364,6 +369,7 @@ async fn test_tls_listener_notify_tls_config_change_with_invalid_certs() {
             port: 8443,
             query_timeout: NonZeroU64::new(3600).unwrap(),
             query_timeout_grace_period: NonZeroU64::new(60).unwrap(),
+            handshake_timeout: NonZeroU64::new(10).unwrap(),
         },
         tls,
     };

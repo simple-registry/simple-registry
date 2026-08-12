@@ -1,13 +1,15 @@
-use std::{fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
+use std::{fmt::Debug, io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
 
+use angos_backoff::Backoff;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use hyper_util::rt::TokioIo;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
+    time::{sleep, timeout},
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
     command::server::{ServerContext, error::Error, serve_request},
@@ -23,11 +25,12 @@ pub struct HandshakeResult<S> {
     pub peer_certificate: Option<Vec<u8>>,
 }
 
-/// The two per-connection deadlines: the wall-clock request-processing timeout
-/// and the grace period allowed for the in-flight request to drain after it
-/// fires.
+/// The per-connection deadlines: how long the handshake may take, the
+/// wall-clock request-processing timeout, and the grace period allowed for the
+/// in-flight request to drain after it fires.
 #[derive(Clone, Copy, Debug)]
 pub struct RequestTimeouts {
+    pub handshake: Duration,
     pub query: Duration,
     pub grace: Duration,
 }
@@ -35,11 +38,17 @@ pub struct RequestTimeouts {
 impl RequestTimeouts {
     pub fn from_config(base: &ListenerBaseConfig) -> Self {
         Self {
+            handshake: Duration::from_secs(base.handshake_timeout.get()),
             query: Duration::from_secs(base.query_timeout.get()),
             grace: Duration::from_secs(base.query_timeout_grace_period.get()),
         }
     }
 }
+
+/// Paced by consecutive accept failures so a listener that cannot hand out
+/// descriptors does not spin the loop at full speed until it recovers.
+const ACCEPT_BACKOFF: Backoff =
+    Backoff::exponential(Duration::from_millis(50), Duration::from_secs(1));
 
 #[async_trait]
 pub trait Connector: Send + Sync {
@@ -62,18 +71,18 @@ pub trait Connector: Send + Sync {
 /// different connector, so the shape lives here once.
 pub struct Listener<C: Connector> {
     binding_address: SocketAddr,
-    connector: C,
+    connector: Arc<C>,
     context: ArcSwap<ServerContext>,
     timeouts: ArcSwap<RequestTimeouts>,
 }
 
-impl<C: Connector> Listener<C> {
+impl<C: Connector + 'static> Listener<C> {
     /// Assemble the shell around `connector`, deriving the bind address and
     /// timeouts from `base`.
     pub fn build(base: &ListenerBaseConfig, connector: C, context: ServerContext) -> Self {
         Self {
             binding_address: SocketAddr::new(base.bind_address, base.port),
-            connector,
+            connector: Arc::new(connector),
             context: ArcSwap::from_pointee(context),
             timeouts: ArcSwap::from_pointee(RequestTimeouts::from_config(base)),
         }
@@ -95,13 +104,8 @@ impl<C: Connector> Listener<C> {
     }
 
     pub async fn serve(&self) -> Result<(), Error> {
-        accept_loop(
-            self.binding_address,
-            &self.connector,
-            &self.context,
-            &self.timeouts,
-        )
-        .await
+        let listener = build_listener(self.binding_address).await?;
+        accept_loop(listener, &self.connector, &self.context, &self.timeouts).await
     }
 
     #[cfg(test)]
@@ -115,36 +119,71 @@ impl<C: Connector> Listener<C> {
     }
 }
 
-pub async fn accept_loop<C: Connector>(
-    binding_address: SocketAddr,
-    connector: &C,
+pub async fn accept_loop<C: Connector + 'static>(
+    listener: TcpListener,
+    connector: &Arc<C>,
     context: &ArcSwap<ServerContext>,
     timeouts: &ArcSwap<RequestTimeouts>,
 ) -> Result<(), Error> {
+    let binding_address = match listener.local_addr() {
+        Ok(address) => address,
+        Err(error) => {
+            return Err(Error::Initialization(format!(
+                "Failed to read the address of a bound listener: {error}"
+            )));
+        }
+    };
     info!("Listening on {} ({})", binding_address, connector.label());
-    let listener = build_listener(binding_address).await?;
+    let mut consecutive_failures = 0;
 
     loop {
         debug!("Waiting for incoming connection");
-        let (tcp, remote_address) = accept(&listener).await?;
-
-        let Some(handshake) = connector.handshake(tcp, remote_address).await else {
-            continue;
+        let (tcp, remote_address) = match listener.accept().await {
+            Ok(accepted) => {
+                consecutive_failures = 0;
+                accepted
+            }
+            // A client gone between the SYN and the accept costs only its own
+            // connection, so the next one is taken immediately.
+            Err(error) if error.kind() == ErrorKind::ConnectionAborted => continue,
+            // Everything else is transient too often to kill the server for:
+            // an exhausted descriptor table clears once connections close.
+            Err(error) => {
+                warn!("Failed to accept a connection on {binding_address}: {error}");
+                sleep(ACCEPT_BACKOFF.delay(consecutive_failures)).await;
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                continue;
+            }
         };
 
-        debug!("Accepted connection from {remote_address}");
-        let stream = TokioIo::new(handshake.stream);
+        let connector = Arc::clone(connector);
         let context = Arc::clone(&context.load());
         let timeouts = Arc::clone(&timeouts.load());
 
-        tokio::spawn(serve_request(
-            stream,
-            context,
-            handshake.peer_certificate,
-            timeouts,
-            remote_address,
-            connector.scheme(),
-        ));
+        // The handshake runs on its own task: awaiting it here would let one
+        // stalled client hold up every other connection on this listener.
+        tokio::spawn(async move {
+            let handshake =
+                match timeout(timeouts.handshake, connector.handshake(tcp, remote_address)).await {
+                    Ok(Some(handshake)) => handshake,
+                    Ok(None) => return,
+                    Err(_) => {
+                        debug!("Handshake from {remote_address} timed out");
+                        return;
+                    }
+                };
+
+            debug!("Accepted connection from {remote_address}");
+            serve_request(
+                TokioIo::new(handshake.stream),
+                context,
+                handshake.peer_certificate,
+                timeouts,
+                remote_address,
+                connector.scheme(),
+            )
+            .await;
+        });
     }
 }
 
@@ -158,24 +197,12 @@ async fn build_listener(binding_address: SocketAddr) -> Result<TcpListener, Erro
     }
 }
 
-async fn accept(listener: &TcpListener) -> Result<(TcpStream, SocketAddr), Error> {
-    match listener.accept().await {
-        Ok((stream, remote_address)) => {
-            debug!("Accepted connection from {remote_address}");
-            Ok((stream, remote_address))
-        }
-        Err(err) => {
-            let msg = format!("Failed to accept incoming connection: {err}");
-            Err(Error::Execution(msg))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use tokio::io::AsyncWriteExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use crate::command::server::server_context::tests::create_test_server_context;
 
     #[tokio::test]
     async fn test_build_listener_invalid_port_in_use() {
@@ -194,24 +221,128 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_accept_with_connection() {
-        let addr = "127.0.0.1:0".parse().unwrap();
-        let listener = build_listener(addr).await.unwrap();
-        let local_addr = listener.local_addr().unwrap();
+    /// A connector whose handshake never completes, counting the connections
+    /// handed to it. Modelling the client that opens a socket and then stalls.
+    struct StalledConnector {
+        started: Arc<AtomicUsize>,
+    }
 
-        let connect_handle = tokio::spawn(async move {
-            let mut stream = TcpStream::connect(local_addr).await.unwrap();
-            stream.write_all(b"test").await.unwrap();
+    #[async_trait]
+    impl Connector for StalledConnector {
+        type Stream = TcpStream;
+
+        async fn handshake(
+            &self,
+            _tcp: TcpStream,
+            _remote_address: SocketAddr,
+        ) -> Option<HandshakeResult<TcpStream>> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+            None
+        }
+
+        fn label(&self) -> &'static str {
+            "stalled"
+        }
+
+        fn scheme(&self) -> RequestScheme {
+            RequestScheme::Http
+        }
+    }
+
+    /// Bind a loopback listener and report where it landed. Binding before the
+    /// loop is spawned means the backlog holds the connections the test opens,
+    /// so it never races the task's start.
+    async fn bound_listener() -> (TcpListener, SocketAddr) {
+        let listener = build_listener("127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("a loopback bind must succeed");
+        let address = listener
+            .local_addr()
+            .expect("a bound listener has an address");
+        (listener, address)
+    }
+
+    /// The regression: awaiting the handshake in the accept loop let one
+    /// stalled client hold up every connection behind it.
+    #[tokio::test]
+    async fn a_stalled_handshake_does_not_block_the_next_connection() {
+        let (listener, address) = bound_listener().await;
+        let started = Arc::new(AtomicUsize::new(0));
+        let connector = Arc::new(StalledConnector {
+            started: Arc::clone(&started),
+        });
+        let context = ArcSwap::from_pointee(create_test_server_context().await);
+        let timeouts =
+            ArcSwap::from_pointee(RequestTimeouts::from_config(&ListenerBaseConfig::default()));
+
+        let loop_handle =
+            tokio::spawn(
+                async move { accept_loop(listener, &connector, &context, &timeouts).await },
+            );
+
+        // Both clients connect; neither handshake will ever finish.
+        let _first = TcpStream::connect(address).await.expect("first connect");
+        let _second = TcpStream::connect(address).await.expect("second connect");
+
+        for _ in 0..100 {
+            if started.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            2,
+            "the second connection must reach the handshake while the first is stalled"
+        );
+        loop_handle.abort();
+    }
+
+    /// A handshake that outlives its deadline is dropped, and the loop keeps
+    /// serving: the stalled task must not accumulate.
+    #[tokio::test]
+    async fn a_handshake_past_its_deadline_is_dropped() {
+        let (listener, address) = bound_listener().await;
+        let started = Arc::new(AtomicUsize::new(0));
+        let connector = Arc::new(StalledConnector {
+            started: Arc::clone(&started),
+        });
+        let context = ArcSwap::from_pointee(create_test_server_context().await);
+        let timeouts = ArcSwap::from_pointee(RequestTimeouts {
+            handshake: Duration::from_millis(20),
+            query: Duration::from_secs(1),
+            grace: Duration::from_secs(1),
         });
 
-        let result = accept(&listener).await;
+        let loop_handle =
+            tokio::spawn(
+                async move { accept_loop(listener, &connector, &context, &timeouts).await },
+            );
 
-        assert!(result.is_ok());
-        let (_, remote_addr) = result.unwrap();
-        assert!(remote_addr.port() > 0);
+        let client = TcpStream::connect(address).await.expect("connect");
+        for _ in 0..100 {
+            if started.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
 
-        connect_handle.await.unwrap();
+        // The deadline fires and the connector's task is dropped, closing the
+        // socket the client still holds.
+        let mut buffer = [0_u8; 1];
+        let read = timeout(Duration::from_secs(5), client.readable())
+            .await
+            .expect("the timed-out connection must be closed");
+        assert!(read.is_ok());
+        assert_eq!(
+            client
+                .try_read(&mut buffer)
+                .expect("a closed peer reads EOF"),
+            0
+        );
+        loop_handle.abort();
     }
 
     #[tokio::test]
