@@ -14,8 +14,6 @@ pub enum Error {
     Execution(String),
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
-    #[error("Conflict: {0}")]
-    Conflict(String),
     #[error("Provider unavailable: {0}")]
     ProviderUnavailable(String),
     /// A registry lookup the authorizer performs (e.g. mount-source

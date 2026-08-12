@@ -1,7 +1,6 @@
 mod connection;
 mod dispatch;
 mod error_response;
-mod observability;
 
 #[cfg(test)]
 mod tests;

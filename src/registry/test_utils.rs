@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     cache,
-    configuration::GlobalConfig,
+    configuration::{GlobalConfig, RegexPattern},
     jobs::Queue,
     jobs::store::JobStore,
     metrics_provider,
@@ -16,7 +16,7 @@ use crate::{
     policy::{RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::{
         CompleteUploadRequest, Error, Registry, RegistryConfig, Repository,
-        blob::{BlobRange, GetBlobResponse},
+        blob::BlobRange,
         blob_store,
         blob_store::{BlobStore, BlobStoreConfig},
         manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
@@ -37,6 +37,16 @@ use angos_storage::{
     ObjectStore, fs::Backend as StorageFsBackend, s3::Backend as StorageS3Backend,
 };
 use angos_tx_engine::{lock::LockStrategy, store::Store};
+use http_body_util::BodyExt;
+use hyper::{
+    Response,
+    header::{HeaderName, HeaderValue},
+};
+
+use crate::{
+    http_response::ResponseBody,
+    registry::{DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID},
+};
 
 /// Canonical connection to the live S3 test backend (rustfs, in CI and
 /// locally), single-sourced from the s3-client test fixtures so credentials,
@@ -214,8 +224,8 @@ pub async fn upload_blob(registry: &Registry, namespace: &Namespace, content: &[
     let digest = Digest::sha256_of_bytes(&body);
     registry
         .complete_upload(
+            None,
             CompleteUploadRequest {
-                actor: None,
                 namespace,
                 session_id: &session_id,
                 digest: &digest,
@@ -268,7 +278,7 @@ pub async fn get_blob(
     namespace: &Namespace,
     digest: &Digest,
     range: Option<BlobRange>,
-) -> Result<GetBlobResponse, Error> {
+) -> Result<Response<ResponseBody>, Error> {
     let has_access = registry
         .blob_ownership()
         .can_read(namespace, digest)
@@ -370,6 +380,26 @@ impl FSRegistryTestCase {
             metadata_store,
             registry,
             temp_dir,
+        }
+    }
+
+    /// A registry whose `test-repo` freezes every tag but `latest`, for the
+    /// immutable-tag write path.
+    pub fn with_immutable_tags() -> Self {
+        let case = Self::new();
+        let mut repository = repository_with_replication("test-repo", Vec::new());
+        repository.immutable_tags = true;
+        repository.immutable_tags_exclusions =
+            vec![RegexPattern::compile("^latest$").expect("test pattern")];
+
+        Self {
+            registry: Registry::new(
+                case.blob_store.clone(),
+                case.metadata_store.clone(),
+                single_repo_resolver("test-repo", repository),
+                RegistryConfig::default(),
+            ),
+            ..case
         }
     }
 
@@ -625,4 +655,52 @@ pub async fn seed_manifest(
         .unwrap();
 
     (manifest_digest, config_digest, layer_digest)
+}
+
+/// The value of `name` on a served response, panicking when absent: a test
+/// asserting on a header has already decided the response must carry it.
+/// `HeaderValue` compares against `str` and `String`, so callers assert on it
+/// directly.
+pub fn response_header<'a>(
+    response: &'a Response<ResponseBody>,
+    name: &HeaderName,
+) -> &'a HeaderValue {
+    response
+        .headers()
+        .get(name)
+        .unwrap_or_else(|| panic!("response must carry the {name} header"))
+}
+
+/// The `Docker-Content-Digest` a response served.
+pub fn response_digest(response: &Response<ResponseBody>) -> Digest {
+    response_header(response, &DOCKER_CONTENT_DIGEST)
+        .to_str()
+        .expect("a digest is printable ASCII")
+        .parse()
+        .expect("the served digest must parse")
+}
+
+/// The `Docker-Upload-UUID` an upload session response served.
+pub fn response_session_id(response: &Response<ResponseBody>) -> UploadSessionId {
+    UploadSessionId::new(
+        response_header(response, &DOCKER_UPLOAD_UUID)
+            .to_str()
+            .expect("a session id is printable ASCII"),
+    )
+    .expect("the served session id must parse")
+}
+
+pub async fn response_body(response: Response<ResponseBody>) -> Vec<u8> {
+    response
+        .into_body()
+        .collect()
+        .await
+        .expect("the body must read")
+        .to_bytes()
+        .to_vec()
+}
+
+/// The JSON body a listing response served.
+pub async fn response_json(response: Response<ResponseBody>) -> serde_json::Value {
+    serde_json::from_slice(&response_body(response).await).expect("the body must be JSON")
 }

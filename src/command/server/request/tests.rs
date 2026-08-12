@@ -8,8 +8,8 @@ use crate::{
     command::server::{
         error::Error,
         request::{ByteRange, RequestHeaders, X_ANGOS_NO_REDIRECT},
-        response_body::ResponseBody,
     },
+    http_response::ResponseBody,
     oci::{MediaRange, MediaType},
     registry::BlobRange,
     registry_client::X_ANGOS_SOURCE_TIMESTAMP,

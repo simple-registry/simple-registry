@@ -8,10 +8,10 @@ use crate::{
     auth::Error,
     auth::webhook::{self, WebhookAuthorizer},
     cache::Cache,
-    configuration::{Configuration, RegexPattern},
+    configuration::Configuration,
     http_client::apply_tls_files,
     identity::{Action, ClientIdentity},
-    oci::{Namespace, Tag},
+    oci::Namespace,
     policy::{AccessPolicy, PolicyDecision},
     registry::{BlobMount, Registry, Repository},
 };
@@ -22,8 +22,6 @@ const ACCESS_DENIED: &str = "Access denied";
 pub struct Authorizer {
     global_access_policy: AccessPolicy,
     global_authorization_webhook: Option<Arc<WebhookAuthorizer>>,
-    global_immutable_tags: bool,
-    global_immutable_tags_exclusions: Vec<RegexPattern>,
     repositories: HashMap<String, AuthorizerRepository>,
 }
 
@@ -31,8 +29,6 @@ pub struct Authorizer {
 struct AuthorizerRepository {
     access_policy: Option<AccessPolicy>,
     authorization_webhook: Option<Arc<WebhookAuthorizer>>,
-    immutable_tags: bool,
-    immutable_tags_exclusions: Vec<RegexPattern>,
 }
 
 #[derive(Clone, Hash, Eq, PartialEq)]
@@ -112,13 +108,9 @@ impl Authorizer {
 
         let repositories = build_repositories(config, &webhook_authorizers)?;
 
-        let global_immutable_tags_exclusions = config.global.immutable_tags_exclusions.clone();
-
         Ok(Self {
             global_access_policy,
             global_authorization_webhook,
-            global_immutable_tags: config.global.immutable_tags,
-            global_immutable_tags_exclusions,
             repositories,
         })
     }
@@ -220,8 +212,6 @@ impl Authorizer {
             )?;
         }
 
-        self.check_immutable_tag(repository.name.as_ref(), action)?;
-
         // Reject pull-through pushes before the paid webhook round-trip: a
         // pull-through cache never accepts writes whatever a webhook would say.
         if repository.is_pull_through() && action.is_push() {
@@ -249,41 +239,6 @@ impl Authorizer {
         repository
             .and_then(|repository| self.repositories.get(repository.name.as_ref()))
             .is_some_and(|auth_repo| auth_repo.access_policy.is_some())
-    }
-
-    fn check_immutable_tag(&self, repository_name: &str, action: &Action) -> Result<(), Error> {
-        let Action::PutManifest { target, .. } = action else {
-            return Ok(());
-        };
-
-        for tag in target.created_tags() {
-            if !self.is_tag_mutable(Some(repository_name), tag) {
-                return Err(Error::Conflict(format!(
-                    "Tag '{tag}' is immutable and cannot be overwritten"
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    pub fn is_tag_mutable(&self, repository_name: Option<&str>, tag: &Tag) -> bool {
-        let repository = repository_name.and_then(|name| self.repositories.get(name));
-        let immutable_tags =
-            self.global_immutable_tags || repository.is_some_and(|repo| repo.immutable_tags);
-        if !immutable_tags {
-            return true;
-        }
-
-        let exclusions = match repository {
-            Some(repo) if !repo.immutable_tags_exclusions.is_empty() => {
-                &repo.immutable_tags_exclusions
-            }
-            _ => &self.global_immutable_tags_exclusions,
-        };
-
-        exclusions
-            .iter()
-            .any(|pattern| pattern.is_match(tag.as_ref()))
     }
 }
 
@@ -343,8 +298,6 @@ fn build_repositories(
             AuthorizerRepository {
                 access_policy,
                 authorization_webhook,
-                immutable_tags: repo_config.immutable_tags,
-                immutable_tags_exclusions: repo_config.immutable_tags_exclusions.clone(),
             },
         );
     }

@@ -1,4 +1,6 @@
-use crate::oci::{Digest, MediaType, Namespace, Reference, Tag};
+use hyper::HeaderMap;
+
+use crate::oci::{Digest, MediaType};
 
 pub struct ManifestMeta {
     pub media_type: Option<MediaType>,
@@ -12,23 +14,21 @@ pub struct ManifestBody {
     pub content: Vec<u8>,
 }
 
-/// The facts a manifest GET resolved to; the handler turns each variant into its
-/// wire response (redirect or full body) and headers.
+/// What a manifest GET resolved to, before it becomes a response: the pull
+/// event needs the served digest, which the response itself does not hand back.
 pub enum GetManifestResponse {
     Redirect {
-        redirect_url: String,
         digest: Digest,
-        media_type: Option<MediaType>,
+        headers: HeaderMap,
     },
     Body {
-        media_type: Option<MediaType>,
         digest: Digest,
         content: Vec<u8>,
+        headers: HeaderMap,
     },
 }
 
 impl GetManifestResponse {
-    /// The digest of the manifest being served, for pull-event reporting.
     pub fn digest(&self) -> &Digest {
         match self {
             GetManifestResponse::Redirect { digest, .. }
@@ -37,27 +37,13 @@ impl GetManifestResponse {
     }
 }
 
-/// The facts a manifest HEAD resolved to; the handler builds the
-/// `Docker-Content-Digest`, `Content-Length`, and optional `Content-Type`
-/// headers from them.
-pub struct HeadManifestResponse {
-    pub media_type: Option<MediaType>,
-    pub digest: Digest,
-    pub size: u64,
-}
-
-/// The facts a manifest PUT committed; the handler rebuilds the `Location`,
-/// optional `OCI-Subject`, and optional `OCI-Tag` headers from them.
+/// What a manifest PUT committed. The registry serves `headers` and decides
+/// replication off the rest, so both outlive the write.
 pub struct PutManifestResponse {
-    pub namespace: Namespace,
-    pub reference: Reference,
     pub digest: Digest,
-    /// The manifest's `subject` back-link target, surfaced as `OCI-Subject`.
-    pub subject: Option<Digest>,
-    /// Tags created via `?tag=` query parameters, surfaced as `OCI-Tag`.
-    pub created_tags: Vec<Tag>,
     /// Whether the write changed local state, as validated by the committed
     /// link transaction itself (no racy pre-read); gates the replication
     /// re-dispatch.
     pub changed: bool,
+    pub headers: HeaderMap,
 }

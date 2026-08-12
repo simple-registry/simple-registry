@@ -1,17 +1,18 @@
-//! The `/_ext` admin surface: repository/namespace info for the web UI and
-//! the jobs list/retry/delete responses, returned as typed domain structs that
-//! the server handlers serialize.
+//! The `/_ext` admin surface: repository/namespace info for the web UI and the
+//! jobs list/retry/delete endpoints, each serving the response it resolved.
 
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
+use hyper::{HeaderMap, Response, StatusCode};
 use serde::Serialize;
 use tokio::try_join;
 use tracing::instrument;
 
 use crate::{
     configuration::RegexPattern,
+    http_response::{ResponseBody, build_response, json_response},
     jobs::store as job_store,
     jobs::{JobState, Queue},
     oci::{
@@ -20,6 +21,41 @@ use crate::{
     },
     registry::{Error, Registry, metadata_store::LinkKind},
 };
+
+#[derive(Debug)]
+pub struct ListNamespacesRequest {
+    pub repository: Namespace,
+}
+
+#[derive(Debug)]
+pub struct ListRevisionsRequest {
+    pub namespace: Namespace,
+}
+
+#[derive(Debug)]
+pub struct ListUploadsRequest {
+    pub namespace: Namespace,
+}
+
+#[derive(Debug)]
+pub struct ListJobsRequest {
+    pub queue: Queue,
+    pub n: Option<u16>,
+    pub after: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct RetryJobRequest {
+    pub queue: Queue,
+    pub storage_key: String,
+}
+
+#[derive(Debug)]
+pub struct DeleteJobRequest {
+    pub queue: Queue,
+    pub state: JobState,
+    pub storage_key: String,
+}
 
 /// Default page size for the durable job-queue listing endpoints when the
 /// client supplies no `?n=`. Bounded so an admin scan reads at most this many
@@ -311,7 +347,7 @@ fn parent_refs_for(
 
 impl Registry {
     #[instrument(skip(self))]
-    pub async fn get_repositories_info(&self) -> Result<RepositoriesBody, Error> {
+    pub async fn get_repositories_info(&self) -> Result<Response<ResponseBody>, Error> {
         // Walk each store once and bucket namespaces per repository in memory.
         // Both walks are concurrent internally; listing per repository would
         // instead re-scan the whole store once per configured repository.
@@ -334,11 +370,15 @@ impl Registry {
 
         repositories.sort_by(|a, b| a.name.cmp(&b.name));
 
-        Ok(RepositoriesBody { repositories })
+        json_response(StatusCode::OK, &RepositoriesBody { repositories })
     }
 
     #[instrument(skip(self))]
-    pub async fn get_namespaces_info(&self, repository: &str) -> Result<NamespacesBody, Error> {
+    pub async fn get_namespaces_info(
+        &self,
+        request: ListNamespacesRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let repository = request.repository.as_ref();
         let namespace_names = self.list_repository_namespaces(repository).await?;
 
         // Each namespace's counts are three independent backend listings; fan
@@ -370,18 +410,25 @@ impl Registry {
 
         let config = self.get_repository_config(repository);
 
-        Ok(NamespacesBody {
-            repository: repository.to_string(),
-            namespaces,
-            pull_through_cache: config.pull_through_cache,
-            upstream_urls: config.upstream_urls,
-            immutable_tags: config.immutable_tags,
-            immutable_tags_exclusions: config.immutable_tags_exclusions,
-        })
+        json_response(
+            StatusCode::OK,
+            &NamespacesBody {
+                repository: repository.to_string(),
+                namespaces,
+                pull_through_cache: config.pull_through_cache,
+                upstream_urls: config.upstream_urls,
+                immutable_tags: config.immutable_tags,
+                immutable_tags_exclusions: config.immutable_tags_exclusions,
+            },
+        )
     }
 
     #[instrument(skip(self))]
-    pub async fn get_revisions_info(&self, namespace: &Namespace) -> Result<RevisionsBody, Error> {
+    pub async fn get_revisions_info(
+        &self,
+        request: ListRevisionsRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let namespace = &request.namespace;
         // Materialized once: the tag map, the parent/referrer maps, and the
         // entry builder below all need the full revision set.
         let all_revisions: Vec<Digest> = self
@@ -402,14 +449,21 @@ impl Registry {
             )
             .await;
 
-        Ok(RevisionsBody {
-            name: namespace.to_string(),
-            manifests,
-        })
+        json_response(
+            StatusCode::OK,
+            &RevisionsBody {
+                name: namespace.to_string(),
+                manifests,
+            },
+        )
     }
 
     #[instrument(skip(self))]
-    pub async fn get_uploads_info(&self, namespace: &Namespace) -> Result<UploadsBody, Error> {
+    pub async fn get_uploads_info(
+        &self,
+        request: ListUploadsRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let namespace = &request.namespace;
         let mut session_ids: Vec<UploadSessionId> = self
             .blob_store
             .stream_uploads(namespace)
@@ -437,10 +491,13 @@ impl Registry {
             .collect()
             .await;
 
-        Ok(UploadsBody {
-            name: namespace.to_string(),
-            uploads: all_uploads,
-        })
+        json_response(
+            StatusCode::OK,
+            &UploadsBody {
+                name: namespace.to_string(),
+                uploads: all_uploads,
+            },
+        )
     }
 
     /// One keyset page of pending/in-flight durable jobs on `queue`. `after` is
@@ -449,10 +506,9 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn get_jobs_info(
         &self,
-        queue: Queue,
-        n: Option<u16>,
-        after: Option<String>,
-    ) -> Result<JobsBody, Error> {
+        request: ListJobsRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let ListJobsRequest { queue, n, after } = request;
         let n = n.unwrap_or(DEFAULT_JOBS_PAGE);
         let page = self
             .job_queue
@@ -486,10 +542,13 @@ impl Registry {
             .try_collect()
             .await?;
 
-        Ok(JobsBody {
-            jobs,
-            next: page.next_token,
-        })
+        json_response(
+            StatusCode::OK,
+            &JobsBody {
+                jobs,
+                next: page.next_token,
+            },
+        )
     }
 
     /// One keyset page of dead-letter (exhausted-retry) jobs on `queue`. See
@@ -497,10 +556,9 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn get_failed_jobs_info(
         &self,
-        queue: Queue,
-        n: Option<u16>,
-        after: Option<String>,
-    ) -> Result<FailedJobsBody, Error> {
+        request: ListJobsRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let ListJobsRequest { queue, n, after } = request;
         let n = n.unwrap_or(DEFAULT_JOBS_PAGE);
         let page = self
             .job_queue
@@ -531,20 +589,31 @@ impl Registry {
             .try_collect()
             .await?;
 
-        Ok(FailedJobsBody {
-            failed,
-            next: page.next_token,
-        })
+        json_response(
+            StatusCode::OK,
+            &FailedJobsBody {
+                failed,
+                next: page.next_token,
+            },
+        )
     }
 
     /// Requeue a dead-letter job (attempts reset to zero) on `queue`. Delegates
     /// to the durable queue; a stale key surfaces as [`Error::NotFound`] (404).
     #[instrument(skip(self))]
-    pub async fn retry_failed_job(&self, queue: Queue, storage_key: &str) -> Result<(), Error> {
+    pub async fn retry_failed_job(
+        &self,
+        request: RetryJobRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
         self.job_queue
-            .retry_failed(queue, storage_key)
-            .await
-            .map_err(Error::from)
+            .retry_failed(request.queue, &request.storage_key)
+            .await?;
+
+        Ok(build_response(
+            StatusCode::NO_CONTENT,
+            HeaderMap::new(),
+            ResponseBody::empty(),
+        )?)
     }
 
     /// Delete a job on `queue` in the given partition. A stale key surfaces as
@@ -552,14 +621,17 @@ impl Registry {
     #[instrument(skip(self))]
     pub async fn delete_job(
         &self,
-        queue: Queue,
-        state: JobState,
-        storage_key: &str,
-    ) -> Result<(), Error> {
+        request: DeleteJobRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
         self.job_queue
-            .delete_job(queue, state, storage_key)
-            .await
-            .map_err(Error::from)
+            .delete_job(request.queue, request.state, &request.storage_key)
+            .await?;
+
+        Ok(build_response(
+            StatusCode::NO_CONTENT,
+            HeaderMap::new(),
+            ResponseBody::empty(),
+        )?)
     }
 
     fn get_repository_config(&self, name: &str) -> RepositoryConfig {
@@ -768,6 +840,7 @@ impl Registry {
 mod tests {
     use std::collections::HashMap;
 
+    use super::ListNamespacesRequest;
     use super::{
         ExtPlatform, analyze_manifest, build_digest_to_tags_map_from_pairs,
         extract_docker_referrer, extract_in_toto_predicate, parent_refs_for,
@@ -781,7 +854,7 @@ mod tests {
             metadata_store::{LinkKind, LinkOperation},
             test_utils::{
                 FSRegistryTestCase, RegistryTestCase, create_test_blob, for_each_backend,
-                media_type,
+                media_type, response_json,
             },
         },
     };
@@ -1169,8 +1242,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            let response = registry.get_namespaces_info("test-repo").await.unwrap();
-            let body = serde_json::to_value(&response).unwrap();
+            let response = registry
+                .get_namespaces_info(ListNamespacesRequest {
+                    repository: Namespace::new("test-repo").unwrap(),
+                })
+                .await
+                .unwrap();
+            let body = response_json(response).await;
             let namespaces = body["namespaces"].as_array().unwrap();
 
             let entries: Vec<(&str, u64, u64)> = namespaces
@@ -1197,7 +1275,7 @@ mod tests {
             );
 
             let response = registry.get_repositories_info().await.unwrap();
-            let body = serde_json::to_value(&response).unwrap();
+            let body = response_json(response).await;
             let count = body["repositories"][0]["namespace_count"].as_u64().unwrap();
             assert_eq!(
                 count, 2,
@@ -1229,8 +1307,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            let response = registry.get_namespaces_info("test-repo").await.unwrap();
-            let body = serde_json::to_value(&response).unwrap();
+            let response = registry
+                .get_namespaces_info(ListNamespacesRequest {
+                    repository: Namespace::new("test-repo").unwrap(),
+                })
+                .await
+                .unwrap();
+            let body = response_json(response).await;
             let entry = body["namespaces"]
                 .as_array()
                 .unwrap()
@@ -1262,8 +1345,13 @@ mod tests {
             .await
             .unwrap();
 
-        let response = registry.get_namespaces_info("test-repo").await.unwrap();
-        let body = serde_json::to_value(&response).unwrap();
+        let response = registry
+            .get_namespaces_info(ListNamespacesRequest {
+                repository: Namespace::new("test-repo").unwrap(),
+            })
+            .await
+            .unwrap();
+        let body = response_json(response).await;
         let namespaces = body["namespaces"].as_array().unwrap();
 
         assert_eq!(
@@ -1289,11 +1377,18 @@ mod tests {
             let other = Namespace::new("other-repo/hidden").unwrap();
             create_test_blob(registry, &other, b"hidden content").await;
 
-            let response = registry.get_namespaces_info("test-repo").await.unwrap();
-            let names: Vec<&str> = response
-                .namespaces
+            let response = registry
+                .get_namespaces_info(ListNamespacesRequest {
+                    repository: Namespace::new("test-repo").unwrap(),
+                })
+                .await
+                .unwrap();
+            let body = response_json(response).await;
+            let names: Vec<&str> = body["namespaces"]
+                .as_array()
+                .unwrap()
                 .iter()
-                .map(|ns| ns.name.as_str())
+                .map(|ns| ns["name"].as_str().unwrap())
                 .collect();
 
             assert_eq!(
@@ -1330,13 +1425,17 @@ mod tests {
             .unwrap();
 
         let response = registry
-            .get_namespaces_info("test-repo")
+            .get_namespaces_info(ListNamespacesRequest {
+                repository: Namespace::new("test-repo").unwrap(),
+            })
             .await
             .expect("one invalid directory must not fail the listing");
-        let names: Vec<&str> = response
-            .namespaces
+        let body = response_json(response).await;
+        let names: Vec<&str> = body["namespaces"]
+            .as_array()
+            .unwrap()
             .iter()
-            .map(|ns| ns.name.as_str())
+            .map(|ns| ns["name"].as_str().unwrap())
             .collect();
 
         assert_eq!(names, ["test-repo/valid"]);

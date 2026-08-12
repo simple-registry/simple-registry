@@ -19,7 +19,10 @@ use crate::{
     },
     configuration::{self, Configuration},
     policy::{AccessMode, AccessPolicyConfig, CelRule},
-    registry::{Registry, RegistryConfig, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES, repository},
+    registry::{
+        ListCatalogRequest, Registry, RegistryConfig, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
+        repository, test_utils::response_json,
+    },
     secret::Secret,
     test_fixtures::client::test_client_config,
 };
@@ -332,13 +335,16 @@ async fn test_build_registry_components_integration() {
 
     let registry = Registry::new(blob_backend, metadata_store, repositories, registry_config);
 
-    let namespaces = registry
-        .list_catalog_entries(None, None)
+    let response = registry
+        .list_catalog_entries(ListCatalogRequest {
+            n: None,
+            last: None,
+        })
         .await
-        .unwrap()
-        .items;
+        .unwrap();
+    let body = response_json(response).await;
     assert!(
-        namespaces.is_empty(),
+        body["repositories"].as_array().unwrap().is_empty(),
         "a freshly built registry must serve an empty catalog"
     );
 }

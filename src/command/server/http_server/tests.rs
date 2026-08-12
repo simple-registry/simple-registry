@@ -18,22 +18,18 @@ use crate::{
     command::server::{
         ServerContext,
         error::Error,
-        handlers::{
-            content_discovery::handle_list_catalog, ext::handle_list_repositories,
-            token::handle_get_token,
-        },
+        handlers::{handle_get_token, handle_healthz, handle_metrics},
         http_server::{
             connection::{current_trace_id, inject_peer_certificate},
             dispatch::{authenticate_and_authorize, handle_unknown_route},
             error_response::{error_to_response, fallback_500},
-            observability::{handle_healthz, handle_metrics},
         },
-        response_body::ResponseBody,
         server_context::tests::{
             TestConfigOptions, create_test_server_context_from_config,
             create_test_server_context_with,
         },
     },
+    http_response::ResponseBody,
     identity::{Action, ClientIdentity},
     metrics_provider,
     policy::{AccessMode, AccessPolicyConfig},
@@ -129,10 +125,8 @@ fn only_our_own_denial_carries_the_bearer_challenge() {
 
 #[test]
 fn test_handle_healthz_success() {
-    let result = handle_healthz();
+    let response = handle_healthz().unwrap();
 
-    assert!(result.is_ok());
-    let response = result.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get(CONTENT_TYPE).unwrap(),
@@ -144,10 +138,7 @@ fn test_handle_healthz_success() {
 async fn test_handle_healthz_body_content() {
     use http_body_util::BodyExt;
 
-    let result = handle_healthz();
-    assert!(result.is_ok());
-
-    let response = result.unwrap();
+    let response = handle_healthz().unwrap();
     let (_, body) = response.into_parts();
 
     let body_bytes = match body {
@@ -162,10 +153,8 @@ async fn test_handle_healthz_body_content() {
 #[test]
 fn test_handle_metrics_success() {
     metrics_provider::init_for_tests();
-    let result = handle_metrics();
+    let response = handle_metrics().unwrap();
 
-    assert!(result.is_ok());
-    let response = result.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.headers().get(CONTENT_TYPE).is_some());
 }
@@ -175,10 +164,7 @@ async fn test_handle_metrics_contains_metric_data() {
     use http_body_util::BodyExt;
 
     metrics_provider::init_for_tests();
-    let result = handle_metrics();
-    assert!(result.is_ok());
-
-    let response = result.unwrap();
+    let response = handle_metrics().unwrap();
     let (parts, body) = response.into_parts();
 
     let content_type = parts.headers.get(CONTENT_TYPE).unwrap().to_str().unwrap();
@@ -214,11 +200,6 @@ fn test_error_to_response_all_error_types() {
         (
             Error::Internal("msg".to_string()),
             StatusCode::INTERNAL_SERVER_ERROR,
-            false,
-        ),
-        (
-            Error::Conflict("msg".to_string()),
-            StatusCode::CONFLICT,
             false,
         ),
         (
@@ -424,7 +405,10 @@ async fn a_registry_token_cannot_be_exchanged_for_another() {
         ..ClientIdentity::default()
     };
 
-    let Err(error) = handle_get_token(&context, &identity) else {
+    let Err(error) = handle_get_token(
+        context.token_issuer().expect("the test context issues"),
+        &identity,
+    ) else {
         panic!("a registry token must not be renewable");
     };
 
@@ -437,7 +421,11 @@ async fn a_registry_token_cannot_be_exchanged_for_another() {
 async fn an_issued_token_is_never_cached() {
     let context = token_service_context().await;
 
-    let response = handle_get_token(&context, &ClientIdentity::default()).unwrap();
+    let response = handle_get_token(
+        context.token_issuer().expect("the test context issues"),
+        &ClientIdentity::default(),
+    )
+    .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers().get(CACHE_CONTROL).unwrap(), "no-store");
@@ -452,24 +440,6 @@ async fn create_test_context_with_allow_policy() -> ServerContext {
         ..TestConfigOptions::default()
     })
     .await
-}
-
-#[tokio::test]
-async fn test_handle_list_repositories() {
-    let context = create_test_context_with_allow_policy().await;
-
-    let result = handle_list_repositories(&context).await;
-
-    assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn test_handle_list_catalog() {
-    let context = create_test_context_with_allow_policy().await;
-
-    let result = handle_list_catalog(&context, None, None).await;
-
-    assert!(result.is_ok());
 }
 
 #[test]

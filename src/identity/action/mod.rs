@@ -37,7 +37,7 @@ use crate::{
 /// - `digest`: The blob/manifest digest (when applicable)
 /// - `reference`: The manifest tag or digest reference (when applicable)
 /// - `tags`: Tags created by a by-digest manifest push via `?tag=` (when present)
-/// - `uuid`: The upload session UUID (for upload operations)
+/// - `session_id`: The upload session id (for upload operations)
 /// - `n`: Maximum number of results for pagination
 /// - `last`: Last result marker for pagination
 /// - `artifact_type`: Filter for referrer queries
@@ -93,23 +93,23 @@ pub enum Action {
     #[serde(rename = "get-upload")]
     GetUpload {
         namespace: Namespace,
-        uuid: UploadSessionId,
+        session_id: UploadSessionId,
     },
     #[serde(rename = "update-upload")]
     PatchUpload {
         namespace: Namespace,
-        uuid: UploadSessionId,
+        session_id: UploadSessionId,
     },
     #[serde(rename = "complete-upload")]
     PutUpload {
         namespace: Namespace,
         digest: Digest,
-        uuid: UploadSessionId,
+        session_id: UploadSessionId,
     },
     #[serde(rename = "cancel-upload")]
     DeleteUpload {
         namespace: Namespace,
-        uuid: UploadSessionId,
+        session_id: UploadSessionId,
     },
     #[serde(rename = "get-blob")]
     GetBlob {

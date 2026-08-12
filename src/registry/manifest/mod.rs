@@ -2,30 +2,57 @@ pub mod link_plan;
 mod parse;
 mod response;
 
+use std::slice;
+
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
+use hyper::{
+    HeaderMap, Response, StatusCode,
+    header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, LOCATION},
+};
 use parse::parse_pushed_manifest;
 pub use parse::{ParsedManifestDigests, parse_manifest_digests, recover_media_type};
-pub use response::{GetManifestResponse, HeadManifestResponse, PutManifestResponse};
-use response::{ManifestBody, ManifestMeta};
+use response::{GetManifestResponse, ManifestBody, ManifestMeta, PutManifestResponse};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{debug, error, instrument, warn};
 
 use crate::{
     cache_fill::CACHE_ACTOR,
     event_webhook::event::{Event, EventActor},
+    http_response::{ResponseBody, build_response},
     jobs::Queue,
     metrics_provider::metrics_provider,
     oci::{Content, Digest, Manifest, MediaRange, MediaType, Namespace, Reference, Tag},
     registry::{
-        Error, Registry, Repository,
+        DOCKER_CONTENT_DIGEST, Error, OCI_SUBJECT, OCI_TAG, Registry, Repository,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, ReferencePolicy},
+        repository_name,
     },
     replication::{ReplicationDownstream, ReplicationJob, ReplicationTarget, build_envelope},
 };
 
 pub const DEFAULT_MAX_MANIFEST_SIZE_BYTES: usize = 5 * 1024 * 1024;
+
+#[derive(Debug)]
+pub struct HeadManifestRequest {
+    pub namespace: Namespace,
+    pub reference: Reference,
+    pub accepted_types: Vec<MediaRange>,
+}
+
+pub struct DeleteManifestRequest {
+    pub source_ts: Option<DateTime<Utc>>,
+    pub namespace: Namespace,
+    pub reference: Reference,
+}
+
+pub struct GetManifestRequest {
+    pub namespace: Namespace,
+    pub reference: Reference,
+    pub accepted_types: Vec<MediaRange>,
+    pub allow_redirect: bool,
+}
 
 /// The inputs to [`Registry::accept_put_manifest`]; the manifest body is passed
 /// separately as a stream. Shared with the HTTP handler that builds it, so the
@@ -35,7 +62,6 @@ pub struct PutManifestRequest<'a> {
     pub reference: Reference,
     pub mime_type: MediaType,
     pub tags: Vec<Tag>,
-    pub actor: Option<EventActor>,
     pub source_ts: Option<DateTime<Utc>>,
 }
 
@@ -93,29 +119,178 @@ where
     Ok(request_body)
 }
 
+/// `Docker-Content-Digest` and `Content-Length` for a served manifest, plus its
+/// `Content-Type` when one is recorded.
+fn manifest_headers(
+    media_type: Option<&MediaType>,
+    digest: &Digest,
+    size: u64,
+) -> Result<HeaderMap, Error> {
+    let mut headers = HeaderMap::new();
+    headers.insert(DOCKER_CONTENT_DIGEST, HeaderValue::try_from(digest)?);
+    headers.insert(CONTENT_LENGTH, size.into());
+    if let Some(media_type) = media_type {
+        headers.insert(CONTENT_TYPE, HeaderValue::try_from(media_type.to_string())?);
+    }
+
+    Ok(headers)
+}
+
+fn get_manifest_redirect_headers(
+    url: &str,
+    digest: &Digest,
+    media_type: Option<&MediaType>,
+) -> Result<HeaderMap, Error> {
+    let mut headers = HeaderMap::new();
+    headers.insert(LOCATION, HeaderValue::try_from(url)?);
+    headers.insert(DOCKER_CONTENT_DIGEST, HeaderValue::try_from(digest)?);
+    if let Some(media_type) = media_type {
+        headers.insert(CONTENT_TYPE, HeaderValue::try_from(media_type.to_string())?);
+    }
+
+    Ok(headers)
+}
+
+fn put_manifest_headers(
+    namespace: &Namespace,
+    reference: &Reference,
+    digest: &Digest,
+    subject: Option<&Digest>,
+    created_tags: &[Tag],
+) -> Result<HeaderMap, Error> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        LOCATION,
+        HeaderValue::try_from(format!("/v2/{namespace}/manifests/{reference}"))?,
+    );
+    headers.insert(DOCKER_CONTENT_DIGEST, HeaderValue::try_from(digest)?);
+    if let Some(subject) = subject {
+        headers.insert(OCI_SUBJECT, HeaderValue::try_from(subject)?);
+    }
+    if !created_tags.is_empty() {
+        let joined = created_tags
+            .iter()
+            .map(Tag::as_ref)
+            .collect::<Vec<&str>>()
+            .join(", ");
+        headers.insert(OCI_TAG, HeaderValue::try_from(joined)?);
+    }
+
+    Ok(headers)
+}
+
+#[cfg(test)]
+mod header_tests {
+    use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
+
+    use super::{
+        DOCKER_CONTENT_DIGEST, Digest, MediaType, Namespace, OCI_SUBJECT, OCI_TAG, Reference, Tag,
+        get_manifest_redirect_headers, manifest_headers, put_manifest_headers,
+    };
+
+    const MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+
+    fn sample_digest() -> Digest {
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            .parse()
+            .unwrap()
+    }
+
+    fn sample_media_type() -> MediaType {
+        MediaType::new(MEDIA_TYPE).unwrap()
+    }
+
+    #[test]
+    fn manifest_headers_carry_digest_length_and_media_type() {
+        let headers = manifest_headers(Some(&sample_media_type()), &sample_digest(), 42).unwrap();
+        assert_eq!(headers[&DOCKER_CONTENT_DIGEST], sample_digest().to_string());
+        assert_eq!(headers[&CONTENT_LENGTH], "42");
+        assert_eq!(headers[&CONTENT_TYPE], MEDIA_TYPE);
+    }
+
+    #[test]
+    fn manifest_headers_omit_content_type_without_media_type() {
+        let headers = manifest_headers(None, &sample_digest(), 7).unwrap();
+        assert_eq!(headers[&DOCKER_CONTENT_DIGEST], sample_digest().to_string());
+        assert_eq!(headers[&CONTENT_LENGTH], "7");
+        assert!(!headers.contains_key(CONTENT_TYPE));
+    }
+
+    #[test]
+    fn get_manifest_redirect_headers_carry_location_and_digest() {
+        let headers = get_manifest_redirect_headers(
+            "https://cdn/manifest",
+            &sample_digest(),
+            Some(&sample_media_type()),
+        )
+        .unwrap();
+        assert_eq!(headers[&LOCATION], "https://cdn/manifest");
+        assert_eq!(headers[&DOCKER_CONTENT_DIGEST], sample_digest().to_string());
+        assert_eq!(headers[&CONTENT_TYPE], MEDIA_TYPE);
+    }
+
+    #[test]
+    fn put_manifest_headers_format_location() {
+        let namespace = Namespace::new("test/repo").unwrap();
+        let reference = Reference::Tag(Tag::new("latest").unwrap());
+        let headers =
+            put_manifest_headers(&namespace, &reference, &sample_digest(), None, &[]).unwrap();
+        assert_eq!(headers[&LOCATION], "/v2/test/repo/manifests/latest");
+        assert_eq!(headers[&DOCKER_CONTENT_DIGEST], sample_digest().to_string());
+        assert!(!headers.contains_key(&OCI_SUBJECT));
+        assert!(!headers.contains_key(&OCI_TAG));
+    }
+
+    #[test]
+    fn put_manifest_headers_carry_subject() {
+        let namespace = Namespace::new("test/repo").unwrap();
+        let reference = Reference::Digest(sample_digest());
+        let subject = sample_digest();
+        let headers = put_manifest_headers(
+            &namespace,
+            &reference,
+            &sample_digest(),
+            Some(&subject),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(headers[&OCI_SUBJECT], subject.to_string());
+    }
+
+    #[test]
+    fn put_manifest_headers_join_created_tags() {
+        let namespace = Namespace::new("test/repo").unwrap();
+        let reference = Reference::Digest(sample_digest());
+        let tags = vec![Tag::new("1.2.3").unwrap(), Tag::new("latest").unwrap()];
+        let headers =
+            put_manifest_headers(&namespace, &reference, &sample_digest(), None, &tags).unwrap();
+        assert_eq!(headers[&OCI_TAG], "1.2.3, latest");
+    }
+}
+
 impl Registry {
-    #[instrument(skip(repository))]
+    #[instrument]
     pub async fn head_manifest(
         &self,
-        repository: Option<&Repository>,
-        accepted_types: &[MediaRange],
-        namespace: &Namespace,
-        reference: Reference,
-        is_tag_immutable: bool,
-    ) -> Result<HeadManifestResponse, Error> {
-        let local = self.head_local_manifest(namespace, &reference).await;
+        request: HeadManifestRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let repository = self.get_repository_for_namespace(&request.namespace).ok();
+        let is_tag_immutable = self.is_reference_immutable(repository, &request.reference);
+        let local = self
+            .head_local_manifest(&request.namespace, &request.reference)
+            .await;
         let serveable = self
             .serveable_local(
-                namespace,
-                &reference,
+                &request.namespace,
+                &request.reference,
                 repository.is_some_and(Repository::is_pull_through),
                 local,
                 async |meta| {
                     self.needs_upstream_pull_manifest(
                         repository,
-                        accepted_types,
-                        namespace,
-                        &reference,
+                        &request.accepted_types,
+                        &request.namespace,
+                        &request.reference,
                         is_tag_immutable,
                         &meta.digest,
                     )
@@ -124,28 +299,30 @@ impl Registry {
             )
             .await?;
         if let Some(meta) = serveable {
-            return Ok(HeadManifestResponse {
-                media_type: meta.media_type,
-                digest: meta.digest,
-                size: meta.size,
-            });
+            return Ok(build_response(
+                StatusCode::OK,
+                manifest_headers(meta.media_type.as_ref(), &meta.digest, meta.size)?,
+                ResponseBody::empty(),
+            )?);
         }
 
         let body = self
             .get_manifest(
                 repository,
-                accepted_types,
-                namespace,
-                reference,
+                &request.accepted_types,
+                &request.namespace,
+                request.reference,
                 is_tag_immutable,
             )
             .await?;
 
-        Ok(HeadManifestResponse {
-            media_type: body.media_type,
-            digest: body.digest,
-            size: body.content.len() as u64,
-        })
+        let size = body.content.len() as u64;
+
+        Ok(build_response(
+            StatusCode::OK,
+            manifest_headers(body.media_type.as_ref(), &body.digest, size)?,
+            ResponseBody::empty(),
+        )?)
     }
 
     /// Read a manifest/tag link for a client pull, recording its access time
@@ -463,11 +640,14 @@ impl Registry {
         let subject = manifest.subject.map(|s| s.digest);
 
         Ok(PutManifestResponse {
-            namespace: namespace.clone(),
-            reference: reference.clone(),
+            headers: put_manifest_headers(
+                namespace,
+                reference,
+                &computed_digest,
+                subject.as_ref(),
+                created_tags,
+            )?,
             digest: computed_digest,
-            subject,
-            created_tags: created_tags.to_vec(),
             changed,
         })
     }
@@ -502,6 +682,29 @@ impl Registry {
         }
     }
 
+    /// Serves a client's manifest delete. The retention sweeper deletes
+    /// manifests too, so [`Registry::delete_manifest`] reports the outcome and
+    /// only this entry point answers `202`.
+    pub async fn accept_delete_manifest(
+        &self,
+        actor: Option<EventActor>,
+        request: DeleteManifestRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        self.delete_manifest(
+            actor,
+            request.source_ts,
+            &request.namespace,
+            &request.reference,
+        )
+        .await?;
+
+        Ok(build_response(
+            StatusCode::ACCEPTED,
+            HeaderMap::new(),
+            ResponseBody::empty(),
+        )?)
+    }
+
     /// Deletes a manifest or tag. The delete's initiator is read off the
     /// `actor`: an internal actor (retention enforcement) mirrors the delete
     /// only to downstreams marked `prune = true`, a client delete to every
@@ -516,10 +719,7 @@ impl Registry {
     ) -> Result<(), Error> {
         let client_initiated = actor.as_ref().is_none_or(EventActor::is_client);
         let resolved_repository = self.resolver.resolve(namespace);
-
-        let repository = resolved_repository
-            .map(|r| r.name.to_string())
-            .unwrap_or_default();
+        let repository = repository_name(resolved_repository);
         // Intent-first emission: the events fire before the delete, so a
         // performed delete can never go unnotified; a delete that fails past
         // this point leaves a false-positive notification instead.
@@ -710,9 +910,9 @@ impl Registry {
             .ok()??;
 
         Some(GetManifestResponse::Redirect {
-            redirect_url: presigned_url,
+            headers: get_manifest_redirect_headers(&presigned_url, &link.target, Some(&media_type))
+                .ok()?,
             digest: link.target,
-            media_type: Some(media_type),
         })
     }
 
@@ -722,33 +922,30 @@ impl Registry {
     /// is authoritative (not a pull-through cache, a digest reference, or an
     /// immutable tag); mutable tags on a pull-through cache fall through to
     /// `get_manifest` to refresh if upstream has moved.
-    #[instrument(skip(self, is_tag_immutable, actor))]
+    #[instrument(skip(self, request))]
     pub async fn resolve_get_manifest(
         &self,
         actor: Option<EventActor>,
-        namespace: &Namespace,
-        reference: Reference,
-        mime_types: &[MediaRange],
-        is_tag_immutable: bool,
-        allow_redirect: bool,
-    ) -> Result<GetManifestResponse, Error> {
-        let repository = self.get_repository_for_namespace(namespace).ok();
-        let repository_name = self.repository_name_for(namespace);
-        let event_reference = reference.clone();
+        request: GetManifestRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let repository = self.get_repository_for_namespace(&request.namespace).ok();
+        let is_tag_immutable = self.is_reference_immutable(repository, &request.reference);
+        let repository_name = repository_name(repository);
+        let event_reference = request.reference.clone();
 
         let response = self
             .resolve_get_manifest_response(
                 repository,
-                namespace,
-                reference,
-                mime_types,
+                &request.namespace,
+                request.reference,
+                &request.accepted_types,
                 is_tag_immutable,
-                allow_redirect,
+                request.allow_redirect,
             )
             .await?;
 
         let event = Event::pull_manifest(
-            namespace,
+            &request.namespace,
             &repository_name,
             response.digest(),
             &event_reference,
@@ -756,7 +953,16 @@ impl Registry {
         );
         self.dispatch_events(&[event]).await?;
 
-        Ok(response)
+        Ok(match response {
+            GetManifestResponse::Redirect { headers, .. } => build_response(
+                StatusCode::TEMPORARY_REDIRECT,
+                headers,
+                ResponseBody::empty(),
+            )?,
+            GetManifestResponse::Body {
+                content, headers, ..
+            } => build_response(StatusCode::OK, headers, ResponseBody::fixed(content))?,
+        })
     }
 
     async fn resolve_get_manifest_response(
@@ -791,7 +997,11 @@ impl Registry {
             .await?;
 
         Ok(GetManifestResponse::Body {
-            media_type: manifest.media_type,
+            headers: manifest_headers(
+                manifest.media_type.as_ref(),
+                &manifest.digest,
+                manifest.content.len() as u64,
+            )?,
             digest: manifest.digest,
             content: manifest.content,
         })
@@ -875,9 +1085,10 @@ impl Registry {
     )]
     pub async fn accept_put_manifest<S>(
         &self,
+        actor: Option<EventActor>,
         request: PutManifestRequest<'_>,
         body_stream: S,
-    ) -> Result<PutManifestResponse, Error>
+    ) -> Result<Response<ResponseBody>, Error>
     where
         S: AsyncRead + Unpin + Send,
     {
@@ -886,10 +1097,24 @@ impl Registry {
             reference,
             mime_type,
             tags,
-            actor,
             source_ts,
         } = request;
         let resolved_repository = self.resolver.resolve(namespace);
+
+        // Refused before the body is read, so a push at an immutable tag does
+        // not pay for its own upload. A by-tag push writes the path tag; a
+        // by-digest push writes only the `?tag=` params.
+        let written_tags: &[Tag] = match &reference {
+            Reference::Tag(tag) => slice::from_ref(tag),
+            Reference::Digest(_) => &tags,
+        };
+        for tag in written_tags {
+            if self.is_tag_immutable(resolved_repository, tag) {
+                return Err(Error::Conflict(format!(
+                    "Tag '{tag}' is immutable and cannot be overwritten"
+                )));
+            }
+        }
 
         let created_tags: Vec<Tag> = match &reference {
             Reference::Digest(_) => tags,
@@ -957,7 +1182,11 @@ impl Registry {
             .await;
         }
 
-        Ok(response)
+        Ok(build_response(
+            StatusCode::CREATED,
+            response.headers,
+            ResponseBody::empty(),
+        )?)
     }
 
     /// Replicates a manifest push to every matching downstream: the path tag

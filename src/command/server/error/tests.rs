@@ -16,9 +16,6 @@ fn test_error_display() {
     let error = Error::BadRequest("Malformed request".to_string());
     assert_eq!(format!("{error}"), "Bad Request: Malformed request");
 
-    let error = Error::Conflict("Resource already exists".to_string());
-    assert_eq!(format!("{error}"), "Conflict: Resource already exists");
-
     let error = Error::RangeNotSatisfiable("Invalid range '-'".to_string());
     assert_eq!(
         format!("{error}"),
@@ -84,11 +81,6 @@ fn test_as_json_all_error_types() {
             Error::BadRequest("bad request".to_string()),
             "BAD_REQUEST",
             "bad request",
-        ),
-        (
-            Error::Conflict("conflict".to_string()),
-            "CONFLICT",
-            "conflict",
         ),
         (
             Error::RangeNotSatisfiable("range".to_string()),
@@ -372,7 +364,6 @@ fn test_status_code_coverage() {
     let test_cases = vec![
         (StatusCode::UNAUTHORIZED, Error::Unauthorized(String::new())),
         (StatusCode::BAD_REQUEST, Error::BadRequest(String::new())),
-        (StatusCode::CONFLICT, Error::Conflict(String::new())),
         (
             StatusCode::RANGE_NOT_SATISFIABLE,
             Error::RangeNotSatisfiable(String::new()),

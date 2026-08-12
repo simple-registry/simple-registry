@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duration,
 };
-use tempfile::TempDir;
 
 use argon2::{
     Algorithm, Argon2, Params, PasswordHasher, Version,
@@ -95,71 +94,6 @@ fn test_cache() -> Arc<Cache> {
 pub async fn create_test_server_context_from_config(config: &Configuration) -> ServerContext {
     let registry = create_test_registry(config).await;
     ServerContext::new(config, &test_cache(), registry).unwrap()
-}
-
-/// Context over a fresh FS root with a `test` repository matching `test/*`
-/// (the minimal config resolves no repository at all). The blob and metadata
-/// stores get separate roots, so a read that reaches the wrong one fails here
-/// rather than in production. With `webhook_url`, a required-policy webhook
-/// subscribed to the pull events is wired in.
-///
-/// The returned [`TempDir`] owns both roots; drop it and they are removed.
-pub async fn create_test_repo_context(webhook_url: Option<&str>) -> (ServerContext, TempDir) {
-    let root = TempDir::new().expect("temp dir");
-    let blob_root = root.path().join("blob");
-    let metadata_root = root.path().join("metadata");
-    let blob_root = blob_root.to_string_lossy();
-    let metadata_root = metadata_root.to_string_lossy();
-    let webhook_ref = if webhook_url.is_some() {
-        r#"event_webhooks = ["pull_hook"]"#
-    } else {
-        ""
-    };
-    let webhook_table = webhook_url
-        .map(|url| {
-            format!(
-                r#"
-                [event_webhook.pull_hook]
-                url = "{url}"
-                policy = "required"
-                events = ["manifest.pull", "blob.pull"]
-            "#
-            )
-        })
-        .unwrap_or_default();
-    let toml = format!(
-        r#"
-        [blob_store.fs]
-        root_dir = "{blob_root}"
-
-        [metadata_store.fs]
-        root_dir = "{metadata_root}"
-
-        [cache.memory]
-
-        [server]
-        bind_address = "127.0.0.1"
-        port = 8080
-
-        [global]
-        update_pull_time = false
-        {webhook_ref}
-
-        [global.access_policy]
-        default = "allow"
-        rules = []
-
-        [repository.test]
-        namespace_pattern = "^test/.*"
-
-        [repository.test.access_policy]
-        default = "allow"
-        rules = []
-        {webhook_table}
-    "#
-    );
-    let config: Configuration = toml::from_str(&toml).unwrap();
-    (create_test_server_context_from_config(&config).await, root)
 }
 
 pub async fn create_test_registry(config: &Configuration) -> Arc<Registry> {

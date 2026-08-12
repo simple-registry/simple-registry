@@ -247,22 +247,31 @@ fn try_parse_upload(method: &Method, path: &str, params: Option<&str>) -> Option
         return Some(Action::StartUpload { namespace, digest });
     }
 
-    let (namespace_str, uuid) = path.rsplit_once("/blobs/uploads/")?;
+    let (namespace_str, session_id) = path.rsplit_once("/blobs/uploads/")?;
     let namespace = Namespace::new(namespace_str).ok()?;
-    let uuid = UploadSessionId::from_str(uuid).ok()?;
+    let session_id = UploadSessionId::from_str(session_id).ok()?;
 
     match *method {
-        Method::GET => Some(Action::GetUpload { namespace, uuid }),
-        Method::PATCH => Some(Action::PatchUpload { namespace, uuid }),
+        Method::GET => Some(Action::GetUpload {
+            namespace,
+            session_id,
+        }),
+        Method::PATCH => Some(Action::PatchUpload {
+            namespace,
+            session_id,
+        }),
         Method::PUT => {
             let digest = digest_from_params(params)?;
             Some(Action::PutUpload {
                 namespace,
-                uuid,
+                session_id,
                 digest,
             })
         }
-        Method::DELETE => Some(Action::DeleteUpload { namespace, uuid }),
+        Method::DELETE => Some(Action::DeleteUpload {
+            namespace,
+            session_id,
+        }),
         _ => None,
     }
 }

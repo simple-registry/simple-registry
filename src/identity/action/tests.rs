@@ -74,14 +74,14 @@ fn test_action_serialization_cel_compatibility() {
             "get-upload",
             Action::GetUpload {
                 namespace: ns(),
-                uuid: UploadSessionId::generate(),
+                session_id: UploadSessionId::generate(),
             },
         ),
         (
             "update-upload",
             Action::PatchUpload {
                 namespace: ns(),
-                uuid: UploadSessionId::generate(),
+                session_id: UploadSessionId::generate(),
             },
         ),
         (
@@ -89,14 +89,14 @@ fn test_action_serialization_cel_compatibility() {
             Action::PutUpload {
                 namespace: ns(),
                 digest: digest(),
-                uuid: UploadSessionId::generate(),
+                session_id: UploadSessionId::generate(),
             },
         ),
         (
             "cancel-upload",
             Action::DeleteUpload {
                 namespace: ns(),
-                uuid: UploadSessionId::generate(),
+                session_id: UploadSessionId::generate(),
             },
         ),
         (
@@ -502,7 +502,7 @@ fn test_is_push() {
     assert!(
         Action::PatchUpload {
             namespace: ns(),
-            uuid: UploadSessionId::generate()
+            session_id: UploadSessionId::generate()
         }
         .is_push()
     );
@@ -510,14 +510,14 @@ fn test_is_push() {
         Action::PutUpload {
             namespace: ns(),
             digest: digest(),
-            uuid: UploadSessionId::generate()
+            session_id: UploadSessionId::generate()
         }
         .is_push()
     );
     assert!(
         Action::DeleteUpload {
             namespace: ns(),
-            uuid: UploadSessionId::generate()
+            session_id: UploadSessionId::generate()
         }
         .is_push()
     );
