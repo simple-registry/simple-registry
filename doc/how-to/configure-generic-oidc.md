@@ -42,6 +42,8 @@ jwks_refresh_interval = 3600             # Refresh keys hourly (default)
 clock_skew_tolerance = 60                # Allow 60s clock drift (default)
 allowed_algorithms = ["RS256"]           # Restrict accepted JWT algorithms (default)
 server_ca_bundle = "/certs/ca.pem"       # Trust a private CA for this issuer
+client_certificate_bundle = "/certs/client.pem"   # Authenticate to an issuer that
+client_private_key = "/certs/client-key.pem"      # refuses anonymous discovery
 ```
 
 `required_claims` checks presence only. To test a claim's *value*, use an access
@@ -103,15 +105,9 @@ required_audience = "api://your-app-id"
 
 ### Kubernetes API Server
 
-The cluster CA signs the issuer, so point `server_ca_bundle` at it rather than
-trusting that CA for every outbound connection.
-
-```toml
-[auth.oidc.kube]
-issuer = "https://kubernetes.default.svc"
-server_ca_bundle = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-required_audience = "angos"
-```
+Validating a cluster's service-account tokens takes a private CA and an
+authenticated discovery fetch, and pulls take a kubelet plugin on top:
+[Configure Kubernetes OIDC](configure-kubernetes-oidc.md).
 
 ---
 
@@ -267,3 +263,4 @@ Subject: user@example.com
 
 - [Set Up Access Control](set-up-access-control.md) for comprehensive policies
 - [Configure GitHub Actions OIDC](configure-github-actions-oidc.md) for CI/CD
+- [Configure Kubernetes OIDC](configure-kubernetes-oidc.md) for service-account tokens and image pulls

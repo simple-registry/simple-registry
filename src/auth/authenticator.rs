@@ -264,8 +264,9 @@ impl Authenticator {
     }
 }
 
-/// One client per provider: a CA bundle is baked into a client when it is built,
-/// so a provider trusting its own issuer cannot share one with the others.
+/// One client per provider: its TLS material is baked in when it is built, so a
+/// provider trusting its own issuer, or authenticating to it, cannot share one
+/// with the others.
 fn build_oidc_client(name: &str, config: &oidc::Config) -> Result<Arc<Client>, Error> {
     let initialization_error = |e: String| {
         Error::Initialization(format!(
@@ -273,13 +274,22 @@ fn build_oidc_client(name: &str, config: &oidc::Config) -> Result<Arc<Client>, E
         ))
     };
 
+    // A lone certificate or key would otherwise fetch anonymously and fail as an
+    // unauthorized issuer at runtime.
+    if config.client_certificate_bundle.is_some() != config.client_private_key.is_some() {
+        return Err(initialization_error(
+            "both client_certificate_bundle and client_private_key are required for mTLS"
+                .to_string(),
+        ));
+    }
+
     // No client-level timeout: each fetch carries a per-request timeout from the
     // provider config (`http_request_timeout_secs`, `jwks_refresh_timeout_secs`).
     apply_tls_files(
         Client::builder(),
         config.server_ca_bundle.as_deref(),
-        None,
-        None,
+        config.client_certificate_bundle.as_deref(),
+        config.client_private_key.as_deref(),
     )
     .map_err(initialization_error)?
     .build()
@@ -329,7 +339,7 @@ mod tests {
             mtls::cert_der,
             oidc::KID,
             requests::{empty_parts, parts_with_authorization, parts_with_basic_auth},
-            webhook::ca_bundle_pem,
+            webhook::{ca_bundle_pem, client_cert_pem, client_key_pem},
         },
     };
 
@@ -509,6 +519,59 @@ mod tests {
             Some(bundle_path.as_path())
         );
         assert!(Authenticator::build_oidc_validators(&config.auth, &cache).is_ok());
+    }
+
+    /// An issuer that refuses an anonymous caller, such as a kube-apiserver
+    /// serving discovery to authenticated users only, is reached with a client
+    /// certificate.
+    #[test]
+    fn a_provider_may_present_a_client_certificate() {
+        let material = tempdir().unwrap();
+        let certificate_path = material.path().join("client.pem");
+        let key_path = material.path().join("client-key.pem");
+        fs::write(&certificate_path, client_cert_pem()).unwrap();
+        fs::write(&key_path, client_key_pem()).unwrap();
+
+        let config = load_config(&format!(
+            r#"
+            [auth.oidc.kube]
+            issuer = "https://kubernetes.default.svc"
+            client_certificate_bundle = "{}"
+            client_private_key = "{}"
+        "#,
+            certificate_path.display(),
+            key_path.display()
+        ));
+
+        let cache = cache::Config::Memory.to_backend().unwrap();
+
+        assert!(Authenticator::build_oidc_validators(&config.auth, &cache).is_ok());
+    }
+
+    #[test]
+    fn a_client_certificate_without_its_key_is_refused_at_startup() {
+        let material = tempdir().unwrap();
+        let certificate_path = material.path().join("client.pem");
+        fs::write(&certificate_path, client_cert_pem()).unwrap();
+
+        let config = load_config(&format!(
+            r#"
+            [auth.oidc.kube]
+            issuer = "https://kubernetes.default.svc"
+            client_certificate_bundle = "{}"
+        "#,
+            certificate_path.display()
+        ));
+
+        let cache = cache::Config::Memory.to_backend().unwrap();
+
+        let Err(error) = Authenticator::build_oidc_validators(&config.auth, &cache) else {
+            panic!("half a client identity must be refused rather than fetch anonymously");
+        };
+        assert!(
+            matches!(&error, Error::Initialization(msg) if msg.contains("auth.oidc.kube")),
+            "got: {error:?}"
+        );
     }
 
     #[test]

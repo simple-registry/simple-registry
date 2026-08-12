@@ -24,6 +24,7 @@ const sidebars: SidebarsConfig = {
         'how-to/configure-mtls',
         'how-to/configure-github-actions-oidc',
         'how-to/configure-generic-oidc',
+        'how-to/configure-kubernetes-oidc',
         'how-to/set-up-access-control',
         'how-to/configure-retention-policies',
         'how-to/protect-tags-immutability',

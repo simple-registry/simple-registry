@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "contrib/kubelet-credential-provider",
     "crates/backoff",
     "crates/conformance-gates",
     "crates/s3-client",

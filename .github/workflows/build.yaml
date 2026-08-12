@@ -593,9 +593,11 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             binary_name: angos-linux-amd64
+            provider_binary_name: angos-credential-provider-linux-amd64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             binary_name: angos-linux-arm64
+            provider_binary_name: angos-credential-provider-linux-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -627,6 +629,26 @@ jobs:
         with:
           name: binary-${{ matrix.binary_name }}
           path: ${{ matrix.binary_name }}
+          if-no-files-found: error
+          retention-days: 1
+
+      # The kubelet credential provider is installed on nodes, it ships for
+      # Linux alone.
+      - name: Build kubelet credential provider
+        if: contains(matrix.target, 'linux')
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-Clink-self-contained=yes -Clinker=rust-lld"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: "-Clink-self-contained=yes -Clinker=rust-lld"
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p kubelet-credential-provider
+          mv target/${{ matrix.target }}/release/angos-credential-provider ${{ matrix.provider_binary_name }}
+
+      - name: Upload kubelet credential provider
+        if: contains(matrix.target, 'linux')
+        uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.provider_binary_name }}
+          path: ${{ matrix.provider_binary_name }}
           if-no-files-found: error
           retention-days: 1
 
@@ -792,6 +814,17 @@ jobs:
             | macOS arm64 (Apple)  | `angos-darwin-arm64`   |
             | Linux amd64          | `angos-linux-amd64`    |
             | Linux arm64          | `angos-linux-arm64`    |
+
+            ## Kubelet Credential Provider
+
+            Installed on nodes so image pulls authenticate with the pulling pod's
+            service-account token. `contrib/kubelet-credential-provider` carries a
+            DaemonSet that installs it from this release.
+
+            | Platform    | Binary                                    |
+            |-------------|-------------------------------------------|
+            | Linux amd64 | `angos-credential-provider-linux-amd64`   |
+            | Linux arm64 | `angos-credential-provider-linux-arm64`   |
 
             ## Verification with Cosign
 
