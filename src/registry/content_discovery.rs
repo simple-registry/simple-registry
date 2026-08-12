@@ -1,18 +1,84 @@
 use futures_util::stream::TryStreamExt;
+use hyper::{
+    HeaderMap, Response, StatusCode,
+    header::{CONTENT_TYPE, HeaderValue, LINK},
+};
+use serde::Serialize;
 use tracing::{instrument, warn};
 
-use angos_storage::Page;
-
 use crate::{
-    oci::{Descriptor, Digest, Manifest, MediaType, Namespace, Tag},
-    registry::{Error, Registry, metadata_store::LinkKind},
+    http_response::{ResponseBody, build_response, json_headers},
+    oci::{
+        Descriptor, Digest, Manifest, MediaType, Namespace, OCI_INDEX_MEDIA_TYPE,
+        OCI_MANIFEST_SCHEMA_VERSION, Tag,
+    },
+    registry::{Error, OCI_FILTERS_APPLIED, Registry, metadata_store::LinkKind},
 };
 
-/// The referrers of one subject, and whether an `artifactType` filter was
-/// applied: the response must advertise the filter it honoured.
-pub struct Referrers {
-    pub manifests: Vec<Descriptor>,
-    pub filter_applied: bool,
+pub struct ListCatalogRequest {
+    pub n: Option<u16>,
+    pub last: Option<String>,
+}
+
+pub struct ListTagsRequest {
+    pub namespace: Namespace,
+    pub n: Option<u16>,
+    pub last: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CatalogBody {
+    pub repositories: Vec<Namespace>,
+}
+
+#[derive(Serialize)]
+pub struct TagsBody {
+    pub name: Namespace,
+    pub tags: Vec<Tag>,
+}
+
+fn paginated_json_headers(link: Option<&str>) -> Result<HeaderMap, Error> {
+    let mut headers = json_headers();
+    if let Some(link) = link {
+        headers.insert(
+            LINK,
+            HeaderValue::try_from(format!("<{link}>; rel=\"next\""))?,
+        );
+    }
+
+    Ok(headers)
+}
+
+pub struct GetReferrersRequest {
+    pub namespace: Namespace,
+    pub digest: Digest,
+    pub artifact_type: Option<MediaType>,
+}
+
+/// The OCI image-index body a referrers listing serves.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferrerList {
+    schema_version: i32,
+    // The OCI index media type serializes as its string, so the constant is
+    // carried directly rather than re-parsed through the fallible `MediaType`.
+    media_type: &'static str,
+    manifests: Vec<Descriptor>,
+}
+
+/// A listing that honoured an `artifactType` filter must advertise it, so a
+/// client can tell a filtered index from a complete one.
+fn referrers_headers(artifact_type_filtered: bool) -> Result<HeaderMap, Error> {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::try_from(OCI_INDEX_MEDIA_TYPE)?);
+    if artifact_type_filtered {
+        headers.insert(
+            OCI_FILTERS_APPLIED,
+            HeaderValue::from_static("artifactType"),
+        );
+    }
+
+    Ok(headers)
 }
 
 /// Fan-out for resolving referrer candidates to descriptors: each candidate is
@@ -26,50 +92,81 @@ const REFERRER_RESOLVE_CONCURRENCY: usize = 10;
 pub const DEFAULT_PAGE_SIZE: u16 = 100;
 
 impl Registry {
-    /// Lists namespaces and returns the continuation cursor (the `last` value
-    /// for the next page), or `None` when the listing is exhausted. Building the
-    /// pagination URL from the cursor is the handler's concern.
+    /// Lists namespaces, one page at a time, advertising the next page through
+    /// the `Link` header when the listing is not exhausted.
     pub async fn list_catalog_entries(
         &self,
-        n: Option<u16>,
-        last: Option<String>,
-    ) -> Result<Page<Namespace>, Error> {
-        let n = n.unwrap_or(DEFAULT_PAGE_SIZE);
-        self.metadata_store.list_namespaces(n, last).await
+        request: ListCatalogRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let n = request.n.unwrap_or(DEFAULT_PAGE_SIZE);
+        let page = self.metadata_store.list_namespaces(n, request.last).await?;
+        let link = page
+            .next_token
+            .as_ref()
+            .map(|last| format!("/v2/_catalog?n={n}&last={last}"));
+
+        let body = CatalogBody {
+            repositories: page.items,
+        };
+
+        Ok(build_response(
+            StatusCode::OK,
+            paginated_json_headers(link.as_deref())?,
+            ResponseBody::fixed(serde_json::to_vec(&body)?),
+        )?)
     }
 
-    /// Lists a namespace's tags and returns the continuation cursor (the `last`
-    /// value for the next page), or `None` when the listing is exhausted.
-    /// Building the pagination URL from the cursor is the handler's concern.
+    /// Lists a namespace's tags, one page at a time, advertising the next page
+    /// through the `Link` header when the listing is not exhausted.
     pub async fn list_tag_entries(
         &self,
-        namespace: &Namespace,
-        n: Option<u16>,
-        last: Option<String>,
-    ) -> Result<Page<Tag>, Error> {
-        let n = n.unwrap_or(DEFAULT_PAGE_SIZE);
-        self.metadata_store.list_tags(namespace, n, last).await
+        request: ListTagsRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let n = request.n.unwrap_or(DEFAULT_PAGE_SIZE);
+        let page = self
+            .metadata_store
+            .list_tags(&request.namespace, n, request.last)
+            .await?;
+        let namespace = &request.namespace;
+        let link = page
+            .next_token
+            .as_ref()
+            .map(|last| format!("/v2/{namespace}/tags/list?n={n}&last={last}"));
+
+        let body = TagsBody {
+            name: request.namespace.clone(),
+            tags: page.items,
+        };
+
+        Ok(build_response(
+            StatusCode::OK,
+            paginated_json_headers(link.as_deref())?,
+            ResponseBody::fixed(serde_json::to_vec(&body)?),
+        )?)
     }
 
-    /// Returns the referrer descriptors for a subject digest along with a flag
-    /// indicating whether an `artifactType` filter was applied. Presentation
-    /// (image-index body + headers) is the handler's responsibility.
-    #[instrument]
+    /// Resolves a subject's referrers into the OCI image index that serves them.
+    #[instrument(skip(request))]
     pub async fn get_referrers(
         &self,
-        namespace: &Namespace,
-        digest: &Digest,
-        artifact_type: Option<MediaType>,
-    ) -> Result<Referrers, Error> {
-        let filter_applied = artifact_type.is_some();
+        request: GetReferrersRequest,
+    ) -> Result<Response<ResponseBody>, Error> {
+        let filter_applied = request.artifact_type.is_some();
         let manifests = self
-            .list_referrers(namespace, digest, artifact_type)
+            .list_referrers(&request.namespace, &request.digest, request.artifact_type)
             .await?;
 
-        Ok(Referrers {
+        let body = ReferrerList {
+            schema_version: OCI_MANIFEST_SCHEMA_VERSION,
+            media_type: OCI_INDEX_MEDIA_TYPE,
             manifests,
-            filter_applied,
-        })
+        };
+
+        Ok(build_response(
+            StatusCode::OK,
+            referrers_headers(filter_applied)?,
+            ResponseBody::fixed(serde_json::to_vec(&body)?),
+        )?)
     }
 
     /// Resolves every referrer of `digest` in `namespace` to a sorted
@@ -175,15 +272,43 @@ impl Registry {
 mod tests {
     use std::collections::HashMap;
 
-    use angos_storage::Page;
+    use hyper::header::LINK;
 
+    use super::{ListCatalogRequest, ListTagsRequest, Response, ResponseBody};
+
+    /// The `last` cursor a client would follow out of a `Link` header, or
+    /// `None` once the listing is exhausted and no `Link` is advertised.
+    /// The repository names a catalog response served.
+    async fn catalog(response: Response<ResponseBody>) -> Vec<String> {
+        json_strings(response, "repositories").await
+    }
+
+    /// The tag names a tags response served.
+    async fn tags(response: Response<ResponseBody>) -> Vec<String> {
+        json_strings(response, "tags").await
+    }
+
+    async fn json_strings(response: Response<ResponseBody>, field: &str) -> Vec<String> {
+        response_json(response).await[field]
+            .as_array()
+            .expect("the listing field must be an array")
+            .iter()
+            .map(|value| value.as_str().expect("entries are strings").to_string())
+            .collect()
+    }
+
+    fn next_cursor(response: &Response<ResponseBody>) -> Option<String> {
+        let link = response.headers().get(LINK)?.to_str().ok()?;
+        let (_, last) = link.rsplit_once("last=")?;
+        Some(last.trim_end_matches(">; rel=\"next\"").to_string())
+    }
     use crate::{
         oci::{Descriptor, Digest, Manifest, MediaType, Namespace, Reference, Tag},
         registry::{
             metadata_store::{LinkKind, LinkOperation, MetadataStore},
             test_utils::{
                 FSRegistryTestCase, create_test_blob, for_each_backend, media_type,
-                put_blob_direct, upload_blob,
+                put_blob_direct, response_json, upload_blob,
             },
         },
     };
@@ -193,29 +318,24 @@ mod tests {
         for_each_backend(async |test_case| {
             let registry = test_case.registry();
 
-            let Page {
-                items: namespaces,
-                next_token: token,
-            } = registry.list_catalog_entries(None, None).await.unwrap();
-            assert!(namespaces.is_empty());
-            assert!(token.is_none());
-
-            let Page {
-                items: namespaces,
-                next_token: token,
-            } = registry.list_catalog_entries(Some(10), None).await.unwrap();
-            assert!(namespaces.is_empty());
-            assert!(token.is_none());
-
-            let Page {
-                items: namespaces,
-                next_token: token,
-            } = registry
-                .list_catalog_entries(Some(10), Some("test".to_string()))
-                .await
-                .unwrap();
-            assert!(namespaces.is_empty());
-            assert!(token.is_none());
+            for request in [
+                ListCatalogRequest {
+                    n: None,
+                    last: None,
+                },
+                ListCatalogRequest {
+                    n: Some(10),
+                    last: None,
+                },
+                ListCatalogRequest {
+                    n: Some(10),
+                    last: Some("test".to_string()),
+                },
+            ] {
+                let response = registry.list_catalog_entries(request).await.unwrap();
+                assert!(next_cursor(&response).is_none());
+                assert!(catalog(response).await.is_empty());
+            }
         })
         .await;
     }
@@ -224,12 +344,11 @@ mod tests {
     async fn test_list_tag_entries() {
         for_each_backend(async |test_case| {
             let registry = test_case.registry();
-            let namespace = &Namespace::new("test-repo").unwrap();
+            let namespace = Namespace::new("test-repo").unwrap();
 
             let test_content = b"test content";
             let test_digest = put_blob_direct(registry.metadata_store.store(), test_content).await;
-            let tags = ["latest", "v1.0", "v2.0"];
-            let ops: Vec<LinkOperation> = tags
+            let ops: Vec<LinkOperation> = ["latest", "v1.0", "v2.0"]
                 .iter()
                 .map(|&tag| {
                     LinkOperation::create(
@@ -240,88 +359,54 @@ mod tests {
                 .collect();
             registry
                 .metadata_store
-                .update_links(namespace, &ops)
+                .update_links(&namespace, &ops)
                 .await
                 .unwrap();
 
-            let Page {
-                items: tags,
-                next_token: token,
-            } = registry
-                .list_tag_entries(namespace, None, None)
-                .await
-                .unwrap();
-            assert_eq!(tags.len(), 3);
-            assert!(tags.contains(&Tag::new("latest").unwrap()));
-            assert!(tags.contains(&Tag::new("v1.0").unwrap()));
-            assert!(tags.contains(&Tag::new("v2.0").unwrap()));
-            assert!(token.is_none());
+            let list = async |n: Option<u16>, last: Option<String>| {
+                registry
+                    .list_tag_entries(ListTagsRequest {
+                        namespace: namespace.clone(),
+                        n,
+                        last,
+                    })
+                    .await
+                    .unwrap()
+            };
 
-            let Page {
-                items: page1,
-                next_token: token1,
-            } = registry
-                .list_tag_entries(namespace, Some(2), None)
-                .await
-                .unwrap();
-            assert_eq!(page1.len(), 2);
-            assert!(token1.is_some());
+            let all = list(None, None).await;
+            assert!(next_cursor(&all).is_none());
+            let body = response_json(all).await;
+            assert_eq!(body["name"], namespace.as_ref());
+            assert_eq!(
+                body["tags"].as_array().unwrap().len(),
+                3,
+                "every tag must be listed"
+            );
 
-            let last_tag = token1.unwrap();
+            let page1 = list(Some(2), None).await;
+            let cursor = next_cursor(&page1).expect("a partial page must advertise Link");
+            assert_eq!(tags(page1).await.len(), 2);
 
-            let Page {
-                items: page2,
-                next_token: token2,
-            } = registry
-                .list_tag_entries(namespace, Some(2), Some(last_tag))
-                .await
-                .unwrap();
-            assert_eq!(page2.len(), 1);
-            assert!(token2.is_none());
+            let page2 = list(Some(2), Some(cursor)).await;
+            assert!(next_cursor(&page2).is_none());
+            assert_eq!(tags(page2).await.len(), 1);
 
-            let Page {
-                items: page1,
-                next_token: token1,
-            } = registry
-                .list_tag_entries(namespace, Some(1), None)
-                .await
-                .unwrap();
-            assert_eq!(page1.len(), 1);
-            assert!(token1.is_some());
+            let one = list(Some(1), None).await;
+            let cursor = next_cursor(&one).expect("a partial page must advertise Link");
+            assert_eq!(tags(one).await.len(), 1);
 
-            let last_tag = token1.unwrap();
+            let two = list(Some(1), Some(cursor)).await;
+            let cursor = next_cursor(&two).expect("a partial page must advertise Link");
+            assert_eq!(tags(two).await.len(), 1);
 
-            let Page {
-                items: page2,
-                next_token: token2,
-            } = registry
-                .list_tag_entries(namespace, Some(1), Some(last_tag))
-                .await
-                .unwrap();
-            assert_eq!(page2.len(), 1);
-            assert!(token2.is_some());
+            let three = list(Some(1), Some(cursor)).await;
+            assert!(next_cursor(&three).is_none());
+            assert_eq!(tags(three).await.len(), 1);
 
-            let last_tag = token2.unwrap();
-
-            let Page {
-                items: page3,
-                next_token: token3,
-            } = registry
-                .list_tag_entries(namespace, Some(1), Some(last_tag))
-                .await
-                .unwrap();
-            assert_eq!(page3.len(), 1);
-            assert!(token3.is_none());
-
-            let Page {
-                items: tags,
-                next_token: token,
-            } = registry
-                .list_tag_entries(namespace, Some(10), Some("latest".to_string()))
-                .await
-                .unwrap();
-            assert_eq!(tags.len(), 2);
-            assert!(token.is_none());
+            let after_latest = list(Some(10), Some("latest".to_string())).await;
+            assert!(next_cursor(&after_latest).is_none());
+            assert_eq!(tags(after_latest).await.len(), 2);
         })
         .await;
     }
@@ -362,18 +447,19 @@ mod tests {
         }
 
         // Fetch 2 at a time and collect all namespaces.
-        let mut all_collected: Vec<Namespace> = Vec::new();
+        let mut all_collected: Vec<String> = Vec::new();
         let mut last: Option<String> = None;
 
         loop {
-            let Page {
-                items: page,
-                next_token: token,
-            } = registry.list_catalog_entries(Some(2), last).await.unwrap();
-            all_collected.extend(page);
+            let response = registry
+                .list_catalog_entries(ListCatalogRequest { n: Some(2), last })
+                .await
+                .unwrap();
+            let cursor = next_cursor(&response);
+            all_collected.extend(catalog(response).await);
 
-            // The token is the continuation cursor: feed it straight back as `last`.
-            match token {
+            // Follow the advertised `Link` exactly as a paging client would.
+            match cursor {
                 None => break,
                 Some(cursor) => last = Some(cursor),
             }
@@ -398,20 +484,23 @@ mod tests {
     async fn list_tag_entries_unknown_namespace_returns_empty() {
         let test_case = crate::registry::test_utils::FSRegistryTestCase::new();
         let registry = test_case.registry();
-        let unknown = Namespace::new("no-such-repo/no-such-image").unwrap();
 
-        let Page {
-            items: tags,
-            next_token: token,
-        } = registry
-            .list_tag_entries(&unknown, None, None)
+        let response = registry
+            .list_tag_entries(ListTagsRequest {
+                namespace: Namespace::new("no-such-repo/no-such-image").unwrap(),
+                n: None,
+                last: None,
+            })
             .await
             .unwrap();
 
-        assert!(tags.is_empty(), "unknown namespace must have no tags");
         assert!(
-            token.is_none(),
+            next_cursor(&response).is_none(),
             "unknown namespace must have no continuation token"
+        );
+        assert!(
+            tags(response).await.is_empty(),
+            "unknown namespace must have no tags"
         );
     }
 

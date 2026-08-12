@@ -323,18 +323,18 @@ fn test_parse_mount_with_malformed_digest_is_rejected() {
 #[test]
 fn test_parse_get_upload() {
     let method = Method::GET;
-    let uuid = UploadSessionId::generate();
-    let uri: Uri = format!("/v2/myrepo/app/blobs/uploads/{uuid}")
+    let session_id = UploadSessionId::generate();
+    let uri: Uri = format!("/v2/myrepo/app/blobs/uploads/{session_id}")
         .parse()
         .unwrap();
     let route = parse(&method, &uri);
     if let Some(Action::GetUpload {
         namespace,
-        uuid: parsed_uuid,
+        session_id: parsed_session_id,
     }) = route
     {
         assert_eq!(namespace, "myrepo/app");
-        assert_eq!(parsed_uuid, uuid);
+        assert_eq!(parsed_session_id, session_id);
     } else {
         panic!("Expected GetUpload route");
     }
@@ -343,18 +343,18 @@ fn test_parse_get_upload() {
 #[test]
 fn test_parse_patch_upload() {
     let method = Method::PATCH;
-    let uuid = UploadSessionId::generate();
-    let uri: Uri = format!("/v2/myrepo/app/blobs/uploads/{uuid}")
+    let session_id = UploadSessionId::generate();
+    let uri: Uri = format!("/v2/myrepo/app/blobs/uploads/{session_id}")
         .parse()
         .unwrap();
     let route = parse(&method, &uri);
     if let Some(Action::PatchUpload {
         namespace,
-        uuid: parsed_uuid,
+        session_id: parsed_session_id,
     }) = route
     {
         assert_eq!(namespace, "myrepo/app");
-        assert_eq!(parsed_uuid, uuid);
+        assert_eq!(parsed_session_id, session_id);
     } else {
         panic!("Expected PatchUpload route");
     }
@@ -363,17 +363,17 @@ fn test_parse_patch_upload() {
 #[test]
 fn test_parse_put_upload() {
     let method = Method::PUT;
-    let uuid = UploadSessionId::generate();
-    let uri: Uri = format!("/v2/myrepo/app/blobs/uploads/{uuid}?digest=sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef").parse().unwrap();
+    let session_id = UploadSessionId::generate();
+    let uri: Uri = format!("/v2/myrepo/app/blobs/uploads/{session_id}?digest=sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef").parse().unwrap();
     let route = parse(&method, &uri);
     if let Some(Action::PutUpload {
         namespace,
-        uuid: parsed_uuid,
+        session_id: parsed_session_id,
         digest,
     }) = route
     {
         assert_eq!(namespace, "myrepo/app");
-        assert_eq!(parsed_uuid, uuid);
+        assert_eq!(parsed_session_id, session_id);
         assert_eq!(
             digest.to_string(),
             "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
@@ -386,8 +386,8 @@ fn test_parse_put_upload() {
 #[test]
 fn test_parse_put_upload_without_digest() {
     let method = Method::PUT;
-    let uuid = UploadSessionId::generate();
-    let uri: Uri = format!("/v2/myrepo/app/blobs/uploads/{uuid}")
+    let session_id = UploadSessionId::generate();
+    let uri: Uri = format!("/v2/myrepo/app/blobs/uploads/{session_id}")
         .parse()
         .unwrap();
     let route = parse(&method, &uri);
@@ -397,18 +397,18 @@ fn test_parse_put_upload_without_digest() {
 #[test]
 fn test_parse_delete_upload() {
     let method = Method::DELETE;
-    let uuid = UploadSessionId::generate();
-    let uri: Uri = format!("/v2/myrepo/app/blobs/uploads/{uuid}")
+    let session_id = UploadSessionId::generate();
+    let uri: Uri = format!("/v2/myrepo/app/blobs/uploads/{session_id}")
         .parse()
         .unwrap();
     let route = parse(&method, &uri);
     if let Some(Action::DeleteUpload {
         namespace,
-        uuid: parsed_uuid,
+        session_id: parsed_session_id,
     }) = route
     {
         assert_eq!(namespace, "myrepo/app");
-        assert_eq!(parsed_uuid, uuid);
+        assert_eq!(parsed_session_id, session_id);
     } else {
         panic!("Expected DeleteUpload route");
     }

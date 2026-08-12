@@ -1,10 +1,14 @@
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
+use hyper::{
+    HeaderMap, Response, StatusCode,
+    header::{HeaderName, HeaderValue},
+};
 use tokio::{select, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
-mod admin;
+pub mod admin;
 pub mod blob;
 pub mod blob_ownership;
 pub mod blob_store;
@@ -32,34 +36,49 @@ use crate::{
         global::{DEFAULT_MAX_CONCURRENT_CACHE_JOBS, DEFAULT_MAX_CONCURRENT_REPLICATION_JOBS},
     },
     event_webhook::{dispatcher::EventDispatcher, event::Event},
+    http_response::{ResponseBody, build_response},
     jobs::Queue,
     jobs::{
         runner::execute_one,
         store::{JobHandler, JobStore},
     },
-    oci::Namespace,
+    oci::{Namespace, Reference, Tag},
     registry::{
         blob_store::BlobStore, metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
     },
     replication::ReplicationJobHandler,
 };
-pub use blob::{BlobRange, GetBlobResponse};
+pub use admin::{
+    DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
+    ListUploadsRequest, RetryJobRequest,
+};
+pub use blob::{BlobRange, DeleteBlobRequest, GetBlobRequest, HeadBlobRequest};
 use blob_ownership::BlobOwnership;
+pub use content_discovery::{GetReferrersRequest, ListCatalogRequest, ListTagsRequest};
 pub use error::Error;
 pub use manifest::{
-    GetManifestResponse, ParsedManifestDigests, PutManifestRequest, parse_manifest_digests,
-    recover_media_type,
+    DeleteManifestRequest, GetManifestRequest, HeadManifestRequest, ParsedManifestDigests,
+    PutManifestRequest, parse_manifest_digests, recover_media_type,
 };
 pub use repository::Repository;
-pub use upload::{BlobMount, CompleteUploadRequest, StartUploadResponse};
+pub use upload::{
+    BlobMount, CompleteUploadRequest, DeleteUploadRequest, GetUploadRequest, MountBlobRequest,
+    PatchUploadRequest, StartUploadRequest,
+};
 
-/// OCI wire header names shared by the server responses and the transport
-/// client. Response-only header names live in `command::server::response`.
-pub const DOCKER_CONTENT_DIGEST: &str = "Docker-Content-Digest";
-pub const DOCKER_UPLOAD_UUID: &str = "Docker-Upload-UUID";
-pub const OCI_SUBJECT: &str = "OCI-Subject";
-pub const OCI_TAG: &str = "OCI-Tag";
+/// The OCI wire vocabulary: header names the registry emits on its responses,
+/// shared with the transport client that reads them back. `from_static` is a
+/// `const fn` requiring lowercase, so a malformed name fails the build rather
+/// than a request; HTTP header names are case-insensitive on the wire.
+pub const DOCKER_CONTENT_DIGEST: HeaderName = HeaderName::from_static("docker-content-digest");
+pub const DOCKER_UPLOAD_UUID: HeaderName = HeaderName::from_static("docker-upload-uuid");
+pub const OCI_SUBJECT: HeaderName = HeaderName::from_static("oci-subject");
+pub const OCI_TAG: HeaderName = HeaderName::from_static("oci-tag");
+pub const OCI_FILTERS_APPLIED: HeaderName = HeaderName::from_static("oci-filters-applied");
+pub const DOCKER_DISTRIBUTION_API_VERSION: HeaderName =
+    HeaderName::from_static("docker-distribution-api-version");
+pub const X_POWERED_BY: HeaderName = HeaderName::from_static("x-powered-by");
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct RegistryConfig {
@@ -145,7 +164,60 @@ impl fmt::Debug for Registry {
     }
 }
 
+/// The OCI API version this registry speaks, served on `/v2/`. The handshake
+/// reads no registry state, only the version the protocol pins.
+pub fn api_version() -> Result<Response<ResponseBody>, Error> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        DOCKER_DISTRIBUTION_API_VERSION,
+        HeaderValue::from_static("registry/2.0"),
+    );
+    headers.insert(X_POWERED_BY, HeaderValue::from_static("Angos"));
+
+    Ok(build_response(
+        StatusCode::OK,
+        headers,
+        ResponseBody::empty(),
+    )?)
+}
+
 impl Registry {
+    /// Whether `reference` names something that may not be overwritten. A
+    /// digest is content-addressed, so it is never immutable in this sense.
+    /// Takes the caller's already-resolved repository, so a request resolves
+    /// its namespace once.
+    pub fn is_reference_immutable(
+        &self,
+        repository: Option<&Repository>,
+        reference: &Reference,
+    ) -> bool {
+        match reference {
+            Reference::Tag(tag) => self.is_tag_immutable(repository, tag),
+            Reference::Digest(_) => false,
+        }
+    }
+
+    /// A repository's own `immutable_tags` opts in on top of the global flag,
+    /// and its own exclusions replace the global ones when it declares any.
+    pub fn is_tag_immutable(&self, repository: Option<&Repository>, tag: &Tag) -> bool {
+        let immutable =
+            self.global_immutable_tags || repository.is_some_and(|repo| repo.immutable_tags);
+        if !immutable {
+            return false;
+        }
+
+        let exclusions = match repository {
+            Some(repo) if !repo.immutable_tags_exclusions.is_empty() => {
+                &repo.immutable_tags_exclusions
+            }
+            _ => &self.global_immutable_tags_exclusions,
+        };
+
+        !exclusions
+            .iter()
+            .any(|pattern| pattern.is_match(tag.as_ref()))
+    }
+
     /// Ownership view over the metadata store's blob index.
     pub fn blob_ownership(&self) -> BlobOwnership<'_> {
         BlobOwnership::new(self.metadata_store.as_ref())
@@ -265,11 +337,18 @@ impl Registry {
     /// Resolves the configured repository name for a namespace, or empty string
     /// if none matches. Used when constructing events where the event's
     /// `repository` field should reflect the configured repository scope.
+    ///
+    /// Callers already holding the resolved repository use [`repository_name`]
+    /// instead, so a request never resolves the same namespace twice.
     pub fn repository_name_for(&self, namespace: &Namespace) -> String {
-        self.get_repository_for_namespace(namespace)
-            .map(|r| r.name.to_string())
-            .unwrap_or_default()
+        repository_name(self.get_repository_for_namespace(namespace).ok())
     }
+}
+
+/// The event `repository` field for an already-resolved repository, empty when
+/// no `[repository]` entry matched.
+pub fn repository_name(repository: Option<&Repository>) -> String {
+    repository.map_or_else(String::new, |repository| repository.name.to_string())
 }
 
 /// Construct the in-process job queue used when `[global.job_queue]` is absent.
@@ -628,5 +707,139 @@ mod in_process_replication_tests {
             1,
             "no downstream means no replication loop, so the job must stay pending"
         );
+    }
+}
+
+#[cfg(test)]
+mod immutable_tag_tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use angos_storage::{MemoryObjectStore, ObjectStore};
+
+    use super::{Registry, RegistryConfig};
+    use crate::{
+        configuration::RegexPattern,
+        oci::{Namespace, Reference, Tag},
+        registry::{
+            blob_store::BlobStore,
+            repository::Repository,
+            repository_resolver::RepositoryResolver,
+            test_utils::{metadata_store_over, repository_with_replication},
+        },
+    };
+
+    /// A registry whose sole `myrepo/*` repository carries the immutability
+    /// settings under test, over the global ones.
+    fn registry_with(
+        global_immutable_tags: bool,
+        global_exclusions: &[&str],
+        repository_immutable_tags: bool,
+        repository_exclusions: &[&str],
+    ) -> Arc<Registry> {
+        let mut repository = repository_with_replication("myrepo", Vec::new());
+        repository.immutable_tags = repository_immutable_tags;
+        repository.immutable_tags_exclusions = patterns(repository_exclusions);
+
+        let mut repositories = HashMap::new();
+        repositories.insert("myrepo".to_string(), repository);
+
+        let object: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::default());
+        Registry::new(
+            Arc::new(BlobStore::new(object.clone(), None)),
+            metadata_store_over(object),
+            Arc::new(RepositoryResolver::new(Arc::new(repositories)).expect("test resolver")),
+            RegistryConfig {
+                global_immutable_tags,
+                global_immutable_tags_exclusions: patterns(global_exclusions),
+                ..RegistryConfig::default()
+            },
+        )
+    }
+
+    fn patterns(sources: &[&str]) -> Vec<RegexPattern> {
+        sources
+            .iter()
+            .map(|source| RegexPattern::compile(*source).expect("test pattern must compile"))
+            .collect()
+    }
+
+    fn namespace() -> Namespace {
+        Namespace::new("myrepo/app").unwrap()
+    }
+
+    fn repository_of(registry: &Registry) -> Option<&Repository> {
+        registry.get_repository_for_namespace(&namespace()).ok()
+    }
+
+    fn tag(name: &str) -> Tag {
+        Tag::new(name).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_global_flag_freezes_every_tag() {
+        let registry = registry_with(true, &[], false, &[]);
+
+        assert!(registry.is_tag_immutable(repository_of(&registry), &tag("v1.0.0")));
+    }
+
+    #[tokio::test]
+    async fn global_exclusions_stay_mutable() {
+        let registry = registry_with(true, &["^latest$", "^dev-.*"], false, &[]);
+
+        assert!(!registry.is_tag_immutable(repository_of(&registry), &tag("latest")));
+        assert!(!registry.is_tag_immutable(repository_of(&registry), &tag("dev-branch")));
+        assert!(registry.is_tag_immutable(repository_of(&registry), &tag("v1.0.0")));
+    }
+
+    /// A repository opts in on its own, with the global flag off.
+    #[tokio::test]
+    async fn a_repository_can_freeze_its_own_tags() {
+        let registry = registry_with(false, &[], true, &[]);
+
+        assert!(registry.is_tag_immutable(repository_of(&registry), &tag("v1.0.0")));
+    }
+
+    /// A repository declaring exclusions replaces the global list rather than
+    /// adding to it, so `latest` is frozen here despite the global exclusion.
+    #[tokio::test]
+    async fn repository_exclusions_replace_the_global_ones() {
+        let registry = registry_with(true, &["^latest$"], true, &["^test-.*"]);
+
+        assert!(!registry.is_tag_immutable(repository_of(&registry), &tag("test-123")));
+        assert!(registry.is_tag_immutable(repository_of(&registry), &tag("latest")));
+    }
+
+    /// A digest is content-addressed, so it is never refused as immutable.
+    #[tokio::test]
+    async fn a_digest_reference_is_never_immutable() {
+        let registry = registry_with(true, &[], true, &[]);
+        let digest = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            .parse()
+            .unwrap();
+
+        assert!(
+            !registry.is_reference_immutable(repository_of(&registry), &Reference::Digest(digest))
+        );
+        assert!(
+            registry
+                .is_reference_immutable(repository_of(&registry), &Reference::Tag(tag("v1.0.0")))
+        );
+    }
+}
+
+#[cfg(test)]
+mod api_version_tests {
+    use super::{DOCKER_DISTRIBUTION_API_VERSION, X_POWERED_BY, api_version};
+    use crate::registry::test_utils::response_header;
+
+    #[test]
+    fn api_version_announces_the_v2_protocol() {
+        let response = api_version().unwrap();
+
+        assert_eq!(
+            *response_header(&response, &DOCKER_DISTRIBUTION_API_VERSION),
+            "registry/2.0"
+        );
+        assert_eq!(*response_header(&response, &X_POWERED_BY), "Angos");
     }
 }

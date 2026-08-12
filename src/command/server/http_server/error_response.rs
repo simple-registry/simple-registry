@@ -5,7 +5,7 @@ use hyper::{
     header::{CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE},
 };
 
-use crate::command::server::{error::Error, response_body::ResponseBody};
+use crate::{command::server::error::Error, http_response::ResponseBody};
 
 const BASIC_AUTH_CHALLENGE: &str = r#"Basic realm="Angos", charset="UTF-8""#;
 

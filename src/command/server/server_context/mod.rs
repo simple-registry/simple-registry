@@ -16,7 +16,7 @@ use crate::{
     command::server::error::Error,
     configuration::{Configuration, TrustedProxy},
     identity::{Action, ClientIdentity, RequestScheme},
-    oci::{Namespace, Reference},
+    oci::Namespace,
     registry::{BlobMount, Registry},
 };
 
@@ -159,19 +159,6 @@ impl ServerContext {
             .authorizer
             .authorize_mount_source(mount, identity, request, &self.registry)
             .await?)
-    }
-
-    pub fn is_reference_immutable(&self, namespace: &Namespace, reference: &Reference) -> bool {
-        match reference {
-            Reference::Tag(tag) => !self.authorizer.is_tag_mutable(
-                self.registry
-                    .get_repository_for_namespace(namespace)
-                    .ok()
-                    .map(|repository| repository.name.as_ref()),
-                tag,
-            ),
-            Reference::Digest(_) => false,
-        }
     }
 
     pub async fn shutdown(&self) {

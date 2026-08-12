@@ -17,9 +17,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** CEL access policies read an upload session as `request.session_id`; the field was named `request.uuid`.
 - **Breaking:** OIDC providers are no longer typed. `provider = "github"` and `provider = "generic"` are gone; a provider is now an issuer plus how its tokens are validated, so every entry takes the same options. A GitHub Actions entry spells out the issuer it used to get for free; see [Upgrade Angos](doc/how-to/upgrade.md).
 - **Breaking:** `identity.oidc.provider_type` is removed from access policies and the denial audit log. It only ever distinguished the two built-in provider types; `identity.oidc.provider_name`, the entry's own name, tells providers apart.
 - Cached JWKS and discovery documents are keyed by issuer alone rather than by issuer and provider type, so two entries trusting one issuer share a fetch. Existing entries are refetched once on upgrade.
+- Response header names are emitted lowercase (`docker-content-digest`, `oci-subject`). HTTP header names are case-insensitive, so OCI clients are unaffected; a script matching the previous mixed-case spelling is not.
 
 ### Fixed
 

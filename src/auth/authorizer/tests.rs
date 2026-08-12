@@ -10,6 +10,7 @@ use crate::{
     cache,
     command::bootstrap,
     configuration::Configuration,
+    configuration::RegexPattern,
     identity::{AuthMethod, ClientCertificate, ManifestPutTarget, OidcClaims},
     oci::{Digest, Namespace, Reference, Tag},
     registry::{
@@ -35,28 +36,7 @@ fn test_authorizer_new_minimal() {
     assert!(authorizer.is_ok());
     let authorizer = authorizer.unwrap();
     assert!(authorizer.global_authorization_webhook.is_none());
-    assert!(!authorizer.global_immutable_tags);
-    assert!(authorizer.global_immutable_tags_exclusions.is_empty());
     assert!(authorizer.repositories.is_empty());
-}
-
-#[test]
-fn test_authorizer_new_with_global_immutable_tags() {
-    let config = load_config(
-        r#"
-            immutable_tags = true
-            immutable_tags_exclusions = ["^latest$", "^dev-.*"]
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-
-    let authorizer = Authorizer::new(&config, &cache);
-
-    assert!(authorizer.is_ok());
-    let authorizer = authorizer.unwrap();
-    assert!(authorizer.global_immutable_tags);
-    assert_eq!(authorizer.global_immutable_tags_exclusions.len(), 2);
 }
 
 #[test]
@@ -131,283 +111,6 @@ fn test_invalid_repository_regex_fails_at_deserialize() {
     assert!(
         result.is_err(),
         "invalid repository regex must fail at deserialize time"
-    );
-}
-
-#[test]
-fn test_is_tag_mutable_with_global_setting() {
-    let config = load_config(
-        r"
-            immutable_tags = true
-        ",
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let authorizer = Authorizer::new(&config, &cache).unwrap();
-    assert!(!authorizer.is_tag_mutable(None, &Tag::new("v1.0.0").unwrap()));
-}
-
-#[test]
-fn test_is_tag_mutable_with_global_exclusions() {
-    let config = load_config(
-        r#"
-            immutable_tags = true
-            immutable_tags_exclusions = ["^latest$", "^dev-.*"]
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let authorizer = Authorizer::new(&config, &cache).unwrap();
-    assert!(authorizer.is_tag_mutable(None, &Tag::new("latest").unwrap()));
-    assert!(authorizer.is_tag_mutable(None, &Tag::new("dev-branch").unwrap()));
-    assert!(!authorizer.is_tag_mutable(None, &Tag::new("v1.0.0").unwrap()));
-}
-
-#[test]
-fn test_is_tag_mutable_with_repository_setting() {
-    let config = load_config(
-        r#"
-            immutable_tags = false
-
-            [repository.myrepo]
-            namespace_pattern = "^myrepo/.*"
-            immutable_tags = true
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let authorizer = Authorizer::new(&config, &cache).unwrap();
-    assert!(!authorizer.is_tag_mutable(Some("myrepo"), &Tag::new("v1.0.0").unwrap()));
-}
-
-#[test]
-fn test_is_tag_mutable_with_repository_exclusions() {
-    let config = load_config(
-        r#"
-            immutable_tags = true
-            immutable_tags_exclusions = ["^latest$"]
-
-            [repository.myrepo]
-            namespace_pattern = "^myrepo/.*"
-            immutable_tags = true
-            immutable_tags_exclusions = ["^test-.*"]
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let authorizer = Authorizer::new(&config, &cache).unwrap();
-    assert!(authorizer.is_tag_mutable(Some("myrepo"), &Tag::new("test-123").unwrap()));
-    assert!(!authorizer.is_tag_mutable(Some("myrepo"), &Tag::new("latest").unwrap()));
-    assert!(!authorizer.is_tag_mutable(Some("myrepo"), &Tag::new("v1.0.0").unwrap()));
-}
-
-#[test]
-fn test_is_tag_mutable_with_repository_name() {
-    let config = load_config(
-        r#"
-            immutable_tags = false
-
-            [repository."docker-io"]
-            immutable_tags = true
-            immutable_tags_exclusions = ["^latest$"]
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let authorizer = Authorizer::new(&config, &cache).unwrap();
-    assert!(!authorizer.is_tag_mutable(Some("docker-io"), &Tag::new("v1.0.0").unwrap()));
-    assert!(authorizer.is_tag_mutable(Some("docker-io"), &Tag::new("latest").unwrap()));
-    assert!(authorizer.is_tag_mutable(None, &Tag::new("v1.0.0").unwrap()));
-}
-
-#[test]
-fn test_is_tag_mutable_when_not_immutable() {
-    let config = load_config(
-        r#"
-            immutable_tags = false
-
-            [repository.myrepo]
-            namespace_pattern = "^myrepo/.*"
-            immutable_tags = false
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let authorizer = Authorizer::new(&config, &cache).unwrap();
-    assert!(authorizer.is_tag_mutable(Some("myrepo"), &Tag::new("any-tag").unwrap()));
-}
-
-// When immutable_tags is true and the tag matches an exclusion pattern, the
-// tag is mutable (the exclusion carves out a writable subset).
-#[test]
-fn is_tag_mutable_returns_true_when_immutable_but_excluded() {
-    let config = load_config(
-        r#"
-            [repository.myrepo]
-            namespace_pattern = "^myrepo/.*"
-            immutable_tags = true
-            immutable_tags_exclusions = ["^latest$", "^dev-.*"]
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let authorizer = Authorizer::new(&config, &cache).unwrap();
-    assert!(
-        authorizer.is_tag_mutable(Some("myrepo"), &Tag::new("latest").unwrap()),
-        "'latest' must be mutable because it matches the exclusion pattern"
-    );
-    assert!(
-        authorizer.is_tag_mutable(Some("myrepo"), &Tag::new("dev-feature").unwrap()),
-        "'dev-feature' must be mutable because it matches 'dev-.*'"
-    );
-}
-
-// When immutable_tags is true and the tag does not match any exclusion,
-// the tag is immutable.
-#[test]
-fn is_tag_mutable_returns_false_when_immutable_and_not_excluded() {
-    let config = load_config(
-        r#"
-            [repository.myrepo]
-            namespace_pattern = "^myrepo/.*"
-            immutable_tags = true
-            immutable_tags_exclusions = ["^latest$"]
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let authorizer = Authorizer::new(&config, &cache).unwrap();
-    assert!(
-        !authorizer.is_tag_mutable(Some("myrepo"), &Tag::new("v1.0.0").unwrap()),
-        "'v1.0.0' must be immutable: immutable_tags=true and not excluded"
-    );
-}
-
-#[test]
-fn test_check_immutable_tag_returns_conflict_for_tagged_putmanifest() {
-    let config = load_config(
-        r#"
-            immutable_tags = true
-
-            [repository.myrepo]
-            namespace_pattern = "^myrepo/.*"
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let authorizer = Authorizer::new(&config, &cache).unwrap();
-
-    let action = Action::PutManifest {
-        namespace: Namespace::new("myrepo/app").unwrap(),
-        target: ManifestPutTarget::Tag(Tag::new("v1.0.0").unwrap()),
-    };
-
-    let result = authorizer.check_immutable_tag("myrepo", &action);
-
-    let Err(AuthError::Conflict(msg)) = result else {
-        panic!("expected Err(AuthError::Conflict(_)), got: {result:?}");
-    };
-    assert!(
-        msg.contains("v1.0.0") && msg.contains("immutable"),
-        "error message must mention the tag and 'immutable', got: {msg}"
-    );
-}
-
-// A by-digest push carrying an immutable tag in `?tag=` must be rejected, since
-// the registry would create that tag and overwrite the protected one.
-#[test]
-fn test_check_immutable_tag_returns_conflict_for_by_digest_tag_on_push() {
-    let config = load_config(
-        r#"
-            immutable_tags = true
-
-            [repository.myrepo]
-            namespace_pattern = "^myrepo/.*"
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let authorizer = Authorizer::new(&config, &cache).unwrap();
-
-    let action = Action::PutManifest {
-        namespace: Namespace::new("myrepo/app").unwrap(),
-        target: ManifestPutTarget::Digest {
-            digest: Digest::from_str(
-                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            )
-            .unwrap(),
-            tags: vec![Tag::new("v1.0.0").unwrap()],
-        },
-    };
-
-    let result = authorizer.check_immutable_tag("myrepo", &action);
-
-    let Err(AuthError::Conflict(msg)) = result else {
-        panic!("expected Err(AuthError::Conflict(_)), got: {result:?}");
-    };
-    assert!(
-        msg.contains("v1.0.0") && msg.contains("immutable"),
-        "error message must mention the tag and 'immutable', got: {msg}"
-    );
-}
-
-// A by-digest push whose `?tag=` is excluded (mutable) is allowed.
-#[test]
-fn test_check_immutable_tag_allows_by_digest_mutable_tag_on_push() {
-    let config = load_config(
-        r#"
-            immutable_tags = true
-            immutable_tags_exclusions = ["^latest$"]
-
-            [repository.myrepo]
-            namespace_pattern = "^myrepo/.*"
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let authorizer = Authorizer::new(&config, &cache).unwrap();
-
-    let action = Action::PutManifest {
-        namespace: Namespace::new("myrepo/app").unwrap(),
-        target: ManifestPutTarget::Digest {
-            digest: Digest::from_str(
-                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            )
-            .unwrap(),
-            tags: vec![Tag::new("latest").unwrap()],
-        },
-    };
-
-    assert!(
-        authorizer.check_immutable_tag("myrepo", &action).is_ok(),
-        "a by-digest push creating only an excluded tag must be allowed"
-    );
-}
-
-// A by-tag push to an excluded (mutable) tag is allowed.
-#[test]
-fn test_check_immutable_tag_allows_by_tag_mutable() {
-    let config = load_config(
-        r#"
-            immutable_tags = true
-            immutable_tags_exclusions = ["^latest$"]
-
-            [repository.myrepo]
-            namespace_pattern = "^myrepo/.*"
-        "#,
-    );
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let authorizer = Authorizer::new(&config, &cache).unwrap();
-
-    let action = Action::PutManifest {
-        namespace: Namespace::new("myrepo/app").unwrap(),
-        target: ManifestPutTarget::Tag(Tag::new("latest").unwrap()),
-    };
-
-    assert!(
-        authorizer.check_immutable_tag("myrepo", &action).is_ok(),
-        "a by-tag push to a mutable tag must be allowed"
     );
 }
 
@@ -901,16 +604,14 @@ async fn global_webhook_gates_a_namespace_no_repository_declares() {
 //
 // `RegexPattern` compiles the regex at TOML deserialise time. An invalid
 // pattern causes `Configuration::load_from_str` to return `Err` before any
-// `Authorizer` is constructed, so it can never reach `is_tag_mutable`. This
-// test documents the `RegexPattern::compile` API directly so the
-// compile-time rejection invariant is grep-able from here.
+// `Authorizer` is constructed. This test documents the `RegexPattern::compile`
+// API directly so the compile-time rejection invariant is grep-able from here.
 #[test]
 fn regex_pattern_compile_rejects_invalid_pattern() {
     let err = RegexPattern::compile("[invalid");
     assert!(
         err.is_err(),
-        "an invalid regex must be rejected by RegexPattern::compile; \
-             it can therefore never reach is_tag_mutable"
+        "an invalid regex must be rejected by RegexPattern::compile"
     );
 }
 

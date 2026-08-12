@@ -420,12 +420,12 @@ async fn withheld_cross_namespace_reference_is_not_regranted() {
         );
         permissive
             .accept_put_manifest(
+                None,
                 PutManifestRequest {
                     namespace: borrower,
                     reference: Reference::Tag(Tag::new("borrowed").unwrap()),
                     mime_type: media_type("application/vnd.oci.image.manifest.v1+json"),
                     tags: vec![],
-                    actor: None,
                     source_ts: None,
                 },
                 Cursor::new(manifest.into_bytes()),

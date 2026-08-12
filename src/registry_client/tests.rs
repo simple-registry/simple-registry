@@ -1656,7 +1656,7 @@ async fn put_manifest_warns_on_an_unparseable_advertised_digest() {
     );
     let logs = log_capture.contents();
     assert!(
-        logs.contains("put_manifest") && logs.contains(DOCKER_CONTENT_DIGEST),
+        logs.contains("put_manifest") && logs.contains(DOCKER_CONTENT_DIGEST.as_str()),
         "the dropped digest echo must be logged, logs were: {logs}"
     );
 }

@@ -13,8 +13,6 @@ pub enum Error {
     Unauthorized(String),
     #[error("Bad Request: {0}")]
     BadRequest(String),
-    #[error("Conflict: {0}")]
-    Conflict(String),
     #[error("Range Not Satisfiable: {0}")]
     RangeNotSatisfiable(String),
     #[error("Not Found: {0}")]
@@ -25,6 +23,8 @@ pub enum Error {
     Internal(String),
     #[error("failed to build HTTP response: {0}")]
     HttpBuild(#[from] hyper::http::Error),
+    #[error("Invalid header value: {0}")]
+    InvalidHeader(#[from] hyper::header::InvalidHeaderValue),
     #[error("failed to serialize response body: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("Error {status_code}: {code}{}", msg.as_deref().map(|m| format!(" - {m}")).unwrap_or_default())]
@@ -40,7 +40,6 @@ impl Error {
         match self {
             Error::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Error::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Error::Conflict(_) => StatusCode::CONFLICT,
             Error::RangeNotSatisfiable(_) => StatusCode::RANGE_NOT_SATISFIABLE,
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::ProviderUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -48,6 +47,7 @@ impl Error {
             | Error::Execution(_)
             | Error::Internal(_)
             | Error::HttpBuild(_)
+            | Error::InvalidHeader(_)
             | Error::Serialization(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Custom { status_code, .. } => *status_code,
         }
@@ -60,7 +60,6 @@ impl Error {
         let (code, message) = match self {
             Error::Unauthorized(msg) => ("UNAUTHORIZED", Some(msg.as_str())),
             Error::BadRequest(msg) => ("BAD_REQUEST", Some(msg.as_str())),
-            Error::Conflict(msg) => ("CONFLICT", Some(msg.as_str())),
             Error::RangeNotSatisfiable(msg) => ("RANGE_NOT_SATISFIABLE", Some(msg.as_str())),
             Error::NotFound(msg) => ("NOT_FOUND", Some(msg.as_str())),
             Error::ProviderUnavailable(_) => ("PROVIDER_UNAVAILABLE", None),
@@ -68,6 +67,7 @@ impl Error {
             | Error::Execution(_)
             | Error::Internal(_)
             | Error::HttpBuild(_)
+            | Error::InvalidHeader(_)
             | Error::Serialization(_) => ("INTERNAL_ERROR", None),
             Error::Custom {
                 status_code,

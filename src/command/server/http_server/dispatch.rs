@@ -1,6 +1,8 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use hyper::{Method, Request, Response, body::Incoming, http::request::Parts};
+use hyper::{
+    Method, Request, Response, body::Incoming, header::CONTENT_RANGE, http::request::Parts,
+};
 use tracing::instrument;
 
 use crate::{
@@ -8,13 +10,19 @@ use crate::{
         ServerContext,
         error::Error,
         handlers,
-        http_server::observability::{
-            handle_healthz, handle_metrics, handle_readyz, handle_ui_config,
-        },
-        response_body::ResponseBody,
-        ui,
+        request::{RequestHeaders, incoming_into_async_read},
     },
+    event_webhook::event::EventActor,
+    http_response::ResponseBody,
     identity::{Action, ClientIdentity},
+    registry::{
+        self, BlobMount, CompleteUploadRequest, DeleteBlobRequest, DeleteJobRequest,
+        DeleteManifestRequest, DeleteUploadRequest, GetBlobRequest, GetManifestRequest,
+        GetReferrersRequest, GetUploadRequest, HeadBlobRequest, HeadManifestRequest,
+        ListCatalogRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
+        ListTagsRequest, ListUploadsRequest, MountBlobRequest, PatchUploadRequest,
+        PutManifestRequest, RetryJobRequest, StartUploadRequest,
+    },
 };
 
 #[instrument(skip(context, req, action))]
@@ -53,130 +61,230 @@ async fn dispatch_route<'a>(
     incoming: Incoming,
     identity: &ClientIdentity,
 ) -> Result<Response<ResponseBody>, Error> {
+    let headers = RequestHeaders::new(&parts.headers);
+    let registry = &context.registry;
+    // One actor for the request: only the arm that runs consumes it.
+    let actor = Some(EventActor::from(identity.clone()));
+
     match route {
-        Action::UiAsset { path } if context.enable_ui => ui::serve_asset(&path),
-        Action::UiConfig if context.enable_ui => handle_ui_config(context),
+        Action::UiAsset { path } if context.enable_ui => handlers::handle_ui_asset(&path),
+        Action::UiConfig if context.enable_ui => handlers::handle_ui_config(&context.ui_name),
         Action::UiAsset { .. } | Action::UiConfig => handle_unknown_route(parts),
-        Action::Token => handlers::token::handle_get_token(context, identity),
-        Action::ApiVersion => Ok(handlers::version::handle_get_api_version()?),
-        Action::StartUpload { namespace, digest } => {
-            handlers::upload::handle_start_upload(context, &namespace, digest).await
+        Action::Token => {
+            let Some(token_issuer) = context.token_issuer() else {
+                return Err(Error::NotFound(
+                    "No token service is configured".to_string(),
+                ));
+            };
+
+            handlers::handle_get_token(token_issuer, identity)
         }
+        Action::ApiVersion => Ok(registry::api_version()?),
+        Action::StartUpload { namespace, digest } => Ok(registry
+            .start_upload(StartUploadRequest { namespace, digest })
+            .await?),
         Action::MountBlob {
             namespace,
             digest,
             from,
         } => {
-            handlers::upload::handle_mount_blob(context, parts, &namespace, digest, from, identity)
-                .await
+            let mount = BlobMount { digest, from };
+            // A mount must not hand the caller bytes they could not otherwise
+            // read, so resolve a namespace holding the blob that they may read
+            // from first.
+            let source = context
+                .authorize_mount_source(&mount, identity, parts)
+                .await?;
+
+            Ok(registry
+                .mount_blob(
+                    actor,
+                    MountBlobRequest {
+                        namespace,
+                        mount,
+                        source,
+                    },
+                )
+                .await?)
         }
-        Action::GetUpload { namespace, uuid } => {
-            handlers::upload::handle_get_upload(context, &namespace, uuid).await
-        }
-        Action::PatchUpload { namespace, uuid } => {
-            handlers::upload::handle_patch_upload(context, parts, incoming, &namespace, uuid).await
-        }
+        Action::GetUpload {
+            namespace,
+            session_id,
+        } => Ok(registry
+            .get_upload_status(GetUploadRequest {
+                namespace,
+                session_id,
+            })
+            .await?),
+        Action::PatchUpload {
+            namespace,
+            session_id,
+        } => Ok(registry
+            .patch_upload(
+                PatchUploadRequest {
+                    namespace,
+                    session_id,
+                    start_offset: headers.range(CONTENT_RANGE)?.map(|range| range.start),
+                    content_length: headers.content_length()?,
+                },
+                incoming_into_async_read(incoming),
+            )
+            .await?),
         Action::PutUpload {
             namespace,
-            uuid,
+            session_id,
             digest,
-        } => {
-            let request = handlers::PutRequest {
-                context,
-                parts,
-                incoming,
-                identity,
-            };
-            handlers::upload::handle_put_upload(request, &namespace, uuid, &digest).await
-        }
-        Action::DeleteUpload { namespace, uuid } => {
-            handlers::upload::handle_delete_upload(context, &namespace, uuid).await
-        }
-        Action::GetBlob { namespace, digest } => {
-            handlers::blob::handle_get_blob(context, parts, &namespace, &digest, identity).await
-        }
-        Action::HeadBlob { namespace, digest } => {
-            handlers::blob::handle_head_blob(context, parts, &namespace, &digest).await
-        }
-        Action::DeleteBlob { namespace, digest } => {
-            handlers::blob::handle_delete_blob(context, &namespace, &digest).await
-        }
+        } => Ok(registry
+            .complete_upload(
+                actor,
+                CompleteUploadRequest {
+                    namespace: &namespace,
+                    session_id: &session_id,
+                    digest: &digest,
+                    start_offset: headers.range(CONTENT_RANGE)?.map(|range| range.start),
+                    content_length: headers.content_length()?,
+                },
+                incoming_into_async_read(incoming),
+            )
+            .await?),
+        Action::DeleteUpload {
+            namespace,
+            session_id,
+        } => Ok(registry
+            .delete_upload(DeleteUploadRequest {
+                namespace,
+                session_id,
+            })
+            .await?),
+        Action::GetBlob { namespace, digest } => Ok(registry
+            .resolve_get_blob(
+                actor,
+                GetBlobRequest {
+                    namespace,
+                    digest,
+                    accepted_types: headers.accepted_content_types(),
+                    range: headers.blob_range()?,
+                    allow_redirect: !headers.redirect_suppressed(),
+                },
+            )
+            .await?),
+        Action::HeadBlob { namespace, digest } => Ok(registry
+            .head_blob(HeadBlobRequest {
+                namespace,
+                digest,
+                accepted_types: headers.accepted_content_types(),
+            })
+            .await?),
+        Action::DeleteBlob { namespace, digest } => Ok(registry
+            .delete_blob(DeleteBlobRequest { namespace, digest })
+            .await?),
         Action::GetManifest {
             namespace,
             reference,
-        } => {
-            handlers::manifest::handle_get_manifest(context, parts, &namespace, reference, identity)
-                .await
-        }
+        } => Ok(registry
+            .resolve_get_manifest(
+                actor,
+                GetManifestRequest {
+                    namespace,
+                    reference,
+                    accepted_types: headers.accepted_content_types(),
+                    allow_redirect: !headers.redirect_suppressed(),
+                },
+            )
+            .await?),
         Action::HeadManifest {
             namespace,
             reference,
-        } => handlers::manifest::handle_head_manifest(context, parts, &namespace, reference).await,
+        } => Ok(registry
+            .head_manifest(HeadManifestRequest {
+                namespace,
+                reference,
+                accepted_types: headers.accepted_content_types(),
+            })
+            .await?),
         Action::PutManifest { namespace, target } => {
             let (reference, tags) = target.into_parts();
-            let request = handlers::PutRequest {
-                context,
-                parts,
-                incoming,
-                identity,
-            };
-            handlers::manifest::handle_put_manifest(request, &namespace, reference, tags).await
+            let mime_type = headers.content_type()?.ok_or(Error::BadRequest(
+                "No Content-Type header provided".to_string(),
+            ))?;
+
+            Ok(registry
+                .accept_put_manifest(
+                    actor,
+                    PutManifestRequest {
+                        namespace: &namespace,
+                        reference,
+                        mime_type,
+                        tags,
+                        source_ts: headers.source_timestamp(),
+                    },
+                    incoming_into_async_read(incoming),
+                )
+                .await?)
         }
         Action::DeleteManifest {
             namespace,
             reference,
-        } => {
-            handlers::manifest::handle_delete_manifest(
-                context, parts, &namespace, reference, identity,
+        } => Ok(registry
+            .accept_delete_manifest(
+                actor,
+                DeleteManifestRequest {
+                    source_ts: headers.source_timestamp(),
+                    namespace,
+                    reference,
+                },
             )
-            .await
-        }
+            .await?),
         Action::GetReferrer {
             namespace,
             digest,
             artifact_type,
-        } => {
-            handlers::content_discovery::handle_get_referrers(
-                context,
-                &namespace,
-                &digest,
+        } => Ok(registry
+            .get_referrers(GetReferrersRequest {
+                namespace,
+                digest,
                 artifact_type,
-            )
-            .await
-        }
-        Action::ListCatalog { n, last } => {
-            handlers::content_discovery::handle_list_catalog(context, n, last).await
-        }
-        Action::ListTags { namespace, n, last } => {
-            handlers::content_discovery::handle_list_tags(context, &namespace, n, last).await
-        }
-        Action::ListRevisions { namespace } => {
-            handlers::ext::handle_list_revisions(context, &namespace).await
-        }
-        Action::ListUploads { namespace } => {
-            handlers::ext::handle_list_uploads(context, &namespace).await
-        }
-        Action::ListRepositories => handlers::ext::handle_list_repositories(context).await,
-        Action::ListNamespaces { repository } => {
-            handlers::ext::handle_list_namespaces(context, &repository).await
-        }
-        Action::ListJobs { queue, n, after } => {
-            handlers::ext::handle_list_jobs(context, queue, n, after).await
-        }
-        Action::ListFailedJobs { queue, n, after } => {
-            handlers::ext::handle_list_failed_jobs(context, queue, n, after).await
-        }
-        Action::RetryJob { queue, storage_key } => {
-            handlers::ext::handle_retry_job(context, queue, &storage_key).await
-        }
+            })
+            .await?),
+        Action::ListCatalog { n, last } => Ok(registry
+            .list_catalog_entries(ListCatalogRequest { n, last })
+            .await?),
+        Action::ListTags { namespace, n, last } => Ok(registry
+            .list_tag_entries(ListTagsRequest { namespace, n, last })
+            .await?),
+        Action::ListRevisions { namespace } => Ok(registry
+            .get_revisions_info(ListRevisionsRequest { namespace })
+            .await?),
+        Action::ListUploads { namespace } => Ok(registry
+            .get_uploads_info(ListUploadsRequest { namespace })
+            .await?),
+        Action::ListRepositories => Ok(registry.get_repositories_info().await?),
+        Action::ListNamespaces { repository } => Ok(registry
+            .get_namespaces_info(ListNamespacesRequest { repository })
+            .await?),
+        Action::ListJobs { queue, n, after } => Ok(registry
+            .get_jobs_info(ListJobsRequest { queue, n, after })
+            .await?),
+        Action::ListFailedJobs { queue, n, after } => Ok(registry
+            .get_failed_jobs_info(ListJobsRequest { queue, n, after })
+            .await?),
+        Action::RetryJob { queue, storage_key } => Ok(registry
+            .retry_failed_job(RetryJobRequest { queue, storage_key })
+            .await?),
         Action::DeleteJob {
             queue,
             state,
             storage_key,
-        } => handlers::ext::handle_delete_job(context, queue, state, &storage_key).await,
-        Action::Healthz => handle_healthz(),
-        Action::Readyz => handle_readyz(context).await,
-        Action::Metrics => handle_metrics(),
+        } => Ok(registry
+            .delete_job(DeleteJobRequest {
+                queue,
+                state,
+                storage_key,
+            })
+            .await?),
+        Action::Healthz => handlers::handle_healthz(),
+        Action::Readyz => handlers::handle_readyz(registry).await,
+        Action::Metrics => handlers::handle_metrics(),
     }
 }
 

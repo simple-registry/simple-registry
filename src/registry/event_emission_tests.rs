@@ -13,6 +13,7 @@
 use std::{collections::HashMap, io::Cursor, sync::Arc};
 
 use chrono::{DateTime, Utc};
+use hyper::StatusCode;
 use serde_json::json;
 use tempfile::TempDir;
 use url::Url;
@@ -28,16 +29,17 @@ use crate::{
     },
     jobs::Queue,
     jobs::store::JobStore,
-    oci::{Digest, MediaType, Namespace, Reference, Tag},
+    oci::{Digest, MediaRange, MediaType, Namespace, Reference, Tag},
     registry::{
-        BlobMount, PutManifestRequest, Registry, RegistryConfig, Repository, StartUploadResponse,
+        BlobMount, GetBlobRequest, GetManifestRequest, MountBlobRequest, PutManifestRequest,
+        Registry, RegistryConfig, Repository,
         blob_ownership::BlobOwnership,
         metadata_store::LinkKind,
         repository_resolver::RepositoryResolver,
         test_utils::{
             FsTestStack, create_test_repositories, downstream_client, fs_test_stack,
             put_blob_direct, repository_with_downstream, repository_with_replication,
-            single_repo_resolver, sole_pending_payload, upload_blob,
+            response_digest, single_repo_resolver, sole_pending_payload, upload_blob,
         },
     },
     replication::{
@@ -164,12 +166,12 @@ async fn tag_push_emits_manifest_push_and_tag_create_events() {
     fixture
         .registry
         .accept_put_manifest(
+            None,
             PutManifestRequest {
                 namespace: &namespace,
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
                 mime_type,
                 tags: Vec::new(),
-                actor: None,
                 source_ts: None,
             },
             Cursor::new(manifest_bytes),
@@ -221,12 +223,12 @@ async fn digest_push_suppresses_tag_create_event() {
     let tag_response = fixture
         .registry
         .accept_put_manifest(
+            None,
             PutManifestRequest {
                 namespace: &namespace,
                 reference: Reference::Tag(Tag::new("seed").unwrap()),
                 mime_type: mime_type.clone(),
                 tags: Vec::new(),
-                actor: None,
                 source_ts: None,
             },
             Cursor::new(manifest_bytes.clone()),
@@ -235,18 +237,18 @@ async fn digest_push_suppresses_tag_create_event() {
         .expect("seed push");
     let seed_event_count = received_events(&server).await.len();
 
-    let digest = tag_response.digest.clone();
+    let digest = response_digest(&tag_response);
 
     // Push the same manifest addressed by its digest.
     fixture
         .registry
         .accept_put_manifest(
+            None,
             PutManifestRequest {
                 namespace: &namespace,
                 reference: Reference::Digest(digest),
                 mime_type,
                 tags: Vec::new(),
-                actor: None,
                 source_ts: None,
             },
             Cursor::new(manifest_bytes),
@@ -283,12 +285,12 @@ async fn tag_delete_emits_manifest_delete_and_tag_delete_events() {
     fixture
         .registry
         .accept_put_manifest(
+            None,
             PutManifestRequest {
                 namespace: &namespace,
                 reference: Reference::Tag(Tag::new("v1").unwrap()),
                 mime_type,
                 tags: Vec::new(),
-                actor: None,
                 source_ts: None,
             },
             Cursor::new(manifest_bytes),
@@ -335,12 +337,12 @@ async fn digest_delete_suppresses_tag_delete_event() {
     let push = fixture
         .registry
         .accept_put_manifest(
+            None,
             PutManifestRequest {
                 namespace: &namespace,
                 reference: Reference::Tag(Tag::new("to-delete").unwrap()),
                 mime_type,
                 tags: Vec::new(),
-                actor: None,
                 source_ts: None,
             },
             Cursor::new(manifest_bytes),
@@ -349,7 +351,7 @@ async fn digest_delete_suppresses_tag_delete_event() {
         .expect("put manifest");
     let push_event_count = received_events(&server).await.len();
 
-    let digest = push.digest.clone();
+    let digest = response_digest(&push);
 
     let reference = Reference::Digest(digest);
     fixture
@@ -389,12 +391,12 @@ async fn tag_push_event_payload_has_all_required_fields() {
     fixture
         .registry
         .accept_put_manifest(
+            None,
             PutManifestRequest {
                 namespace: &namespace,
                 reference: Reference::Tag(Tag::new("stable").unwrap()),
                 mime_type,
                 tags: Vec::new(),
-                actor: None,
                 source_ts: None,
             },
             Cursor::new(manifest_bytes),
@@ -466,12 +468,12 @@ async fn digest_push_with_tag_params_emits_tag_create_per_tag() {
     fixture
         .registry
         .accept_put_manifest(
+            None,
             PutManifestRequest {
                 namespace: &namespace,
                 reference: Reference::Digest(digest.clone()),
                 mime_type,
                 tags: vec![Tag::new("1.2.3").unwrap(), Tag::new("latest").unwrap()],
-                actor: None,
                 source_ts: None,
             },
             Cursor::new(manifest_bytes),
@@ -517,12 +519,12 @@ async fn noop_push_still_emits_events() {
     fixture
         .registry
         .accept_put_manifest(
+            None,
             PutManifestRequest {
                 namespace: &namespace,
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
                 mime_type: mime_type.clone(),
                 tags: Vec::new(),
-                actor: None,
                 source_ts: None,
             },
             Cursor::new(manifest_bytes.clone()),
@@ -534,12 +536,12 @@ async fn noop_push_still_emits_events() {
     fixture
         .registry
         .accept_put_manifest(
+            None,
             PutManifestRequest {
                 namespace: &namespace,
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
                 mime_type,
                 tags: Vec::new(),
-                actor: None,
                 source_ts: None,
             },
             Cursor::new(manifest_bytes),
@@ -603,11 +605,19 @@ async fn mount_emits_blob_push_event() {
     };
     let response = fixture
         .registry
-        .mount_blob(None, target, &mount, source)
+        .mount_blob(
+            None,
+            MountBlobRequest {
+                namespace: target.clone(),
+                mount,
+                source: Some(source.clone()),
+            },
+        )
         .await
         .unwrap();
 
-    assert!(matches!(response, StartUploadResponse::ExistingBlob { .. }));
+    // A satisfied mount answers `201` with the blob's location.
+    assert_eq!(response.status(), StatusCode::CREATED);
     let events = received_events(&server).await;
     assert_eq!(events.len(), 1, "a satisfied mount must emit one event");
     assert_eq!(events[0]["kind"], "blob.push");
@@ -636,11 +646,19 @@ async fn mount_fallback_still_emits_intent_event() {
     };
     let response = fixture
         .registry
-        .mount_blob(None, target, &mount, source)
+        .mount_blob(
+            None,
+            MountBlobRequest {
+                namespace: target.clone(),
+                mount,
+                source: Some(source.clone()),
+            },
+        )
         .await
         .unwrap();
 
-    assert!(matches!(response, StartUploadResponse::Session { .. }));
+    // The fallback opens a session instead: `202`, not `201`.
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
     let events = received_events(&server).await;
     assert_eq!(
         events.len(),
@@ -668,12 +686,12 @@ async fn failing_required_webhook_blocks_the_write() {
     let result = fixture
         .registry
         .accept_put_manifest(
+            None,
             PutManifestRequest {
                 namespace: &namespace,
                 reference: Reference::Tag(tag.clone()),
                 mime_type,
                 tags: Vec::new(),
-                actor: None,
                 source_ts: None,
             },
             Cursor::new(manifest_bytes),
@@ -766,12 +784,12 @@ async fn fresh_local_tag_push_enqueues_replication_job() {
     fixture
         .registry
         .accept_put_manifest(
+            None,
             PutManifestRequest {
                 namespace: &namespace,
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
                 mime_type,
                 tags: Vec::new(),
-                actor: None,
                 source_ts: None,
             },
             Cursor::new(manifest_bytes),
@@ -949,4 +967,93 @@ async fn client_delete_mirrors_to_all_downstreams() {
         2,
         "a client delete must enqueue for every matching downstream"
     );
+}
+
+/// A blob GET emits one `blob.pull` event carrying the blob digest.
+#[tokio::test]
+async fn get_blob_emits_pull_event() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let fixture = FsRegistryFixture::with_webhook(&server.uri(), vec![EventKind::BlobPull]);
+    let namespace = Namespace::new("test-repo/pulled").unwrap();
+    let digest = upload_blob(&fixture.registry, &namespace, b"pull event blob").await;
+
+    let response = fixture
+        .registry
+        .resolve_get_blob(
+            None,
+            GetBlobRequest {
+                namespace: namespace.clone(),
+                digest: digest.clone(),
+                accepted_types: Vec::new(),
+                range: None,
+                allow_redirect: true,
+            },
+        )
+        .await
+        .expect("the pull must succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let events = received_events(&server).await;
+    assert_eq!(events.len(), 1, "exactly one pull event must be posted");
+    assert_eq!(events[0]["kind"], "blob.pull");
+    assert_eq!(events[0]["digest"], digest.to_string());
+}
+
+/// A tag GET emits one `manifest.pull` event carrying the resolved digest, the
+/// requested reference, and the tag.
+#[tokio::test]
+async fn get_manifest_emits_pull_event() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let fixture = FsRegistryFixture::with_webhook(&server.uri(), vec![EventKind::ManifestPull]);
+    let namespace = Namespace::new("test-repo/pulled").unwrap();
+    let media_type = MediaType::oci_manifest();
+    let manifest_bytes =
+        br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#.to_vec();
+
+    let seeded = fixture
+        .registry
+        .accept_put_manifest(
+            None,
+            PutManifestRequest {
+                namespace: &namespace,
+                reference: Reference::Tag(Tag::new("latest").unwrap()),
+                mime_type: media_type.clone(),
+                tags: Vec::new(),
+                source_ts: None,
+            },
+            Cursor::new(manifest_bytes),
+        )
+        .await
+        .expect("seeding the manifest must succeed");
+    let digest = response_digest(&seeded);
+
+    let response = fixture
+        .registry
+        .resolve_get_manifest(
+            None,
+            GetManifestRequest {
+                namespace: namespace.clone(),
+                reference: Reference::Tag(Tag::new("latest").unwrap()),
+                accepted_types: vec![MediaRange::from(media_type)],
+                allow_redirect: true,
+            },
+        )
+        .await
+        .expect("the pull must succeed");
+
+    let events = received_events(&server).await;
+    assert_eq!(events.len(), 1, "exactly one pull event must be posted");
+    assert_eq!(events[0]["kind"], "manifest.pull");
+    assert_eq!(events[0]["reference"], "latest");
+    assert_eq!(events[0]["tag"], "latest");
+    assert_eq!(events[0]["digest"], digest.to_string());
+    assert_eq!(response_digest(&response), digest);
 }

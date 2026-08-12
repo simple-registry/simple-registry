@@ -106,7 +106,6 @@ impl From<auth::Error> for Error {
             auth::Error::Initialization(msg) => Error::Initialization(msg),
             auth::Error::Execution(msg) => Error::Execution(msg),
             auth::Error::Unauthorized(msg) => Error::Unauthorized(msg),
-            auth::Error::Conflict(msg) => Error::Conflict(msg),
             auth::Error::ProviderUnavailable(msg) => Error::ProviderUnavailable(msg),
             // A registry error the authorizer surfaced keeps its OCI mapping.
             auth::Error::Registry(inner) => Error::from(*inner),
