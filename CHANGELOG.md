@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - An optional token service exchanges a client's credential for a registry-signed bearer token at `GET /token`, so a short-lived CI credential no longer has to outlive the push it starts.
 - `auth.oidc.<name>.required_claims` rejects a token that does not carry the claims listed, before any access policy runs.
+- `server.handshake_timeout` bounds how long a client may take to complete its handshake, dropping the connection when it does not.
 - `auth.oidc.<name>.server_ca_bundle` trusts a private CA for that provider's discovery and JWKS fetches, so an issuer such as a kube-apiserver needs no host-wide trust.
 - `auth.oidc.<name>.client_certificate_bundle` and `client_private_key` present a client certificate on those fetches, so a cluster that keeps discovery closed to unauthenticated users can still back image pulls with projected service-account tokens.
 - EXPERIMENTAL: `contrib/kubelet-credential-provider` hands the kubelet the pulling pod's service-account token as its registry credential, so an image pull authenticates as the workload instead of a shared `imagePullSecret`. It ships as a released Linux binary, with a DaemonSet that installs it on every node and restarts the kubelet only when the binary changes.
@@ -25,6 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A client that connects and then stalls no longer holds up every other connection on that listener: handshakes run per connection instead of inline in the accept loop, and each is bound by `handshake_timeout`.
+- A listener survives a transient accept failure such as an exhausted descriptor table, backing off and retrying instead of terminating the server.
 - Content pushed to a namespace no `[repository]` entry matches can now be pulled back: retrieval required a configured repository while every other route did not, so such a namespace was writable, listable, and unreadable.
 - A global authorization webhook now also gates a request to a namespace no `[repository]` declares, which used to skip it entirely and be decided by the global access policy alone.
 - A JWKS key angos cannot turn into a decoding key now reports the provider unavailable, as the fetch and parse before it already did, instead of surfacing as an internal error.

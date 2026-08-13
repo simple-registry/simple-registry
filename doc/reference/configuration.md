@@ -81,6 +81,7 @@ TLS certificate files are also automatically reloaded when they change.
 | `port`                            | u16          | `8000`   | Port number                                        |
 | `query_timeout`                   | non-zero u64 | `3600`   | Query timeout in seconds                           |
 | `query_timeout_grace_period`      | non-zero u64 | `60`     | Grace period for queries in seconds                |
+| `handshake_timeout`               | non-zero u64 | `10`     | Seconds a client may take to finish its handshake  |
 
 Timeout values must be greater than zero.
 

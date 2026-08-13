@@ -23,6 +23,14 @@ pub struct ListenerBaseConfig {
         deserialize_with = "deserialize_query_timeout_grace_period"
     )]
     pub query_timeout_grace_period: NonZeroU64,
+    /// How long a client may take to complete its handshake before the
+    /// connection is dropped. A TLS peer that opens a socket and then stalls
+    /// otherwise holds a task until it disconnects.
+    #[serde(
+        default = "ListenerBaseConfig::default_handshake_timeout",
+        deserialize_with = "deserialize_handshake_timeout"
+    )]
+    pub handshake_timeout: NonZeroU64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -109,6 +117,10 @@ impl ListenerBaseConfig {
         Some(value) => value,
         None => panic!("default query timeout grace period must be non-zero"),
     };
+    const DEFAULT_HANDSHAKE_TIMEOUT: NonZeroU64 = match NonZeroU64::new(10) {
+        Some(value) => value,
+        None => panic!("default handshake timeout must be non-zero"),
+    };
 
     fn default_query_timeout() -> NonZeroU64 {
         Self::DEFAULT_QUERY_TIMEOUT
@@ -116,6 +128,10 @@ impl ListenerBaseConfig {
 
     fn default_query_timeout_grace_period() -> NonZeroU64 {
         Self::DEFAULT_QUERY_TIMEOUT_GRACE_PERIOD
+    }
+
+    fn default_handshake_timeout() -> NonZeroU64 {
+        Self::DEFAULT_HANDSHAKE_TIMEOUT
     }
 }
 
@@ -126,6 +142,7 @@ impl Default for ListenerBaseConfig {
             port: Self::default_port(),
             query_timeout: Self::default_query_timeout(),
             query_timeout_grace_period: Self::default_query_timeout_grace_period(),
+            handshake_timeout: Self::default_handshake_timeout(),
         }
     }
 }
@@ -142,4 +159,11 @@ where
     D: Deserializer<'de>,
 {
     deserialize_positive_nonzero::<_, u64, _>(deserializer, "query_timeout_grace_period")
+}
+
+fn deserialize_handshake_timeout<'de, D>(deserializer: D) -> Result<NonZeroU64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_positive_nonzero::<_, u64, _>(deserializer, "handshake_timeout")
 }
