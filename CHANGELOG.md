@@ -35,6 +35,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A basic-auth username matching an OIDC provider name is refused at startup instead of locking that user out, since a Basic credential naming a provider is read as that provider's token.
 - An authorization webhook now receives the caller's OIDC provider and subject, so it can decide per user and its decision cache no longer serves one answer to every OIDC caller performing the same action.
 - An upstream token response that omits `expires_in` is now cached for the 60 seconds the spec defines as its default rather than an hour, so angos stops sending a token long after its issuer stopped honouring it.
+- A referrers request whose digest or `artifactType` is malformed is answered with `400 DIGEST_INVALID` as the spec requires, instead of the `404` an unserved path gets.
+- A manifest larger than `global.max_manifest_size` is refused with `413`, matching the blob size limit, instead of `400`.
 - A ranged blob pull on a pull-through repository forwards the range to the upstream instead of returning `416` until the blob is cached, so one URL no longer answers `206` or `416` depending on cache state.
 
 ## 1.4.5

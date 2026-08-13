@@ -2,6 +2,26 @@ use hyper::StatusCode;
 
 use crate::{command::server::Error, event_webhook, registry};
 
+/// A body over the manifest cap is too large, not malformed: both size limits
+/// answer `413`, keeping the OCI code that names which body was refused.
+#[test]
+fn oversized_bodies_are_payload_too_large() {
+    for (error, code) in [
+        (
+            registry::Error::ManifestBodyTooLarge { limit: 42 },
+            "MANIFEST_INVALID",
+        ),
+        (
+            registry::Error::BlobBodyTooLarge { limit: 42 },
+            "BLOB_UPLOAD_INVALID",
+        ),
+    ] {
+        let converted = Error::from(error);
+        assert_eq!(converted.status_code(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(converted.as_json(None)["errors"][0]["code"], code);
+    }
+}
+
 #[test]
 fn test_error_display() {
     let error = Error::Initialization("Some init error".to_string());

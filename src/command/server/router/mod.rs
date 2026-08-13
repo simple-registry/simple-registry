@@ -342,6 +342,25 @@ fn try_find_manifests(method: &Method, path: &str, params: Option<&str>) -> Opti
     None
 }
 
+/// Whether a request [`parse`] refused was a referrers read, which owes a `400`
+/// for the digest or filter that failed. An invalid namespace is not one, so it
+/// keeps the `404` it gets on every route.
+pub fn is_invalid_referrers_request(method: &Method, uri: &Uri) -> bool {
+    if *method != Method::GET {
+        return false;
+    }
+
+    let Some((namespace, _)) = uri
+        .path()
+        .strip_prefix("/v2/")
+        .and_then(|api_path| api_path.rsplit_once("/referrers/"))
+    else {
+        return false;
+    };
+
+    Namespace::new(namespace).is_ok()
+}
+
 fn try_find_referrers(method: &Method, path: &str, params: Option<&str>) -> Option<Action> {
     if let Some((namespace_str, digest)) = path.rsplit_once("/referrers/") {
         let namespace = Namespace::new(namespace_str).ok()?;

@@ -135,7 +135,7 @@ PUT /v2/{namespace}/manifests/{reference}
 ```
 
 Push a manifest. Manifest bodies larger than `global.max_manifest_size` are rejected with
-`MANIFEST_INVALID`. When `global.allow_missing_manifest_references = false`, config, layer, and
+`MANIFEST_INVALID` (HTTP 413). When `global.allow_missing_manifest_references = false`, config, layer, and
 child manifest digests referenced by the manifest must already exist and be readable in the
 namespace, and missing references are rejected with `MANIFEST_BLOB_UNKNOWN`. By default
 (`allow_missing_manifest_references = true`) the push is accepted, but a referenced digest the
@@ -230,6 +230,8 @@ Query parameters:
 - `artifactType` - Filter by artifact type
 - `n` - Maximum number of results (default 100)
 - `last` - Pagination marker
+
+A digest that is not valid syntax, or an `artifactType` that is not a media type, is rejected with `DIGEST_INVALID` (HTTP 400) rather than served as an unfiltered or empty listing.
 
 A subject with more referrers than the page size is served one page at a time, with the next page advertised in a `Link` header carrying `rel="next"`; the link repeats the `artifactType` filter so following it keeps the listing filtered. A filtered page holds at most `n` entries and may hold fewer, since the filter is applied after the page is cut.
 
@@ -612,7 +614,7 @@ Errors follow OCI Distribution error format:
 | `BLOB_UPLOAD_UNKNOWN` | 404          | Upload session not found  |
 | `DIGEST_INVALID`      | 400          | Invalid digest format     |
 | `MANIFEST_BLOB_UNKNOWN` | 404        | Manifest reference is missing |
-| `MANIFEST_INVALID`    | 400          | Invalid manifest content  |
+| `MANIFEST_INVALID`    | 400, or 413 when the body exceeds `global.max_manifest_size` | Invalid manifest content  |
 | `MANIFEST_UNKNOWN`    | 404          | Manifest does not exist   |
 | `NAME_INVALID`        | 400          | Invalid repository name   |
 | `NAME_UNKNOWN`        | 404          | Repository not found      |

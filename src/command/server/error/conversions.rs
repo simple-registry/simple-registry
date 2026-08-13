@@ -37,7 +37,7 @@ impl From<registry::Error> for Error {
                 oci_error(StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN", None)
             }
             registry::Error::ManifestBodyTooLarge { .. } => oci_error(
-                StatusCode::BAD_REQUEST,
+                StatusCode::PAYLOAD_TOO_LARGE,
                 "MANIFEST_INVALID",
                 Some(error.to_string()),
             ),

@@ -11,6 +11,7 @@ use crate::{
         error::Error,
         handlers,
         request::{RequestHeaders, incoming_into_async_read},
+        router,
     },
     event_webhook::event::EventActor,
     http_range::RequestRange,
@@ -299,6 +300,12 @@ async fn dispatch_route<'a>(
 /// conformance requires `400` from a manifest `PUT` whose reference parses as
 /// neither a tag nor a digest.
 pub fn handle_unknown_route(parts: &Parts) -> Result<Response<ResponseBody>, Error> {
+    // The referrers endpoint is the exception: the spec requires `400` from a
+    // read whose digest or filter is malformed, not the miss below.
+    if router::is_invalid_referrers_request(&parts.method, &parts.uri) {
+        return Err(registry::Error::DigestInvalid.into());
+    }
+
     if [Method::GET, Method::HEAD].contains(&parts.method) {
         let msg = format!("unknown route: {} {}", parts.method, parts.uri);
         Err(Error::NotFound(msg))
