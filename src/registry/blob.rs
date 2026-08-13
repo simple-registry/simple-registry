@@ -119,7 +119,10 @@ pub async fn cache_blob(
 ) -> Result<(), Error> {
     debug!("Fetching blob: {digest}");
     let session_id = UploadSessionId::generate();
-    blob_store.create_upload(namespace, &session_id).await?;
+    // The fill knows what it is fetching, so the session hashes that alone.
+    blob_store
+        .create_upload(namespace, &session_id, Some(digest.algorithm()))
+        .await?;
 
     let result = fill_cache_session(
         blob_store,

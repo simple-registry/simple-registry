@@ -8,7 +8,7 @@ use tracing::{instrument, warn};
 use crate::{
     event_webhook::event::{Event, EventActor},
     http_response::{ResponseBody, build_response},
-    oci::{Digest, Namespace, UploadSessionId},
+    oci::{Algorithm, Digest, Namespace, UploadSessionId},
     registry::{
         DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID, Error, Registry,
         blob_ownership::promote_and_grant,
@@ -99,6 +99,9 @@ pub struct BlobMount {
 pub struct StartUploadRequest {
     pub namespace: Namespace,
     pub digest: Option<Digest>,
+    /// The algorithm the client says it will close the upload with, so the
+    /// session hashes under that one alone.
+    pub digest_algorithm: Option<Algorithm>,
 }
 
 #[derive(Debug)]
@@ -279,13 +282,16 @@ impl Registry {
     }
 
     /// Opens a fresh resumable upload session and returns its `202` headers.
+    /// `digest_algorithm` is the client's `?digest-algorithm=` hint, which fixes
+    /// what each chunk is hashed under.
     async fn open_upload_session(
         &self,
         namespace: &Namespace,
+        digest_algorithm: Option<Algorithm>,
     ) -> Result<Response<ResponseBody>, Error> {
         let session_id = UploadSessionId::generate();
         self.blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, digest_algorithm)
             .await?;
 
         Ok(build_response(
@@ -316,7 +322,8 @@ impl Registry {
             )?);
         }
 
-        self.open_upload_session(&request.namespace).await
+        self.open_upload_session(&request.namespace, request.digest_algorithm)
+            .await
     }
 
     /// Starts a cross-repository blob mount from the authorized `source`,
@@ -343,7 +350,7 @@ impl Registry {
         // An unsatisfiable mount degrades to an ordinary upload session, so the
         // caller is never told whether the blob exists.
         let Some(source) = &request.source else {
-            return self.open_upload_session(&request.namespace).await;
+            return self.open_upload_session(&request.namespace, None).await;
         };
 
         if let Some(digest) = self
@@ -357,7 +364,7 @@ impl Registry {
             )?);
         }
 
-        self.open_upload_session(&request.namespace).await
+        self.open_upload_session(&request.namespace, None).await
     }
 
     /// Early-reject a known-length body whose declared length would push the
@@ -722,6 +729,7 @@ mod tests {
                 .start_upload(StartUploadRequest {
                     namespace: namespace.clone(),
                     digest: None,
+                    digest_algorithm: None,
                 })
                 .await
                 .unwrap();
@@ -740,6 +748,7 @@ mod tests {
                 .start_upload(StartUploadRequest {
                     namespace: namespace.clone(),
                     digest: Some(digest.clone()),
+                    digest_algorithm: None,
                 })
                 .await
                 .unwrap();
@@ -759,6 +768,7 @@ mod tests {
                 .start_upload(StartUploadRequest {
                     namespace: namespace.clone(),
                     digest: Some(digest.clone()),
+                    digest_algorithm: None,
                 })
                 .await
                 .unwrap();
@@ -1118,7 +1128,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1186,7 +1196,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1237,7 +1247,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1303,7 +1313,7 @@ mod tests {
 
                 registry
                     .blob_store
-                    .create_upload(namespace, &session_id)
+                    .create_upload(namespace, &session_id, None)
                     .await
                     .unwrap();
 
@@ -1403,7 +1413,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1458,6 +1468,105 @@ mod tests {
         .await;
     }
 
+    /// The `?digest-algorithm=` hint makes a chunked session hash under that one
+    /// algorithm alone, which the closing PUT must still be able to finalize.
+    #[tokio::test]
+    async fn hinted_algorithm_completes_a_chunked_upload() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"chunked upload hinted as sha512";
+            let session_id = UploadSessionId::generate();
+
+            registry
+                .blob_store
+                .create_upload(namespace, &session_id, Some(Algorithm::Sha512))
+                .await
+                .unwrap();
+            registry
+                .patch_upload(
+                    PatchUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        start_offset: None,
+                        content_length: Some(content.len() as u64),
+                    },
+                    Cursor::new(content.to_vec()),
+                )
+                .await
+                .unwrap();
+
+            let expected_digest = Digest::from_bytes(Algorithm::Sha512, content);
+            let response = registry
+                .complete_upload(
+                    None,
+                    CompleteUploadRequest {
+                        namespace,
+                        session_id: &session_id,
+                        digest: &expected_digest,
+                        start_offset: None,
+                        content_length: Some(0),
+                    },
+                    Cursor::new(Vec::new()),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response_digest(&response), expected_digest);
+        })
+        .await;
+    }
+
+    /// Closing a hinted session under a different algorithm is refused: the
+    /// session never hashed the one the client finally asked for.
+    #[tokio::test]
+    async fn a_digest_outside_the_hinted_algorithm_is_refused() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"chunked upload hinted as sha512";
+            let session_id = UploadSessionId::generate();
+
+            registry
+                .blob_store
+                .create_upload(namespace, &session_id, Some(Algorithm::Sha512))
+                .await
+                .unwrap();
+            registry
+                .patch_upload(
+                    PatchUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        start_offset: None,
+                        content_length: Some(content.len() as u64),
+                    },
+                    Cursor::new(content.to_vec()),
+                )
+                .await
+                .unwrap();
+
+            let result = registry
+                .complete_upload(
+                    None,
+                    CompleteUploadRequest {
+                        namespace,
+                        session_id: &session_id,
+                        digest: &Digest::sha256_of_bytes(content),
+                        start_offset: None,
+                        content_length: Some(0),
+                    },
+                    Cursor::new(Vec::new()),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(Error::DigestInvalid)),
+                "a digest the session never hashed must be refused, got {result:?}"
+            );
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn test_sha512_complete_upload_wrong_digest_rejected() {
         for_each_backend(async |test_case| {
@@ -1468,7 +1577,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1521,7 +1630,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -1585,7 +1694,7 @@ mod tests {
         let session_id = UploadSessionId::generate();
         registry
             .blob_store
-            .create_upload(second_namespace, &session_id)
+            .create_upload(second_namespace, &session_id, None)
             .await
             .unwrap();
         registry
@@ -1659,7 +1768,7 @@ mod tests {
         let session_id = UploadSessionId::generate();
         registry
             .blob_store
-            .create_upload(second_namespace, &session_id)
+            .create_upload(second_namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -1705,7 +1814,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1746,7 +1855,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1797,7 +1906,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1842,7 +1951,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1906,7 +2015,7 @@ mod tests {
             let session_id = UploadSessionId::generate();
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1940,7 +2049,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1982,7 +2091,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -2027,7 +2136,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -2134,7 +2243,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -2174,7 +2283,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -2216,7 +2325,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -2260,7 +2369,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, None)
             .await
             .unwrap();
 

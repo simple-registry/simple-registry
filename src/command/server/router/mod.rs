@@ -6,7 +6,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use crate::{
     identity::{Action, ManifestPutTarget},
     jobs::{JobState, Queue},
-    oci::{Digest, MediaType, Namespace, Reference, Tag, UploadSessionId},
+    oci::{Algorithm, Digest, MediaType, Namespace, Reference, Tag, UploadSessionId},
 };
 
 /// Deserializes a query string, returning `None` when a value fails to
@@ -95,6 +95,10 @@ struct MountQuery {
     mount: Option<Digest>,
     from: Option<Namespace>,
     digest: Option<Digest>,
+    /// The algorithm the client will close the upload with, so a chunked
+    /// session hashes under that one alone instead of every supported one.
+    #[serde(rename = "digest-algorithm")]
+    digest_algorithm: Option<Algorithm>,
 }
 
 /// The referrers `?artifactType=` filter. The value is a media type per the
@@ -243,8 +247,11 @@ fn try_parse_upload(method: &Method, path: &str, params: Option<&str>) -> Option
             });
         }
 
-        let digest = query.digest;
-        return Some(Action::StartUpload { namespace, digest });
+        return Some(Action::StartUpload {
+            namespace,
+            digest: query.digest,
+            digest_algorithm: query.digest_algorithm,
+        });
     }
 
     let (namespace_str, session_id) = path.rsplit_once("/blobs/uploads/")?;

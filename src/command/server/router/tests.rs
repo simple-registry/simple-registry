@@ -744,6 +744,37 @@ fn test_parse_invalid_uuid_in_upload_path() {
     assert!(route.is_none());
 }
 
+/// The `?digest-algorithm=` hint reaches the session so it hashes under one
+/// algorithm; an unsupported value is a malformed request, not an absent hint.
+#[test]
+fn upload_digest_algorithm_hint_is_parsed() {
+    let uri: Uri = "/v2/myrepo/app/blobs/uploads/?digest-algorithm=sha512"
+        .parse()
+        .unwrap();
+    match parse(&Method::POST, &uri) {
+        Some(Action::StartUpload {
+            digest_algorithm, ..
+        }) => assert_eq!(digest_algorithm, Some(Algorithm::Sha512)),
+        other => panic!("a hinted upload must start a session, got {other:?}"),
+    }
+
+    let uri: Uri = "/v2/myrepo/app/blobs/uploads/".parse().unwrap();
+    match parse(&Method::POST, &uri) {
+        Some(Action::StartUpload {
+            digest_algorithm, ..
+        }) => assert!(digest_algorithm.is_none()),
+        other => panic!("an unhinted upload must start a session, got {other:?}"),
+    }
+
+    let uri: Uri = "/v2/myrepo/app/blobs/uploads/?digest-algorithm=md5"
+        .parse()
+        .unwrap();
+    assert!(
+        parse(&Method::POST, &uri).is_none(),
+        "an unsupported algorithm must not start a session (POST -> 400)"
+    );
+}
+
 #[test]
 fn test_try_parse_upload_start_post_method() {
     let method = Method::POST;

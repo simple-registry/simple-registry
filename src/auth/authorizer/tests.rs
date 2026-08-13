@@ -354,6 +354,7 @@ async fn test_pull_through_repo_blocks_push_operations() {
     let start_upload_route = Action::StartUpload {
         namespace,
         digest: None,
+        digest_algorithm: None,
     };
     let result = authorizer
         .authorize_request(&start_upload_route, &identity, &parts, &registry)
@@ -400,6 +401,7 @@ async fn pull_through_push_rejected_before_calling_webhook() {
     let push = Action::StartUpload {
         namespace: Namespace::new("docker-io/library/nginx").unwrap(),
         digest: None,
+        digest_algorithm: None,
     };
 
     let result = authorizer

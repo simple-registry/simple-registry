@@ -60,6 +60,7 @@ fn test_action_serialization_cel_compatibility() {
             Action::StartUpload {
                 namespace: ns(),
                 digest: None,
+                digest_algorithm: None,
             },
         ),
         (
@@ -353,6 +354,7 @@ fn test_get_digest() {
         Action::StartUpload {
             namespace: ns(),
             digest: Some(d.clone()),
+            digest_algorithm: None,
         }
         .get_digest(),
         Some(&d)
@@ -361,6 +363,7 @@ fn test_get_digest() {
         Action::StartUpload {
             namespace: ns(),
             digest: None,
+            digest_algorithm: None,
         }
         .get_digest(),
         None
@@ -490,6 +493,7 @@ fn test_is_push() {
         Action::StartUpload {
             namespace: ns(),
             digest: None,
+            digest_algorithm: None,
         }
         .is_push()
     );

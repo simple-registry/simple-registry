@@ -231,6 +231,7 @@ mod tests {
         let normal_upload = Action::StartUpload {
             namespace: namespace.clone(),
             digest: None,
+            digest_algorithm: None,
         };
         let mount = Action::MountBlob {
             namespace,
@@ -561,6 +562,7 @@ mod tests {
         let action = Action::StartUpload {
             namespace: Namespace::new("team/app").unwrap(),
             digest: None,
+            digest_algorithm: None,
         };
         let identity = ClientIdentity::default();
 

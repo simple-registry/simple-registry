@@ -82,8 +82,16 @@ async fn dispatch_route<'a>(
             handlers::handle_get_token(token_issuer, identity)
         }
         Action::ApiVersion => Ok(registry::api_version()?),
-        Action::StartUpload { namespace, digest } => Ok(registry
-            .start_upload(StartUploadRequest { namespace, digest })
+        Action::StartUpload {
+            namespace,
+            digest,
+            digest_algorithm,
+        } => Ok(registry
+            .start_upload(StartUploadRequest {
+                namespace,
+                digest,
+                digest_algorithm,
+            })
             .await?),
         Action::MountBlob {
             namespace,

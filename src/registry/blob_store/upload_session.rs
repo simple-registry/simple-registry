@@ -280,18 +280,28 @@ impl BlobStore {
         .await
     }
 
+    /// Opens an upload session. `algorithm` is the one the client said it would
+    /// close the upload with: the session then checkpoints that hash alone, and
+    /// every other supported one is never computed. Without it the session must
+    /// keep every supported algorithm, since the digest is only known at the
+    /// closing `PUT`.
     #[instrument(skip(self))]
     pub async fn create_upload(
         &self,
         namespace: &Namespace,
         session_id: &UploadSessionId,
+        algorithm: Option<Algorithm>,
     ) -> Result<(), Error> {
         let upload_path = path_builder::upload_path(namespace, session_id);
         // Begin/clear a fresh upload at the data key (clears any leaked prior
         // multipart and staged remainder).
         self.object.create_upload(&upload_path).await?;
 
-        let hash_context = Hasher::new().state().to_bytes()?;
+        let hasher = match algorithm {
+            Some(algorithm) => Hasher::for_algorithm(algorithm),
+            None => Hasher::new(),
+        };
+        let hash_context = hasher.state().to_bytes()?;
         let record = UploadSessionRecord {
             session_id: session_id.clone(),
             namespace: namespace.clone(),

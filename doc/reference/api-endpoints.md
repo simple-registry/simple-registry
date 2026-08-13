@@ -71,6 +71,11 @@ session, or `201 Created` when the blob is already available (see `digest` / `mo
 Query parameters:
 - `digest` - Return the existing blob (returns `201 Created`) only when the requested namespace
   already owns it; otherwise start a new upload session.
+- `digest-algorithm` - The algorithm (`sha256` or `sha512`) the upload will be closed with. The
+  session then hashes each chunk under that one alone instead of every supported algorithm, which is
+  what a session must do when it cannot know the algorithm before the closing `PUT`. Completing a
+  hinted session with a digest of another algorithm returns `DIGEST_INVALID`, and an unsupported
+  value returns `400 Bad Request`.
 - `mount` (with optional `from`) - Cross-repository blob mount. `?mount={digest}` requests that an
   existing blob be referenced by the target namespace with no body transfer:
   - With `from`: the mount succeeds when the blob exists, is held by `{repository}`, and the caller is

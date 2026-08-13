@@ -310,7 +310,7 @@ mod tests {
 
             let old_uuid = UploadSessionId::generate();
             blob_store
-                .create_upload(&namespace, &old_uuid)
+                .create_upload(&namespace, &old_uuid, None)
                 .await
                 .unwrap();
 
@@ -330,7 +330,7 @@ mod tests {
 
             let fresh_uuid = UploadSessionId::generate();
             blob_store
-                .create_upload(&namespace, &fresh_uuid)
+                .create_upload(&namespace, &fresh_uuid, None)
                 .await
                 .unwrap();
             sweep_upload_sessions(&blob_store, Duration::days(1), &executor, 4)
@@ -355,7 +355,7 @@ mod tests {
 
             let session_id = UploadSessionId::generate();
             blob_store
-                .create_upload(&namespace, &session_id)
+                .create_upload(&namespace, &session_id, None)
                 .await
                 .unwrap();
 

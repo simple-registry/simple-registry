@@ -136,7 +136,7 @@ mod tests {
             seed_manifest(metadata_store.store(), &metadata_store, &owned).await;
             let ghost_upload = UploadSessionId::generate();
             blob_store
-                .create_upload(&ghost, &ghost_upload)
+                .create_upload(&ghost, &ghost_upload, None)
                 .await
                 .unwrap();
 

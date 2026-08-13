@@ -215,7 +215,7 @@ pub async fn upload_blob(registry: &Registry, namespace: &Namespace, content: &[
     let session_id = UploadSessionId::generate();
     registry
         .blob_store
-        .create_upload(namespace, &session_id)
+        .create_upload(namespace, &session_id, None)
         .await
         .unwrap();
 

@@ -12,7 +12,8 @@ use crate::oci::Error;
 /// OCI digest algorithm: `sha256` (canonical) and `sha512` (optional) are the
 /// only two the image-spec registers.
 /// REF: <https://github.com/opencontainers/image-spec/blob/v1.0.1/descriptor.md#digests>
-#[derive(Debug, Clone, Copy, Ord, Eq, Hash, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, Ord, Eq, Hash, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "&'static str")]
 pub enum Algorithm {
     Sha256,
     Sha512,
@@ -38,6 +39,20 @@ impl Algorithm {
     /// Every algorithm angos supports, canonical (sha256) first.
     pub fn supported_algorithms() -> &'static [Algorithm] {
         &[Algorithm::Sha256, Algorithm::Sha512]
+    }
+}
+
+impl From<Algorithm> for &'static str {
+    fn from(algorithm: Algorithm) -> Self {
+        algorithm.as_str()
+    }
+}
+
+impl TryFrom<String> for Algorithm {
+    type Error = Error;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
     }
 }
 

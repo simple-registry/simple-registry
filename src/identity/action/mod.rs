@@ -4,7 +4,7 @@ use serde::{Serialize, Serializer, ser::SerializeMap};
 
 use crate::{
     jobs::{JobState, Queue},
-    oci::{Digest, MediaType, Namespace, Reference, Tag, UploadSessionId},
+    oci::{Algorithm, Digest, MediaType, Namespace, Reference, Tag, UploadSessionId},
 };
 
 /// Action represents a parsed HTTP request: both the domain operation (for CEL policies)
@@ -42,6 +42,7 @@ use crate::{
 /// - `last`: Last result marker for pagination
 /// - `artifact_type`: Filter for referrer queries
 /// - `from`: Source repository of a cross-repo `mount-blob`; absent unless `?from=` is given
+/// - `digest_algorithm`: The `?digest-algorithm=` hint of a `start-upload`; absent unless given
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum Action {
@@ -79,6 +80,8 @@ pub enum Action {
         namespace: Namespace,
         #[serde(skip_serializing_if = "Option::is_none")]
         digest: Option<Digest>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        digest_algorithm: Option<Algorithm>,
     },
     /// Cross-repository blob mount (`POST .../blobs/uploads/?mount=<digest>`).
     /// A distinct CEL action from `start-upload` so policies can gate mounts
@@ -363,7 +366,9 @@ impl Action {
                 }
             }
 
-            Action::StartUpload { namespace, digest } => ActionData {
+            Action::StartUpload {
+                namespace, digest, ..
+            } => ActionData {
                 namespace: Some(namespace),
                 digest: digest.as_ref(),
                 is_push: true,
