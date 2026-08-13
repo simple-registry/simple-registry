@@ -76,6 +76,9 @@ pub const DOCKER_UPLOAD_UUID: HeaderName = HeaderName::from_static("docker-uploa
 pub const OCI_SUBJECT: HeaderName = HeaderName::from_static("oci-subject");
 pub const OCI_TAG: HeaderName = HeaderName::from_static("oci-tag");
 pub const OCI_FILTERS_APPLIED: HeaderName = HeaderName::from_static("oci-filters-applied");
+/// Echoes the `?ns=` a response was served under, telling a proxying client
+/// that the parameter selected an upstream. Absent when it did not.
+pub const OCI_NAMESPACE: HeaderName = HeaderName::from_static("oci-namespace");
 pub const DOCKER_DISTRIBUTION_API_VERSION: HeaderName =
     HeaderName::from_static("docker-distribution-api-version");
 pub const X_POWERED_BY: HeaderName = HeaderName::from_static("x-powered-by");
@@ -324,6 +327,12 @@ impl Registry {
             .await
             .map_err(|e| Error::Internal(format!("storage backend not ready: {e}")))?;
         Ok(())
+    }
+
+    /// The repository mirroring `ns`, the registry namespace a proxying client
+    /// names in `?ns=`. `None` when no repository claims it.
+    pub fn repository_for_ns(&self, ns: &str) -> Option<&Repository> {
+        self.resolver.resolve_ns(ns)
     }
 
     #[instrument]

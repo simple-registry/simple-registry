@@ -69,6 +69,22 @@ pub fn parse(method: &Method, uri: &Uri) -> Option<Action> {
     None
 }
 
+/// The proxy `ns` parameter: the registry namespace a mirroring client believes
+/// it is addressing. Parsed here with every other query value; resolving it to a
+/// repository needs the configuration and happens at the server context.
+#[derive(Deserialize, Default)]
+struct NamespaceQuery {
+    ns: Option<String>,
+}
+
+/// The `?ns=` a request names, if any.
+pub fn proxy_namespace(uri: &Uri) -> Option<String> {
+    uri.query()
+        .and_then(parse_query::<NamespaceQuery>)
+        .and_then(|query| query.ns)
+        .filter(|ns| !ns.is_empty())
+}
+
 #[derive(Deserialize, Default)]
 struct DigestQuery {
     digest: Option<Digest>,

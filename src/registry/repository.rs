@@ -197,6 +197,11 @@ async fn build_downstreams(
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Config {
+    /// The registry namespace this repository mirrors, as a client spells it in
+    /// the `?ns=` proxy parameter (`docker.io`). A pull naming it is served from
+    /// this repository whatever path it asks for; without it `?ns=` selects
+    /// nothing and the local prefix alone decides.
+    pub namespace: Option<String>,
     #[serde(default)]
     pub upstream: Vec<RegistryClientConfig>,
     #[serde(default)]
@@ -227,6 +232,9 @@ impl Config {
 
 pub struct Repository {
     pub name: Namespace,
+    /// The registry namespace this repository mirrors, which is the `?ns=`
+    /// value it answers to. Distinct from `name`, the local prefix it owns.
+    pub namespace: Option<String>,
     pub upstreams: Vec<Upstream>,
     pub replication: Vec<ReplicationDownstream>,
     pub retention_policy: RetentionPolicy,
@@ -278,6 +286,10 @@ impl Repository {
 
         Ok(Self {
             name,
+            namespace: config
+                .namespace
+                .clone()
+                .filter(|namespace| !namespace.is_empty()),
             upstreams,
             replication,
             retention_policy,

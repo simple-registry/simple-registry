@@ -559,6 +559,7 @@ pub fn repository_with_replication(
 ) -> Repository {
     Repository {
         name: Namespace::new(name).unwrap(),
+        namespace: None,
         upstreams: Vec::new(),
         replication,
         retention_policy: RetentionPolicy::new(

@@ -4,7 +4,7 @@ use std::{
 };
 
 use hyper::{
-    Request,
+    Request, Uri,
     header::{HOST, HeaderMap, HeaderValue},
     http::{request::Parts, uri::Authority},
 };
@@ -13,10 +13,10 @@ use tracing::instrument;
 use crate::{
     auth::{Authenticator, Authorizer, TokenIssuer},
     cache::Cache,
-    command::server::error::Error,
+    command::server::{error::Error, router},
     configuration::{Configuration, TrustedProxy},
     identity::{Action, ClientIdentity, RequestScheme},
-    oci::Namespace,
+    oci::{Namespace, namespace_belongs_to},
     registry::{BlobMount, Registry},
 };
 
@@ -65,6 +65,23 @@ impl ServerContext {
 
     pub fn token_issuer(&self) -> Option<&TokenIssuer> {
         self.token_issuer.as_ref()
+    }
+
+    /// Resolves a pull's proxy `?ns=` to the repository mirroring that registry
+    /// namespace, rewriting `action` to address it. Returns the namespace
+    /// served, which the response echoes in `OCI-Namespace`; `None` leaves the
+    /// request exactly as it arrived, which is what an unclaimed `ns`, a
+    /// non-pull route, and a request already addressing that repository all get.
+    pub fn apply_proxy_namespace(&self, action: Option<&mut Action>, uri: &Uri) -> Option<String> {
+        let ns = router::proxy_namespace(uri)?;
+        let repository = self.registry.repository_for_ns(&ns)?;
+        let namespace = action?.pull_namespace_mut()?;
+
+        if !namespace_belongs_to(namespace.as_ref(), repository.name.as_ref()) {
+            *namespace = namespace.prepend(&repository.name).ok()?;
+        }
+
+        Some(ns)
     }
 
     /// The scheme and host a bearer challenge is derived from, or `None` when no

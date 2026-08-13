@@ -329,6 +329,7 @@ mod tests {
             .collect();
         Repository {
             name: Namespace::new(name).unwrap(),
+            namespace: None,
             upstreams,
             replication,
             retention_policy: RetentionPolicy::new(

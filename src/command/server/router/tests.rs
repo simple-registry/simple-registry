@@ -744,6 +744,35 @@ fn test_parse_invalid_uuid_in_upload_path() {
     assert!(route.is_none());
 }
 
+/// The proxy `ns` parameter selects no upstream, so it must not change or
+/// reject the route it rides on. Angos resolves its upstream from the namespace
+/// prefix alone.
+#[test]
+fn ns_parameter_is_accepted_and_ignored() {
+    let digest = format!("sha256:{}", "a".repeat(64));
+    for (method, path) in [
+        (Method::GET, "/v2/lib/nginx/manifests/latest".to_string()),
+        (Method::HEAD, "/v2/lib/nginx/manifests/latest".to_string()),
+        (Method::GET, format!("/v2/lib/nginx/blobs/{digest}")),
+        (Method::GET, "/v2/lib/nginx/tags/list".to_string()),
+        (Method::GET, format!("/v2/lib/nginx/referrers/{digest}")),
+        (Method::POST, "/v2/lib/nginx/blobs/uploads/".to_string()),
+        (Method::GET, "/v2/_catalog".to_string()),
+    ] {
+        let plain = parse(&method, &path.parse::<Uri>().unwrap());
+        let with_ns = parse(
+            &method,
+            &format!("{path}?ns=docker.io").parse::<Uri>().unwrap(),
+        );
+        assert!(plain.is_some(), "{method} {path} must route");
+        assert_eq!(
+            format!("{with_ns:?}"),
+            format!("{plain:?}"),
+            "?ns= must not change the {method} {path} route"
+        );
+    }
+}
+
 /// The `?digest-algorithm=` hint reaches the session so it hashes under one
 /// algorithm; an unsupported value is a malformed request, not an absent hint.
 #[test]

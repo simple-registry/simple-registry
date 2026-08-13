@@ -289,6 +289,49 @@ impl ActionData<'_> {
 }
 
 impl Action {
+    /// The namespace a pull addresses, mutably, so the proxy `?ns=` parameter
+    /// can resolve it to the repository mirroring that registry before
+    /// authorization reads it.
+    ///
+    /// `None` for everything else: the spec defines the parameter on pull
+    /// operations, so a write naming one is left addressing the namespace it
+    /// spelled out.
+    pub fn pull_namespace_mut(&mut self) -> Option<&mut Namespace> {
+        match self {
+            Action::GetBlob { namespace, .. }
+            | Action::HeadBlob { namespace, .. }
+            | Action::GetManifest { namespace, .. }
+            | Action::HeadManifest { namespace, .. }
+            | Action::ListTags { namespace, .. }
+            | Action::GetReferrer { namespace, .. } => Some(namespace),
+            Action::UiAsset { .. }
+            | Action::UiConfig
+            | Action::Token
+            | Action::Healthz
+            | Action::Readyz
+            | Action::Metrics
+            | Action::ApiVersion
+            | Action::ListCatalog { .. }
+            | Action::StartUpload { .. }
+            | Action::MountBlob { .. }
+            | Action::GetUpload { .. }
+            | Action::PatchUpload { .. }
+            | Action::PutUpload { .. }
+            | Action::DeleteUpload { .. }
+            | Action::DeleteBlob { .. }
+            | Action::PutManifest { .. }
+            | Action::DeleteManifest { .. }
+            | Action::ListRevisions { .. }
+            | Action::ListUploads { .. }
+            | Action::ListRepositories
+            | Action::ListNamespaces { .. }
+            | Action::ListJobs { .. }
+            | Action::ListFailedJobs { .. }
+            | Action::RetryJob { .. }
+            | Action::DeleteJob { .. } => None,
+        }
+    }
+
     /// Returns the action name string as used in CEL policies and webhook headers.
     pub fn action_name(&self) -> &'static str {
         match self {

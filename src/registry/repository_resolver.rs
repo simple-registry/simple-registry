@@ -11,6 +11,12 @@ use std::{collections::HashMap, fmt, sync::Arc};
 
 use crate::{oci::namespace_belongs_to, registry::Repository};
 
+/// The `ns` a repository key mirrors, for the construction-time uniqueness
+/// check.
+fn mirrored<'a>(repositories: &'a HashMap<String, Repository>, key: &str) -> Option<&'a str> {
+    repositories.get(key).and_then(|r| r.namespace.as_deref())
+}
+
 /// A repository map that rejects overlapping repository prefixes at
 /// construction and provides deterministic namespace resolution.
 ///
@@ -29,12 +35,17 @@ impl fmt::Debug for RepositoryResolver {
     }
 }
 
-/// Error returned when overlapping repository prefixes are detected.
+/// Error returned when two repositories cannot be told apart: their prefixes
+/// overlap, or they claim the same `ns`.
 ///
-/// The error names both offending prefixes so the operator can disambiguate.
+/// The error names both offenders so the operator can disambiguate.
 #[derive(Debug, thiserror::Error)]
-#[error("repository prefixes overlap: '{0}' and '{1}'")]
-pub struct OverlapError(String, String);
+pub enum OverlapError {
+    #[error("repository prefixes overlap: '{0}' and '{1}'")]
+    Prefix(String, String),
+    #[error("repositories '{0}' and '{1}' both mirror the namespace '{2}'")]
+    Namespace(String, String, String),
+}
 
 impl RepositoryResolver {
     /// Constructs a resolver from the given map.
@@ -50,13 +61,34 @@ impl RepositoryResolver {
                 let a = keys[i];
                 let b = keys[j];
                 if namespace_belongs_to(a, b) || namespace_belongs_to(b, a) {
-                    return Err(OverlapError(a.to_string(), b.to_string()));
+                    return Err(OverlapError::Prefix(a.to_string(), b.to_string()));
+                }
+                // A `?ns=` value must resolve to one repository, so two
+                // claiming the same one is a misconfiguration, not a race.
+                if let (Some(left), Some(right)) =
+                    (mirrored(&repositories, a), mirrored(&repositories, b))
+                    && left == right
+                {
+                    return Err(OverlapError::Namespace(
+                        a.to_string(),
+                        b.to_string(),
+                        left.to_string(),
+                    ));
                 }
             }
         }
         Ok(Self {
             inner: repositories,
         })
+    }
+
+    /// Resolves the repository mirroring `ns`, the value of a request's proxy
+    /// `?ns=` parameter. `None` when no repository claims it, which leaves the
+    /// parameter without effect.
+    pub fn resolve_ns(&self, ns: &str) -> Option<&Repository> {
+        self.inner
+            .values()
+            .find(|repository| repository.namespace.as_deref() == Some(ns))
     }
 
     /// Resolves the repository for a namespace.
@@ -91,7 +123,7 @@ impl RepositoryResolver {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
 
     use super::*;
     use crate::{
@@ -103,6 +135,7 @@ mod tests {
     fn repo(name: &str) -> Repository {
         Repository {
             name: Namespace::new(name).unwrap(),
+            namespace: None,
             upstreams: Vec::new(),
             replication: Vec::new(),
             retention_policy: RetentionPolicy::new(
@@ -145,6 +178,46 @@ mod tests {
             result.is_err(),
             "org/team and org/team/sub must be rejected"
         );
+    }
+
+    /// A `?ns=` must name one repository, so two claiming the same registry
+    /// namespace fail at startup rather than resolving by map order.
+    #[test]
+    fn repositories_mirroring_the_same_namespace_rejected() {
+        let mut mirror = repo("docker-hub");
+        mirror.namespace = Some("docker.io".to_string());
+        let mut second = repo("hub-mirror");
+        second.namespace = Some("docker.io".to_string());
+
+        let repositories = Arc::new(HashMap::from([
+            ("docker-hub".to_string(), mirror),
+            ("hub-mirror".to_string(), second),
+        ]));
+        let error = RepositoryResolver::new(repositories)
+            .expect_err("two repositories mirroring docker.io must be refused");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("docker.io"),
+            "the error must name the namespace both claim: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_ns_finds_the_mirroring_repository() {
+        let mut mirror = repo("docker-hub");
+        mirror.namespace = Some("docker.io".to_string());
+        let repositories = Arc::new(HashMap::from([
+            ("docker-hub".to_string(), mirror),
+            ("internal".to_string(), repo("internal")),
+        ]));
+        let resolver = RepositoryResolver::new(repositories).unwrap();
+
+        assert_eq!(
+            resolver.resolve_ns("docker.io").map(|r| r.name.to_string()),
+            Some("docker-hub".to_string())
+        );
+        assert!(resolver.resolve_ns("quay.io").is_none());
     }
 
     #[test]

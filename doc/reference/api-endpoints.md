@@ -16,6 +16,8 @@ Base path: `/v2/`
 
 Comma-separated `Accept` header values are parsed and ordered by quality (`q`) before Angos uses them for upstream pull-through requests.
 
+The optional `ns` query parameter ([Registry Proxying](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#registry-proxying)) names the registry namespace a mirroring client believes it is addressing. On a pull, a request naming one a `[repository]` declares (`namespace = "docker.io"`) is served from that repository whatever path it asks for, and the response echoes `OCI-Namespace`. A namespace no repository declares is ignored, as is `ns` on a write, and no header is sent. See [Upstream Selection and the `ns` Parameter](../explanation/pull-through-caching.md#upstream-selection-and-the-ns-parameter).
+
 ### API Version Check
 
 ```

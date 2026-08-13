@@ -534,10 +534,11 @@ must be set.
 
 ## Repository (`repository."<namespace>"`)
 
-Repository namespace keys must not overlap: a key like `team` and a key like `team/app` are considered overlapping because one is a namespace-prefix of the other. The registry rejects this configuration at startup.
+Repository namespace keys must not overlap: a key like `team` and a key like `team/app` are considered overlapping because one is a namespace-prefix of the other. The registry rejects this configuration at startup, as it does two repositories declaring the same `namespace`.
 
 | Option                      | Type     | Default  | Description                     |
 |-----------------------------|----------|----------|---------------------------------|
+| `namespace`                 | string   | none     | Registry namespace this repository mirrors (`docker.io`), as a client names it in the `?ns=` proxy parameter. A request naming it is served from this repository whatever path it asks for; see [Upstream Selection](../explanation/pull-through-caching.md#upstream-selection-and-the-ns-parameter) |
 | `immutable_tags`            | bool     | `false`  | Enable immutable tags for this repository. The effective flag is this value OR `global.immutable_tags`, so a repository can add immutability but never opt out of a global `true` |
 | `immutable_tags_exclusions` | [string] | inherits | Replaces the global exclusion list when non-empty |
 | `authorization_webhook`     | string   | inherits | Webhook name (empty to disable) |
