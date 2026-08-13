@@ -44,6 +44,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A manifest pushed with parameters on its `Content-Type` (`; charset=utf-8`) is accepted rather than refused as a media-type mismatch, and the parameters are dropped instead of stored and echoed on pull.
 - Listing the tags of a namespace that holds nothing answers `404 NAME_UNKNOWN` instead of `200` with an empty list, so a client can tell an absent repository from an empty one. A repository whose tags were all deleted still answers `200`.
 - A referrers listing on a pull-through repository now merges the upstream's referrers with the cached ones, so a subject that was never pulled no longer reports none. An unreachable upstream is left out rather than failing the request. The tag listing still reports cached tags only; see [API Endpoints](doc/reference/api-endpoints.md).
+- A referrer whose manifest carries no `mediaType` is listed under the type its shape implies rather than dropped from the listing.
+- The referrers listing folds in the entries a client recorded under the fallback tag before the API existed, so a repository imported from such a registry keeps them.
+- A chunk upload whose `Content-Range` names a last byte must carry exactly that many bytes; a body disagreeing with the window it announced is refused with `416` instead of committed.
+- Deleting a blob a manifest still references answers `409` rather than `405`, which read as "this registry does not delete blobs" when the client only had to delete the manifest first.
+- A blob `HEAD` carries `Accept-Ranges`, which only `GET` sent, so a client learns a blob is rangeable without fetching it.
 - A manifest larger than `global.max_manifest_size` is refused with `413`, matching the blob size limit, instead of `400`.
 - A ranged blob pull on a pull-through repository forwards the range to the upstream instead of returning `416` until the blob is cached, so one URL no longer answers `206` or `416` depending on cache state.
 

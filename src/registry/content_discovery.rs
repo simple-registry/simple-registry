@@ -13,7 +13,7 @@ use angos_storage::Page;
 use crate::{
     http_response::{ResponseBody, build_response, json_headers},
     oci::{
-        Descriptor, Digest, Manifest, MediaType, Namespace, OCI_INDEX_MEDIA_TYPE,
+        Content, Descriptor, Digest, Manifest, MediaType, Namespace, OCI_INDEX_MEDIA_TYPE,
         OCI_MANIFEST_SCHEMA_VERSION, Tag,
     },
     registry::{
@@ -96,6 +96,12 @@ fn referrers_headers(artifact_type_filtered: bool, link: Option<&str>) -> Result
     insert_next_link(&mut headers, link)?;
 
     Ok(headers)
+}
+
+/// Whether `referrer` passes a listing's `artifactType` filter, which an
+/// already-resolved descriptor is checked against rather than re-read.
+fn matches_filter(referrer: &Descriptor, artifact_type: Option<&MediaType>) -> bool {
+    artifact_type.is_none_or(|filter| referrer.artifact_type.as_ref() == Some(filter))
 }
 
 /// Fan-out for resolving referrer candidates to descriptors: each candidate is
@@ -242,9 +248,16 @@ impl Registry {
         last: Option<String>,
     ) -> Result<Page<Descriptor>, Error> {
         let artifact_type = artifact_type.as_ref();
-        let upstream = self
+        // Referrers no local index knows: an upstream's, and any a pre-API
+        // client left under the fallback tag. Both arrive resolved.
+        let mut described = self
             .upstream_referrers(upstream, namespace, digest, artifact_type)
             .await;
+        for referrer in self.fallback_tag_referrers(namespace, digest).await {
+            if matches_filter(&referrer, artifact_type) {
+                described.entry(referrer.digest.clone()).or_insert(referrer);
+            }
+        }
 
         let local: HashSet<Digest> = self
             .metadata_store
@@ -253,16 +266,16 @@ impl Registry {
             .await?;
         let mut candidates: Vec<Digest> = local
             .iter()
-            .chain(upstream.keys().filter(|digest| !local.contains(*digest)))
+            .chain(described.keys().filter(|digest| !local.contains(*digest)))
             .cloned()
             .collect();
         candidates.sort();
 
         let page = pagination::paginate_sorted(&candidates, n, last.as_deref());
         // Up to `REFERRER_RESOLVE_CONCURRENCY` local candidates resolve at once,
-        // each one an independent manifest read. An upstream-only candidate is
-        // already resolved, its descriptor coming from the listing.
-        let (local, upstream) = (&local, &upstream);
+        // each one an independent manifest read. A candidate the local index
+        // does not hold is already resolved, its descriptor coming with it.
+        let (local, described) = (&local, &described);
         let mut referrers: Vec<Descriptor> = stream::iter(page.items)
             .map(async |manifest_digest| {
                 if local.contains(&manifest_digest) {
@@ -275,7 +288,7 @@ impl Registry {
                         )
                         .await;
                 }
-                upstream.get(&manifest_digest).cloned()
+                described.get(&manifest_digest).cloned()
             })
             .buffer_unordered(REFERRER_RESOLVE_CONCURRENCY)
             .filter_map(|descriptor| async move { descriptor })
@@ -287,6 +300,37 @@ impl Registry {
             items: referrers,
             next_token: page.next_token,
         })
+    }
+
+    /// The referrers a pre-API client recorded under the fallback tag
+    /// (`sha256-<hex>`), which the spec's "Enabling the Referrers API"
+    /// procedure has a registry fold into the listing: a repository imported
+    /// from a registry whose clients used the fallback would otherwise lose
+    /// them. Costs one link read per listing, which misses on a subject that
+    /// never had one.
+    async fn fallback_tag_referrers(
+        &self,
+        namespace: &Namespace,
+        subject: &Digest,
+    ) -> Vec<Descriptor> {
+        let Ok(tag) = Tag::new(&format!("{}-{}", subject.algorithm(), subject.hash())) else {
+            return Vec::new();
+        };
+        let Ok(link) = self
+            .metadata_store
+            .read_link(namespace, &LinkKind::Tag(tag))
+            .await
+        else {
+            return Vec::new();
+        };
+        let Ok(body) = self.blob_store.read(&link.target).await else {
+            return Vec::new();
+        };
+
+        match Manifest::from_slice(&body).map(|index| index.content) {
+            Ok(Content::Index { manifests }) => manifests,
+            _ => Vec::new(),
+        }
     }
 
     /// The referrers `upstream` holds for `digest`, keyed by their own digest
@@ -310,10 +354,7 @@ impl Registry {
         match repository.list_referrers(namespace, digest).await {
             Ok(referrers) => referrers
                 .into_iter()
-                .filter(|referrer| {
-                    artifact_type
-                        .is_none_or(|filter| referrer.artifact_type.as_ref() == Some(filter))
-                })
+                .filter(|referrer| matches_filter(referrer, artifact_type))
                 .map(|referrer| (referrer.digest.clone(), referrer))
                 .collect(),
             Err(error) => {
@@ -365,7 +406,7 @@ impl Registry {
                         if !manifest.artifact_type_matches(artifact_type) {
                             return None;
                         }
-                        manifest.take_descriptor(manifest_digest, manifest_len as u64)
+                        Some(manifest.take_descriptor(manifest_digest, manifest_len as u64))
                     }
                     Err(e) => {
                         warn!("Failed to parse referrer manifest {manifest_digest}: {e}");
@@ -1031,6 +1072,63 @@ mod tests {
             .resolve_referrer_descriptor(&referrer_namespace(), &subject(), manifest_digest, None)
             .await;
         assert!(result.is_none());
+    }
+
+    /// A repository imported from a registry whose clients used the referrers
+    /// fallback tag keeps those entries: the spec's "Enabling the Referrers
+    /// API" procedure has the tag's index folded into the listing.
+    #[tokio::test]
+    async fn list_referrers_merges_the_fallback_tag_index() {
+        let case = FSRegistryTestCase::with_split_backends();
+        let registry = case.registry();
+        let namespace = referrer_namespace();
+        let subject = subject();
+
+        let indexed = Digest::sha256_of_bytes(b"referrer the index knows");
+        create_referrer_link(
+            &registry.metadata_store,
+            &namespace,
+            &indexed,
+            Some(descriptor_with(None, &indexed)),
+        )
+        .await;
+
+        // The fallback tag an older client would have pushed: an index whose
+        // manifests are the referrers of the subject.
+        let tagged = Digest::sha256_of_bytes(b"referrer only the tag knows");
+        let fallback = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "mediaType": OCI_INDEX_MEDIA_TYPE,
+            "manifests": [descriptor_with(None, &tagged)],
+        }))
+        .unwrap();
+        let fallback_digest = upload_blob(registry, &namespace, &fallback).await;
+        let tag = Tag::new(&format!("{}-{}", subject.algorithm(), subject.hash())).unwrap();
+        registry
+            .metadata_store
+            .update_links(
+                &namespace,
+                &[LinkOperation::create(
+                    LinkKind::Tag(tag),
+                    fallback_digest.clone(),
+                )],
+            )
+            .await
+            .unwrap();
+
+        let page = registry
+            .list_referrers(None, &namespace, &subject, None, DEFAULT_PAGE_SIZE, None)
+            .await
+            .unwrap();
+
+        let mut served: Vec<Digest> = page.items.into_iter().map(|d| d.digest).collect();
+        served.sort();
+        let mut expected = vec![indexed, tagged];
+        expected.sort();
+        assert_eq!(
+            served, expected,
+            "the listing must hold both the indexed and the fallback-tagged referrer"
+        );
     }
 
     /// A pull-through namespace lists what the upstream holds alongside what it

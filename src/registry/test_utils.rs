@@ -228,7 +228,7 @@ pub async fn upload_blob(registry: &Registry, namespace: &Namespace, content: &[
                 namespace,
                 session_id: &session_id,
                 digest: &digest,
-                start_offset: None,
+                content_range: None,
                 content_length: Some(body.len() as u64),
             },
             Cursor::new(body),

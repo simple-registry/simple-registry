@@ -126,20 +126,10 @@ pub fn parse_pushed_manifest(
 /// type otherwise, so a served manifest never lacks the `Content-Type` the OCI
 /// spec requires and go-containerregistry clients reject when absent.
 pub fn recover_media_type(body: &[u8]) -> MediaType {
-    let manifest = Manifest::from_slice(body).ok();
-    if let Some(media_type) = manifest.as_ref().and_then(|m| m.media_type.clone()) {
-        return media_type;
-    }
-    // Keyed on the children rather than the shape: a document whose `manifests`
-    // array is present but empty has always been served as an image manifest,
-    // and a stored one must keep the `Content-Type` it has always had.
-    let lists_children =
-        |m: &Manifest| matches!(&m.content, Content::Index { manifests } if !manifests.is_empty());
-    if manifest.as_ref().is_some_and(lists_children) {
-        MediaType::oci_index()
-    } else {
-        MediaType::oci_manifest()
-    }
+    Manifest::from_slice(body).as_ref().map_or_else(
+        |_| MediaType::oci_manifest(),
+        Manifest::described_media_type,
+    )
 }
 
 pub fn parse_manifest_digests(

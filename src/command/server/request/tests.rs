@@ -9,7 +9,7 @@ use crate::{
         error::Error,
         request::{RequestHeaders, X_ANGOS_NO_REDIRECT},
     },
-    http_range::RequestRange,
+    http_range::{ByteWindow, RequestRange},
     http_response::ResponseBody,
     oci::{MediaRange, MediaType},
     registry_client::X_ANGOS_SOURCE_TIMESTAMP,
@@ -24,14 +24,14 @@ fn test_range_with_bytes_prefix() {
     let (parts, ()) = request.into_parts();
 
     let range = RequestHeaders::new(&parts.headers)
-        .range(RANGE)
+        .chunk_range(RANGE)
         .unwrap()
         .unwrap();
     assert_eq!(
         range,
-        RequestRange::FromTo {
+        ByteWindow {
             start: 0,
-            end: Some(499)
+            end: Some(499),
         }
     );
 }
@@ -74,10 +74,10 @@ fn test_blob_range_with_bytes_prefix() {
         .unwrap();
     assert_eq!(
         range,
-        RequestRange::FromTo {
+        RequestRange::FromTo(ByteWindow {
             start: 0,
-            end: Some(499)
-        }
+            end: Some(499),
+        })
     );
 }
 
@@ -95,10 +95,10 @@ fn test_blob_range_unit_is_case_insensitive() {
         .unwrap();
     assert_eq!(
         range,
-        RequestRange::FromTo {
+        RequestRange::FromTo(ByteWindow {
             start: 0,
-            end: Some(499)
-        }
+            end: Some(499),
+        })
     );
 }
 
@@ -111,14 +111,14 @@ fn test_range_without_bytes_prefix() {
     let (parts, ()) = request.into_parts();
 
     let range = RequestHeaders::new(&parts.headers)
-        .range(RANGE)
+        .chunk_range(RANGE)
         .unwrap()
         .unwrap();
     assert_eq!(
         range,
-        RequestRange::FromTo {
+        ByteWindow {
             start: 100,
-            end: Some(200)
+            end: Some(200),
         }
     );
 }
@@ -132,14 +132,14 @@ fn test_content_range_without_bytes_prefix() {
     let (parts, ()) = request.into_parts();
 
     let range = RequestHeaders::new(&parts.headers)
-        .range(CONTENT_RANGE)
+        .chunk_range(CONTENT_RANGE)
         .unwrap()
         .unwrap();
     assert_eq!(
         range,
-        RequestRange::FromTo {
+        ByteWindow {
             start: 100,
-            end: Some(200)
+            end: Some(200),
         }
     );
 }
@@ -153,14 +153,14 @@ fn test_range_no_end() {
     let (parts, ()) = request.into_parts();
 
     let range = RequestHeaders::new(&parts.headers)
-        .range(RANGE)
+        .chunk_range(RANGE)
         .unwrap()
         .unwrap();
     assert_eq!(
         range,
-        RequestRange::FromTo {
+        ByteWindow {
             start: 0,
-            end: None
+            end: None,
         }
     );
 }
@@ -204,14 +204,14 @@ fn test_range_large_numbers() {
     let (parts, ()) = request.into_parts();
 
     let range = RequestHeaders::new(&parts.headers)
-        .range(RANGE)
+        .chunk_range(RANGE)
         .unwrap()
         .unwrap();
     assert_eq!(
         range,
-        RequestRange::FromTo {
+        ByteWindow {
             start: 1_000_000_000,
-            end: Some(2_000_000_000)
+            end: Some(2_000_000_000),
         }
     );
 }
@@ -221,7 +221,9 @@ fn test_range_missing_header() {
     let request = Request::builder().body(()).unwrap();
     let (parts, ()) = request.into_parts();
 
-    let range = RequestHeaders::new(&parts.headers).range(RANGE).unwrap();
+    let range = RequestHeaders::new(&parts.headers)
+        .chunk_range(RANGE)
+        .unwrap();
     assert_eq!(range, None);
 }
 
@@ -235,14 +237,14 @@ fn test_range_custom_header_name() {
     let (parts, ()) = request.into_parts();
 
     let range = RequestHeaders::new(&parts.headers)
-        .range(custom_header)
+        .chunk_range(custom_header)
         .unwrap()
         .unwrap();
     assert_eq!(
         range,
-        RequestRange::FromTo {
+        ByteWindow {
             start: 50,
-            end: Some(100)
+            end: Some(100),
         }
     );
 }
@@ -255,7 +257,7 @@ fn test_range_start_greater_than_end() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).range(RANGE);
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
     match result.unwrap_err() {
         Error::RangeNotSatisfiable(msg) => {
@@ -273,7 +275,7 @@ fn test_range_missing_start_is_invalid_for_start_end_parser() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).range(RANGE);
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
     match result.unwrap_err() {
         Error::RangeNotSatisfiable(msg) => {
@@ -291,7 +293,7 @@ fn test_range_invalid_format() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).range(RANGE);
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
     match result.unwrap_err() {
         Error::RangeNotSatisfiable(msg) => {
@@ -321,7 +323,7 @@ fn test_range_non_numeric_start() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).range(RANGE);
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
 }
 
@@ -333,7 +335,7 @@ fn test_range_non_numeric_end() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).range(RANGE);
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
     match result.unwrap_err() {
         Error::RangeNotSatisfiable(msg) => {
@@ -353,7 +355,7 @@ fn test_range_overflow() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).range(RANGE);
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
 }
 

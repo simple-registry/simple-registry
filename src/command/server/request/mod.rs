@@ -13,7 +13,7 @@ use tokio_util::io::StreamReader;
 
 use crate::{
     command::server::error::Error,
-    http_range::{Error as RangeError, RequestRange},
+    http_range::{ByteWindow, Error as RangeError, RequestRange},
     oci::{MediaRange, MediaType},
     registry_client::X_ANGOS_SOURCE_TIMESTAMP,
 };
@@ -138,14 +138,14 @@ impl<'a> RequestHeaders<'a> {
         Some(parsed.min(Utc::now()))
     }
 
-    /// The upload offset carried by `header`, which chunked-upload clients send
-    /// both bare and `bytes=`-prefixed.
-    pub fn range(&self, header: HeaderName) -> Result<Option<RequestRange>, Error> {
+    /// The window carried by `header`, which chunked-upload clients send both
+    /// bare and `bytes=`-prefixed.
+    pub fn chunk_range(&self, header: HeaderName) -> Result<Option<ByteWindow>, Error> {
         let Some(range_header) = self.header_string(header)? else {
             return Ok(None);
         };
 
-        RequestRange::parse_offset(&range_header)
+        RequestRange::parse_chunk(&range_header)
             .map(Some)
             .map_err(|error| not_satisfiable(&error))
     }

@@ -24,16 +24,12 @@ use crate::{
     },
 };
 
-fn head_blob_headers(digest: &Digest, size: u64) -> Result<HeaderMap, Error> {
+/// Headers a blob answer carries whether or not it has a body: `Accept-Ranges`
+/// among them, so a `HEAD` advertises the ranges a `GET` will serve.
+fn blob_headers(digest: &Digest, size: u64) -> Result<HeaderMap, Error> {
     let mut headers = HeaderMap::new();
     headers.insert(DOCKER_CONTENT_DIGEST, HeaderValue::try_from(digest)?);
     headers.insert(CONTENT_LENGTH, size.into());
-
-    Ok(headers)
-}
-
-fn get_blob_headers(digest: &Digest, total_length: u64) -> Result<HeaderMap, Error> {
-    let mut headers = head_blob_headers(digest, total_length)?;
     headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
 
     Ok(headers)
@@ -46,7 +42,7 @@ fn partial_blob_headers(
     length: u64,
     range: ResponseRange,
 ) -> Result<HeaderMap, Error> {
-    let mut headers = get_blob_headers(digest, length)?;
+    let mut headers = blob_headers(digest, length)?;
     headers.insert(CONTENT_RANGE, HeaderValue::try_from(range)?);
 
     Ok(headers)
@@ -69,7 +65,7 @@ fn whole_blob_response(
 ) -> Result<Response<ResponseBody>, Error> {
     Ok(build_response(
         StatusCode::OK,
-        get_blob_headers(digest, total_length)?,
+        blob_headers(digest, total_length)?,
         ResponseBody::streaming(body),
     )?)
 }
@@ -217,7 +213,7 @@ impl Registry {
                 Ok(size) => {
                     return Ok(build_response(
                         StatusCode::OK,
-                        head_blob_headers(&request.digest, size)?,
+                        blob_headers(&request.digest, size)?,
                         ResponseBody::empty(),
                     )?);
                 }
@@ -238,7 +234,7 @@ impl Registry {
 
         Ok(build_response(
             StatusCode::OK,
-            head_blob_headers(&digest, size)?,
+            blob_headers(&digest, size)?,
             ResponseBody::empty(),
         )?)
     }
@@ -466,6 +462,7 @@ mod tests {
     use super::*;
     use crate::{
         cache,
+        http_range::ByteWindow,
         oci::{Namespace, Tag},
         registry::{
             manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
@@ -669,10 +666,10 @@ mod tests {
             let content = b"test blob content";
 
             let (digest, repository) = create_test_blob(registry, namespace, content).await;
-            let range = Some(RequestRange::FromTo {
+            let range = Some(RequestRange::FromTo(ByteWindow {
                 start: 5,
                 end: Some(10),
-            });
+            }));
             let response = get_blob(registry, &repository, &[], namespace, &digest, range)
                 .await
                 .unwrap();
@@ -998,10 +995,10 @@ mod tests {
             metadata_store_over(object),
         );
         let namespace = &Namespace::new("local/repo").unwrap();
-        let range = Some(RequestRange::FromTo {
+        let range = Some(RequestRange::FromTo(ByteWindow {
             start: 5,
             end: Some(10),
-        });
+        }));
 
         let response = registry
             .get_blob_with_access(Some(&repository), &[], namespace, &digest, range, false)
@@ -1186,10 +1183,10 @@ mod tests {
             );
             assert_eq!(response_body(response).await, content);
 
-            let range = Some(RequestRange::FromTo {
+            let range = Some(RequestRange::FromTo(ByteWindow {
                 start: 5,
                 end: Some(15),
-            });
+            }));
             let response = registry.get_local_blob(&digest, range).await.unwrap();
             assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
             assert_eq!(
@@ -1213,10 +1210,10 @@ mod tests {
             let response = registry
                 .get_local_blob(
                     &digest,
-                    Some(RequestRange::FromTo {
+                    Some(RequestRange::FromTo(ByteWindow {
                         start: 0,
                         end: None,
-                    }),
+                    })),
                 )
                 .await
                 .unwrap();
@@ -1317,10 +1314,10 @@ mod tests {
             let response = registry
                 .get_local_blob(
                     &digest,
-                    Some(RequestRange::FromTo {
+                    Some(RequestRange::FromTo(ByteWindow {
                         start: 8,
                         end: Some(10_000),
-                    }),
+                    })),
                 )
                 .await
                 .unwrap();
@@ -1355,10 +1352,10 @@ mod tests {
             let result = registry
                 .get_local_blob(
                     &digest,
-                    Some(RequestRange::FromTo {
+                    Some(RequestRange::FromTo(ByteWindow {
                         start: content.len() as u64,
                         end: None,
-                    }),
+                    })),
                 )
                 .await;
 
@@ -1377,10 +1374,10 @@ mod tests {
             let response = registry
                 .get_local_blob(
                     &digest,
-                    Some(RequestRange::FromTo {
+                    Some(RequestRange::FromTo(ByteWindow {
                         start: 0,
                         end: None,
-                    }),
+                    })),
                 )
                 .await
                 .unwrap();
@@ -1432,8 +1429,7 @@ mod header_tests {
     use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, LOCATION};
 
     use super::{
-        Digest, ResponseRange, get_blob_headers, get_blob_redirect_headers, head_blob_headers,
-        partial_blob_headers,
+        Digest, ResponseRange, blob_headers, get_blob_redirect_headers, partial_blob_headers,
     };
     use crate::registry::DOCKER_CONTENT_DIGEST;
 
@@ -1444,18 +1440,13 @@ mod header_tests {
     }
 
     #[test]
-    fn head_blob_headers_contains_required_fields() {
-        let headers = head_blob_headers(&sample_digest(), 42).unwrap();
+    /// `Accept-Ranges` rides on every blob answer, `HEAD` included: a client
+    /// must be able to learn a blob is rangeable without fetching it.
+    fn blob_headers_advertise_ranges() {
+        let headers = blob_headers(&sample_digest(), 42).unwrap();
         assert_eq!(headers[&DOCKER_CONTENT_DIGEST], sample_digest().to_string());
         assert_eq!(headers[&CONTENT_LENGTH], "42");
-    }
-
-    #[test]
-    fn get_blob_headers_includes_accept_ranges() {
-        let headers = get_blob_headers(&sample_digest(), 1024).unwrap();
-        assert_eq!(headers[&DOCKER_CONTENT_DIGEST], sample_digest().to_string());
         assert_eq!(headers[&ACCEPT_RANGES], "bytes");
-        assert_eq!(headers[&CONTENT_LENGTH], "1024");
     }
 
     /// `Content-Length` is the streamed body, which an upstream reports apart

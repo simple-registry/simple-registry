@@ -108,13 +108,28 @@ impl Manifest {
         filter.is_none_or(|want| self.has_artifact_type(want))
     }
 
+    /// The media type describing this manifest: its own `mediaType`, else the
+    /// one its shape implies. Keyed on the children rather than the shape: a
+    /// document whose `manifests` array is present but empty has always been
+    /// served as an image manifest, and a stored one must keep the
+    /// `Content-Type` it has always had.
+    pub fn described_media_type(&self) -> MediaType {
+        if let Some(media_type) = self.media_type.clone() {
+            return media_type;
+        }
+        match &self.content {
+            Content::Index { manifests } if !manifests.is_empty() => MediaType::oci_index(),
+            _ => MediaType::oci_manifest(),
+        }
+    }
+
     /// Builds a `Descriptor` for this manifest, moving the (potentially large)
-    /// annotations map out of `self` rather than cloning it. Returns `None`
-    /// only when the manifest carries no `media_type`. Filter-mismatch is a
-    /// separate concern; callers that need filtering call
-    /// `artifact_type_matches` first.
-    pub fn take_descriptor(&mut self, digest: Digest, size: u64) -> Option<Descriptor> {
-        let media_type = self.media_type.clone()?;
+    /// annotations map out of `self` rather than cloning it. A manifest with no
+    /// `mediaType` is described by the one its shape implies, so it is listed
+    /// rather than dropped. Filter-mismatch is a separate concern; callers that
+    /// need filtering call `artifact_type_matches` first.
+    pub fn take_descriptor(&mut self, digest: Digest, size: u64) -> Descriptor {
+        let media_type = self.described_media_type();
         // Per the OCI Referrers API a referrer's `artifactType` is the manifest's
         // own field, falling back to the config `mediaType` for image manifests
         // without one; an empty value would drop the entry from filtered lists.
@@ -122,14 +137,14 @@ impl Manifest {
             .artifact_type
             .clone()
             .or_else(|| self.content.config().map(|c| c.media_type.clone()));
-        Some(Descriptor {
+        Descriptor {
             media_type,
             annotations: mem::take(&mut self.annotations),
             artifact_type,
             platform: None,
             digest,
             size,
-        })
+        }
     }
 }
 
@@ -264,13 +279,12 @@ mod tests {
         assert!(!manifest.has_artifact_type(&media_type("application/vnd.anything")));
     }
 
-    // take_descriptor: media_type present → Some(Descriptor)
+    // take_descriptor: the manifest's own media type describes it
     #[test]
     fn test_take_descriptor_with_media_type_returns_descriptor() {
         let mut manifest = demo_manifest();
         let digest = valid_digest();
-        let descriptor = manifest.take_descriptor(digest.clone(), 999);
-        let d = descriptor.expect("expected Some(Descriptor)");
+        let d = manifest.take_descriptor(digest.clone(), 999);
         assert_eq!(d.media_type, MEDIA_TYPE_MANIFEST);
         assert_eq!(d.digest, digest);
         assert_eq!(d.size, 999);
@@ -283,21 +297,35 @@ mod tests {
     fn test_take_descriptor_falls_back_to_config_media_type() {
         let mut manifest = demo_manifest();
         manifest.artifact_type = None;
-        let d = manifest
-            .take_descriptor(valid_digest(), 1)
-            .expect("expected Some(Descriptor)");
+        let d = manifest.take_descriptor(valid_digest(), 1);
         assert_eq!(d.artifact_type.as_deref(), Some(MEDIA_TYPE_CONFIG));
     }
 
-    // take_descriptor: media_type absent → None (only reason to return None now)
+    /// A manifest carrying no `mediaType` is described by the type its shape
+    /// implies, so a referrer listing names it rather than dropping it.
     #[test]
-    fn test_take_descriptor_no_media_type_returns_none() {
-        let mut manifest = Manifest {
+    fn test_take_descriptor_recovers_an_absent_media_type() {
+        let image = Manifest {
             media_type: None,
             ..Manifest::default()
+        }
+        .take_descriptor(valid_digest(), 0);
+        assert_eq!(image.media_type, MediaType::oci_manifest());
+
+        let child = Descriptor {
+            media_type: media_type(MEDIA_TYPE_MANIFEST),
+            digest: valid_digest(),
+            size: 1,
+            annotations: HashMap::new(),
+            artifact_type: None,
+            platform: None,
         };
-        let descriptor = manifest.take_descriptor(valid_digest(), 0);
-        assert!(descriptor.is_none(), "absent media_type must yield None");
+        let index = Manifest {
+            media_type: None,
+            ..Manifest::index(vec![child])
+        }
+        .take_descriptor(valid_digest(), 0);
+        assert_eq!(index.media_type, MediaType::oci_index());
     }
 
     // artifact_type_matches: None filter matches anything

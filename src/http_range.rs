@@ -37,7 +37,7 @@ fn parse_number(value: &str, part: &str) -> Result<u64, Error> {
 }
 
 /// Parses a `start-end` value where `end` is optional (`100-200`, `0-`).
-fn parse_start_end(value: &str) -> Result<RequestRange, Error> {
+fn parse_start_end(value: &str) -> Result<ByteWindow, Error> {
     let (start, end) = value
         .split_once('-')
         .filter(|(start, end)| is_digits(start) && (end.is_empty() || is_digits(end)))
@@ -45,7 +45,7 @@ fn parse_start_end(value: &str) -> Result<RequestRange, Error> {
 
     let start = parse_number(start, "start")?;
     if end.is_empty() {
-        return Ok(RequestRange::FromTo { start, end: None });
+        return Ok(ByteWindow { start, end: None });
     }
 
     let end = parse_number(end, "end")?;
@@ -55,7 +55,7 @@ fn parse_start_end(value: &str) -> Result<RequestRange, Error> {
         )));
     }
 
-    Ok(RequestRange::FromTo {
+    Ok(ByteWindow {
         start,
         end: Some(end),
     })
@@ -72,11 +72,31 @@ fn strip_bytes_prefix(value: &str) -> Option<&str> {
         .then_some(range_value)
 }
 
-/// A single byte range as a client asks for it: an explicit window, open-ended
-/// when `end` is absent, or a suffix length anchored to the end of the body.
+/// An explicit byte window: where it starts, and where it ends when an end is
+/// named. The `Range` header's `start-end` form and a `Content-Range` are the
+/// same window, so both parse to this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ByteWindow {
+    pub start: u64,
+    pub end: Option<u64>,
+}
+
+impl ByteWindow {
+    /// Whether `received` bytes is what this window declared. A window naming no
+    /// end declares nothing to disagree with.
+    pub fn covers(self, received: u64) -> bool {
+        self.end
+            .is_none_or(|end| received == end.saturating_sub(self.start) + 1)
+    }
+}
+
+/// A single byte range as a client asks for it: an explicit window, or a suffix
+/// length anchored to the end of the body. A suffix is its own variant because
+/// its number is a length rather than a position, and cannot be resolved to a
+/// window without knowing how long the body is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestRange {
-    FromTo { start: u64, end: Option<u64> },
+    FromTo(ByteWindow),
     Suffix(u64),
 }
 
@@ -104,27 +124,21 @@ impl RequestRange {
             return Ok(Some(RequestRange::Suffix(parse_number(suffix, "suffix")?)));
         }
 
-        parse_start_end(range_value).map(Some)
+        parse_start_end(range_value)
+            .map(RequestRange::FromTo)
+            .map(Some)
     }
 
-    /// Parses an upload offset, where the `bytes=` unit is optional: chunked
-    /// upload clients send the offset both bare and prefixed. Only the explicit
-    /// `start-end` form is accepted, a suffix being meaningless for an offset.
+    /// Parses the window a chunk declares in `Content-Range`, where the `bytes=`
+    /// unit is optional: chunked upload clients send the offset both bare and
+    /// prefixed. Only the explicit `start-end` form is accepted, a suffix being
+    /// meaningless for an offset.
     ///
     /// # Errors
     ///
     /// [`Error::Malformed`] for a non-numeric bound or an end before its start.
-    pub fn parse_offset(value: &str) -> Result<Self, Error> {
+    pub fn parse_chunk(value: &str) -> Result<ByteWindow, Error> {
         parse_start_end(strip_bytes_prefix(value).unwrap_or(value))
-    }
-
-    /// The first byte asked for, absent on a suffix range: that one is anchored
-    /// to the end of a body whose length the caller may not know yet.
-    pub fn start(self) -> Option<u64> {
-        match self {
-            RequestRange::FromTo { start, .. } => Some(start),
-            RequestRange::Suffix(_) => None,
-        }
     }
 
     /// Resolves the requested window against a known body length, clamping an
@@ -142,7 +156,7 @@ impl RequestRange {
 
         let last_byte = total_length - 1;
         let (start, end) = match self {
-            RequestRange::FromTo { start, end } => {
+            RequestRange::FromTo(ByteWindow { start, end }) => {
                 if start >= total_length {
                     return Err(Error::Unsatisfiable);
                 }
@@ -175,11 +189,11 @@ impl RequestRange {
 impl Display for RequestRange {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RequestRange::FromTo {
+            RequestRange::FromTo(ByteWindow {
                 start,
                 end: Some(end),
-            } => write!(formatter, "{BYTES_RANGE_PREFIX}{start}-{end}"),
-            RequestRange::FromTo { start, end: None } => {
+            }) => write!(formatter, "{BYTES_RANGE_PREFIX}{start}-{end}"),
+            RequestRange::FromTo(ByteWindow { start, end: None }) => {
                 write!(formatter, "{BYTES_RANGE_PREFIX}{start}-")
             }
             RequestRange::Suffix(length) => write!(formatter, "{BYTES_RANGE_PREFIX}-{length}"),
@@ -226,7 +240,7 @@ impl FromStr for ResponseRange {
         };
 
         match parse_start_end(window)? {
-            RequestRange::FromTo {
+            ByteWindow {
                 start,
                 end: Some(end),
             } => Ok(ResponseRange {
@@ -236,7 +250,7 @@ impl FromStr for ResponseRange {
             }),
             // `parse_start_end` accepts the open-ended form a request may use;
             // a served window always names its last byte.
-            _ => Err(malformed(value)),
+            ByteWindow { end: None, .. } => Err(malformed(value)),
         }
     }
 }
@@ -271,17 +285,17 @@ mod tests {
     fn parse_reads_every_requested_form() {
         assert_eq!(
             RequestRange::parse("bytes=0-499").unwrap(),
-            Some(RequestRange::FromTo {
+            Some(RequestRange::FromTo(ByteWindow {
                 start: 0,
-                end: Some(499)
-            })
+                end: Some(499),
+            }))
         );
         assert_eq!(
             RequestRange::parse("bytes=5-").unwrap(),
-            Some(RequestRange::FromTo {
+            Some(RequestRange::FromTo(ByteWindow {
                 start: 5,
-                end: None
-            })
+                end: None,
+            }))
         );
         assert_eq!(
             RequestRange::parse("bytes=-64").unwrap(),
@@ -303,21 +317,40 @@ mod tests {
         ));
     }
 
-    /// The offset form is what chunked-upload clients send, bare or prefixed.
+    /// The chunk form is what chunked-upload clients send, bare or prefixed.
     #[test]
-    fn parse_offset_accepts_the_unit_as_optional() {
-        let expected = RequestRange::FromTo {
+    fn parse_chunk_accepts_the_unit_as_optional() {
+        let expected = ByteWindow {
             start: 0,
             end: Some(41),
         };
-        assert_eq!(RequestRange::parse_offset("0-41").unwrap(), expected);
-        assert_eq!(RequestRange::parse_offset("bytes=0-41").unwrap(), expected);
+        assert_eq!(RequestRange::parse_chunk("0-41").unwrap(), expected);
+        assert_eq!(RequestRange::parse_chunk("bytes=0-41").unwrap(), expected);
+    }
+
+    /// A chunk that names its last byte declares how many bytes it carries.
+    #[test]
+    fn chunk_range_covers_only_the_length_it_declared() {
+        let window = ByteWindow {
+            start: 10,
+            end: Some(19),
+        };
+        assert!(window.covers(10));
+        assert!(!window.covers(9));
+        assert!(!window.covers(11));
+
+        let open = ByteWindow {
+            start: 10,
+            end: None,
+        };
+        assert!(open.covers(0));
+        assert!(open.covers(4096));
     }
 
     #[test]
-    fn parse_offset_rejects_an_inverted_window() {
+    fn parse_chunk_rejects_an_inverted_window() {
         let error =
-            RequestRange::parse_offset("500-499").expect_err("inverted window must be refused");
+            RequestRange::parse_chunk("500-499").expect_err("inverted window must be refused");
         assert!(
             error.to_string().contains("start (500) > end (499)"),
             "the error must name both bounds, got: {error}"
@@ -327,14 +360,14 @@ mod tests {
     #[test]
     fn request_range_round_trips_through_its_header_value() {
         for range in [
-            RequestRange::FromTo {
+            RequestRange::FromTo(ByteWindow {
                 start: 5,
                 end: Some(10),
-            },
-            RequestRange::FromTo {
+            }),
+            RequestRange::FromTo(ByteWindow {
                 start: 5,
                 end: None,
-            },
+            }),
             RequestRange::Suffix(64),
         ] {
             let header =
@@ -349,10 +382,10 @@ mod tests {
     #[test]
     fn resolve_clamps_to_the_body_length() {
         assert_eq!(
-            RequestRange::FromTo {
+            RequestRange::FromTo(ByteWindow {
                 start: 4,
-                end: Some(99)
-            }
+                end: Some(99),
+            })
             .resolve(10)
             .unwrap(),
             Some(ResponseRange {
@@ -362,10 +395,10 @@ mod tests {
             })
         );
         assert_eq!(
-            RequestRange::FromTo {
+            RequestRange::FromTo(ByteWindow {
                 start: 4,
-                end: None
-            }
+                end: None,
+            })
             .resolve(10)
             .unwrap(),
             Some(ResponseRange {
@@ -399,10 +432,10 @@ mod tests {
     #[test]
     fn resolve_ignores_ranges_for_an_empty_body() {
         assert!(matches!(
-            RequestRange::FromTo {
+            RequestRange::FromTo(ByteWindow {
                 start: 0,
-                end: None
-            }
+                end: None,
+            })
             .resolve(0),
             Ok(None)
         ));
@@ -412,10 +445,10 @@ mod tests {
     #[test]
     fn resolve_refuses_a_window_outside_the_body() {
         assert!(matches!(
-            RequestRange::FromTo {
+            RequestRange::FromTo(ByteWindow {
                 start: 10,
-                end: None
-            }
+                end: None,
+            })
             .resolve(10),
             Err(Error::Unsatisfiable)
         ));

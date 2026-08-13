@@ -58,7 +58,8 @@ DELETE /v2/{namespace}/blobs/{digest}
 ```
 
 Delete a blob owned by the namespace. If the digest is still referenced by manifest metadata in
-that namespace, Angos returns `DENIED` and leaves the blob unchanged. After those references are
+that namespace, Angos returns `DENIED` (HTTP 409) and leaves the blob unchanged: the reference is a
+state the client can resolve by deleting the manifest first, not a method the registry refuses. After those references are
 removed, deleting the blob removes that namespace's ownership; the underlying blob data is removed
 only when no namespace references the digest.
 
@@ -118,7 +119,7 @@ Get upload status.
 PATCH /v2/{namespace}/blobs/uploads/{uuid}
 ```
 
-Upload a chunk. Use `Content-Range` for the chunk range and `Content-Length` for the exact chunk size. A missing `Content-Length` is accepted as a chunked upload streamed to EOF; an invalid `Content-Length` returns `400 Bad Request`. An upload whose cumulative size exceeds `global.max_blob_size` is rejected with `BLOB_UPLOAD_INVALID` (HTTP 413).
+Upload a chunk. Use `Content-Range` for the chunk range and `Content-Length` for the exact chunk size. A `Content-Range` must resume at the committed offset and, when it names a last byte, the body must carry exactly that many bytes; either mismatch returns `416 Range Not Satisfiable`. A missing `Content-Length` is accepted as a chunked upload streamed to EOF; an invalid `Content-Length` returns `400 Bad Request`. An upload whose cumulative size exceeds `global.max_blob_size` is rejected with `BLOB_UPLOAD_INVALID` (HTTP 413).
 
 ```
 PUT /v2/{namespace}/blobs/uploads/{uuid}?digest={digest}
@@ -253,6 +254,8 @@ Query parameters:
 - `last` - Pagination marker
 
 A digest that is not valid syntax, or an `artifactType` that is not a media type, is rejected with `DIGEST_INVALID` (HTTP 400) rather than served as an unfiltered or empty listing.
+
+Referrers a client recorded under the fallback tag (`<algorithm>-<hex>`, an index of referring descriptors) before this registry served the API are folded into the listing, as the spec's "Enabling the Referrers API" procedure requires, so a repository imported from such a registry keeps them.
 
 On a pull-through repository the listing merges the upstream's referrers with the cached ones, since nothing fills a referrer index on its own and an uncached subject would otherwise report none. An upstream that cannot be reached is left out rather than failing the request, so the cached referrers are still served. The `artifactType` filter is applied to both.
 
@@ -643,7 +646,7 @@ Errors follow OCI Distribution error format:
 | `NAME_UNKNOWN`        | 404          | Repository not found      |
 | `SIZE_INVALID`        | 416          | Requested range not satisfiable |
 | `UNAUTHORIZED`        | 401          | Authentication required   |
-| `DENIED`              | 403, 405, or 409 | Access denied by policy, blob is still referenced, or a write was rejected (an immutable tag cannot be overwritten) |
+| `DENIED`              | 403 or 409   | Access denied by policy, or a write was rejected: a still-referenced blob, an immutable tag that cannot be overwritten |
 | `UNSUPPORTED`         | 400          | Unsupported operation, and the code carried by any other malformed request |
 | `REPLICATION_SUPERSEDED` | 409       | Replication write rejected by last-writer-wins (the local copy is strictly newer) |
 

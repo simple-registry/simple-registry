@@ -22,11 +22,12 @@ impl From<registry::Error> for Error {
         match error {
             registry::Error::Initialization(msg) => Error::Initialization(msg),
             registry::Error::BlobUnknown => oci_error(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", None),
-            registry::Error::BlobReferenced => oci_error(
-                StatusCode::METHOD_NOT_ALLOWED,
-                "DENIED",
-                Some(error.to_string()),
-            ),
+            // A blob a manifest still names is a state conflict, not a refused
+            // method: `405` reads as "this registry does not delete blobs",
+            // where the client only has to drop the manifest first.
+            registry::Error::BlobReferenced => {
+                oci_error(StatusCode::CONFLICT, "DENIED", Some(error.to_string()))
+            }
             registry::Error::BlobUploadUnknown => {
                 oci_error(StatusCode::NOT_FOUND, "BLOB_UPLOAD_UNKNOWN", None)
             }

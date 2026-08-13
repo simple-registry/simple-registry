@@ -9,6 +9,7 @@ use tracing::{instrument, warn};
 
 use crate::{
     event_webhook::event::{Event, EventActor},
+    http_range::ByteWindow,
     http_response::{ResponseBody, build_response},
     oci::{Algorithm, Digest, Namespace, UploadSessionId},
     registry::{
@@ -145,7 +146,7 @@ pub struct GetUploadRequest {
 pub struct PatchUploadRequest {
     pub namespace: Namespace,
     pub session_id: UploadSessionId,
-    pub start_offset: Option<u64>,
+    pub content_range: Option<ByteWindow>,
     pub content_length: Option<u64>,
 }
 
@@ -156,8 +157,29 @@ pub struct CompleteUploadRequest<'a> {
     pub namespace: &'a Namespace,
     pub session_id: &'a UploadSessionId,
     pub digest: &'a Digest,
-    pub start_offset: Option<u64>,
+    pub content_range: Option<ByteWindow>,
     pub content_length: Option<u64>,
+}
+
+/// A chunk declaring where it resumes must resume where the session stands: a
+/// gap or a rewind is an out-of-order chunk, not a digest mismatch.
+fn verify_chunk_start(range: Option<ByteWindow>, committed: u64) -> Result<(), Error> {
+    match range {
+        Some(range) if range.start != committed => Err(Error::RangeNotSatisfiable),
+        _ => Ok(()),
+    }
+}
+
+/// A chunk declaring its last byte must carry exactly that many: a body longer
+/// or shorter than the window it announced is refused rather than committed as
+/// whatever arrived.
+fn verify_chunk_extent(range: Option<ByteWindow>, committed: u64, total: u64) -> Result<(), Error> {
+    match range {
+        Some(range) if !range.covers(total.saturating_sub(committed)) => {
+            Err(Error::RangeNotSatisfiable)
+        }
+        _ => Ok(()),
+    }
 }
 
 impl Registry {
@@ -367,7 +389,7 @@ impl Registry {
                 namespace: &request.namespace,
                 session_id: &session_id,
                 digest: &digest,
-                start_offset: None,
+                content_range: None,
                 content_length: Some(content_length.get()),
             },
             stream,
@@ -504,11 +526,7 @@ impl Registry {
             .upload_summary(&request.namespace, &request.session_id)
             .await?;
 
-        if let Some(offset) = request.start_offset
-            && offset != summary.size
-        {
-            return Err(Error::RangeNotSatisfiable);
-        }
+        verify_chunk_start(request.content_range, summary.size)?;
 
         self.reject_oversized_known_length(
             &request.namespace,
@@ -534,6 +552,7 @@ impl Registry {
 
         self.reject_if_oversized(&request.namespace, &request.session_id, size)
             .await?;
+        verify_chunk_extent(request.content_range, summary.size, size)?;
 
         Ok(build_response(
             StatusCode::ACCEPTED,
@@ -563,7 +582,7 @@ impl Registry {
             namespace,
             session_id,
             digest,
-            start_offset,
+            content_range,
             content_length,
         } = request;
 
@@ -587,11 +606,7 @@ impl Registry {
         // A final-chunk PUT carrying a Content-Range must resume from the
         // committed offset; a gap or rewind is an out-of-order chunk (416), not
         // a digest mismatch.
-        if let Some(offset) = start_offset
-            && offset != committed
-        {
-            return Err(Error::RangeNotSatisfiable);
-        }
+        verify_chunk_start(content_range, committed)?;
 
         self.reject_oversized_known_length(namespace, session_id, committed, content_length)
             .await?;
@@ -640,6 +655,7 @@ impl Registry {
 
         self.reject_if_oversized(namespace, session_id, new_total)
             .await?;
+        verify_chunk_extent(content_range, committed, new_total)?;
 
         if &upload_digest != digest {
             warn!("Expected digest '{digest}', got '{upload_digest}'");
@@ -710,6 +726,7 @@ mod tests {
     use async_trait::async_trait;
 
     use crate::{
+        http_range::ByteWindow,
         oci::{Algorithm, Digest, Namespace, UploadSessionId},
         registry::{
             BlobMount, CompleteUploadRequest, Error, GetUploadRequest, MountBlobRequest,
@@ -1205,7 +1222,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(content.len() as u64),
                     },
                     stream,
@@ -1224,7 +1241,10 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: Some(content.len() as u64),
+                        content_range: Some(ByteWindow {
+                            start: content.len() as u64,
+                            end: None,
+                        }),
                         content_length: Some(additional_content.len() as u64),
                     },
                     stream,
@@ -1272,7 +1292,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: None,
                     },
                     Cursor::new(content),
@@ -1288,7 +1308,7 @@ mod tests {
                         namespace,
                         session_id: &session_id,
                         digest: &expected_digest,
-                        start_offset: None,
+                        content_range: None,
                         content_length: None,
                     },
                     Cursor::new(Vec::new()),
@@ -1324,7 +1344,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(content.len() as u64),
                     },
                     stream,
@@ -1342,7 +1362,7 @@ mod tests {
                         namespace,
                         session_id: &session_id,
                         digest: &expected_digest,
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(0),
                     },
                     empty_stream,
@@ -1392,7 +1412,7 @@ mod tests {
                             namespace,
                             session_id: &session_id,
                             digest: &expected_digest,
-                            start_offset: None,
+                            content_range: None,
                             content_length: Some(content.len() as u64),
                         },
                         Cursor::new(content.to_vec()),
@@ -1427,7 +1447,7 @@ mod tests {
                     namespace,
                     session_id: &UploadSessionId::generate(),
                     digest: &digest,
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 Cursor::new(content.to_vec()),
@@ -1458,7 +1478,7 @@ mod tests {
                     namespace,
                     session_id: &UploadSessionId::generate(),
                     digest: &digest,
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 Cursor::new(content.to_vec()),
@@ -1489,7 +1509,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(first_chunk.len() as u64),
                     },
                     Cursor::new(first_chunk.to_vec()),
@@ -1501,7 +1521,10 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: Some(first_chunk.len() as u64),
+                        content_range: Some(ByteWindow {
+                            start: first_chunk.len() as u64,
+                            end: None,
+                        }),
                         content_length: Some(second_chunk.len() as u64),
                     },
                     Cursor::new(second_chunk.to_vec()),
@@ -1517,7 +1540,7 @@ mod tests {
                         namespace,
                         session_id: &session_id,
                         digest: &expected_digest,
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(0),
                     },
                     Cursor::new(Vec::new()),
@@ -1531,6 +1554,84 @@ mod tests {
                 registry.blob_store.read(&expected_digest).await.unwrap(),
                 full_content
             );
+        })
+        .await;
+    }
+
+    /// A chunk declaring its last byte must carry exactly that many: a body
+    /// shorter or longer than the window it announced is refused rather than
+    /// committed as whatever arrived.
+    #[tokio::test]
+    async fn a_chunk_shorter_than_its_content_range_is_refused() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"ten bytes!";
+            let session_id = UploadSessionId::generate();
+
+            registry
+                .blob_store
+                .create_upload(namespace, &session_id, None)
+                .await
+                .unwrap();
+
+            let result = registry
+                .patch_upload(
+                    PatchUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        // Declares 0-99 while carrying ten bytes.
+                        content_range: Some(ByteWindow {
+                            start: 0,
+                            end: Some(99),
+                        }),
+                        content_length: None,
+                    },
+                    Cursor::new(content.to_vec()),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(Error::RangeNotSatisfiable)),
+                "a chunk that undershoots its window must be refused, got {result:?}"
+            );
+        })
+        .await;
+    }
+
+    /// The declared window and the bytes agreeing is the ordinary case, and
+    /// still commits.
+    #[tokio::test]
+    async fn a_chunk_matching_its_content_range_is_committed() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"ten bytes!";
+            let session_id = UploadSessionId::generate();
+
+            registry
+                .blob_store
+                .create_upload(namespace, &session_id, None)
+                .await
+                .unwrap();
+
+            let response = registry
+                .patch_upload(
+                    PatchUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        content_range: Some(ByteWindow {
+                            start: 0,
+                            end: Some(content.len() as u64 - 1),
+                        }),
+                        content_length: Some(content.len() as u64),
+                    },
+                    Cursor::new(content.to_vec()),
+                )
+                .await
+                .expect("a chunk matching its window must commit");
+
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
         })
         .await;
     }
@@ -1625,7 +1726,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(content.len() as u64),
                     },
                     Cursor::new(content.to_vec()),
@@ -1641,7 +1742,7 @@ mod tests {
                         namespace,
                         session_id: &session_id,
                         digest: &expected_digest,
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(0),
                     },
                     Cursor::new(Vec::new()),
@@ -1674,7 +1775,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(content.len() as u64),
                     },
                     Cursor::new(content.to_vec()),
@@ -1689,7 +1790,7 @@ mod tests {
                         namespace,
                         session_id: &session_id,
                         digest: &Digest::sha256_of_bytes(content),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(0),
                     },
                     Cursor::new(Vec::new()),
@@ -1723,7 +1824,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(full_content.len() as u64),
                     },
                     Cursor::new(full_content.to_vec()),
@@ -1739,7 +1840,7 @@ mod tests {
                         namespace,
                         session_id: &session_id,
                         digest: &wrong_digest,
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(0),
                     },
                     Cursor::new(Vec::new()),
@@ -1776,7 +1877,7 @@ mod tests {
                 PatchUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 Cursor::new(content),
@@ -1792,7 +1893,7 @@ mod tests {
                     namespace,
                     session_id: &session_id,
                     digest: &expected_digest,
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(0),
                 },
                 Cursor::new(Vec::new()),
@@ -1839,7 +1940,7 @@ mod tests {
                 PatchUploadRequest {
                     namespace: second_namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 Cursor::new(content),
@@ -1854,7 +1955,7 @@ mod tests {
                     namespace: second_namespace,
                     session_id: &session_id,
                     digest: &digest,
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(0),
                 },
                 Cursor::new(Vec::new()),
@@ -1916,7 +2017,7 @@ mod tests {
                     namespace: second_namespace,
                     session_id: &session_id,
                     digest: &digest,
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 Cursor::new(content),
@@ -2011,7 +2112,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(content.len() as u64),
                     },
                     stream,
@@ -2053,7 +2154,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(9),
                     },
                     stream,
@@ -2067,7 +2168,10 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: Some(0),
+                        content_range: Some(ByteWindow {
+                            start: 0,
+                            end: None,
+                        }),
                         content_length: Some(9),
                     },
                     stream,
@@ -2098,7 +2202,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(12),
                     },
                     stream,
@@ -2119,7 +2223,7 @@ mod tests {
                         namespace,
                         session_id: &session_id,
                         digest: &wrong_digest,
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(0),
                     },
                     empty_stream,
@@ -2164,7 +2268,7 @@ mod tests {
                         namespace,
                         session_id: &session_id,
                         digest: &digest,
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(10),
                     },
                     Cursor::new(content),
@@ -2283,7 +2387,7 @@ mod tests {
                 PatchUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 stream,
@@ -2323,7 +2427,7 @@ mod tests {
                     namespace,
                     session_id: &session_id,
                     digest: &Digest::sha256_of_bytes(content),
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(0),
                 },
                 empty_stream,
@@ -2390,7 +2494,7 @@ mod tests {
                 PatchUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 Cursor::new(content.to_vec()),
@@ -2432,7 +2536,7 @@ mod tests {
                 PatchUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: None,
+                    content_range: None,
                     content_length: None,
                 },
                 Cursor::new(content.to_vec()),
@@ -2476,7 +2580,7 @@ mod tests {
                     namespace,
                     session_id: &session_id,
                     digest: &digest,
-                    start_offset: None,
+                    content_range: None,
                     content_length: None,
                 },
                 Cursor::new(content.to_vec()),
@@ -2516,7 +2620,7 @@ mod tests {
                 PatchUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(4),
                 },
                 Cursor::new(b"abcd".to_vec()),
@@ -2528,7 +2632,10 @@ mod tests {
                 PatchUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: Some(4),
+                    content_range: Some(ByteWindow {
+                        start: 4,
+                        end: None,
+                    }),
                     content_length: None,
                 },
                 Cursor::new(b"efgh".to_vec()),

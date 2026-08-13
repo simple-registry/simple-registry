@@ -68,15 +68,11 @@ pub fn push(
             subject: subject.digest.clone(),
             referrer: digest.clone(),
         };
-        if let Some(descriptor) = manifest.take_descriptor(digest.clone(), body_len) {
-            ops.push(LinkOperation::create_with_descriptor(
-                referrer_link,
-                digest.clone(),
-                Box::new(descriptor),
-            ));
-        } else {
-            ops.push(LinkOperation::create(referrer_link, digest.clone()));
-        }
+        ops.push(LinkOperation::create_with_descriptor(
+            referrer_link,
+            digest.clone(),
+            Box::new(manifest.take_descriptor(digest.clone(), body_len)),
+        ));
     }
 
     match &manifest.content {
