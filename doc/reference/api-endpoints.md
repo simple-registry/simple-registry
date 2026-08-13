@@ -67,11 +67,16 @@ POST /v2/{namespace}/blobs/uploads/
 ```
 
 Start a new blob upload. Returns `202 Accepted` with a `Location` header pointing at the upload
-session, or `201 Created` when the blob is already available (see `digest` / `mount` below).
+session, or `201 Created` when the blob is already available or was uploaded by this request
+(see `digest` / `mount` below).
 
 Query parameters:
-- `digest` - Return the existing blob (returns `201 Created`) only when the requested namespace
-  already owns it; otherwise start a new upload session.
+- `digest` - Return the existing blob (returns `201 Created`) when the requested namespace already
+  owns it. Otherwise, a request carrying the blob as its body with a `Content-Length` completes the
+  upload here and returns `201 Created`, and a request with no body starts a new upload session. A
+  body of undeclared length (chunked, no `Content-Length`) also starts a session, which the client
+  then closes with a `PUT`. A body that does not hash to `digest` is rejected with `DIGEST_INVALID`
+  and stores nothing.
 - `digest-algorithm` - The algorithm (`sha256` or `sha512`) the upload will be closed with. The
   session then hashes each chunk under that one alone instead of every supported algorithm, which is
   what a session must do when it cannot know the algorithm before the closing `PUT`. Completing a

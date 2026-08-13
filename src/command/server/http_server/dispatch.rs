@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, num::NonZeroU64, sync::Arc};
 
 use hyper::{
     Method, Request, Response, body::Incoming, header::CONTENT_RANGE, http::request::Parts,
@@ -23,7 +23,7 @@ use crate::{
         GetReferrersRequest, GetUploadRequest, HeadBlobRequest, HeadManifestRequest,
         ListCatalogRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
         ListTagsRequest, ListUploadsRequest, MountBlobRequest, PatchUploadRequest,
-        PutManifestRequest, RetryJobRequest, StartUploadRequest,
+        PutManifestRequest, RetryJobRequest, StartUploadRequest, StartUploadTarget,
     },
 };
 
@@ -86,13 +86,25 @@ async fn dispatch_route<'a>(
             namespace,
             digest,
             digest_algorithm,
-        } => Ok(registry
-            .start_upload(StartUploadRequest {
-                namespace,
-                digest,
-                digest_algorithm,
-            })
-            .await?),
+        } => {
+            // A body with no `?digest=` has nothing to verify it against, so it
+            // opens a session and is not read.
+            let content_length = headers.content_length()?.and_then(NonZeroU64::new);
+            Ok(registry
+                .start_upload(
+                    actor,
+                    StartUploadRequest {
+                        namespace,
+                        digest_algorithm,
+                        target: digest.map(|digest| StartUploadTarget {
+                            digest,
+                            content_length,
+                        }),
+                    },
+                    incoming_into_async_read(incoming),
+                )
+                .await?)
+        }
         Action::MountBlob {
             namespace,
             digest,

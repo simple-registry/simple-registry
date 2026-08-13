@@ -64,7 +64,7 @@ pub use manifest::{
 pub use repository::Repository;
 pub use upload::{
     BlobMount, CompleteUploadRequest, DeleteUploadRequest, GetUploadRequest, MountBlobRequest,
-    PatchUploadRequest, StartUploadRequest,
+    PatchUploadRequest, StartUploadRequest, StartUploadTarget,
 };
 
 /// The OCI wire vocabulary: header names the registry emits on its responses,

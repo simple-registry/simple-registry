@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `auth.oidc.<name>.client_certificate_bundle` and `client_private_key` present a client certificate on those fetches, so a cluster that keeps discovery closed to unauthenticated users can still back image pulls with projected service-account tokens.
 - EXPERIMENTAL: `contrib/kubelet-credential-provider` hands the kubelet the pulling pod's service-account token as its registry credential, so an image pull authenticates as the workload instead of a shared `imagePullSecret`. It ships as a released Linux binary, with a DaemonSet that installs it on every node and restarts the kubelet only when the binary changes.
 - The `has_repository_policy()` access-policy function lets a global rule admit only what a `[repository]` declaring its own `access_policy` will decide, instead of restating every repository rule globally.
+- A blob upload `POST` carrying `?digest=` and the blob as its body now completes in that one request, returning `201 Created`, instead of answering `202` and making the client send every byte again.
 - A blob upload started with `?digest-algorithm=` hashes each chunk under that algorithm alone; without it a chunked upload still keeps a checkpoint for every supported algorithm, since the digest is only known at the closing `PUT`. The hint is also exposed to access policies as `request.digest_algorithm`.
 
 ### Changed

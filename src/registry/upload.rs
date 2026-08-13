@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use hyper::{
     HeaderMap, Response, StatusCode,
     header::{CONTENT_LENGTH, HeaderValue, LOCATION, RANGE},
@@ -95,13 +97,23 @@ pub struct BlobMount {
     pub from: Option<Namespace>,
 }
 
+/// The `?digest=` target of an upload POST: the digest the client names, plus
+/// the length of the blob when the POST carries it, which is the single-request
+/// upload. A body without a digest is not a target, since there would be
+/// nothing to verify it against, so that POST only opens a session.
+#[derive(Debug)]
+pub struct StartUploadTarget {
+    pub digest: Digest,
+    pub content_length: Option<NonZeroU64>,
+}
+
 #[derive(Debug)]
 pub struct StartUploadRequest {
     pub namespace: Namespace,
-    pub digest: Option<Digest>,
     /// The algorithm the client says it will close the upload with, so the
     /// session hashes under that one alone.
     pub digest_algorithm: Option<Algorithm>,
+    pub target: Option<StartUploadTarget>,
 }
 
 #[derive(Debug)]
@@ -301,15 +313,27 @@ impl Registry {
         )?)
     }
 
-    /// Starts a blob upload: `ExistingBlob` (201) when the namespace already
-    /// owns `digest`, otherwise a new session (202).
-    #[instrument]
-    pub async fn start_upload(
+    /// Starts a blob upload: `201` when the namespace already owns `digest` or
+    /// when a `?digest=` POST carries the whole blob, otherwise a new session
+    /// (`202`).
+    #[instrument(skip(request, stream), fields(namespace = %request.namespace))]
+    pub async fn start_upload<S>(
         &self,
+        actor: Option<EventActor>,
         request: StartUploadRequest,
-    ) -> Result<Response<ResponseBody>, Error> {
-        if let Some(digest) = request.digest
-            && self.blob_store.size(&digest).await.is_ok()
+        stream: S,
+    ) -> Result<Response<ResponseBody>, Error>
+    where
+        S: AsyncRead + Unpin + Send + Sync + 'static,
+    {
+        let Some(target) = request.target else {
+            return self
+                .open_upload_session(&request.namespace, request.digest_algorithm)
+                .await;
+        };
+        let digest = target.digest;
+
+        if self.blob_store.size(&digest).await.is_ok()
             && self
                 .blob_ownership()
                 .can_read(&request.namespace, &digest)
@@ -322,8 +346,33 @@ impl Registry {
             )?);
         }
 
-        self.open_upload_session(&request.namespace, request.digest_algorithm)
-            .await
+        // A `?digest=` POST carrying the blob is the single-request upload:
+        // close it here rather than have the client send every byte again. A
+        // body of undeclared length falls back to a session, which the spec
+        // allows and which no client sending this form uses.
+        let Some(content_length) = target.content_length else {
+            return self
+                .open_upload_session(&request.namespace, request.digest_algorithm)
+                .await;
+        };
+
+        let session_id = UploadSessionId::generate();
+        self.blob_store
+            .create_upload(&request.namespace, &session_id, Some(digest.algorithm()))
+            .await?;
+
+        self.complete_upload(
+            actor,
+            CompleteUploadRequest {
+                namespace: &request.namespace,
+                session_id: &session_id,
+                digest: &digest,
+                start_offset: None,
+                content_length: Some(content_length.get()),
+            },
+            stream,
+        )
+        .await
     }
 
     /// Starts a cross-repository blob mount from the authorized `source`,
@@ -651,7 +700,7 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Cursor, str::FromStr, sync::Arc};
+    use std::{io::Cursor, num::NonZeroU64, str::FromStr, sync::Arc};
 
     use hyper::{
         StatusCode,
@@ -664,7 +713,7 @@ mod tests {
         oci::{Algorithm, Digest, Namespace, UploadSessionId},
         registry::{
             BlobMount, CompleteUploadRequest, Error, GetUploadRequest, MountBlobRequest,
-            PatchUploadRequest, Registry, RegistryConfig, StartUploadRequest,
+            PatchUploadRequest, Registry, RegistryConfig, StartUploadRequest, StartUploadTarget,
             blob_store::BlobStore,
             metadata_store::LinkKind,
             path_builder,
@@ -726,11 +775,15 @@ mod tests {
             let content = b"test upload content";
 
             let response = registry
-                .start_upload(StartUploadRequest {
-                    namespace: namespace.clone(),
-                    digest: None,
-                    digest_algorithm: None,
-                })
+                .start_upload(
+                    None,
+                    StartUploadRequest {
+                        namespace: namespace.clone(),
+                        digest_algorithm: None,
+                        target: None,
+                    },
+                    Cursor::new(Vec::new()),
+                )
                 .await
                 .unwrap();
             // A fresh session answers `202` with its location.
@@ -745,11 +798,18 @@ mod tests {
 
             let digest = put_blob_direct(registry.metadata_store.store(), content).await;
             let response = registry
-                .start_upload(StartUploadRequest {
-                    namespace: namespace.clone(),
-                    digest: Some(digest.clone()),
-                    digest_algorithm: None,
-                })
+                .start_upload(
+                    None,
+                    StartUploadRequest {
+                        namespace: namespace.clone(),
+                        digest_algorithm: None,
+                        target: Some(StartUploadTarget {
+                            digest: digest.clone(),
+                            content_length: None,
+                        }),
+                    },
+                    Cursor::new(Vec::new()),
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -765,11 +825,18 @@ mod tests {
                 .unwrap();
 
             let response = registry
-                .start_upload(StartUploadRequest {
-                    namespace: namespace.clone(),
-                    digest: Some(digest.clone()),
-                    digest_algorithm: None,
-                })
+                .start_upload(
+                    None,
+                    StartUploadRequest {
+                        namespace: namespace.clone(),
+                        digest_algorithm: None,
+                        target: Some(StartUploadTarget {
+                            digest: digest.clone(),
+                            content_length: None,
+                        }),
+                    },
+                    Cursor::new(Vec::new()),
+                )
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::CREATED);
@@ -1464,6 +1531,76 @@ mod tests {
                 registry.blob_store.read(&expected_digest).await.unwrap(),
                 full_content
             );
+        })
+        .await;
+    }
+
+    /// A `?digest=` POST carrying the blob completes in that one request, so the
+    /// client never sends the bytes twice.
+    #[tokio::test]
+    async fn single_post_upload_completes_in_one_request() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"blob pushed in a single POST";
+            let digest = Digest::sha256_of_bytes(content);
+
+            let response = registry
+                .start_upload(
+                    None,
+                    StartUploadRequest {
+                        namespace: namespace.clone(),
+                        digest_algorithm: None,
+                        target: Some(StartUploadTarget {
+                            digest: digest.clone(),
+                            content_length: NonZeroU64::new(content.len() as u64),
+                        }),
+                    },
+                    Cursor::new(content.to_vec()),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::CREATED);
+            assert_eq!(
+                *response_header(&response, &LOCATION),
+                format!("/v2/{namespace}/blobs/{digest}")
+            );
+            assert_eq!(registry.blob_store.read(&digest).await.unwrap(), content);
+        })
+        .await;
+    }
+
+    /// A single-POST body that does not hash to the digest it claims is refused,
+    /// like the same body closing a session.
+    #[tokio::test]
+    async fn single_post_upload_rejects_a_mismatched_digest() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"body that will not match";
+            let claimed = Digest::sha256_of_bytes(b"something else entirely");
+
+            let result = registry
+                .start_upload(
+                    None,
+                    StartUploadRequest {
+                        namespace: namespace.clone(),
+                        digest_algorithm: None,
+                        target: Some(StartUploadTarget {
+                            digest: claimed.clone(),
+                            content_length: NonZeroU64::new(content.len() as u64),
+                        }),
+                    },
+                    Cursor::new(content.to_vec()),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(Error::DigestInvalid)),
+                "a body that hashes to something else must be refused, got {result:?}"
+            );
+            assert!(registry.blob_store.read(&claimed).await.is_err());
         })
         .await;
     }
