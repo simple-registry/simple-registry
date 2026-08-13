@@ -264,6 +264,36 @@ histogram_quantile(0.95, rate(lock_acquisition_duration_ms_bucket[5m]))
 
 ---
 
+## Pull-Through Cache Metrics
+
+### angos_pull_through_requests_total
+
+Manifest and blob requests served by a pull-through repository, counted once per
+client request. A `hit` is served from the local copy; a `miss` consults the
+upstream (a manifest body fetch, a blob fetch, or a blob HEAD). Requests to a
+repository with no upstream are not counted.
+
+| Type    | Labels                            |
+|---------|-----------------------------------|
+| Counter | `repository`, `upstream`, `result` |
+
+**Labels:**
+- `repository`: the `[repository]` name that matched the namespace
+- `upstream`: the repository's first configured upstream URL, which serves every request until it fails
+- `result`: `hit` or `miss`
+
+**Example:**
+```promql
+# Cache hit rate per repository
+sum by (repository) (rate(angos_pull_through_requests_total{result="hit"}[5m])) /
+sum by (repository) (rate(angos_pull_through_requests_total[5m]))
+
+# Upstream fetch rate
+sum by (upstream) (rate(angos_pull_through_requests_total{result="miss"}[5m]))
+```
+
+---
+
 ## Job Queue Metrics
 
 `angos_job_queue_pending` and `angos_job_queue_failed` are published only when

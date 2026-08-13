@@ -267,6 +267,9 @@ impl Registry {
         if has_access {
             match self.blob_store.size(&request.digest).await {
                 Ok(size) => {
+                    if let Some(repository) = upstream {
+                        repository.record_cache_result(true);
+                    }
                     return Ok(build_response(
                         StatusCode::OK,
                         head_blob_headers(&request.digest, size)?,
@@ -284,6 +287,7 @@ impl Registry {
         let Some(repository) = upstream else {
             return Err(Error::BlobUnknown);
         };
+        repository.record_cache_result(false);
         let (digest, size) = repository
             .head_blob(&request.accepted_types, &request.namespace, &request.digest)
             .await?;
@@ -312,7 +316,12 @@ impl Registry {
 
         if has_access {
             match self.get_local_blob(digest, range).await {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    if let Some(repository) = upstream {
+                        repository.record_cache_result(true);
+                    }
+                    return Ok(response);
+                }
                 // Owned but the bytes are gone: a pull-through repo re-fetches.
                 Err(Error::BlobUnknown) if upstream.is_some() => {}
                 Err(error) => return Err(error),
@@ -329,6 +338,7 @@ impl Registry {
         let Some(repository) = upstream else {
             return Err(Error::BlobUnknown);
         };
+        repository.record_cache_result(false);
         let (total_length, client_stream) = repository
             .get_blob(accepted_types, namespace, digest)
             .await?;
@@ -511,10 +521,11 @@ mod tests {
         registry::{
             metadata_store::{BlobIndexOperation, LinkOperation},
             path_builder,
+            repository::Upstream,
             test_utils::{
-                RegistryTestCase, create_test_blob, create_test_registry, for_each_backend,
-                get_blob, metadata_store_over, put_blob_direct, response_body, response_digest,
-                response_header,
+                RegistryTestCase, create_test_blob, create_test_registry, downstream_client,
+                for_each_backend, get_blob, metadata_store_over, put_blob_direct,
+                repository_with_replication, response_body, response_digest, response_header,
             },
         },
     };
@@ -991,6 +1002,61 @@ mod tests {
                 .unwrap();
 
             assert_eq!(response_body(response).await, content);
+        })
+        .await;
+    }
+
+    /// Unreachable upstream: the miss path records before it dials, so the
+    /// connection refusal does not hide the count.
+    const TEST_UPSTREAM_URL: &str = "http://127.0.0.1:1";
+
+    /// A pull-through repository over [`TEST_UPSTREAM_URL`], mapping namespaces
+    /// verbatim.
+    fn pull_through_repository(name: &str) -> Repository {
+        let client = Arc::into_inner(downstream_client(TEST_UPSTREAM_URL))
+            .expect("unshared test upstream client");
+        let mut repository = repository_with_replication(name, Vec::new());
+        repository.upstreams.push(Upstream {
+            client,
+            local_namespace: None,
+            target_namespace: None,
+        });
+
+        repository
+    }
+
+    #[tokio::test]
+    async fn pull_through_blob_counts_hit_and_miss() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let repository = pull_through_repository("test-repo");
+            let counter = &metrics_provider().pull_through_requests;
+            let hits = counter.with_label_values(&["test-repo", TEST_UPSTREAM_URL, "hit"]);
+            let misses = counter.with_label_values(&["test-repo", TEST_UPSTREAM_URL, "miss"]);
+            let (before_hits, before_misses) = (hits.get(), misses.get());
+
+            let (digest, _) = create_test_blob(registry, namespace, b"cached layer").await;
+            get_blob(registry, &repository, &[], namespace, &digest, None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                hits.get(),
+                before_hits + 1,
+                "a locally served pull-through blob must count a hit"
+            );
+
+            let absent = Digest::sha256_of_bytes(b"never stored locally");
+            let result = get_blob(registry, &repository, &[], namespace, &absent, None).await;
+
+            assert!(matches!(result, Err(Error::BlobUnknown)));
+            assert_eq!(
+                misses.get(),
+                before_misses + 1,
+                "a blob fetched from the upstream must count a miss"
+            );
+            assert_eq!(hits.get(), before_hits + 1, "the miss must not count a hit");
         })
         .await;
     }

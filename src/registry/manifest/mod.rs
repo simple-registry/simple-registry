@@ -299,6 +299,9 @@ impl Registry {
             )
             .await?;
         if let Some(meta) = serveable {
+            if let Some(repository) = repository.filter(|repository| repository.is_pull_through()) {
+                repository.record_cache_result(true);
+            }
             return Ok(build_response(
                 StatusCode::OK,
                 manifest_headers(meta.media_type.as_ref(), &meta.digest, meta.size)?,
@@ -306,6 +309,7 @@ impl Registry {
             )?);
         }
 
+        // The miss is counted by `get_manifest`, which resolves it.
         let body = self
             .get_manifest(
                 repository,
@@ -402,12 +406,18 @@ impl Registry {
             )
             .await?;
         if let Some(manifest) = serveable {
+            if let Some(repository) = repository.filter(|repository| repository.is_pull_through()) {
+                repository.record_cache_result(true);
+            }
             return Ok(manifest);
         }
 
+        // Only a pull-through repository reaches here: `serveable_local` serves
+        // or fails outright for every other kind.
         let Some(repository) = repository else {
             return Err(Error::ManifestUnknown);
         };
+        repository.record_cache_result(false);
         let fetched = repository
             .get_manifest(accepted_types, namespace, &reference)
             .await?;

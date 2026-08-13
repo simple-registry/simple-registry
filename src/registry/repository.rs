@@ -9,6 +9,7 @@ pub use crate::registry_client::RegistryClientConfig;
 use crate::{
     cache::Cache,
     configuration::RegexPattern,
+    metrics_provider::metrics_provider,
     oci::{Digest, Error as OciError, MediaRange, Namespace, Reference},
     policy::{AccessPolicyConfig, RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::{Error, blob_store::BoxedReader},
@@ -287,6 +288,22 @@ impl Repository {
 
     pub fn is_pull_through(&self) -> bool {
         !self.upstreams.is_empty()
+    }
+
+    /// Count one pull-through request on `angos_pull_through_requests_total`.
+    /// The `upstream` label names the first configured upstream, which serves
+    /// every request until it fails; a hit consults none at all.
+    pub fn record_cache_result(&self, hit: bool) {
+        let upstream = self
+            .upstreams
+            .first()
+            .map_or("", |upstream| upstream.client.url.as_str());
+        let result = if hit { "hit" } else { "miss" };
+
+        metrics_provider()
+            .pull_through_requests
+            .with_label_values(&[self.name.as_ref(), upstream, result])
+            .inc();
     }
 
     /// Checks whether the upstream still has the same digest for the given tag.
