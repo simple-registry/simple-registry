@@ -14,7 +14,7 @@ use auth::token_index_cache_key;
 use futures_util::TryStreamExt;
 use reqwest::{
     Client, Method, RequestBuilder, Response, StatusCode,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, LINK},
+    header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LINK, RANGE},
     redirect::Policy,
 };
 use serde::Deserialize;
@@ -50,11 +50,13 @@ pub const REPLICATION_SUPERSEDED_CODE: &str = "REPLICATION_SUPERSEDED";
 
 /// Classifies a non-success read status: a true 404 maps to `not_found` so
 /// callers can tell a genuinely absent object from a transient probe failure,
-/// and a 405 maps to `Unsupported` (the remote rejects the method).
+/// a 405 maps to `Unsupported` (the remote rejects the method), and a 416
+/// answers a ranged blob fetch the remote cannot satisfy.
 fn classify_read_failure(status: StatusCode, op: &str, not_found: Error) -> Error {
     match status {
         StatusCode::NOT_FOUND => not_found,
         StatusCode::METHOD_NOT_ALLOWED => Error::Unsupported,
+        StatusCode::RANGE_NOT_SATISFIABLE => Error::RangeNotSatisfiable,
         _ => Error::Internal(format!("{op}: downstream returned status {status}")),
     }
 }
@@ -198,6 +200,15 @@ pub struct ManifestHead {
     pub size: u64,
 }
 
+/// A blob body streamed from an upstream. `content_range` carries the
+/// upstream's `Content-Range` when it answered a ranged fetch with `206`; when
+/// it is absent the reader carries the whole blob and `length` its full size.
+pub struct FetchedBlob {
+    pub length: u64,
+    pub content_range: Option<String>,
+    pub reader: BoxedReader,
+}
+
 #[derive(Clone, Debug)]
 pub struct FetchedManifest {
     pub media_type: Option<MediaType>,
@@ -336,11 +347,12 @@ impl RegistryClient {
         method: &Method,
         accepted_types: &[MediaRange],
         location: &str,
+        range: Option<&str>,
     ) -> Result<Response, Error> {
         debug!("Requesting from upstream: {}", without_query(location));
 
         self.send_with_auth_retry(location, |auth| async move {
-            self.send(method, accepted_types, location, auth.as_deref())
+            self.send(method, accepted_types, location, auth.as_deref(), range)
                 .await
         })
         .await
@@ -468,8 +480,9 @@ impl RegistryClient {
         accepted_types: &[MediaRange],
         location: &str,
         auth_header: Option<&str>,
+        range: Option<&str>,
     ) -> Result<Response, Error> {
-        self.build_request(method, accepted_types, location, auth_header)
+        self.build_request(method, accepted_types, location, auth_header, range)
             .send()
             .await
             .map_err(|e| Error::Internal(format!("HTTP request failed: {e}")))
@@ -481,6 +494,7 @@ impl RegistryClient {
         accepted_types: &[MediaRange],
         location: &str,
         auth_header: Option<&str>,
+        range: Option<&str>,
     ) -> RequestBuilder {
         let mut request = self.client.request(method.clone(), location);
         for accepted_type in accepted_types {
@@ -488,6 +502,9 @@ impl RegistryClient {
         }
         if let Some(auth) = auth_header {
             request = request.header(AUTHORIZATION, auth);
+        }
+        if let Some(range) = range {
+            request = request.header(RANGE, range);
         }
         request
     }
@@ -503,7 +520,9 @@ impl RegistryClient {
         accepted_types: &[MediaRange],
         location: &str,
     ) -> Result<(Digest, u64), Error> {
-        let response = self.query(&Method::HEAD, accepted_types, location).await?;
+        let response = self
+            .query(&Method::HEAD, accepted_types, location, None)
+            .await?;
 
         if !response.status().is_success() {
             return Err(classify_read_failure(
@@ -530,7 +549,7 @@ impl RegistryClient {
         // Unlike `head_blob` this never reads `Docker-Content-Digest`, which the
         // OCI spec makes a SHOULD on blob HEAD: a conformant downstream that
         // omits it must read as present, not as a probe failure.
-        let response = self.query(&Method::HEAD, &[], location).await?;
+        let response = self.query(&Method::HEAD, &[], location, None).await?;
         let status = response.status();
         if status.is_success() {
             return Ok(true);
@@ -575,7 +594,7 @@ impl RegistryClient {
                 break;
             }
 
-            let response = self.query(&Method::GET, &[], &page_location).await?;
+            let response = self.query(&Method::GET, &[], &page_location, None).await?;
 
             if response.status() == StatusCode::NOT_FOUND {
                 return Ok(tags);
@@ -622,18 +641,22 @@ impl RegistryClient {
         response.url().join(url).ok().map(|u| u.to_string())
     }
 
-    /// Streams a blob from the upstream registry.
+    /// Streams a blob from the upstream registry, optionally under `range` (a
+    /// `Range` header value).
     ///
     /// # Errors
     ///
     /// Returns an error when the upstream request fails, rejects access, omits required
-    /// headers, or reports that the blob is unknown.
+    /// headers, cannot satisfy `range`, or reports that the blob is unknown.
     pub async fn get_blob(
         &self,
         accepted_types: &[MediaRange],
         location: &str,
-    ) -> Result<(u64, BoxedReader), Error> {
-        let response = self.query(&Method::GET, accepted_types, location).await?;
+        range: Option<&str>,
+    ) -> Result<FetchedBlob, Error> {
+        let response = self
+            .query(&Method::GET, accepted_types, location, range)
+            .await?;
 
         if !response.status().is_success() {
             return Err(classify_read_failure(
@@ -643,11 +666,22 @@ impl RegistryClient {
             ));
         }
 
-        let total_length = parse_header(&response, CONTENT_LENGTH)?;
+        // RFC 9110 lets a server ignore `Range` and answer `200` with the whole
+        // blob, so the status is what says which body arrived. A `206` without
+        // `Content-Range` is a protocol fault: serving it as whole would hand
+        // the client a truncated blob.
+        let content_range = match response.status() {
+            StatusCode::PARTIAL_CONTENT => Some(parse_header(&response, CONTENT_RANGE)?),
+            _ => None,
+        };
+        let length = parse_header(&response, CONTENT_LENGTH)?;
         let stream = response.bytes_stream().map_err(io::Error::other);
-        let reader = StreamReader::new(stream);
 
-        Ok((total_length, Box::new(reader)))
+        Ok(FetchedBlob {
+            length,
+            content_range,
+            reader: Box::new(StreamReader::new(stream)),
+        })
     }
 
     /// Sends a HEAD request for a manifest and returns its metadata. The digest
@@ -664,7 +698,9 @@ impl RegistryClient {
         accepted_types: &[MediaRange],
         location: &str,
     ) -> Result<ManifestHead, Error> {
-        let response = self.query(&Method::HEAD, accepted_types, location).await?;
+        let response = self
+            .query(&Method::HEAD, accepted_types, location, None)
+            .await?;
 
         if !response.status().is_success() {
             return Err(classify_read_failure(
@@ -699,7 +735,9 @@ impl RegistryClient {
         accepted_types: &[MediaRange],
         location: &str,
     ) -> Result<FetchedManifest, Error> {
-        let response = self.query(&Method::GET, accepted_types, location).await?;
+        let response = self
+            .query(&Method::GET, accepted_types, location, None)
+            .await?;
 
         if !response.status().is_success() {
             return Err(classify_read_failure(

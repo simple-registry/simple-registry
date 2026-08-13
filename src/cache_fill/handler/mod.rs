@@ -163,14 +163,14 @@ impl CacheFillJobHandler {
                 ));
             }
 
-            let (content_length, stream) = repository.get_blob(&[], namespace, digest).await?;
+            let fetched = repository.get_blob(&[], namespace, digest, None).await?;
             cache_blob(
                 &self.blob_store,
                 &self.metadata_store,
                 namespace,
                 digest,
-                stream,
-                content_length,
+                fetched.reader,
+                fetched.length,
             )
             .await?;
         }

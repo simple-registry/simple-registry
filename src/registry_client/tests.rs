@@ -544,7 +544,10 @@ async fn a_scope_cache_hit_indexes_the_url_it_served() {
     let client =
         RegistryClient::from_config(&config, cache.clone(), DEFAULT_MAX_MANIFEST_SIZE_BYTES)
             .unwrap();
-    client.get_blob(&[], &location).await.expect("blob fetch");
+    client
+        .get_blob(&[], &location, None)
+        .await
+        .expect("blob fetch");
 
     assert_eq!(
         cache.retrieve_value(&index_key).await.unwrap().as_deref(),
@@ -1009,12 +1012,14 @@ async fn test_get_blob_success() {
         .get_blob(
             &[],
             &format!("{}/v2/test/blobs/{test_digest}", mock_server.uri()),
+            None,
         )
         .await;
 
     assert!(result.is_ok());
-    let (size, mut reader) = result.unwrap();
-    assert_eq!(size, blob_data.len() as u64);
+    let fetched = result.unwrap();
+    assert_eq!(fetched.length, blob_data.len() as u64);
+    let mut reader = fetched.reader;
 
     let mut buffer = Vec::new();
     tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buffer)
@@ -1038,6 +1043,7 @@ async fn get_blob_reports_an_upstream_outage_as_transient_not_missing() {
         .get_blob(
             &[],
             &format!("{}/v2/test/blobs/{test_digest}", mock_server.uri()),
+            None,
         )
         .await
         .err()
@@ -1066,6 +1072,7 @@ async fn test_get_blob_not_found() {
         .get_blob(
             &[],
             &format!("{}/v2/test/blobs/{test_digest}", mock_server.uri()),
+            None,
         )
         .await;
 

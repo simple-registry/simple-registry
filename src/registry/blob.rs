@@ -29,6 +29,62 @@ pub enum BlobRange {
     Suffix(u64),
 }
 
+impl BlobRange {
+    /// Formats the range back into a `Range` header value, so a pull from an
+    /// upstream asks for the same window the client did.
+    pub fn to_header(self) -> String {
+        match self {
+            BlobRange::FromTo {
+                start,
+                end: Some(end),
+            } => format!("bytes={start}-{end}"),
+            BlobRange::FromTo { start, end: None } => format!("bytes={start}-"),
+            BlobRange::Suffix(length) => format!("bytes=-{length}"),
+        }
+    }
+
+    /// Resolves the requested window against a known blob length, clamping an
+    /// end past the last byte and a suffix longer than the blob. Yields the
+    /// served `(start, end, length)`, `end` inclusive; `None` means the range is
+    /// to be ignored, as an empty blob has no window to serve.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RangeNotSatisfiable`] for a start at or past the blob
+    /// length, an inverted window, or a zero-length suffix.
+    pub fn resolve(self, total_length: u64) -> Result<Option<(u64, u64, u64)>, Error> {
+        if total_length == 0 {
+            return Ok(None);
+        }
+
+        let last_byte = total_length - 1;
+        let (start, end) = match self {
+            BlobRange::FromTo { start, end } => {
+                if start >= total_length {
+                    return Err(Error::RangeNotSatisfiable);
+                }
+
+                let end = end.unwrap_or(last_byte).min(last_byte);
+                if end < start {
+                    return Err(Error::RangeNotSatisfiable);
+                }
+
+                (start, end)
+            }
+            BlobRange::Suffix(suffix_length) => {
+                if suffix_length == 0 {
+                    return Err(Error::RangeNotSatisfiable);
+                }
+
+                let length = suffix_length.min(total_length);
+                (total_length - length, last_byte)
+            }
+        };
+
+        Ok(Some((start, end, end - start + 1)))
+    }
+}
+
 fn head_blob_headers(digest: &Digest, size: u64) -> Result<HeaderMap, Error> {
     let mut headers = HeaderMap::new();
     headers.insert(DOCKER_CONTENT_DIGEST, HeaderValue::try_from(digest)?);
@@ -44,15 +100,15 @@ fn get_blob_headers(digest: &Digest, total_length: u64) -> Result<HeaderMap, Err
     Ok(headers)
 }
 
-fn get_blob_range_headers(digest: &Digest, range: ResolvedRange) -> Result<HeaderMap, Error> {
-    let mut headers = get_blob_headers(digest, range.length)?;
-    headers.insert(
-        CONTENT_RANGE,
-        HeaderValue::try_from(format!(
-            "bytes {}-{}/{}",
-            range.start, range.end, range.total_length
-        ))?,
-    );
+/// Headers for a `206`: `length` is the served window, `content_range` the
+/// `Content-Range` describing it.
+fn partial_blob_headers(
+    digest: &Digest,
+    length: u64,
+    content_range: &str,
+) -> Result<HeaderMap, Error> {
+    let mut headers = get_blob_headers(digest, length)?;
+    headers.insert(CONTENT_RANGE, HeaderValue::try_from(content_range)?);
 
     Ok(headers)
 }
@@ -98,56 +154,6 @@ pub struct GetBlobRequest {
 pub struct DeleteBlobRequest {
     pub namespace: Namespace,
     pub digest: Digest,
-}
-
-/// A byte range resolved against a known blob length: the served window plus
-/// the total length, so the handler can format `Content-Range`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ResolvedRange {
-    pub start: u64,
-    pub end: u64,
-    pub length: u64,
-    pub total_length: u64,
-}
-
-fn resolve_blob_range(
-    requested: BlobRange,
-    total_length: u64,
-) -> Result<Option<ResolvedRange>, Error> {
-    if total_length == 0 {
-        return Ok(None);
-    }
-
-    let last_byte = total_length - 1;
-    let (start, end) = match requested {
-        BlobRange::FromTo { start, end } => {
-            if start >= total_length {
-                return Err(Error::RangeNotSatisfiable);
-            }
-
-            let end = end.unwrap_or(last_byte).min(last_byte);
-            if end < start {
-                return Err(Error::RangeNotSatisfiable);
-            }
-
-            (start, end)
-        }
-        BlobRange::Suffix(suffix_length) => {
-            if suffix_length == 0 {
-                return Err(Error::RangeNotSatisfiable);
-            }
-
-            let length = suffix_length.min(total_length);
-            (total_length - length, last_byte)
-        }
-    };
-
-    Ok(Some(ResolvedRange {
-        start,
-        end,
-        length: end - start + 1,
-        total_length,
-    }))
 }
 
 fn has_non_ownership_reference(links: &HashSet<LinkKind>, digest: &Digest) -> bool {
@@ -321,21 +327,32 @@ impl Registry {
             return Err(Error::BlobUnknown);
         }
 
-        if range.is_some() {
-            warn!("Range requests are not supported for pull-through repositories");
-            return Err(Error::RangeNotSatisfiable);
-        }
-
         let Some(repository) = upstream else {
             return Err(Error::BlobUnknown);
         };
-        let (total_length, client_stream) = repository
-            .get_blob(accepted_types, namespace, digest)
+        let requested_range = range.map(BlobRange::to_header);
+        let fetched = repository
+            .get_blob(
+                accepted_types,
+                namespace,
+                digest,
+                requested_range.as_deref(),
+            )
             .await?;
 
         self.dispatch_cache_fill(namespace, digest).await;
 
-        whole_blob_response(digest, total_length, client_stream)
+        // An upstream is free to ignore `Range` and answer the whole blob,
+        // which stays a valid answer; only its `206` becomes partial content.
+        let Some(content_range) = fetched.content_range else {
+            return whole_blob_response(digest, fetched.length, fetched.reader);
+        };
+
+        Ok(build_response(
+            StatusCode::PARTIAL_CONTENT,
+            partial_blob_headers(digest, fetched.length, &content_range)?,
+            ResponseBody::streaming(fetched.reader),
+        )?)
     }
 
     /// Fire-and-forget enqueue of a pull-through cache-fill job. A failure is
@@ -373,16 +390,20 @@ impl Registry {
         };
 
         let total_length = self.blob_store.size(digest).await?;
-        let Some(range) = resolve_blob_range(requested_range, total_length)? else {
+        let Some((start, end, length)) = requested_range.resolve(total_length)? else {
             let (reader, _) = self.blob_store.reader(digest, None).await?;
             return whole_blob_response(digest, total_length, reader);
         };
-        let (reader, _) = self.blob_store.reader(digest, Some(range.start)).await?;
-        let reader = Box::new(reader.take(range.length));
+        let (reader, _) = self.blob_store.reader(digest, Some(start)).await?;
+        let reader = Box::new(reader.take(length));
 
         Ok(build_response(
             StatusCode::PARTIAL_CONTENT,
-            get_blob_range_headers(digest, range)?,
+            partial_blob_headers(
+                digest,
+                length,
+                &format!("bytes {start}-{end}/{total_length}"),
+            )?,
             ResponseBody::streaming(reader),
         )?)
     }
@@ -504,19 +525,27 @@ mod tests {
     use async_trait::async_trait;
     use tempfile::TempDir;
     use tokio::time::sleep;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
 
     use super::*;
     use crate::{
+        cache,
         oci::{Namespace, Tag},
         registry::{
+            manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
             metadata_store::{BlobIndexOperation, LinkOperation},
             path_builder,
+            repository::Config,
             test_utils::{
                 RegistryTestCase, create_test_blob, create_test_registry, for_each_backend,
                 get_blob, metadata_store_over, put_blob_direct, response_body, response_digest,
                 response_header,
             },
         },
+        test_fixtures::client::test_client_config,
     };
 
     /// `delete_blob` must hold the `blob-data:{digest}` coarse lock across its
@@ -995,6 +1024,62 @@ mod tests {
         .await;
     }
 
+    /// Regression: a range over a blob the cache does not hold yet is forwarded
+    /// to the upstream and answered `206`. It used to be refused with `416`, so
+    /// one URL answered differently depending on cache state.
+    #[tokio::test]
+    async fn ranged_get_of_an_uncached_pull_through_blob_serves_partial_content() {
+        let content = b"pull-through ranged blob content";
+        let digest = Digest::sha256_of_bytes(content);
+        let content_range = format!("bytes 5-10/{}", content.len());
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/repo/blobs/{digest}")))
+            .and(header("range", "bytes=5-10"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", content_range.as_str())
+                    .set_body_bytes(&content[5..=10]),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let config = Config {
+            upstream: vec![test_client_config(mock_server.uri())],
+            ..Default::default()
+        };
+        let cache_backend = cache::Config::Memory.to_backend().unwrap();
+        let repository = Repository::new(
+            "local",
+            &config,
+            &cache_backend,
+            DEFAULT_MAX_MANIFEST_SIZE_BYTES,
+        )
+        .await
+        .unwrap();
+
+        let object: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+        let registry = create_test_registry(
+            Arc::new(BlobStore::new(object.clone(), None)),
+            metadata_store_over(object),
+        );
+        let namespace = &Namespace::new("local/repo").unwrap();
+        let range = Some(BlobRange::FromTo {
+            start: 5,
+            end: Some(10),
+        });
+
+        let response = registry
+            .get_blob_with_access(Some(&repository), &[], namespace, &digest, range, false)
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(*response_header(&response, &CONTENT_RANGE), content_range);
+        assert_eq!(response_body(response).await, &content[5..=10]);
+    }
+
     /// Upload-session directories still staged under `namespace`.
     async fn staged_session_count(
         test_case: &dyn RegistryTestCase,
@@ -1409,145 +1494,88 @@ mod tests {
     }
 
     #[test]
-    fn resolve_blob_range_ignores_ranges_for_empty_blob() {
+    fn resolve_ignores_ranges_for_empty_blob() {
         assert!(matches!(
-            resolve_blob_range(
-                BlobRange::FromTo {
-                    start: 0,
-                    end: None,
-                },
-                0
-            ),
-            Ok(None)
-        ));
-        assert!(matches!(
-            resolve_blob_range(BlobRange::Suffix(1), 0),
-            Ok(None)
-        ));
-    }
-
-    #[test]
-    fn resolve_blob_range_rejects_start_at_or_after_length() {
-        assert!(matches!(
-            resolve_blob_range(
-                BlobRange::FromTo {
-                    start: 10,
-                    end: None,
-                },
-                10
-            ),
-            Err(Error::RangeNotSatisfiable)
-        ));
-        assert!(matches!(
-            resolve_blob_range(
-                BlobRange::FromTo {
-                    start: 11,
-                    end: None,
-                },
-                10
-            ),
-            Err(Error::RangeNotSatisfiable)
-        ));
-    }
-
-    #[test]
-    fn resolve_blob_range_clamps_end_to_last_byte() {
-        let range = resolve_blob_range(
             BlobRange::FromTo {
-                start: 4,
-                end: Some(99),
-            },
-            10,
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(
-            range,
-            ResolvedRange {
-                start: 4,
-                end: 9,
-                length: 6,
-                total_length: 10,
-            }
-        );
-    }
-
-    #[test]
-    fn resolve_blob_range_expands_open_ended_range() {
-        let range = resolve_blob_range(
-            BlobRange::FromTo {
-                start: 4,
-                end: None,
-            },
-            10,
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(
-            range,
-            ResolvedRange {
-                start: 4,
-                end: 9,
-                length: 6,
-                total_length: 10,
-            }
-        );
-    }
-
-    #[test]
-    fn resolve_blob_range_resolves_suffix_range() {
-        let range = resolve_blob_range(BlobRange::Suffix(4), 10)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            range,
-            ResolvedRange {
-                start: 6,
-                end: 9,
-                length: 4,
-                total_length: 10,
-            }
-        );
-    }
-
-    #[test]
-    fn resolve_blob_range_clamps_suffix_range_to_blob_length() {
-        let range = resolve_blob_range(BlobRange::Suffix(99), 10)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            range,
-            ResolvedRange {
                 start: 0,
-                end: 9,
-                length: 10,
-                total_length: 10,
+                end: None,
             }
-        );
+            .resolve(0),
+            Ok(None)
+        ));
+        assert!(matches!(BlobRange::Suffix(1).resolve(0), Ok(None)));
     }
 
     #[test]
-    fn resolve_blob_range_rejects_zero_suffix_range() {
+    fn resolve_rejects_start_at_or_after_length() {
         assert!(matches!(
-            resolve_blob_range(BlobRange::Suffix(0), 10),
+            BlobRange::FromTo {
+                start: 10,
+                end: None,
+            }
+            .resolve(10),
+            Err(Error::RangeNotSatisfiable)
+        ));
+        assert!(matches!(
+            BlobRange::FromTo {
+                start: 11,
+                end: None,
+            }
+            .resolve(10),
             Err(Error::RangeNotSatisfiable)
         ));
     }
 
     #[test]
-    fn resolve_blob_range_rejects_end_before_start() {
+    fn resolve_clamps_end_to_last_byte() {
+        let served = BlobRange::FromTo {
+            start: 4,
+            end: Some(99),
+        }
+        .resolve(10)
+        .unwrap();
+
+        assert_eq!(served, Some((4, 9, 6)));
+    }
+
+    #[test]
+    fn resolve_expands_open_ended_range() {
+        let served = BlobRange::FromTo {
+            start: 4,
+            end: None,
+        }
+        .resolve(10)
+        .unwrap();
+
+        assert_eq!(served, Some((4, 9, 6)));
+    }
+
+    #[test]
+    fn resolve_resolves_suffix_range() {
+        assert_eq!(BlobRange::Suffix(4).resolve(10).unwrap(), Some((6, 9, 4)));
+    }
+
+    #[test]
+    fn resolve_clamps_suffix_range_to_blob_length() {
+        assert_eq!(BlobRange::Suffix(99).resolve(10).unwrap(), Some((0, 9, 10)));
+    }
+
+    #[test]
+    fn resolve_rejects_zero_suffix_range() {
         assert!(matches!(
-            resolve_blob_range(
-                BlobRange::FromTo {
-                    start: 5,
-                    end: Some(4),
-                },
-                10
-            ),
+            BlobRange::Suffix(0).resolve(10),
+            Err(Error::RangeNotSatisfiable)
+        ));
+    }
+
+    #[test]
+    fn resolve_rejects_end_before_start() {
+        assert!(matches!(
+            BlobRange::FromTo {
+                start: 5,
+                end: Some(4),
+            }
+            .resolve(10),
             Err(Error::RangeNotSatisfiable)
         ));
     }
@@ -1558,8 +1586,8 @@ mod header_tests {
     use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, LOCATION};
 
     use super::{
-        Digest, ResolvedRange, get_blob_headers, get_blob_range_headers, get_blob_redirect_headers,
-        head_blob_headers,
+        BlobRange, Digest, get_blob_headers, get_blob_redirect_headers, head_blob_headers,
+        partial_blob_headers,
     };
     use crate::registry::DOCKER_CONTENT_DIGEST;
 
@@ -1585,16 +1613,33 @@ mod header_tests {
     }
 
     #[test]
-    fn get_blob_range_headers_computes_content_length() {
-        let range = ResolvedRange {
-            start: 5,
-            end: 10,
-            length: 6,
-            total_length: 100,
-        };
-        let headers = get_blob_range_headers(&sample_digest(), range).unwrap();
+    fn partial_blob_headers_carries_length_and_content_range() {
+        let headers = partial_blob_headers(&sample_digest(), 6, "bytes 5-10/100").unwrap();
         assert_eq!(headers[&CONTENT_LENGTH], "6");
         assert_eq!(headers[&CONTENT_RANGE], "bytes 5-10/100");
+    }
+
+    /// The value forwarded upstream must ask for the window the client asked
+    /// for, in each of the three forms the router parses.
+    #[test]
+    fn to_header_formats_every_requested_form() {
+        assert_eq!(
+            BlobRange::FromTo {
+                start: 5,
+                end: Some(10)
+            }
+            .to_header(),
+            "bytes=5-10"
+        );
+        assert_eq!(
+            BlobRange::FromTo {
+                start: 5,
+                end: None
+            }
+            .to_header(),
+            "bytes=5-"
+        );
+        assert_eq!(BlobRange::Suffix(64).to_header(), "bytes=-64");
     }
 
     #[test]

@@ -46,7 +46,7 @@ a digest that exists in storage but is not linked to the requested namespace ret
 - A range whose start is at or beyond the blob length, or a zero-length suffix range, returns `416 Range Not Satisfiable`.
 - For an empty blob, Angos ignores a syntactically valid range and returns the normal `200 OK` empty body.
 
-Range requests for pull-through repositories are supported only after the blob is available locally. A range request for an uncached pull-through blob returns `416`; request the full blob first to populate the cache.
+On a pull-through repository, a range over a blob that is not cached yet is forwarded to the upstream: its `206` is passed through with the upstream's `Content-Range`, and an upstream that ignores the range answers the full `200 OK` body. The blob is still queued for caching, so later ranges are served locally.
 
 When blob redirects are enabled (`global.enable_blob_redirect`, default `true`) and the blob store supports presigned URLs, `GET` may answer with a `307` redirect. Sending an `X-Angos-No-Redirect` header with any non-empty value other than `0` or `false` forces an inline body instead. The web UI sends it because a browser `fetch` cannot follow the cross-origin presigned redirect; OCI clients never send it.
 

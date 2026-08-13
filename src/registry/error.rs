@@ -192,6 +192,7 @@ impl From<registry_client::Error> for Error {
                 Error::ManifestBodyTooLarge { limit }
             }
             registry_client::Error::Unsupported => Error::Unsupported,
+            registry_client::Error::RangeNotSatisfiable => Error::RangeNotSatisfiable,
             registry_client::Error::Internal(msg) => Error::Internal(msg),
         }
     }

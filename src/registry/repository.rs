@@ -11,8 +11,8 @@ use crate::{
     configuration::RegexPattern,
     oci::{Digest, Error as OciError, MediaRange, Namespace, Reference},
     policy::{AccessPolicyConfig, RetentionPolicy, RetentionPolicyConfig, SystemClock},
-    registry::{Error, blob_store::BoxedReader},
-    registry_client::{FetchedManifest, ManifestHead, RegistryClient},
+    registry::Error,
+    registry_client::{FetchedBlob, FetchedManifest, ManifestHead, RegistryClient},
     replication::{ReplicationDownstream, ReplicationDownstreamConfig},
 };
 
@@ -324,19 +324,25 @@ impl Repository {
         .await
     }
 
+    /// Streams a blob from the first upstream that serves it, forwarding the
+    /// client's `Range` when there is one.
     #[instrument(skip(self))]
     pub async fn get_blob(
         &self,
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
-    ) -> Result<(u64, BoxedReader), Error> {
+        range: Option<&str>,
+    ) -> Result<FetchedBlob, Error> {
         self.try_upstreams(namespace, Error::BlobUnknown, |upstream| {
             Box::pin(async move {
                 let location = upstream
                     .client
                     .get_blob_path(upstream.remote(namespace)?.as_ref(), digest);
-                Ok(upstream.client.get_blob(accepted_types, &location).await?)
+                Ok(upstream
+                    .client
+                    .get_blob(accepted_types, &location, range)
+                    .await?)
             })
         })
         .await
@@ -747,11 +753,12 @@ mod tests {
             ResponseTemplate::new(200).set_body_bytes(blob_content),
         )
         .await;
-        let result = repo.get_blob(&[], &namespace, &digest).await;
+        let result = repo.get_blob(&[], &namespace, &digest, None).await;
         assert!(result.is_ok());
 
-        let (size, mut reader) = result.unwrap();
-        assert_eq!(size, blob_content.len() as u64);
+        let fetched = result.unwrap();
+        assert_eq!(fetched.length, blob_content.len() as u64);
+        let mut reader = fetched.reader;
 
         let mut buffer = Vec::new();
         AsyncReadExt::read_to_end(&mut reader, &mut buffer)
@@ -947,11 +954,12 @@ mod tests {
         .unwrap();
         let namespace = Namespace::new("local/repo").unwrap();
 
-        let result = repo.get_blob(&[], &namespace, &digest).await;
+        let result = repo.get_blob(&[], &namespace, &digest, None).await;
         assert!(result.is_ok());
 
-        let (size, mut reader) = result.unwrap();
-        assert_eq!(size, blob_content.len() as u64);
+        let fetched = result.unwrap();
+        assert_eq!(fetched.length, blob_content.len() as u64);
+        let mut reader = fetched.reader;
 
         let mut buffer = Vec::new();
         AsyncReadExt::read_to_end(&mut reader, &mut buffer)
@@ -985,7 +993,7 @@ mod tests {
         .unwrap();
         let namespace = Namespace::new("local/repo").unwrap();
 
-        let result = repo.get_blob(&[], &namespace, &digest).await;
+        let result = repo.get_blob(&[], &namespace, &digest, None).await;
         assert!(result.is_err());
         match result {
             Err(Error::BlobUnknown) => (),

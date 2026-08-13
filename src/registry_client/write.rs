@@ -176,7 +176,7 @@ impl RegistryClient {
         source_ts: Option<&str>,
     ) -> Result<Response, Error> {
         let mut request = self
-            .build_request(method, &[], location, auth_header)
+            .build_request(method, &[], location, auth_header, None)
             .body(body);
         if let Some(content_type) = content_type {
             request = request.header(CONTENT_TYPE, content_type);
@@ -218,7 +218,7 @@ impl RegistryClient {
         };
         let body = Body::wrap_stream(ReaderStream::new(stream));
         let response = self
-            .build_request(method, &[], location, auth.as_deref())
+            .build_request(method, &[], location, auth.as_deref(), None)
             .header(CONTENT_TYPE, "application/octet-stream")
             .header(CONTENT_LENGTH, content_length)
             .body(body)
