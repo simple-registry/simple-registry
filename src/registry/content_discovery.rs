@@ -140,6 +140,18 @@ impl Registry {
             .metadata_store
             .list_tags(&request.namespace, n, request.last)
             .await?;
+        // A namespace holding nothing is unknown, not empty: a client probing
+        // existence here must be able to tell the two apart. A repository whose
+        // tags were all deleted still holds revisions, so it stays a `200`.
+        if page.items.is_empty()
+            && !self
+                .metadata_store
+                .has_manifest_content(&request.namespace)
+                .await?
+        {
+            return Err(Error::NameUnknown);
+        }
+
         let namespace = &request.namespace;
         let link = page
             .next_token
@@ -362,6 +374,7 @@ mod tests {
     use crate::{
         oci::{Descriptor, Digest, Manifest, MediaType, Namespace, Reference, Tag},
         registry::{
+            Error,
             metadata_store::{LinkKind, LinkOperation, MetadataStore},
             test_utils::{
                 FSRegistryTestCase, create_test_blob, for_each_backend, media_type,
@@ -535,29 +548,62 @@ mod tests {
         }
     }
 
-    // list_tag_entries for a namespace that has never been written must return
-    // an empty tag list and no continuation token.
+    // A namespace that has never been written is unknown, not empty: a client
+    // probing existence through this endpoint must be able to tell them apart.
     #[tokio::test]
-    async fn list_tag_entries_unknown_namespace_returns_empty() {
+    async fn list_tag_entries_unknown_namespace_is_not_found() {
         let test_case = crate::registry::test_utils::FSRegistryTestCase::new();
         let registry = test_case.registry();
 
-        let response = registry
+        let result = registry
             .list_tag_entries(ListTagsRequest {
                 namespace: Namespace::new("no-such-repo/no-such-image").unwrap(),
                 n: None,
                 last: None,
             })
+            .await;
+
+        assert!(
+            matches!(result, Err(Error::NameUnknown)),
+            "a namespace holding nothing must be unknown, got {result:?}"
+        );
+    }
+
+    // The other half of the same rule: a namespace whose tags were all deleted
+    // still holds a revision, so it is an empty repository rather than a
+    // missing one.
+    #[tokio::test]
+    async fn list_tag_entries_serves_a_namespace_whose_tags_are_gone() {
+        let test_case = crate::registry::test_utils::FSRegistryTestCase::new();
+        let registry = test_case.registry();
+        let namespace = Namespace::new("test-repo").unwrap();
+
+        let digest = put_blob_direct(registry.metadata_store.store(), b"revision body").await;
+        registry
+            .metadata_store
+            .update_links(
+                &namespace,
+                &[LinkOperation::create(
+                    LinkKind::Digest(digest.clone()),
+                    digest,
+                )],
+            )
             .await
             .unwrap();
 
-        assert!(
-            next_cursor(&response).is_none(),
-            "unknown namespace must have no continuation token"
-        );
+        let response = registry
+            .list_tag_entries(ListTagsRequest {
+                namespace,
+                n: None,
+                last: None,
+            })
+            .await
+            .expect("a namespace holding a revision must be served");
+
+        assert!(next_cursor(&response).is_none());
         assert!(
             tags(response).await.is_empty(),
-            "unknown namespace must have no tags"
+            "a namespace with no tags must serve an empty list"
         );
     }
 

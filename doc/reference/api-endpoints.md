@@ -208,6 +208,8 @@ Query parameters:
 - `n` - Maximum number of results
 - `last` - Pagination marker
 
+A namespace holding no manifest content at all returns `NAME_UNKNOWN` (HTTP 404), so a client can probe existence here. A namespace whose tags were all deleted still holds its revisions and returns `200` with an empty list, until those are deleted too.
+
 ### Catalog
 
 ```

@@ -223,6 +223,27 @@ impl MetadataStore {
         })
     }
 
+    /// Whether `namespace` holds any manifest content, by the rule the catalog
+    /// listing names a repository with: at least one revision or tag. Probes one
+    /// entry of each, so a namespace that was never written costs the listings
+    /// that find nothing.
+    pub async fn has_manifest_content(&self, namespace: &Namespace) -> Result<bool, Error> {
+        let revisions = self.stream_revisions(namespace);
+        tokio::pin!(revisions);
+        if revisions.next().await.transpose()?.is_some() {
+            return Ok(true);
+        }
+
+        let tags_dir = path_builder::manifest_tags_dir(namespace);
+        let page = self
+            .store()
+            .object_store()
+            .list_children(&tags_dir, 1, None, None)
+            .await?;
+
+        Ok(!page.sub_prefixes.is_empty())
+    }
+
     pub async fn has_referrers(
         &self,
         namespace: &Namespace,
