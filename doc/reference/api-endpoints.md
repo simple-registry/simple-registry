@@ -189,7 +189,7 @@ replicated repository as trust over `created_at`, and restrict it via the CEL `a
 [Restrict replication writes](../how-to/set-up-access-control.md#restrict-replication-writes)).
 
 A `409 REPLICATION_SUPERSEDED` is convergence, not failure: the sender treats it as success and
-completes the replication job. It is distinct on the wire from the immutable-tag `409 CONFLICT`, which
+completes the replication job. It is distinct on the wire from the immutable-tag `409 DENIED`, which
 surfaces so the job retries or dead-letters.
 
 ### Tags
@@ -619,8 +619,9 @@ Errors follow OCI Distribution error format:
 | `NAME_INVALID`        | 400          | Invalid repository name   |
 | `NAME_UNKNOWN`        | 404          | Repository not found      |
 | `SIZE_INVALID`        | 416          | Requested range not satisfiable |
-| `CONFLICT`            | 409          | Write rejected, for example, an immutable tag cannot be overwritten |
-| `REPLICATION_SUPERSEDED` | 409       | Replication write rejected by last-writer-wins (the local copy is strictly newer) |
 | `UNAUTHORIZED`        | 401          | Authentication required   |
-| `DENIED`              | 403 or 405   | Access denied by policy, or blob is still referenced |
-| `UNSUPPORTED`         | 400          | Unsupported operation     |
+| `DENIED`              | 403, 405, or 409 | Access denied by policy, blob is still referenced, or a write was rejected (an immutable tag cannot be overwritten) |
+| `UNSUPPORTED`         | 400          | Unsupported operation, and the code carried by any other malformed request |
+| `REPLICATION_SUPERSEDED` | 409       | Replication write rejected by last-writer-wins (the local copy is strictly newer) |
+
+The spec fixes the `code` of a 4XX body to the identifiers above; `REPLICATION_SUPERSEDED` is the one exception, and only ever answers a replication write (a manifest `PUT` or `DELETE` carrying `X-Angos-Source-Timestamp`). A 5XX body carries `INTERNAL_ERROR` or `PROVIDER_UNAVAILABLE`, which the rule does not cover.

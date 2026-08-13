@@ -2,6 +2,66 @@ use hyper::StatusCode;
 
 use crate::{command::server::Error, event_webhook, registry};
 
+/// The identifiers the spec allows in the `code` of a 4XX body.
+const OCI_ERROR_CODES: [&str; 14] = [
+    "BLOB_UNKNOWN",
+    "BLOB_UPLOAD_INVALID",
+    "BLOB_UPLOAD_UNKNOWN",
+    "DIGEST_INVALID",
+    "MANIFEST_BLOB_UNKNOWN",
+    "MANIFEST_INVALID",
+    "MANIFEST_UNKNOWN",
+    "NAME_INVALID",
+    "NAME_UNKNOWN",
+    "SIZE_INVALID",
+    "UNAUTHORIZED",
+    "DENIED",
+    "UNSUPPORTED",
+    "TOOMANYREQUESTS",
+];
+
+/// Every 4XX body must name one of those, so a new mapping cannot invent a code
+/// clients are not meant to see. `REPLICATION_SUPERSEDED` is the one exception,
+/// covered in `registry::manifest::tests`: it answers a replication write only.
+#[test]
+fn every_4xx_code_is_one_the_spec_defines() {
+    let errors = [
+        Error::Unauthorized("unauthorized".to_string()),
+        Error::BadRequest("bad request".to_string()),
+        Error::RangeNotSatisfiable("range".to_string()),
+        Error::NotFound("not found".to_string()),
+        registry::Error::BlobUnknown.into(),
+        registry::Error::BlobReferenced.into(),
+        registry::Error::BlobUploadUnknown.into(),
+        registry::Error::DigestInvalid.into(),
+        registry::Error::ManifestBlobUnknown.into(),
+        registry::Error::ManifestBodyTooLarge { limit: 42 }.into(),
+        registry::Error::BlobBodyTooLarge { limit: 42 }.into(),
+        registry::Error::ManifestInvalid("invalid".to_string()).into(),
+        registry::Error::ManifestUnknown.into(),
+        registry::Error::NameInvalid.into(),
+        registry::Error::NameUnknown.into(),
+        registry::Error::NotFound.into(),
+        registry::Error::Unauthorized("unauthorized".to_string()).into(),
+        registry::Error::Denied("denied".to_string()).into(),
+        registry::Error::Unsupported.into(),
+        registry::Error::RangeNotSatisfiable.into(),
+        registry::Error::Conflict("conflict".to_string()).into(),
+    ];
+
+    for error in errors {
+        assert!(
+            error.status_code().is_client_error(),
+            "{error:?} is not a 4XX, so it does not belong here"
+        );
+        let code = error.as_json(None)["errors"][0]["code"].clone();
+        assert!(
+            OCI_ERROR_CODES.contains(&code.as_str().expect("a code is a string")),
+            "{error:?} answers with {code}, which the spec does not define"
+        );
+    }
+}
+
 /// A body over the manifest cap is too large, not malformed: both size limits
 /// answer `413`, keeping the OCI code that names which body was refused.
 #[test]
@@ -84,7 +144,7 @@ fn test_as_json_with_request_id() {
     let request_id = Some("req-12345".to_string());
     let json = error.as_json(request_id.as_ref());
 
-    assert_eq!(json["errors"][0]["code"], "BAD_REQUEST");
+    assert_eq!(json["errors"][0]["code"], "UNSUPPORTED");
     assert_eq!(json["errors"][0]["message"], "Missing parameter");
     assert_eq!(json["errors"][0]["detail"]["request_id"], "req-12345");
 }
@@ -99,17 +159,17 @@ fn test_as_json_all_error_types() {
         ),
         (
             Error::BadRequest("bad request".to_string()),
-            "BAD_REQUEST",
+            "UNSUPPORTED",
             "bad request",
         ),
         (
             Error::RangeNotSatisfiable("range".to_string()),
-            "RANGE_NOT_SATISFIABLE",
+            "SIZE_INVALID",
             "range",
         ),
         (
             Error::NotFound("not found".to_string()),
-            "NOT_FOUND",
+            "NAME_UNKNOWN",
             "not found",
         ),
         (

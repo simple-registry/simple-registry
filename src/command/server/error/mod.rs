@@ -53,15 +53,18 @@ impl Error {
         }
     }
 
+    /// The OCI error body. A 4XX `code` must come from the spec's fixed set, so
+    /// each case picks the closest of those and carries what angos knows in
+    /// `message`; a 5XX code is unconstrained.
     pub fn as_json(&self, request_id: Option<&String>) -> serde_json::Value {
         // A 5xx body carries no message: an internal error string must never
         // leak to the client. The full detail is logged server-side (see
         // `error_for_log`); the client gets the code plus a request id.
         let (code, message) = match self {
             Error::Unauthorized(msg) => ("UNAUTHORIZED", Some(msg.as_str())),
-            Error::BadRequest(msg) => ("BAD_REQUEST", Some(msg.as_str())),
-            Error::RangeNotSatisfiable(msg) => ("RANGE_NOT_SATISFIABLE", Some(msg.as_str())),
-            Error::NotFound(msg) => ("NOT_FOUND", Some(msg.as_str())),
+            Error::BadRequest(msg) => ("UNSUPPORTED", Some(msg.as_str())),
+            Error::RangeNotSatisfiable(msg) => ("SIZE_INVALID", Some(msg.as_str())),
+            Error::NotFound(msg) => ("NAME_UNKNOWN", Some(msg.as_str())),
             Error::ProviderUnavailable(_) => ("PROVIDER_UNAVAILABLE", None),
             Error::Initialization(_)
             | Error::Execution(_)

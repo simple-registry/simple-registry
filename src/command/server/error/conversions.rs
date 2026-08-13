@@ -55,7 +55,9 @@ impl From<registry::Error> for Error {
             registry::Error::NameInvalid => {
                 oci_error(StatusCode::BAD_REQUEST, "NAME_INVALID", None)
             }
-            registry::Error::NameUnknown => oci_error(StatusCode::NOT_FOUND, "NAME_UNKNOWN", None),
+            registry::Error::NameUnknown | registry::Error::NotFound => {
+                oci_error(StatusCode::NOT_FOUND, "NAME_UNKNOWN", None)
+            }
             registry::Error::Unauthorized(msg) => {
                 oci_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", Some(msg))
             }
@@ -64,11 +66,13 @@ impl From<registry::Error> for Error {
             registry::Error::RangeNotSatisfiable => {
                 oci_error(StatusCode::RANGE_NOT_SATISFIABLE, "SIZE_INVALID", None)
             }
-            registry::Error::NotFound => oci_error(StatusCode::NOT_FOUND, "NOT_FOUND", None),
-            // A concurrent-writer CAS conflict: HTTP 409 so the client retries.
-            registry::Error::Conflict(msg) => {
-                oci_error(StatusCode::CONFLICT, "CONFLICT", Some(msg))
-            }
+            // A refused write (an immutable tag, a concurrent-writer CAS
+            // conflict): HTTP 409 so the client retries, under the spec code
+            // closest to a rejected write.
+            registry::Error::Conflict(msg) => oci_error(StatusCode::CONFLICT, "DENIED", Some(msg)),
+            // The one code outside the spec's set, and the only one a client
+            // never sees: it answers a replication write, which angos marks with
+            // its own header and whose sender reads this code to converge.
             registry::Error::ReplicationSuperseded(msg) => {
                 oci_error(StatusCode::CONFLICT, REPLICATION_SUPERSEDED_CODE, Some(msg))
             }

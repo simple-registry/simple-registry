@@ -1761,7 +1761,7 @@ async fn test_put_manifest_superseded_409() {
 #[tokio::test]
 async fn test_put_manifest_non_superseded_409_is_error() {
     let mock_server = MockServer::start().await;
-    let body = serde_json::json!({ "errors": [{ "code": "CONFLICT" }] });
+    let body = serde_json::json!({ "errors": [{ "code": "DENIED" }] });
 
     Mock::given(method("PUT"))
         .and(path("/v2/test/manifests/v1"))

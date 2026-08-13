@@ -153,7 +153,7 @@ When attempting to overwrite an immutable tag:
 
 **HTTP Response:**
 - Status: `409 Conflict`
-- Code: `CONFLICT`
+- Code: `DENIED`
 - Message: `Tag 'tagname' is immutable and cannot be overwritten`
 
 **Docker CLI:**

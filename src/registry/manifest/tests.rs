@@ -3452,7 +3452,7 @@ async fn replication_superseded_maps_to_distinct_oci_code() {
         superseded_json["errors"][0]["code"],
         REPLICATION_SUPERSEDED_CODE
     );
-    assert_eq!(conflict_json["errors"][0]["code"], "CONFLICT");
+    assert_eq!(conflict_json["errors"][0]["code"], "DENIED");
     assert_ne!(
         superseded_json["errors"][0]["code"],
         conflict_json["errors"][0]["code"]

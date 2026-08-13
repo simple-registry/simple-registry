@@ -750,9 +750,8 @@ async fn execute_push_surfaces_immutable_conflict_409_as_error() {
     Mock::given(method("PUT"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
         .respond_with(
-            ResponseTemplate::new(409).set_body_string(
-                r#"{"errors":[{"code":"CONFLICT","message":"tag is immutable"}]}"#,
-            ),
+            ResponseTemplate::new(409)
+                .set_body_string(r#"{"errors":[{"code":"DENIED","message":"tag is immutable"}]}"#),
         )
         .mount(&mock_server)
         .await;
@@ -980,9 +979,8 @@ async fn execute_push_records_failed_metric_on_error() {
     Mock::given(method("PUT"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
         .respond_with(
-            ResponseTemplate::new(409).set_body_string(
-                r#"{"errors":[{"code":"CONFLICT","message":"tag is immutable"}]}"#,
-            ),
+            ResponseTemplate::new(409)
+                .set_body_string(r#"{"errors":[{"code":"DENIED","message":"tag is immutable"}]}"#),
         )
         .mount(&mock_server)
         .await;
