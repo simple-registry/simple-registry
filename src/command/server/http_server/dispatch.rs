@@ -5,6 +5,14 @@ use hyper::{
 };
 use tracing::instrument;
 
+use crate::registry::content_discovery::ListCatalogRequest;
+use angos_oci::request::{
+    BlobMount, CompleteUploadRequest, DeleteBlobRequest, DeleteManifestRequest,
+    DeleteUploadRequest, GetBlobRequest, GetManifestRequest, GetReferrersRequest, GetUploadRequest,
+    HeadBlobRequest, HeadManifestRequest, ListTagsRequest, MountBlobRequest, PatchUploadRequest,
+    PutManifestRequest, StartUploadRequest, StartUploadTarget,
+};
+
 use crate::{
     command::server::{
         ServerContext,
@@ -17,12 +25,8 @@ use crate::{
     http_response::ResponseBody,
     identity::{Action, ClientIdentity},
     registry::{
-        self, BlobMount, CompleteUploadRequest, DeleteBlobRequest, DeleteJobRequest,
-        DeleteManifestRequest, DeleteUploadRequest, GetBlobRequest, GetManifestRequest,
-        GetReferrersRequest, GetUploadRequest, HeadBlobRequest, HeadManifestRequest,
-        ListCatalogRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
-        ListTagsRequest, ListUploadsRequest, MountBlobRequest, PatchUploadRequest,
-        PutManifestRequest, RetryJobRequest, StartUploadRequest, StartUploadTarget,
+        self, DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
+        ListUploadsRequest, RetryJobRequest,
     },
 };
 
@@ -118,14 +122,7 @@ async fn dispatch_route<'a>(
                 .await?;
 
             Ok(registry
-                .mount_blob(
-                    actor,
-                    MountBlobRequest {
-                        namespace,
-                        mount,
-                        source,
-                    },
-                )
+                .mount_blob(actor, MountBlobRequest { namespace, mount }, source)
                 .await?)
         }
         Action::GetUpload {
@@ -159,9 +156,9 @@ async fn dispatch_route<'a>(
             .complete_upload(
                 actor,
                 CompleteUploadRequest {
-                    namespace: &namespace,
-                    session_id: &session_id,
-                    digest: &digest,
+                    namespace,
+                    session_id,
+                    digest,
                     content_range: headers.chunk_range(CONTENT_RANGE)?,
                     content_length: headers.content_length()?,
                 },
@@ -225,7 +222,7 @@ async fn dispatch_route<'a>(
             .await?),
         Action::PutManifest { namespace, target } => {
             let (reference, tags) = target.into_parts();
-            let mime_type = headers.content_type()?.ok_or(Error::BadRequest(
+            let content_type = headers.content_type()?.ok_or(Error::BadRequest(
                 "No Content-Type header provided".to_string(),
             ))?;
 
@@ -233,9 +230,9 @@ async fn dispatch_route<'a>(
                 .accept_put_manifest(
                     actor,
                     PutManifestRequest {
-                        namespace: &namespace,
+                        namespace,
                         reference,
-                        mime_type,
+                        content_type: Some(content_type),
                         tags,
                         source_ts: headers.source_timestamp(),
                     },

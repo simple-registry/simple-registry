@@ -184,19 +184,21 @@ async function postAction(url: string): Promise<string | null> {
 }
 
 export async function fetchRepositories(): Promise<FetchResult<RepositoriesResponse>> {
-	return fetchJson<RepositoriesResponse>('/_ext/_repositories');
+	return fetchJson<RepositoriesResponse>('/v2/_angos/repositories/list');
 }
 
 export async function fetchNamespaces(repository: string): Promise<FetchResult<NamespacesResponse>> {
-	return fetchJson<NamespacesResponse>(`/_ext/${repository}/_namespaces`);
+	return fetchJson<NamespacesResponse>(
+		`/v2/_angos/namespaces/list?repository=${encodeURIComponent(repository)}`
+	);
 }
 
 export async function fetchRevisions(namespace: string): Promise<FetchResult<RevisionsResponse>> {
-	return fetchJson<RevisionsResponse>(`/_ext/${namespace}/_revisions`);
+	return fetchJson<RevisionsResponse>(`/v2/${namespace}/_angos/revisions/list`);
 }
 
 export async function fetchUploads(namespace: string): Promise<FetchResult<UploadsResponse>> {
-	return fetchJson<UploadsResponse>(`/_ext/${namespace}/_uploads`);
+	return fetchJson<UploadsResponse>(`/v2/${namespace}/_angos/uploads/list`);
 }
 
 function jobsQuery(queue: JobQueue, n: number, after?: string): string {
@@ -212,7 +214,7 @@ export async function fetchJobs(
 	n = 100,
 	after?: string
 ): Promise<FetchResult<JobsResponse>> {
-	return fetchJson<JobsResponse>(`/_ext/_jobs?${jobsQuery(queue, n, after)}`);
+	return fetchJson<JobsResponse>(`/v2/_angos/jobs/list?${jobsQuery(queue, n, after)}`);
 }
 
 export async function fetchFailedJobs(
@@ -220,11 +222,11 @@ export async function fetchFailedJobs(
 	n = 100,
 	after?: string
 ): Promise<FetchResult<FailedJobsResponse>> {
-	return fetchJson<FailedJobsResponse>(`/_ext/_jobs/failed?${jobsQuery(queue, n, after)}`);
+	return fetchJson<FailedJobsResponse>(`/v2/_angos/jobs/failed?${jobsQuery(queue, n, after)}`);
 }
 
 export async function retryJob(queue: JobQueue, storageKey: string): Promise<string | null> {
-	return postAction(`/_ext/_jobs/failed/${encodeURIComponent(storageKey)}/retry?queue=${queue}`);
+	return postAction(`/v2/_angos/jobs/failed/${encodeURIComponent(storageKey)}/retry?queue=${queue}`);
 }
 
 export async function deleteJob(
@@ -232,7 +234,7 @@ export async function deleteJob(
 	state: JobState,
 	storageKey: string
 ): Promise<string | null> {
-	return deleteResource(`/_ext/_jobs/${state}/${encodeURIComponent(storageKey)}?queue=${queue}`);
+	return deleteResource(`/v2/_angos/jobs/${state}/${encodeURIComponent(storageKey)}?queue=${queue}`);
 }
 
 export interface ManifestResult {

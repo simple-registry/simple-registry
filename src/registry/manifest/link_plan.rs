@@ -10,10 +10,9 @@
 //! ensures that both sides apply the same decisions about which links to create
 //! or delete for a given manifest, eliminating divergence between them.
 
-use crate::{
-    oci::{Content, Digest, Manifest, MediaType, Reference, Tag},
-    registry::metadata_store::{LinkKind, LinkOperation},
-};
+use angos_oci::{Content, Digest, Manifest, MediaType, Reference, Tag};
+
+use crate::registry::metadata_store::{LinkKind, LinkOperation};
 
 /// Produces the `LinkOperation::Create` set needed to store a manifest
 /// identified by `digest` under `reference`.
@@ -183,11 +182,10 @@ pub fn delete(
 mod tests {
     use std::{collections::HashMap, str::FromStr};
 
-    use super::*;
-    use crate::{
-        oci::{Descriptor, Manifest, Tag},
-        registry::test_utils::media_type,
-    };
+    use angos_oci::{Descriptor, Manifest, Tag};
+
+    use crate::registry::manifest::link_plan::*;
+    use crate::registry::test_utils::media_type;
 
     fn d(byte: u8) -> Digest {
         let hex = format!("{byte:02x}").repeat(32);

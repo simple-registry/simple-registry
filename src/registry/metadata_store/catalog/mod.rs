@@ -4,15 +4,13 @@
 use futures_util::stream::{self, Stream, StreamExt, TryStreamExt};
 use tracing::{debug, instrument};
 
+use angos_oci::{Algorithm, Digest, Namespace, Tag};
 use angos_storage::{Page, paginated};
 
-use crate::{
-    oci::{Algorithm, Digest, Namespace, Tag},
-    registry::{
-        Error,
-        metadata_store::{LinkKind, MetadataStore},
-        pagination, path_builder,
-    },
+use crate::registry::{
+    Error,
+    metadata_store::{LinkKind, MetadataStore},
+    pagination, path_builder,
 };
 
 /// Fan-out for the tag link reads behind [`MetadataStore::find_tags_pointing_at`].

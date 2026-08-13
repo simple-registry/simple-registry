@@ -84,6 +84,7 @@ pub struct ByteWindow {
 impl ByteWindow {
     /// Whether `received` bytes is what this window declared. A window naming no
     /// end declares nothing to disagree with.
+    #[must_use]
     pub fn covers(self, received: u64) -> bool {
         self.end
             .is_none_or(|end| received == end.saturating_sub(self.start) + 1)
@@ -220,6 +221,7 @@ pub struct ResponseRange {
 
 impl ResponseRange {
     /// The number of bytes served, `end` being inclusive.
+    #[must_use]
     pub fn length(self) -> u64 {
         self.end - self.start + 1
     }
@@ -279,7 +281,7 @@ impl TryFrom<ResponseRange> for HeaderValue {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::types::http_range::*;
 
     #[test]
     fn parse_reads_every_requested_form() {

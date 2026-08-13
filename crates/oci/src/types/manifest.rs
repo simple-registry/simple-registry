@@ -2,7 +2,7 @@ use std::{collections::HashMap, mem};
 
 use serde::{Deserialize, Serialize};
 
-use crate::oci::{Descriptor, Digest, Error, MediaType};
+use crate::types::{Descriptor, Digest, Error, MediaType};
 
 /// OCI image-spec manifest `schemaVersion`. Enforced where a manifest enters
 /// the store, not on this DTO, so angos keeps reading what it once accepted.
@@ -33,6 +33,7 @@ pub enum Content {
 
 impl Content {
     /// The config descriptor of an image manifest; an index carries none.
+    #[must_use]
     pub fn config(&self) -> Option<&Descriptor> {
         match self {
             Content::Image { config, .. } => config.as_deref(),
@@ -70,6 +71,10 @@ impl Manifest {
     /// Deserializes leniently, like `media_type` being optional: angos must
     /// keep reading manifests it once accepted. Ingress checks the strict rules
     /// through [`Self::from_pushed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bytes are not a JSON manifest object.
     pub fn from_slice(s: &[u8]) -> Result<Self, Error> {
         Ok(serde_json::from_slice(s)?)
     }
@@ -81,6 +86,11 @@ impl Manifest {
     /// The shapes are read off the raw object because the flattened [`Content`]
     /// keeps only the one it selects, which is what lets an already-stored
     /// hybrid stay readable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bytes are not a JSON manifest object, or when
+    /// the object declares both image and index content.
     pub fn from_pushed(s: &[u8]) -> Result<Self, Error> {
         let raw: serde_json::Value = serde_json::from_slice(s)?;
         if declares_both_shapes(&raw) {
@@ -94,6 +104,7 @@ impl Manifest {
     /// Returns `true` if `artifact_type` equals either the manifest's top-level
     /// `artifactType` field or, per the OCI Referrers API spec, the config's
     /// `mediaType` fallback.
+    #[must_use]
     pub fn has_artifact_type(&self, artifact_type: &MediaType) -> bool {
         self.artifact_type.as_ref() == Some(artifact_type)
             || self
@@ -104,6 +115,7 @@ impl Manifest {
 
     /// Returns whether this manifest's `artifact_type` (or config `mediaType`
     /// fallback) matches the given filter. A `None` filter matches anything.
+    #[must_use]
     pub fn artifact_type_matches(&self, filter: Option<&MediaType>) -> bool {
         filter.is_none_or(|want| self.has_artifact_type(want))
     }
@@ -113,6 +125,7 @@ impl Manifest {
     /// document whose `manifests` array is present but empty has always been
     /// served as an image manifest, and a stored one must keep the
     /// `Content-Type` it has always had.
+    #[must_use]
     pub fn described_media_type(&self) -> MediaType {
         if let Some(media_type) = self.media_type.clone() {
             return media_type;
@@ -148,6 +161,19 @@ impl Manifest {
     }
 }
 
+impl Manifest {
+    /// An OCI image index listing `manifests`, typed as one so it serializes
+    /// under the media type a client negotiates the listing on.
+    #[must_use]
+    pub fn oci_index(manifests: Vec<Descriptor>) -> Self {
+        Self {
+            media_type: Some(MediaType::oci_index()),
+            content: Content::Index { manifests },
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for Manifest {
     fn default() -> Self {
         Self {
@@ -157,6 +183,32 @@ impl Default for Manifest {
             annotations: HashMap::new(),
             artifact_type: None,
             content: Content::default(),
+        }
+    }
+}
+
+/// Construction shortcuts for fixtures: nothing in the serving paths builds a
+/// manifest, they only parse.
+#[cfg(feature = "test-util")]
+impl Manifest {
+    /// An image manifest carrying `config` and `layers`, every other field left
+    /// at its default.
+    pub fn image(config: Option<Descriptor>, layers: Vec<Descriptor>) -> Self {
+        Self {
+            content: Content::Image {
+                config: config.map(Box::new),
+                layers,
+            },
+            ..Self::default()
+        }
+    }
+
+    /// An index listing `manifests`, every other field left at its default.
+    #[must_use]
+    pub fn index(manifests: Vec<Descriptor>) -> Self {
+        Self {
+            content: Content::Index { manifests },
+            ..Self::default()
         }
     }
 }
@@ -177,8 +229,9 @@ fn declares_both_shapes(raw: &serde_json::Value) -> bool {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::*;
-    use crate::oci::Digest;
+    use crate::types::Digest;
+    use crate::types::constants::OCI_INDEX_MEDIA_TYPE;
+    use crate::types::manifest::*;
 
     const VALID_HASH: &str = "99c9d5e2bdc7ef0223f56c845a695ea0f8f11f5b55ea6f74e1f7df0d4f90026c";
     const MEDIA_TYPE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
@@ -303,6 +356,24 @@ mod tests {
 
     /// A manifest carrying no `mediaType` is described by the type its shape
     /// implies, so a referrer listing names it rather than dropping it.
+    #[test]
+    fn an_oci_index_serializes_as_the_referrers_document() {
+        let index = Manifest::oci_index(vec![Descriptor {
+            media_type: media_type(MEDIA_TYPE_MANIFEST),
+            digest: valid_digest(),
+            size: 7,
+            annotations: HashMap::new(),
+            artifact_type: None,
+            platform: None,
+        }]);
+        let json: Value = serde_json::to_value(&index).unwrap();
+
+        assert_eq!(json["schemaVersion"], 2);
+        assert_eq!(json["mediaType"], OCI_INDEX_MEDIA_TYPE);
+        assert_eq!(json["manifests"].as_array().unwrap().len(), 1);
+        assert!(json.get("config").is_none() && json.get("layers").is_none());
+    }
+
     #[test]
     fn test_take_descriptor_recovers_an_absent_media_type() {
         let image = Manifest {

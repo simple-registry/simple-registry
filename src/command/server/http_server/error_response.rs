@@ -18,7 +18,10 @@ pub fn error_to_response(
     request_id: Option<&String>,
     challenge: Option<HeaderValue>,
 ) -> Response<ResponseBody> {
-    let body = Bytes::from(error.as_json(request_id).to_string());
+    let Ok(body) = serde_json::to_vec(&error.error_body(request_id)) else {
+        return fallback_500();
+    };
+    let body = Bytes::from(body);
 
     let mut response = Response::builder()
         .status(error.status_code())

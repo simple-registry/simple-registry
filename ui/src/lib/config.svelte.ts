@@ -9,7 +9,7 @@ export async function loadConfig(): Promise<void> {
 	if (loaded) return;
 
 	try {
-		const response = await fetch('/_ui/config');
+		const response = await fetch('/v2/_angos/ui/config');
 		if (response.ok) {
 			const data: UiConfig = await response.json();
 			config = data;

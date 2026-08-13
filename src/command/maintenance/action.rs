@@ -1,8 +1,9 @@
 use std::fmt;
 
+use angos_oci::{Digest, Namespace, Tag, UploadSessionId};
+
 use crate::{
     jobs::{JobState, Queue},
-    oci::{Digest, Namespace, Tag, UploadSessionId},
     registry::{blob_store::OrphanMultipartUpload, metadata_store::LinkKind},
 };
 

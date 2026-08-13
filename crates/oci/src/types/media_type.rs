@@ -9,8 +9,8 @@ use std::{
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::oci::Error;
-use crate::oci::constants::{
+use crate::types::Error;
+use crate::types::constants::{
     DOCKER_MANIFEST_LIST_MEDIA_TYPE, DOCKER_MANIFEST_MEDIA_TYPE, OCI_INDEX_MEDIA_TYPE,
     OCI_MANIFEST_MEDIA_TYPE,
 };
@@ -51,6 +51,9 @@ impl MediaType {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when `s` is not a `type/subtype` media type.
     pub fn new(s: &str) -> Result<Self, Error> {
         if Self::is_valid(s) {
             Ok(Self(Self::essence(s).to_owned()))
@@ -62,24 +65,28 @@ impl MediaType {
     /// The OCI image-manifest media type. Infallible: the value is a validated
     /// compile-time constant needing no fallible re-validation. Serves as the
     /// `Content-Type` fallback for a manifest whose link and body both lack one.
+    #[must_use]
     pub fn oci_manifest() -> Self {
         Self(OCI_MANIFEST_MEDIA_TYPE.to_owned())
     }
 
     /// The OCI image-index (manifest list) media type, infallible like
     /// [`Self::oci_manifest`].
+    #[must_use]
     pub fn oci_index() -> Self {
         Self(OCI_INDEX_MEDIA_TYPE.to_owned())
     }
 
     /// The Docker v2 schema-2 manifest media type, infallible like
     /// [`Self::oci_manifest`].
+    #[must_use]
     pub fn docker_manifest() -> Self {
         Self(DOCKER_MANIFEST_MEDIA_TYPE.to_owned())
     }
 
     /// The Docker v2 manifest-list media type, infallible like
     /// [`Self::oci_manifest`].
+    #[must_use]
     pub fn docker_manifest_list() -> Self {
         Self(DOCKER_MANIFEST_LIST_MEDIA_TYPE.to_owned())
     }
@@ -187,7 +194,7 @@ impl<'de> Deserialize<'de> for MediaType {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::types::media_type::*;
 
     #[test]
     fn test_valid_media_types() {

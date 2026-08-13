@@ -6,6 +6,7 @@ use std::{
     time::Duration as StdDuration,
 };
 
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::{
@@ -13,17 +14,17 @@ use wiremock::{
     matchers::{header, method, path, query_param},
 };
 
+use angos_oci::header::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT};
+use angos_oci::{
+    Digest, MediaType, Namespace, OCI_INDEX_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, Reference, Tag,
+    constants::{DOCKER_MANIFEST_LIST_MEDIA_TYPE, DOCKER_MANIFEST_MEDIA_TYPE},
+};
 use angos_tx_engine::store::Store;
 
 use crate::{
     metrics_provider,
-    oci::{
-        Digest, MediaType, Namespace, OCI_INDEX_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, Reference,
-        Tag,
-        constants::{DOCKER_MANIFEST_LIST_MEDIA_TYPE, DOCKER_MANIFEST_MEDIA_TYPE},
-    },
     registry::{
-        DOCKER_CONTENT_DIGEST, OCI_SUBJECT, ParsedManifestDigests,
+        ParsedManifestDigests,
         blob_store::BlobStore,
         metadata_store::{BlobIndexOperation, LinkKind, LinkOperation, MetadataStore},
         test_utils::{FsTestStack, downstream_client, fs_test_stack, media_type, put_blob_direct},
@@ -37,6 +38,17 @@ use crate::{
 };
 
 const NAMESPACE: &str = "nginx";
+
+/// The origin timestamp the fixtures stamp. The header carries whatever
+/// `to_rfc3339` renders it as, which is what the sender puts on the wire.
+const SOURCE_TS: &str = "2026-06-03T00:00:00Z";
+
+/// The origin timestamp a replication write stamps, parsed from RFC 3339.
+fn instant(rfc3339: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(rfc3339)
+        .expect("fixture timestamp must be RFC 3339")
+        .with_timezone(&Utc)
+}
 
 fn test_blob_store() -> (Arc<BlobStore>, Arc<MetadataStore>, Arc<Store>, TempDir) {
     let FsTestStack {
@@ -146,7 +158,7 @@ async fn push_referrers_fallback_when_downstream_is_oci_1_0() {
     mount_manifest_put(&mock_server, NAMESPACE, "v1", &manifest_digest).await;
 
     // The pipeline GETs the existing fallback index first (404 => start fresh).
-    let fallback_tag = format!("{}-{}", subject.algorithm(), subject.hash());
+    let fallback_tag = Tag::referrers_fallback(&subject);
     Mock::given(method("GET"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
         .respond_with(ResponseTemplate::new(404))
@@ -220,7 +232,10 @@ async fn referrers_fallback_put_is_timestamp_less() {
     // The primary PUT must carry the header; no `OCI-Subject` => fallback runs.
     Mock::given(method("PUT"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
-        .and(header(X_ANGOS_SOURCE_TIMESTAMP, "2026-06-03T00:00:00Z"))
+        .and(header(
+            X_ANGOS_SOURCE_TIMESTAMP,
+            instant(SOURCE_TS).to_rfc3339(),
+        ))
         .respond_with(
             ResponseTemplate::new(201)
                 .insert_header(DOCKER_CONTENT_DIGEST, manifest_digest.to_string().as_str()),
@@ -230,7 +245,7 @@ async fn referrers_fallback_put_is_timestamp_less() {
         .await;
 
     // The fallback-index PUT must not carry the source-timestamp header.
-    let fallback_tag = format!("{}-{}", subject.algorithm(), subject.hash());
+    let fallback_tag = Tag::referrers_fallback(&subject);
     Mock::given(method("GET"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
         .respond_with(ResponseTemplate::new(404))
@@ -255,7 +270,7 @@ async fn referrers_fallback_put_is_timestamp_less() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = PushContext {
-        source_ts: Some("2026-06-03T00:00:00Z"),
+        source_ts: Some(instant(SOURCE_TS)),
         ..push_context(&downstream, &blob_store, &metadata_store, &namespace)
     };
     push_manifest(&ctx, &manifest_digest, None, Some("v1"), manifest_bytes)
@@ -298,7 +313,7 @@ async fn referrers_fallback_propagates_transient_get_error_without_clobbering() 
     mount_manifest_put(&mock_server, NAMESPACE, "v1", &manifest_digest).await;
 
     // The fallback index GET fails with 500; the merge PUT must not run.
-    let fallback_tag = format!("{}-{}", subject.algorithm(), subject.hash());
+    let fallback_tag = Tag::referrers_fallback(&subject);
     Mock::given(method("GET"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
         .respond_with(ResponseTemplate::new(500))
@@ -359,7 +374,7 @@ async fn referrers_fallback_errors_on_unparseable_index_without_clobbering() {
 
     // The fallback GET returns a 200 whose JSON body has no `manifests`
     // array; the merge PUT must not run.
-    let fallback_tag = format!("{}-{}", subject.algorithm(), subject.hash());
+    let fallback_tag = Tag::referrers_fallback(&subject);
     Mock::given(method("GET"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
         .respond_with(
@@ -426,7 +441,7 @@ async fn concurrent_same_subject_referrers_merge_without_lost_update() {
 
     // A stateful fallback endpoint: GET serves what the last PUT stored, so
     // the second merge sees the first descriptor only if the merges serialized.
-    let fallback_tag = format!("{}-{}", subject.algorithm(), subject.hash());
+    let fallback_tag = Tag::referrers_fallback(&subject);
     let stored: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let get_stored = stored.clone();
     let get_digest = subject.to_string();
@@ -886,7 +901,10 @@ async fn push_manifest_stamps_source_timestamp_header() {
 
     Mock::given(method("PUT"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
-        .and(header(X_ANGOS_SOURCE_TIMESTAMP, "2026-06-03T00:00:00Z"))
+        .and(header(
+            X_ANGOS_SOURCE_TIMESTAMP,
+            instant(SOURCE_TS).to_rfc3339(),
+        ))
         .respond_with(
             ResponseTemplate::new(201)
                 .insert_header(DOCKER_CONTENT_DIGEST, manifest_digest.to_string().as_str()),
@@ -898,7 +916,7 @@ async fn push_manifest_stamps_source_timestamp_header() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = PushContext {
-        source_ts: Some("2026-06-03T00:00:00Z"),
+        source_ts: Some(instant(SOURCE_TS)),
         ..push_context(&downstream, &blob_store, &metadata_store, &namespace)
     };
     push_manifest(
@@ -1374,7 +1392,7 @@ async fn converged_subject_manifest_still_pushes_referrers_fallback() {
     // The re-issued primary PUT returns no `OCI-Subject` (OCI-1.0 downstream).
     mount_manifest_put(&mock_server, NAMESPACE, "v1", &manifest_digest).await;
 
-    let fallback_tag = format!("{}-{}", subject.algorithm(), subject.hash());
+    let fallback_tag = Tag::referrers_fallback(&subject);
     Mock::given(method("GET"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
         .respond_with(ResponseTemplate::new(404))
@@ -1595,7 +1613,7 @@ async fn push_manifest_treats_lww_superseded_409_as_success() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = PushContext {
-        source_ts: Some("2026-06-03T00:00:00Z"),
+        source_ts: Some(instant(SOURCE_TS)),
         ..push_context(&downstream, &blob_store, &metadata_store, &namespace)
     };
     push_manifest(
@@ -1652,7 +1670,10 @@ async fn delete_manifest_stamps_header_and_distinguishes_superseded() {
 
     Mock::given(method("DELETE"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
-        .and(header(X_ANGOS_SOURCE_TIMESTAMP, "2026-06-03T00:00:00Z"))
+        .and(header(
+            X_ANGOS_SOURCE_TIMESTAMP,
+            instant(SOURCE_TS).to_rfc3339(),
+        ))
         .respond_with(
             ResponseTemplate::new(409).set_body_json(oci_error_body(REPLICATION_SUPERSEDED_CODE)),
         )
@@ -1665,10 +1686,10 @@ async fn delete_manifest_stamps_header_and_distinguishes_superseded() {
         &downstream_client(&mock_server.uri()),
         &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
-        NAMESPACE,
+        &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Tag(Tag::new("v1").unwrap()),
         None,
-        Some("2026-06-03T00:00:00Z"),
+        Some(instant(SOURCE_TS)),
     )
     .await
     .expect("an LWW-superseded delete-409 must be treated as success");
@@ -1693,7 +1714,7 @@ async fn delete_manifest_of_absent_target_is_converged_not_pushed() {
         &downstream_client(&mock_server.uri()),
         &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
-        NAMESPACE,
+        &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Tag(Tag::new("gone").unwrap()),
         None,
         None,
@@ -1726,7 +1747,7 @@ async fn delete_manifest_of_unsupported_downstream_is_unsupported_not_error() {
         &downstream_client(&mock_server.uri()),
         &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
-        NAMESPACE,
+        &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Tag(Tag::new("v1").unwrap()),
         None,
         None,
@@ -1754,7 +1775,7 @@ async fn delete_manifest_propagates_non_superseded_409_as_error() {
         &downstream_client(&mock_server.uri()),
         &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
-        NAMESPACE,
+        &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Tag(Tag::new("v1").unwrap()),
         None,
         None,
@@ -1819,7 +1840,7 @@ async fn deleting_last_referrer_removes_the_fallback_tag() {
 
     let subject = Digest::sha256_of_bytes(b"the-subject");
     let (referrer_body, referrer) = referrer_manifest(&subject);
-    let fallback_tag = format!("{}-{}", subject.algorithm(), subject.hash());
+    let fallback_tag = Tag::referrers_fallback(&subject);
 
     // The downstream still holds the referrer, so the delete can read its
     // subject before removing it.
@@ -1867,7 +1888,7 @@ async fn deleting_last_referrer_removes_the_fallback_tag() {
         &downstream_client(&mock_server.uri()),
         &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
-        NAMESPACE,
+        &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Digest(referrer.clone()),
         None,
         None,
@@ -1888,7 +1909,7 @@ async fn deleting_a_referrer_keeps_its_siblings_in_the_fallback_index() {
     let subject = Digest::sha256_of_bytes(b"shared-subject");
     let (referrer_body, referrer) = referrer_manifest(&subject);
     let sibling = Digest::sha256_of_bytes(b"sibling-referrer");
-    let fallback_tag = format!("{}-{}", subject.algorithm(), subject.hash());
+    let fallback_tag = Tag::referrers_fallback(&subject);
 
     Mock::given(method("GET"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/{referrer}")))
@@ -1936,7 +1957,7 @@ async fn deleting_a_referrer_keeps_its_siblings_in_the_fallback_index() {
         &downstream_client(&mock_server.uri()),
         &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
-        NAMESPACE,
+        &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Digest(referrer.clone()),
         None,
         None,
@@ -1950,7 +1971,7 @@ async fn deleting_a_referrer_keeps_its_siblings_in_the_fallback_index() {
         .await
         .unwrap_or_default()
         .into_iter()
-        .find(|r| r.method.as_str() == "PUT" && r.url.path().ends_with(&fallback_tag))
+        .find(|r| r.method.as_str() == "PUT" && r.url.path().ends_with(fallback_tag.as_ref()))
         .map(|r| r.body)
         .expect("the fallback index must be re-PUT");
     let digests: Vec<String> = serde_json::from_slice::<Value>(&put_body)
@@ -1979,7 +2000,7 @@ async fn a_retried_delete_prunes_the_fallback_index_from_the_carried_subject() {
 
     let subject = Digest::sha256_of_bytes(b"retried-subject");
     let (_, referrer) = referrer_manifest(&subject);
-    let fallback_tag = format!("{}-{}", subject.algorithm(), subject.hash());
+    let fallback_tag = Tag::referrers_fallback(&subject);
 
     // Carrying the subject spares this round-trip, which could only ever 404.
     Mock::given(method("GET"))
@@ -2021,7 +2042,7 @@ async fn a_retried_delete_prunes_the_fallback_index_from_the_carried_subject() {
         &downstream_client(&mock_server.uri()),
         &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
-        NAMESPACE,
+        &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Digest(referrer.clone()),
         Some(&subject),
         None,

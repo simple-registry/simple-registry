@@ -1,7 +1,6 @@
-use crate::{
-    oci::{Digest, Namespace, UploadSessionId},
-    registry::metadata_store::LinkKind,
-};
+use angos_oci::{Digest, Namespace, UploadSessionId};
+
+use crate::registry::metadata_store::LinkKind;
 
 pub const BLOBS_ROOT: &str = "v2/blobs";
 pub const REPOS_ROOT: &str = "v2/repositories";
@@ -178,8 +177,9 @@ pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::oci::Tag;
+    use angos_oci::Tag;
+
+    use crate::registry::path_builder::*;
 
     // Valid 64-char lowercase-hex sha256 hashes (the only shape `Digest` accepts).
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

@@ -8,7 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::oci::Error;
+use crate::types::Error;
 
 /// A blob upload session identifier, the opaque token the registry issues in the
 /// `Location` of a started upload and the client echoes back on every subsequent
@@ -21,10 +21,14 @@ pub struct UploadSessionId(String);
 
 impl UploadSessionId {
     /// Mint a fresh session identifier for a newly opened upload.
+    #[must_use]
     pub fn generate() -> Self {
         Self(Uuid::new_v4().to_string())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when `s` is not a UUID.
     pub fn new(s: &str) -> Result<Self, Error> {
         match Uuid::try_parse(s) {
             Ok(uuid) => Ok(Self(uuid.to_string())),
@@ -110,7 +114,7 @@ impl<'de> Deserialize<'de> for UploadSessionId {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::types::upload_session_id::*;
 
     const SAMPLE: &str = "067e6162-3b6f-4ae2-a171-2470b63dff00";
 

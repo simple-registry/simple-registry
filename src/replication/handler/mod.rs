@@ -10,13 +10,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use angos_oci::{Digest, Namespace, Reference, Tag};
 use angos_tx_engine::transaction::Transaction;
 
 use crate::{
     jobs::Queue,
     jobs::store::{Error, JobEnvelope, JobHandler},
     metrics_provider::metrics_provider,
-    oci::{Digest, Namespace, Reference, Tag},
     registry::{
         Error as MetadataStoreError,
         blob_store::BlobStore,
@@ -384,15 +384,14 @@ impl ReplicationJobHandler {
             })?;
             Reference::Digest(digest)
         };
-        let source_ts = target.source_ts.map(|ts| ts.to_rfc3339());
         let outcome = pipeline::delete_manifest(
             &downstream.registry_client,
             &self.metadata_store,
             namespace,
-            downstream_namespace.as_ref(),
+            downstream_namespace,
             &reference,
             subject,
-            source_ts.as_deref(),
+            target.source_ts,
         )
         .await
         .map_err(job_error)?;
@@ -424,7 +423,7 @@ impl ReplicationJobHandler {
         // digest actually sent, for coalesced and reconcile pushes alike.
         // A tag-less push has no local timestamp, so the payload value
         // carries through (the receiver skips LWW for it).
-        let source_ts = created_at.or(target.source_ts).map(|ts| ts.to_rfc3339());
+        let source_ts = created_at.or(target.source_ts);
         let body = self.blob_store.read(&digest).await.map_err(|e| {
             Error::Execution(format!("failed to read local manifest '{digest}': {e}"))
         })?;
@@ -434,7 +433,7 @@ impl ReplicationJobHandler {
             metadata_store: &self.metadata_store,
             namespace,
             downstream_namespace,
-            source_ts: source_ts.as_deref(),
+            source_ts,
         };
         let outcome = pipeline::push_manifest(&ctx, &digest, None, target.tag.as_deref(), body)
             .await

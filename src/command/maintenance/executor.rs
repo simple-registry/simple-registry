@@ -5,9 +5,14 @@ use chrono::Utc;
 use tracing::{debug, info};
 use uuid::Uuid;
 
+use angos_oci::{Digest, Namespace, Reference, Tag, UploadSessionId};
 use angos_storage::ObjectStore;
 use angos_tx_engine::StorageError;
 
+#[cfg(test)]
+use crate::registry::{
+    RegistryConfig, repository_resolver::RepositoryResolver, test_utils::create_test_repositories,
+};
 use crate::{
     command::maintenance::{
         action::{Action, LOST_AND_FOUND_PREFIX, WalkedStore},
@@ -16,7 +21,6 @@ use crate::{
     event_webhook::event::EventActor,
     jobs::store::{Error as JobStoreError, JobEnvelope, JobStore},
     jobs::{JobState, Queue},
-    oci::{Digest, Namespace, Reference, Tag, UploadSessionId},
     registry::{
         Error as RegistryError, Registry,
         blob_store::{BlobStore, MultipartCleanup, OrphanMultipartUpload},
@@ -27,11 +31,6 @@ use crate::{
         ReplicationJob, ReplicationTarget, build_envelope, build_prune_delete_envelope,
         record_reconcile_outcome,
     },
-};
-
-#[cfg(test)]
-use crate::registry::{
-    RegistryConfig, repository_resolver::RepositoryResolver, test_utils::create_test_repositories,
 };
 
 /// Internal-process name stamped on the events retention deletions emit.
@@ -653,13 +652,13 @@ mod tests {
 
     use chrono::DateTime;
 
+    use angos_oci::Digest;
     use angos_storage::MemoryObjectStore;
 
-    use super::*;
+    use crate::command::maintenance::executor::*;
     use crate::{
         cache_fill::{CACHE_FETCH_BLOB_KIND, CacheFetchBlobPayload},
         jobs::store::FailOutcome,
-        oci::Digest,
         registry::{
             metadata_store::{LinkKind, LinkOperation},
             test_utils::{build_store, for_each_backend, put_blob_direct},

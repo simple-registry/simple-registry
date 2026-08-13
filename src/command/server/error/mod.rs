@@ -1,6 +1,8 @@
 use hyper::StatusCode;
 use serde_json::json;
 
+use angos_oci::response::{ErrorCode, ErrorInfo, ErrorResponse};
+
 mod conversions;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +37,11 @@ pub enum Error {
     },
 }
 
+/// Codes the spec does not define, which angos serves on failures the OCI set
+/// has no word for. A 5xx code is unconstrained, so these never collide.
+pub const INTERNAL_ERROR_CODE: &str = "INTERNAL_ERROR";
+pub const PROVIDER_UNAVAILABLE_CODE: &str = "PROVIDER_UNAVAILABLE";
+
 impl Error {
     pub fn status_code(&self) -> StatusCode {
         match self {
@@ -53,25 +60,27 @@ impl Error {
         }
     }
 
-    /// The OCI error body. A 4XX `code` must come from the spec's fixed set, so
+    /// The error answer's body. A 4XX `code` must come from the spec's fixed set, so
     /// each case picks the closest of those and carries what angos knows in
     /// `message`; a 5XX code is unconstrained.
-    pub fn as_json(&self, request_id: Option<&String>) -> serde_json::Value {
+    pub fn error_body(&self, request_id: Option<&String>) -> ErrorResponse {
         // A 5xx body carries no message: an internal error string must never
         // leak to the client. The full detail is logged server-side (see
         // `error_for_log`); the client gets the code plus a request id.
         let (code, message) = match self {
-            Error::Unauthorized(msg) => ("UNAUTHORIZED", Some(msg.as_str())),
-            Error::BadRequest(msg) => ("UNSUPPORTED", Some(msg.as_str())),
-            Error::RangeNotSatisfiable(msg) => ("SIZE_INVALID", Some(msg.as_str())),
-            Error::NotFound(msg) => ("NAME_UNKNOWN", Some(msg.as_str())),
-            Error::ProviderUnavailable(_) => ("PROVIDER_UNAVAILABLE", None),
+            Error::Unauthorized(msg) => (ErrorCode::Unauthorized.as_str(), Some(msg.as_str())),
+            Error::BadRequest(msg) => (ErrorCode::Unsupported.as_str(), Some(msg.as_str())),
+            Error::RangeNotSatisfiable(msg) => {
+                (ErrorCode::SizeInvalid.as_str(), Some(msg.as_str()))
+            }
+            Error::NotFound(msg) => (ErrorCode::NameUnknown.as_str(), Some(msg.as_str())),
+            Error::ProviderUnavailable(_) => (PROVIDER_UNAVAILABLE_CODE, None),
             Error::Initialization(_)
             | Error::Execution(_)
             | Error::Internal(_)
             | Error::HttpBuild(_)
             | Error::InvalidHeader(_)
-            | Error::Serialization(_) => ("INTERNAL_ERROR", None),
+            | Error::Serialization(_) => (INTERNAL_ERROR_CODE, None),
             Error::Custom {
                 status_code,
                 code,
@@ -86,21 +95,12 @@ impl Error {
             }
         };
 
-        if let Some(request_id) = request_id {
-            json!({
-                "errors": [{
-                    "code": code,
-                    "message": message,
-                    "detail": { "request_id": request_id }
-                }]
-            })
-        } else {
-            json!({
-                "errors": [{
-                    "code": code,
-                    "message": message,
-                }]
-            })
+        ErrorResponse {
+            errors: vec![ErrorInfo {
+                code: code.to_string(),
+                message: message.map(ToString::to_string),
+                detail: request_id.map(|request_id| json!({ "request_id": request_id })),
+            }],
         }
     }
 }

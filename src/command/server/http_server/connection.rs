@@ -17,6 +17,8 @@ use tokio::{
 use tracing::{Span, debug, error, info, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use angos_oci::header::OCI_NAMESPACE;
+
 use crate::{
     auth::PeerCertificate,
     command::server::{
@@ -29,7 +31,6 @@ use crate::{
     http_response::ResponseBody,
     identity::{Action, RequestScheme},
     metrics_provider::{InFlightGuard, metrics_provider},
-    registry::OCI_NAMESPACE,
     timing::elapsed_ms,
 };
 

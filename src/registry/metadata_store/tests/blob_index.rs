@@ -2,20 +2,18 @@ use std::str::FromStr;
 
 use bytes::Bytes;
 
+use angos_oci::{Digest, Namespace, Tag};
 use angos_tx_engine::lock::{LockStrategy, S3LockConfig};
 
-use super::test_config;
-use crate::{
-    oci::{Digest, Namespace, Tag},
-    registry::{
-        Error,
-        metadata_store::{
-            BlobIndexOperation, LinkKind, LinkOperation,
-            blob_index::shard::{any_other_namespace_references_blob, read_shard},
-        },
-        path_builder,
-        test_utils::fs_test_stack,
+use crate::registry::metadata_store::tests::test_config;
+use crate::registry::{
+    Error,
+    metadata_store::{
+        BlobIndexOperation, LinkKind, LinkOperation,
+        blob_index::shard::{any_other_namespace_references_blob, read_shard},
     },
+    path_builder,
+    test_utils::fs_test_stack,
 };
 
 #[tokio::test]

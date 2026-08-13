@@ -6,6 +6,8 @@ use bytes::Bytes;
 use chrono::Utc;
 use uuid::Uuid;
 
+use angos_oci::request::PutManifestRequest;
+use angos_oci::{Digest, Namespace, Reference, Tag};
 use angos_tx_engine::intent::{IntentRecord, MutationProgress, MutationRecord, PlannedMutation};
 
 use crate::{
@@ -17,10 +19,8 @@ use crate::{
         },
         scrub::validate::{Pass, Validator},
     },
-    oci::{Digest, Namespace, Reference, Tag},
     registry::{
         blob_store::BlobStore,
-        manifest::PutManifestRequest,
         metadata_store::{BlobIndexOperation, LinkKind, LinkMetadata, MetadataStore},
         path_builder,
         test_utils::{
@@ -422,9 +422,9 @@ async fn withheld_cross_namespace_reference_is_not_regranted() {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: borrower,
+                    namespace: borrower.clone(),
                     reference: Reference::Tag(Tag::new("borrowed").unwrap()),
-                    mime_type: media_type("application/vnd.oci.image.manifest.v1+json"),
+                    content_type: Some(media_type("application/vnd.oci.image.manifest.v1+json")),
                     tags: vec![],
                     source_ts: None,
                 },

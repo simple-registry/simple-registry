@@ -3,7 +3,9 @@ use std::{collections::HashMap, sync::Arc};
 use url::Url;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
-use super::{CACHE_ACTOR, CacheFillJobHandler, build_envelope, job_error};
+use angos_oci::Namespace;
+
+use crate::cache_fill::handler::{CACHE_ACTOR, CacheFillJobHandler, build_envelope, job_error};
 use crate::{
     event_webhook::{
         config::{DeliveryPolicy, EventWebhookConfig},
@@ -11,7 +13,6 @@ use crate::{
         event::EventKind,
     },
     jobs::store::{Error as JobError, JobHandler},
-    oci::Namespace,
     registry::{
         Error as RegistryError,
         blob_ownership::BlobOwnership,

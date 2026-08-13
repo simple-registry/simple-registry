@@ -1,5 +1,6 @@
 use std::{io::Cursor, path::PathBuf, time::Duration};
 
+use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
 use serde_json::json;
 use tracing::Level;
@@ -9,13 +10,19 @@ use wiremock::{
     matchers::{body_bytes, header, method, path, query_param, query_param_is_missing},
 };
 
+use angos_oci::header::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT};
+use angos_oci::request::{
+    BlobMount, DeleteManifestRequest, GetBlobRequest, GetManifestRequest, HeadBlobRequest,
+    HeadManifestRequest, ListTagsRequest, MountBlobRequest, PutManifestRequest, StartUploadRequest,
+};
+use angos_oci::response::{DeleteManifestOutcome, PutManifestOutcome};
+use angos_oci::{Digest, MediaType, Namespace, Reference, Tag};
+
 use crate::{
     cache,
-    oci::{Digest, MediaType, Reference, Tag},
-    registry::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES},
+    registry::manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
     registry_client::{
-        DeleteManifestOutcome, Error, MtlsIdentity, PutManifestOutcome,
-        REPLICATION_SUPERSEDED_CODE, RegistryClient, RegistryClientConfig,
+        Error, MtlsIdentity, REPLICATION_SUPERSEDED_CODE, RegistryClient, RegistryClientConfig,
         X_ANGOS_SOURCE_TIMESTAMP,
         auth::{token_cache_key, token_index_cache_key},
         without_query,
@@ -24,48 +31,24 @@ use crate::{
     test_fixtures::{client::test_client_config, logging::LogCapture},
 };
 
+/// The blob the scope-cache test fetches; its URL is also what the cache keys
+/// are derived from, so both sides read the digest from here.
+const SCOPE_CACHE_DIGEST: &str =
+    "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+/// The origin timestamp a replication write stamps. The header carries whatever
+/// `to_rfc3339` renders it as, which is what the sender puts on the wire.
+fn source_ts() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339("2026-06-03T00:00:00Z")
+        .expect("fixture timestamp must be RFC 3339")
+        .with_timezone(&Utc)
+}
+
 /// Builds a no-auth client pointed at `mock_server`.
 fn client_for(mock_server: &MockServer) -> RegistryClient {
     let config = test_client_config(mock_server.uri());
     let cache = cache::Config::Memory.to_backend().unwrap();
     RegistryClient::from_config(&config, cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).unwrap()
-}
-
-#[test]
-fn test_get_manifest_path() {
-    let config = RegistryClientConfig {
-        username: Some("username".to_string()),
-        password: Some(Secret::new("password".to_string())),
-        ..test_client_config("https://example.com")
-    };
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let upstream =
-        RegistryClient::from_config(&config, cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).unwrap();
-
-    let reference = Reference::Tag(Tag::new("latest").unwrap());
-
-    let path = upstream.get_manifest_path("repo", &reference);
-    assert_eq!(path, "https://example.com/v2/repo/manifests/latest");
-}
-
-#[test]
-fn test_get_blob_path() {
-    let config = test_client_config("https://example.com");
-
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let upstream =
-        RegistryClient::from_config(&config, cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).unwrap();
-
-    let digest =
-        Digest::try_from("sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
-            .unwrap();
-
-    let path = upstream.get_blob_path("repo", &digest);
-    assert_eq!(
-        path,
-        "https://example.com/v2/repo/blobs/sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-    );
 }
 
 #[test]
@@ -148,10 +131,11 @@ async fn test_head_blob_success() {
     let client = client_for(&mock_server);
 
     let result = client
-        .head_blob(
-            &[],
-            &format!("{}/v2/test/blobs/{test_digest}", mock_server.uri()),
-        )
+        .head_blob(HeadBlobRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest: Digest::try_from(test_digest).unwrap(),
+            accepted_types: Vec::new(),
+        })
         .await;
 
     assert!(result.is_ok());
@@ -165,7 +149,7 @@ async fn test_head_blob_not_found() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("HEAD"))
-        .and(path("/v2/test/blobs/sha256:notfound"))
+        .and(path("/v2/test/blobs/sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"))
         .respond_with(ResponseTemplate::new(404))
         .mount(&mock_server)
         .await;
@@ -173,10 +157,14 @@ async fn test_head_blob_not_found() {
     let client = client_for(&mock_server);
 
     let result = client
-        .head_blob(
-            &[],
-            &format!("{}/v2/test/blobs/sha256:notfound", mock_server.uri()),
-        )
+        .head_blob(HeadBlobRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest: Digest::try_from(
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            )
+            .unwrap(),
+            accepted_types: Vec::new(),
+        })
         .await;
 
     assert!(result.is_err());
@@ -200,10 +188,11 @@ async fn test_blob_exists_true_when_digest_header_absent() {
     let client = client_for(&mock_server);
 
     let present = client
-        .blob_exists(&format!(
-            "{}/v2/test/blobs/{test_digest}",
-            mock_server.uri()
-        ))
+        .blob_exists(HeadBlobRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest: Digest::try_from(test_digest).unwrap(),
+            accepted_types: Vec::new(),
+        })
         .await
         .unwrap();
     assert!(
@@ -217,7 +206,7 @@ async fn test_blob_exists_false_on_404() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("HEAD"))
-        .and(path("/v2/test/blobs/sha256:absent"))
+        .and(path("/v2/test/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
         .respond_with(ResponseTemplate::new(404))
         .mount(&mock_server)
         .await;
@@ -225,10 +214,14 @@ async fn test_blob_exists_false_on_404() {
     let client = client_for(&mock_server);
 
     let present = client
-        .blob_exists(&format!(
-            "{}/v2/test/blobs/sha256:absent",
-            mock_server.uri()
-        ))
+        .blob_exists(HeadBlobRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest: Digest::try_from(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap(),
+            accepted_types: Vec::new(),
+        })
         .await
         .unwrap();
     assert!(!present, "a 404 HEAD must read as absent");
@@ -239,7 +232,7 @@ async fn test_blob_exists_errors_on_server_error() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("HEAD"))
-        .and(path("/v2/test/blobs/sha256:boom"))
+        .and(path("/v2/test/blobs/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
         .respond_with(ResponseTemplate::new(503))
         .mount(&mock_server)
         .await;
@@ -247,7 +240,14 @@ async fn test_blob_exists_errors_on_server_error() {
     let client = client_for(&mock_server);
 
     let result = client
-        .blob_exists(&format!("{}/v2/test/blobs/sha256:boom", mock_server.uri()))
+        .blob_exists(HeadBlobRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest: Digest::try_from(
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+            .unwrap(),
+            accepted_types: Vec::new(),
+        })
         .await;
     assert!(
         result.is_err(),
@@ -277,10 +277,11 @@ async fn test_head_manifest_success() {
     let client = client_for(&mock_server);
 
     let result = client
-        .head_manifest(
-            &[],
-            &format!("{}/v2/test/manifests/latest", mock_server.uri()),
-        )
+        .head_manifest(HeadManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            accepted_types: Vec::new(),
+        })
         .await;
 
     assert!(result.is_ok());
@@ -314,10 +315,11 @@ async fn head_manifest_without_content_digest_reports_an_unknown_digest() {
         .await;
 
     let head = client_for(&mock_server)
-        .head_manifest(
-            &[],
-            &format!("{}/v2/test/manifests/latest", mock_server.uri()),
-        )
+        .head_manifest(HeadManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            accepted_types: Vec::new(),
+        })
         .await
         .expect("a manifest HEAD without Docker-Content-Digest must still succeed");
 
@@ -350,10 +352,12 @@ async fn get_manifest_without_content_digest_still_returns_the_body() {
         .await;
 
     let fetched = client_for(&mock_server)
-        .get_manifest(
-            &[],
-            &format!("{}/v2/test/manifests/latest", mock_server.uri()),
-        )
+        .get_manifest(GetManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            accepted_types: Vec::new(),
+            allow_redirect: true,
+        })
         .await
         .expect("a manifest GET without Docker-Content-Digest must still succeed");
 
@@ -384,10 +388,12 @@ async fn test_get_manifest_success() {
     let client = client_for(&mock_server);
 
     let result = client
-        .get_manifest(
-            &[],
-            &format!("{}/v2/test/manifests/latest", mock_server.uri()),
-        )
+        .get_manifest(GetManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            accepted_types: Vec::new(),
+            allow_redirect: true,
+        })
         .await;
 
     assert!(result.is_ok());
@@ -426,10 +432,12 @@ async fn test_get_manifest_rejects_oversized_body() {
     let client = RegistryClient::from_config(&config, cache, 7).unwrap();
 
     let result = client
-        .get_manifest(
-            &[],
-            &format!("{}/v2/test/manifests/latest", mock_server.uri()),
-        )
+        .get_manifest(GetManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            accepted_types: Vec::new(),
+            allow_redirect: true,
+        })
         .await;
 
     assert!(matches!(
@@ -485,10 +493,12 @@ async fn test_bearer_authentication() {
     let client = client_for(&mock_server);
 
     let result = client
-        .get_manifest(
-            &[],
-            &format!("{}/v2/test/manifests/latest", mock_server.uri()),
-        )
+        .get_manifest(GetManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            accepted_types: Vec::new(),
+            allow_redirect: true,
+        })
         .await;
 
     assert!(result.is_ok());
@@ -501,7 +511,7 @@ async fn test_bearer_authentication() {
 async fn a_scope_cache_hit_indexes_the_url_it_served() {
     let mock_server = MockServer::start().await;
     let registry_url = mock_server.uri();
-    let location = format!("{registry_url}/v2/test/blobs/sha256:abc");
+    let location = format!("{registry_url}/v2/test/blobs/{SCOPE_CACHE_DIGEST}");
     let url = Url::parse(&location).unwrap();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
@@ -523,13 +533,13 @@ async fn a_scope_cache_hit_indexes_the_url_it_served() {
     assert!(cache.retrieve_value(&index_key).await.unwrap().is_none());
 
     Mock::given(method("GET"))
-        .and(path("/v2/test/blobs/sha256:abc"))
+        .and(path(format!("/v2/test/blobs/{SCOPE_CACHE_DIGEST}")))
         .and(header("Authorization", "Bearer scope-token"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"blob"))
         .mount(&mock_server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/v2/test/blobs/sha256:abc"))
+        .and(path(format!("/v2/test/blobs/{SCOPE_CACHE_DIGEST}")))
         .respond_with(ResponseTemplate::new(401).insert_header(
             "WWW-Authenticate",
             format!(
@@ -545,7 +555,13 @@ async fn a_scope_cache_hit_indexes_the_url_it_served() {
         RegistryClient::from_config(&config, cache.clone(), DEFAULT_MAX_MANIFEST_SIZE_BYTES)
             .unwrap();
     client
-        .get_blob(&[], &location, None)
+        .get_blob(GetBlobRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest: Digest::try_from(SCOPE_CACHE_DIGEST).unwrap(),
+            accepted_types: Vec::new(),
+            range: None,
+            allow_redirect: true,
+        })
         .await
         .expect("blob fetch");
 
@@ -604,7 +620,14 @@ async fn test_cached_bearer_token_is_used() {
 
     let client =
         RegistryClient::from_config(&config, cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).unwrap();
-    let result = client.get_manifest(&[], &location).await;
+    let result = client
+        .get_manifest(GetManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            accepted_types: Vec::new(),
+            allow_redirect: true,
+        })
+        .await;
 
     assert!(result.is_ok());
 }
@@ -613,9 +636,9 @@ async fn test_cached_bearer_token_is_used() {
 async fn test_bearer_tokens_are_cached_per_scope() {
     let mock_server = MockServer::start().await;
     let auth_server = MockServer::start().await;
-    let registry_url = mock_server.uri();
-    let alpha_location = format!("{registry_url}/v2/alpha/manifests/latest");
-    let beta_location = format!("{registry_url}/v2/beta/manifests/latest");
+    let alpha_namespace = Namespace::new("alpha").unwrap();
+    let beta_namespace = Namespace::new("beta").unwrap();
+    let latest = Reference::Tag(Tag::new("latest").unwrap());
 
     Mock::given(method("GET"))
         .and(path("/v2/alpha/manifests/latest"))
@@ -701,9 +724,21 @@ async fn test_bearer_tokens_are_cached_per_scope() {
 
     let client = client_for(&mock_server);
 
-    assert!(client.get_manifest(&[], &alpha_location).await.is_ok());
-    assert!(client.get_manifest(&[], &beta_location).await.is_ok());
-    assert!(client.get_manifest(&[], &alpha_location).await.is_ok());
+    let fetch = async |namespace: &Namespace| {
+        client
+            .get_manifest(GetManifestRequest {
+                namespace: namespace.clone(),
+                reference: latest.clone(),
+                accepted_types: Vec::new(),
+                allow_redirect: true,
+            })
+            .await
+    };
+    // Alpha twice: the second read must be served by the cached scope token,
+    // which the `expect(1)` on the 401 mock pins.
+    assert!(fetch(&alpha_namespace).await.is_ok());
+    assert!(fetch(&beta_namespace).await.is_ok());
+    assert!(fetch(&alpha_namespace).await.is_ok());
 }
 
 #[tokio::test]
@@ -788,7 +823,14 @@ async fn test_expired_bearer_token_is_refetched() {
 
     let client =
         RegistryClient::from_config(&config, cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).unwrap();
-    let result = client.get_manifest(&[], &location).await;
+    let result = client
+        .get_manifest(GetManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            accepted_types: Vec::new(),
+            allow_redirect: true,
+        })
+        .await;
 
     assert!(result.is_ok());
 }
@@ -797,8 +839,6 @@ async fn test_expired_bearer_token_is_refetched() {
 async fn test_concurrent_bearer_refresh_uses_single_token_exchange() {
     let mock_server = MockServer::start().await;
     let auth_server = MockServer::start().await;
-    let registry_url = mock_server.uri();
-    let location = format!("{registry_url}/v2/test/manifests/latest");
 
     Mock::given(method("GET"))
         .and(path("/v2/test/manifests/latest"))
@@ -843,7 +883,17 @@ async fn test_concurrent_bearer_refresh_uses_single_token_exchange() {
         .await;
 
     let client = client_for(&mock_server);
-    let results = join_all((0..10).map(|_| client.get_manifest(&[], &location))).await;
+    let namespace = Namespace::new("test").unwrap();
+    let reference = Reference::Tag(Tag::new("latest").unwrap());
+    let results = join_all((0..10).map(|_| {
+        client.get_manifest(GetManifestRequest {
+            namespace: namespace.clone(),
+            reference: reference.clone(),
+            accepted_types: Vec::new(),
+            allow_redirect: true,
+        })
+    }))
+    .await;
 
     assert!(results.iter().all(Result::is_ok));
 }
@@ -888,10 +938,12 @@ async fn test_basic_authentication() {
         RegistryClient::from_config(&config, cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).unwrap();
 
     let result = client
-        .get_manifest(
-            &[],
-            &format!("{}/v2/test/manifests/latest", mock_server.uri()),
-        )
+        .get_manifest(GetManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            accepted_types: Vec::new(),
+            allow_redirect: true,
+        })
         .await;
 
     assert!(result.is_ok());
@@ -928,7 +980,12 @@ async fn a_forbidden_response_after_a_token_refresh_is_denied() {
         .await;
 
     let error = client_for(&mock_server)
-        .get_manifest(&[], &format!("{registry_url}/v2/test/manifests/latest"))
+        .get_manifest(GetManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            accepted_types: Vec::new(),
+            allow_redirect: true,
+        })
         .await
         .expect_err("a 403 must not read as a successful fetch");
 
@@ -961,7 +1018,12 @@ async fn a_persistent_unauthorized_after_a_refresh_is_terminal() {
         .await;
 
     let error = client_for(&mock_server)
-        .get_manifest(&[], &format!("{registry_url}/v2/test/manifests/latest"))
+        .get_manifest(GetManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            accepted_types: Vec::new(),
+            allow_redirect: true,
+        })
         .await
         .expect_err("a persistent 401 must not read as a successful fetch");
 
@@ -984,10 +1046,12 @@ async fn test_forbidden_access() {
     let client = client_for(&mock_server);
 
     let result = client
-        .get_manifest(
-            &[],
-            &format!("{}/v2/test/manifests/latest", mock_server.uri()),
-        )
+        .get_manifest(GetManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            accepted_types: Vec::new(),
+            allow_redirect: true,
+        })
         .await;
 
     assert!(result.is_err());
@@ -1009,11 +1073,13 @@ async fn test_get_blob_success() {
     let client = client_for(&mock_server);
 
     let result = client
-        .get_blob(
-            &[],
-            &format!("{}/v2/test/blobs/{test_digest}", mock_server.uri()),
-            None,
-        )
+        .get_blob(GetBlobRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest: Digest::try_from(test_digest).unwrap(),
+            accepted_types: Vec::new(),
+            range: None,
+            allow_redirect: true,
+        })
         .await;
 
     assert!(result.is_ok());
@@ -1040,11 +1106,13 @@ async fn get_blob_reports_an_upstream_outage_as_transient_not_missing() {
         .await;
 
     let error = client_for(&mock_server)
-        .get_blob(
-            &[],
-            &format!("{}/v2/test/blobs/{test_digest}", mock_server.uri()),
-            None,
-        )
+        .get_blob(GetBlobRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest: Digest::try_from(test_digest).unwrap(),
+            accepted_types: Vec::new(),
+            range: None,
+            allow_redirect: true,
+        })
         .await
         .err()
         .expect("a 503 must not read as a successful fetch");
@@ -1058,7 +1126,7 @@ async fn get_blob_reports_an_upstream_outage_as_transient_not_missing() {
 #[tokio::test]
 async fn test_get_blob_not_found() {
     let mock_server = MockServer::start().await;
-    let test_digest = "sha256:notfound1234567890abcdef1234567890abcdef1234567890abcdef12345678";
+    let test_digest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
     Mock::given(method("GET"))
         .and(path(format!("/v2/test/blobs/{test_digest}")))
@@ -1069,11 +1137,13 @@ async fn test_get_blob_not_found() {
     let client = client_for(&mock_server);
 
     let result = client
-        .get_blob(
-            &[],
-            &format!("{}/v2/test/blobs/{test_digest}", mock_server.uri()),
-            None,
-        )
+        .get_blob(GetBlobRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest: Digest::try_from(test_digest).unwrap(),
+            accepted_types: Vec::new(),
+            range: None,
+            allow_redirect: true,
+        })
         .await;
 
     assert!(result.is_err());
@@ -1179,13 +1249,15 @@ async fn test_blob_upload_sequence() {
         .await;
 
     let client = client_for(&mock_server);
-    let start_url = client.get_uploads_start_path("test");
-    assert_eq!(
-        start_url,
-        format!("{}/v2/test/blobs/uploads/", mock_server.uri())
-    );
-
-    let session = client.start_upload(&start_url).await.unwrap();
+    let namespace = Namespace::new("test").unwrap();
+    let session = client
+        .start_upload(StartUploadRequest {
+            namespace: namespace.clone(),
+            digest_algorithm: None,
+            target: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(
         session.url,
         format!("{}{session_path}?state=a", mock_server.uri())
@@ -1299,8 +1371,14 @@ async fn test_blob_upload_reuses_session_open_bearer_token_on_patch() {
         .await;
 
     let client = client_for(&mock_server);
-    let start_url = client.get_uploads_start_path("test");
-    let session = client.start_upload(&start_url).await.unwrap();
+    let session = client
+        .start_upload(StartUploadRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest_algorithm: None,
+            target: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(session.auth.as_deref(), Some("Bearer push-token"));
     let next_url = client
         .patch_upload(
@@ -1363,8 +1441,14 @@ async fn test_blob_upload_reuses_basic_credentials_on_patch() {
     let client =
         RegistryClient::from_config(&config, cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).unwrap();
 
-    let start_url = client.get_uploads_start_path("test");
-    let session = client.start_upload(&start_url).await.unwrap();
+    let session = client
+        .start_upload(StartUploadRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest_algorithm: None,
+            target: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(session.auth.as_deref(), Some("Basic dXNlcjpwYXNz"));
     let next_url = client
         .patch_upload(
@@ -1399,13 +1483,14 @@ async fn test_mount_blob_returns_none_on_201() {
         .await;
 
     let client = client_for(&mock_server);
-    let start_url = client.get_uploads_start_path("target");
     let outcome = client
-        .mount_blob(
-            &start_url,
-            &Digest::try_from(digest).unwrap(),
-            Some("source"),
-        )
+        .mount_blob(MountBlobRequest {
+            namespace: Namespace::new("target").unwrap(),
+            mount: BlobMount {
+                digest: Digest::try_from(digest).unwrap(),
+                from: Some(Namespace::new("source").unwrap()),
+            },
+        })
         .await
         .unwrap();
 
@@ -1434,9 +1519,14 @@ async fn test_mount_blob_omits_from_when_none() {
         .await;
 
     let client = client_for(&mock_server);
-    let start_url = client.get_uploads_start_path("target");
     let outcome = client
-        .mount_blob(&start_url, &Digest::try_from(digest).unwrap(), None)
+        .mount_blob(MountBlobRequest {
+            namespace: Namespace::new("target").unwrap(),
+            mount: BlobMount {
+                digest: Digest::try_from(digest).unwrap(),
+                from: None,
+            },
+        })
         .await
         .unwrap();
 
@@ -1463,13 +1553,14 @@ async fn test_mount_blob_falls_back_to_session_on_202() {
         .await;
 
     let client = client_for(&mock_server);
-    let start_url = client.get_uploads_start_path("target");
     let outcome = client
-        .mount_blob(
-            &start_url,
-            &Digest::try_from(digest).unwrap(),
-            Some("source"),
-        )
+        .mount_blob(MountBlobRequest {
+            namespace: Namespace::new("target").unwrap(),
+            mount: BlobMount {
+                digest: Digest::try_from(digest).unwrap(),
+                from: Some(Namespace::new("source").unwrap()),
+            },
+        })
         .await
         .unwrap();
 
@@ -1497,13 +1588,14 @@ async fn test_mount_blob_rejects_mismatched_201_digest() {
         .await;
 
     let client = client_for(&mock_server);
-    let start_url = client.get_uploads_start_path("target");
     let outcome = client
-        .mount_blob(
-            &start_url,
-            &Digest::try_from(digest).unwrap(),
-            Some("source"),
-        )
+        .mount_blob(MountBlobRequest {
+            namespace: Namespace::new("target").unwrap(),
+            mount: BlobMount {
+                digest: Digest::try_from(digest).unwrap(),
+                from: Some(Namespace::new("source").unwrap()),
+            },
+        })
         .await;
 
     assert!(
@@ -1533,13 +1625,14 @@ async fn mount_blob_rejects_an_unparseable_201_digest() {
         .await;
 
     let client = client_for(&mock_server);
-    let start_url = client.get_uploads_start_path("target");
     let outcome = client
-        .mount_blob(
-            &start_url,
-            &Digest::try_from(digest).unwrap(),
-            Some("source"),
-        )
+        .mount_blob(MountBlobRequest {
+            namespace: Namespace::new("target").unwrap(),
+            mount: BlobMount {
+                digest: Digest::try_from(digest).unwrap(),
+                from: Some(Namespace::new("source").unwrap()),
+            },
+        })
         .await;
 
     assert!(
@@ -1564,13 +1657,14 @@ async fn test_mount_blob_accepts_matching_201_digest() {
         .await;
 
     let client = client_for(&mock_server);
-    let start_url = client.get_uploads_start_path("target");
     let outcome = client
-        .mount_blob(
-            &start_url,
-            &Digest::try_from(digest).unwrap(),
-            Some("source"),
-        )
+        .mount_blob(MountBlobRequest {
+            namespace: Namespace::new("target").unwrap(),
+            mount: BlobMount {
+                digest: Digest::try_from(digest).unwrap(),
+                from: Some(Namespace::new("source").unwrap()),
+            },
+        })
         .await
         .unwrap();
 
@@ -1603,10 +1697,17 @@ async fn test_put_manifest_with_oci_subject() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_manifest_path("test", &Reference::Tag(Tag::new("latest").unwrap()));
-
     let result = client
-        .put_manifest(&location, Some(media_type), manifest.to_vec(), None)
+        .put_manifest(
+            PutManifestRequest {
+                namespace: Namespace::new("test").unwrap(),
+                reference: Reference::Tag(Tag::new("latest").unwrap()),
+                content_type: Some(MediaType::new(media_type).unwrap()),
+                tags: Vec::new(),
+                source_ts: None,
+            },
+            manifest.to_vec(),
+        )
         .await
         .unwrap();
 
@@ -1640,8 +1741,6 @@ async fn put_manifest_warns_on_an_unparseable_advertised_digest() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_manifest_path("test", &Reference::Tag(Tag::new("latest").unwrap()));
-
     let log_capture = LogCapture::default();
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(Level::WARN)
@@ -1651,7 +1750,16 @@ async fn put_manifest_warns_on_an_unparseable_advertised_digest() {
     let guard = tracing::subscriber::set_default(subscriber);
 
     let result = client
-        .put_manifest(&location, Some(media_type), manifest.to_vec(), None)
+        .put_manifest(
+            PutManifestRequest {
+                namespace: Namespace::new("test").unwrap(),
+                reference: Reference::Tag(Tag::new("latest").unwrap()),
+                content_type: Some(MediaType::new(media_type).unwrap()),
+                tags: Vec::new(),
+                source_ts: None,
+            },
+            manifest.to_vec(),
+        )
         .await
         .expect("an unparseable echo must not fail a push the downstream accepted");
 
@@ -1683,10 +1791,17 @@ async fn test_put_manifest_without_oci_subject() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_manifest_path("test", &Reference::Tag(Tag::new("v1").unwrap()));
-
     let result = client
-        .put_manifest(&location, Some(media_type), manifest.to_vec(), None)
+        .put_manifest(
+            PutManifestRequest {
+                namespace: Namespace::new("test").unwrap(),
+                reference: Reference::Tag(Tag::new("v1").unwrap()),
+                content_type: Some(MediaType::new(media_type).unwrap()),
+                tags: Vec::new(),
+                source_ts: None,
+            },
+            manifest.to_vec(),
+        )
         .await
         .unwrap();
 
@@ -1713,21 +1828,23 @@ async fn test_put_manifest_stamps_replication_headers() {
 
     Mock::given(method("PUT"))
         .and(path("/v2/test/manifests/v1"))
-        .and(header(X_ANGOS_SOURCE_TIMESTAMP, "2026-06-03T00:00:00Z"))
+        .and(header(X_ANGOS_SOURCE_TIMESTAMP, source_ts().to_rfc3339()))
         .respond_with(ResponseTemplate::new(201).insert_header(DOCKER_CONTENT_DIGEST, digest))
         .expect(1)
         .mount(&mock_server)
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_manifest_path("test", &Reference::Tag(Tag::new("v1").unwrap()));
-
     client
         .put_manifest(
-            &location,
-            Some(media_type),
+            PutManifestRequest {
+                namespace: Namespace::new("test").unwrap(),
+                reference: Reference::Tag(Tag::new("v1").unwrap()),
+                content_type: Some(MediaType::new(media_type).unwrap()),
+                tags: Vec::new(),
+                source_ts: Some(source_ts()),
+            },
             manifest.to_vec(),
-            Some("2026-06-03T00:00:00Z"),
         )
         .await
         .unwrap();
@@ -1746,10 +1863,17 @@ async fn test_put_manifest_superseded_409() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_manifest_path("test", &Reference::Tag(Tag::new("v1").unwrap()));
-
     let result = client
-        .put_manifest(&location, Some("application/json"), b"{}".to_vec(), None)
+        .put_manifest(
+            PutManifestRequest {
+                namespace: Namespace::new("test").unwrap(),
+                reference: Reference::Tag(Tag::new("v1").unwrap()),
+                content_type: Some(MediaType::new("application/json").unwrap()),
+                tags: Vec::new(),
+                source_ts: None,
+            },
+            b"{}".to_vec(),
+        )
         .await
         .unwrap();
     assert!(
@@ -1770,10 +1894,17 @@ async fn test_put_manifest_non_superseded_409_is_error() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_manifest_path("test", &Reference::Tag(Tag::new("v1").unwrap()));
-
     let result = client
-        .put_manifest(&location, Some("application/json"), b"{}".to_vec(), None)
+        .put_manifest(
+            PutManifestRequest {
+                namespace: Namespace::new("test").unwrap(),
+                reference: Reference::Tag(Tag::new("v1").unwrap()),
+                content_type: Some(MediaType::new("application/json").unwrap()),
+                tags: Vec::new(),
+                source_ts: None,
+            },
+            b"{}".to_vec(),
+        )
         .await;
     assert!(matches!(result, Err(Error::Internal(_))));
 }
@@ -1791,9 +1922,14 @@ async fn test_delete_manifest_superseded_409() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_manifest_path("test", &Reference::Tag(Tag::new("v1").unwrap()));
-
-    let outcome = client.delete_manifest(&location, None).await.unwrap();
+    let outcome = client
+        .delete_manifest(DeleteManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("v1").unwrap()),
+            source_ts: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(outcome, DeleteManifestOutcome::Superseded);
 }
 
@@ -1810,12 +1946,14 @@ async fn test_delete_manifest() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_manifest_path(
-        "test",
-        &Reference::Digest(Digest::try_from(digest).unwrap()),
-    );
-
-    let outcome = client.delete_manifest(&location, None).await.unwrap();
+    let outcome = client
+        .delete_manifest(DeleteManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Digest(Digest::try_from(digest).unwrap()),
+            source_ts: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(outcome, DeleteManifestOutcome::Deleted);
 }
 
@@ -1830,9 +1968,13 @@ async fn test_delete_manifest_surfaces_error_status() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_manifest_path("test", &Reference::Tag(Tag::new("latest").unwrap()));
-
-    let result = client.delete_manifest(&location, None).await;
+    let result = client
+        .delete_manifest(DeleteManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("latest").unwrap()),
+            source_ts: None,
+        })
+        .await;
     assert!(matches!(result, Err(Error::Internal(_))));
 }
 
@@ -1850,9 +1992,14 @@ async fn test_delete_manifest_absent_404_is_already_absent() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_manifest_path("test", &Reference::Tag(Tag::new("gone").unwrap()));
-
-    let outcome = client.delete_manifest(&location, None).await.unwrap();
+    let outcome = client
+        .delete_manifest(DeleteManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("gone").unwrap()),
+            source_ts: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(outcome, DeleteManifestOutcome::AlreadyAbsent);
 }
 
@@ -1870,9 +2017,14 @@ async fn test_delete_manifest_405_is_unsupported() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_manifest_path("test", &Reference::Tag(Tag::new("v1").unwrap()));
-
-    let outcome = client.delete_manifest(&location, None).await.unwrap();
+    let outcome = client
+        .delete_manifest(DeleteManifestRequest {
+            namespace: Namespace::new("test").unwrap(),
+            reference: Reference::Tag(Tag::new("v1").unwrap()),
+            source_ts: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(outcome, DeleteManifestOutcome::Unsupported);
 }
 
@@ -1891,10 +2043,11 @@ async fn test_head_blob_5xx_is_transient_error_not_unknown() {
 
     let client = client_for(&mock_server);
     let result = client
-        .head_blob(
-            &[],
-            &format!("{}/v2/test/blobs/{digest}", mock_server.uri()),
-        )
+        .head_blob(HeadBlobRequest {
+            namespace: Namespace::new("test").unwrap(),
+            digest: Digest::try_from(digest).unwrap(),
+            accepted_types: Vec::new(),
+        })
         .await;
 
     assert!(
@@ -1955,17 +2108,6 @@ async fn test_delete_upload_500_is_error() {
     drop(mock_server);
 }
 
-#[test]
-fn test_get_tags_list_path() {
-    let config = test_client_config("https://example.com");
-    let cache = cache::Config::Memory.to_backend().unwrap();
-    let client =
-        RegistryClient::from_config(&config, cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).unwrap();
-
-    let path = client.get_tags_list_path("repo");
-    assert_eq!(path, "https://example.com/v2/repo/tags/list");
-}
-
 #[tokio::test]
 async fn test_list_tags_single_page() {
     let mock_server = MockServer::start().await;
@@ -1980,9 +2122,14 @@ async fn test_list_tags_single_page() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_tags_list_path("test");
-
-    let tags = client.list_tags(&location).await.unwrap();
+    let tags = client
+        .list_tags(ListTagsRequest {
+            namespace: Namespace::new("test").unwrap(),
+            n: None,
+            last: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(
         tags,
         vec![
@@ -2009,7 +2156,7 @@ async fn test_list_tags_follows_pagination() {
         .await;
     Mock::given(method("GET"))
         .and(path("/v2/test/tags/list"))
-        .and(query_param("n", "1"))
+        .and(query_param_is_missing("last"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("Link", "</v2/test/tags/list?n=1&last=a>; rel=\"next\"")
@@ -2020,9 +2167,15 @@ async fn test_list_tags_follows_pagination() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = format!("{}/v2/test/tags/list?n=1", mock_server.uri());
 
-    let tags = client.list_tags(&location).await.unwrap();
+    let tags = client
+        .list_tags(ListTagsRequest {
+            namespace: Namespace::new("test").unwrap(),
+            n: None,
+            last: None,
+        })
+        .await
+        .unwrap();
     assert_eq!(
         tags,
         vec![Tag::new("a").unwrap(), Tag::new("b").unwrap()],
@@ -2042,9 +2195,14 @@ async fn test_list_tags_absent_repo_returns_empty() {
         .await;
 
     let client = client_for(&mock_server);
-    let location = client.get_tags_list_path("missing");
-
-    let tags = client.list_tags(&location).await.unwrap();
+    let tags = client
+        .list_tags(ListTagsRequest {
+            namespace: Namespace::new("missing").unwrap(),
+            n: None,
+            last: None,
+        })
+        .await
+        .unwrap();
     assert!(tags.is_empty(), "a 404 repo must yield an empty tag list");
 }
 
@@ -2066,7 +2224,11 @@ async fn list_tags_breaks_on_cyclic_next_link() {
 
     let client = client_for(&mock_server);
     let tags = client
-        .list_tags(&client.get_tags_list_path("test"))
+        .list_tags(ListTagsRequest {
+            namespace: Namespace::new("test").unwrap(),
+            n: None,
+            last: None,
+        })
         .await
         .expect("cyclic pagination must terminate, not error");
 

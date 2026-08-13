@@ -14,6 +14,7 @@ use hyper::{
 use uuid::Uuid;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
+use angos_oci::{Digest, Namespace, Reference, Tag};
 use angos_s3_client::Backend as S3HttpBackend;
 use angos_storage::{ObjectStore, s3::Backend as StorageS3Backend};
 
@@ -24,7 +25,6 @@ use crate::{
     event_webhook::{config::EventWebhookConfig, dispatcher::EventDispatcher, event::Event},
     identity::{Action, ClientIdentity, RequestScheme},
     metrics_provider,
-    oci::{Digest, Namespace, Reference, Tag},
     policy::AccessPolicyConfig,
     registry::{
         Error as RegistryError, Registry, RegistryConfig, Repository,

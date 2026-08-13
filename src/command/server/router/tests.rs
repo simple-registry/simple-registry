@@ -26,20 +26,38 @@ fn test_parse_token() {
     assert!(parse(&Method::HEAD, &uri).is_none());
 }
 
+/// The UI's configuration endpoint is a module of the `ui` component, under the
+/// same extension namespace as the rest of angos's own API.
 #[test]
-fn test_parse_api_version() {
-    let method = Method::GET;
-    let uri: Uri = "/v2".parse().unwrap();
-    let route = parse(&method, &uri);
-    assert!(matches!(route, Some(Action::ApiVersion)));
+fn test_parse_ui_config() {
+    let uri: Uri = "/v2/_angos/ui/config".parse().unwrap();
+    assert!(matches!(parse(&Method::GET, &uri), Some(Action::UiConfig)));
+    assert!(parse(&Method::POST, &uri).is_none());
+    assert!(
+        parse(&Method::GET, &"/_ui/config".parse().unwrap())
+            .is_none_or(|action| !matches!(action, Action::UiConfig))
+    );
 }
 
 #[test]
-fn test_parse_api_version_with_trailing_slash() {
+fn test_parse_api_version() {
     let method = Method::GET;
     let uri: Uri = "/v2/".parse().unwrap();
     let route = parse(&method, &uri);
     assert!(matches!(route, Some(Action::ApiVersion)));
+}
+
+/// end-1 spells the trailing slash. Without one the path is not the version
+/// endpoint, and must not reach the UI-asset arm and answer `index.html`.
+#[test]
+fn test_parse_api_version_without_trailing_slash_is_not_a_route() {
+    for method in [Method::GET, Method::HEAD] {
+        let uri: Uri = "/v2".parse().unwrap();
+        assert!(
+            parse(&method, &uri).is_none(),
+            "{method} /v2 must not route anywhere"
+        );
+    }
 }
 
 /// The version check must resolve for HEAD too, or it reaches the UI-asset arm
@@ -47,14 +65,12 @@ fn test_parse_api_version_with_trailing_slash() {
 #[test]
 fn test_parse_api_version_head() {
     let method = Method::HEAD;
-    for path in ["/v2", "/v2/"] {
-        let uri: Uri = path.parse().unwrap();
-        let route = parse(&method, &uri);
-        assert!(
-            matches!(route, Some(Action::ApiVersion)),
-            "HEAD {path} must resolve to the API version check"
-        );
-    }
+    let uri: Uri = "/v2/".parse().unwrap();
+    let route = parse(&method, &uri);
+    assert!(
+        matches!(route, Some(Action::ApiVersion)),
+        "HEAD /v2/ must resolve to the API version check"
+    );
 }
 
 /// A reference that parses as neither a tag nor a digest must not route, so the
@@ -99,43 +115,26 @@ fn test_parse_list_catalog_with_pagination() {
     }
 }
 
+/// A page size angos cannot read is a bad cursor, not an absent one: serving
+/// an unpaginated listing instead would answer a different question.
 #[test]
-fn test_parse_list_catalog_non_numeric_n() {
+fn test_parse_list_catalog_unreadable_n_is_not_a_route() {
     let method = Method::GET;
-    let uri: Uri = "/v2/_catalog?n=abc".parse().unwrap();
-    let route = parse(&method, &uri);
-    if let Some(Action::ListCatalog { n, last }) = route {
-        assert_eq!(n, None);
-        assert_eq!(last, None);
-    } else {
-        panic!("Expected ListCatalog route");
+    for query in ["n=abc", "n=65536"] {
+        let uri: Uri = format!("/v2/_catalog?{query}").parse().unwrap();
+        assert!(
+            parse(&method, &uri).is_none(),
+            "?{query} must not degrade into an unpaginated listing"
+        );
     }
-}
 
-#[test]
-fn test_parse_list_catalog_overflowing_n() {
-    let method = Method::GET;
-    let uri: Uri = "/v2/_catalog?n=65536".parse().unwrap();
-    let route = parse(&method, &uri);
-    if let Some(Action::ListCatalog { n, last }) = route {
-        assert_eq!(n, None);
-        assert_eq!(last, None);
-    } else {
-        panic!("Expected ListCatalog route");
-    }
-}
-
-#[test]
-fn test_parse_list_catalog_empty_n() {
-    let method = Method::GET;
+    // An empty value is form syntax for an absent one, which is a page size the
+    // listing can answer.
     let uri: Uri = "/v2/_catalog?n=".parse().unwrap();
-    let route = parse(&method, &uri);
-    if let Some(Action::ListCatalog { n, last }) = route {
-        assert_eq!(n, None);
-        assert_eq!(last, None);
-    } else {
-        panic!("Expected ListCatalog route");
-    }
+    assert!(matches!(
+        parse(&method, &uri),
+        Some(Action::ListCatalog { n: None, .. })
+    ));
 }
 
 #[test]
@@ -154,22 +153,6 @@ fn test_parse_list_catalog_url_encoded_last() {
 #[test]
 fn test_parse_start_upload() {
     let method = Method::POST;
-    let uri: Uri = "/v2/myrepo/app/blobs/uploads".parse().unwrap();
-    let route = parse(&method, &uri);
-    if let Some(Action::StartUpload {
-        namespace, digest, ..
-    }) = route
-    {
-        assert_eq!(namespace, "myrepo/app");
-        assert!(digest.is_none());
-    } else {
-        panic!("Expected StartUpload route");
-    }
-}
-
-#[test]
-fn test_parse_start_upload_with_trailing_slash() {
-    let method = Method::POST;
     let uri: Uri = "/v2/myrepo/app/blobs/uploads/".parse().unwrap();
     let route = parse(&method, &uri);
     if let Some(Action::StartUpload {
@@ -184,9 +167,20 @@ fn test_parse_start_upload_with_trailing_slash() {
 }
 
 #[test]
+fn test_parse_start_upload_without_trailing_slash_is_not_a_route() {
+    let method = Method::POST;
+    let uri: Uri = "/v2/myrepo/app/blobs/uploads".parse().unwrap();
+
+    assert!(
+        parse(&method, &uri).is_none(),
+        "the uploads endpoint is spelled with its trailing slash (end-4a)"
+    );
+}
+
+#[test]
 fn test_parse_start_upload_with_digest() {
     let method = Method::POST;
-    let uri: Uri = "/v2/myrepo/app/blobs/uploads?digest=sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".parse().unwrap();
+    let uri: Uri = "/v2/myrepo/app/blobs/uploads/?digest=sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".parse().unwrap();
     let route = parse(&method, &uri);
     if let Some(Action::StartUpload {
         namespace, digest, ..
@@ -270,7 +264,7 @@ fn test_parse_malformed_from_without_mount_is_rejected() {
 
 #[test]
 fn test_parse_start_upload_with_malformed_digest_is_rejected() {
-    let uri: Uri = "/v2/myrepo/app/blobs/uploads?digest=not-a-digest"
+    let uri: Uri = "/v2/myrepo/app/blobs/uploads/?digest=not-a-digest"
         .parse()
         .unwrap();
     let route = parse(&Method::POST, &uri);
@@ -807,7 +801,7 @@ fn upload_digest_algorithm_hint_is_parsed() {
 #[test]
 fn test_try_parse_upload_start_post_method() {
     let method = Method::POST;
-    let path = "myrepo/app/blobs/uploads";
+    let path = "myrepo/app/blobs/uploads/";
     let route = try_parse_upload(&method, path, None);
     assert!(route.is_some());
     if let Some(Action::StartUpload {
@@ -824,49 +818,49 @@ fn test_try_parse_upload_start_post_method() {
 #[test]
 fn test_try_parse_upload_start_wrong_method() {
     let method = Method::GET;
-    let path = "myrepo/app/blobs/uploads";
+    let path = "myrepo/app/blobs/uploads/";
     let route = try_parse_upload(&method, path, None);
     assert!(route.is_none());
 }
 
 #[test]
-fn test_try_parse_upload_start_no_slash() {
+fn test_try_parse_upload_start_requires_the_trailing_slash() {
     let method = Method::POST;
 
-    // No-slash variant: /v2/foo/blobs/uploads → StartUpload for namespace "foo".
-    let route = try_parse_upload(&method, "foo/blobs/uploads", None);
-    assert!(
-        matches!(route, Some(Action::StartUpload { ref namespace, digest: None, .. }) if namespace == "foo"),
-        "no-slash variant must yield StartUpload with correct namespace"
-    );
-
-    // With-slash variant: /v2/foo/blobs/uploads/ → same result.
+    // The spec's endpoint (end-4a) carries the trailing slash.
     let route = try_parse_upload(&method, "foo/blobs/uploads/", None);
     assert!(
         matches!(route, Some(Action::StartUpload { ref namespace, digest: None, .. }) if namespace == "foo"),
-        "with-slash variant must yield StartUpload with correct namespace"
+        "the spec's spelling must yield StartUpload with the right namespace"
     );
 
-    // Nested namespace without slash.
-    let route = try_parse_upload(&method, "org/team/blobs/uploads", None);
+    // Without it the path is not that endpoint, so it does not route.
+    let route = try_parse_upload(&method, "foo/blobs/uploads", None);
+    assert!(
+        route.is_none(),
+        "a path missing the trailing slash is not the uploads endpoint"
+    );
+
+    // Nested namespace.
+    let route = try_parse_upload(&method, "org/team/blobs/uploads/", None);
     assert!(
         matches!(route, Some(Action::StartUpload { ref namespace, .. }) if namespace == "org/team"),
-        "nested namespace without slash must parse correctly"
+        "nested namespace must parse correctly"
     );
 
     // Invalid namespace: empty string before the suffix.
-    let route = try_parse_upload(&method, "blobs/uploads", None);
+    let route = try_parse_upload(&method, "blobs/uploads/", None);
     assert!(route.is_none(), "empty namespace must not yield a route");
 
     // Invalid namespace: contains uppercase letter.
-    let route = try_parse_upload(&method, "MyRepo/blobs/uploads", None);
+    let route = try_parse_upload(&method, "MyRepo/blobs/uploads/", None);
     assert!(
         route.is_none(),
         "uppercase namespace must not yield a route"
     );
 
     // Invalid namespace: contains a space (invalid character).
-    let route = try_parse_upload(&method, "bad ns/blobs/uploads", None);
+    let route = try_parse_upload(&method, "bad ns/blobs/uploads/", None);
     assert!(
         route.is_none(),
         "namespace with space must not yield a route"
@@ -1030,7 +1024,7 @@ fn test_parse_ui_asset_post_not_allowed() {
 #[test]
 fn test_parse_list_revisions() {
     let method = Method::GET;
-    let uri: Uri = "/_ext/myrepo/app/_revisions".parse().unwrap();
+    let uri: Uri = "/v2/myrepo/app/_angos/revisions/list".parse().unwrap();
     let route = parse(&method, &uri);
     if let Some(Action::ListRevisions { namespace }) = route {
         assert_eq!(namespace, "myrepo/app");
@@ -1042,7 +1036,7 @@ fn test_parse_list_revisions() {
 #[test]
 fn test_parse_list_revisions_simple_namespace() {
     let method = Method::GET;
-    let uri: Uri = "/_ext/library/_revisions".parse().unwrap();
+    let uri: Uri = "/v2/library/_angos/revisions/list".parse().unwrap();
     let route = parse(&method, &uri);
     if let Some(Action::ListRevisions { namespace }) = route {
         assert_eq!(namespace, "library");
@@ -1054,7 +1048,9 @@ fn test_parse_list_revisions_simple_namespace() {
 #[test]
 fn test_parse_list_revisions_nested_namespace() {
     let method = Method::GET;
-    let uri: Uri = "/_ext/org/team/project/_revisions".parse().unwrap();
+    let uri: Uri = "/v2/org/team/project/_angos/revisions/list"
+        .parse()
+        .unwrap();
     let route = parse(&method, &uri);
     if let Some(Action::ListRevisions { namespace }) = route {
         assert_eq!(namespace, "org/team/project");
@@ -1066,7 +1062,7 @@ fn test_parse_list_revisions_nested_namespace() {
 #[test]
 fn test_parse_list_revisions_post_not_allowed() {
     let method = Method::POST;
-    let uri: Uri = "/_ext/myrepo/_revisions".parse().unwrap();
+    let uri: Uri = "/v2/myrepo/_angos/revisions/list".parse().unwrap();
     let route = parse(&method, &uri);
     assert!(route.is_none());
 }
@@ -1074,7 +1070,9 @@ fn test_parse_list_revisions_post_not_allowed() {
 #[test]
 fn test_parse_list_namespaces() {
     let method = Method::GET;
-    let uri: Uri = "/_ext/myrepo/_namespaces".parse().unwrap();
+    let uri: Uri = "/v2/_angos/namespaces/list?repository=myrepo"
+        .parse()
+        .unwrap();
     let route = parse(&method, &uri);
     if let Some(Action::ListNamespaces { repository }) = route {
         assert_eq!(repository, "myrepo");
@@ -1086,7 +1084,9 @@ fn test_parse_list_namespaces() {
 #[test]
 fn test_parse_list_namespaces_nested() {
     let method = Method::GET;
-    let uri: Uri = "/_ext/org/team/_namespaces".parse().unwrap();
+    let uri: Uri = "/v2/_angos/namespaces/list?repository=org/team"
+        .parse()
+        .unwrap();
     let route = parse(&method, &uri);
     if let Some(Action::ListNamespaces { repository }) = route {
         assert_eq!(repository, "org/team");
@@ -1098,7 +1098,9 @@ fn test_parse_list_namespaces_nested() {
 #[test]
 fn test_parse_list_namespaces_invalid_repository_returns_none() {
     let method = Method::GET;
-    let uri: Uri = "/_ext/INVALID/_namespaces".parse().unwrap();
+    let uri: Uri = "/v2/_angos/namespaces/list?repository=INVALID"
+        .parse()
+        .unwrap();
     let route = parse(&method, &uri);
     assert!(route.is_none());
 }
@@ -1106,7 +1108,9 @@ fn test_parse_list_namespaces_invalid_repository_returns_none() {
 #[test]
 fn test_parse_list_namespaces_post_not_allowed() {
     let method = Method::POST;
-    let uri: Uri = "/_ext/myrepo/_namespaces".parse().unwrap();
+    let uri: Uri = "/v2/_angos/namespaces/list?repository=myrepo"
+        .parse()
+        .unwrap();
     let route = parse(&method, &uri);
     assert!(route.is_none());
 }
@@ -1115,7 +1119,7 @@ fn test_parse_list_namespaces_post_not_allowed() {
 
 #[test]
 fn test_parse_list_jobs() {
-    let route = parse(&Method::GET, &"/_ext/_jobs".parse().unwrap());
+    let route = parse(&Method::GET, &"/v2/_angos/jobs/list".parse().unwrap());
     match route {
         Some(Action::ListJobs { queue, n, after }) => {
             assert_eq!(queue, Queue::Cache);
@@ -1128,7 +1132,10 @@ fn test_parse_list_jobs() {
 
 #[test]
 fn test_parse_list_jobs_with_pagination() {
-    let route = parse(&Method::GET, &"/_ext/_jobs?n=10&after=abc".parse().unwrap());
+    let route = parse(
+        &Method::GET,
+        &"/v2/_angos/jobs/list?n=10&after=abc".parse().unwrap(),
+    );
     match route {
         Some(Action::ListJobs { queue, n, after }) => {
             assert_eq!(queue, Queue::Cache);
@@ -1141,7 +1148,7 @@ fn test_parse_list_jobs_with_pagination() {
 
 #[test]
 fn test_parse_list_failed_jobs() {
-    let route = parse(&Method::GET, &"/_ext/_jobs/failed".parse().unwrap());
+    let route = parse(&Method::GET, &"/v2/_angos/jobs/failed".parse().unwrap());
     match route {
         Some(Action::ListFailedJobs { queue, n, after }) => {
             assert_eq!(queue, Queue::Cache);
@@ -1156,7 +1163,7 @@ fn test_parse_list_failed_jobs() {
 fn test_parse_retry_job() {
     let route = parse(
         &Method::POST,
-        &"/_ext/_jobs/failed/0000018b-abc/retry".parse().unwrap(),
+        &"/v2/_angos/jobs/failed?key=0000018b-abc".parse().unwrap(),
     );
     match route {
         Some(Action::RetryJob { queue, storage_key }) => {
@@ -1171,7 +1178,7 @@ fn test_parse_retry_job() {
 fn test_parse_delete_failed_job() {
     let route = parse(
         &Method::DELETE,
-        &"/_ext/_jobs/failed/0000018b-abc".parse().unwrap(),
+        &"/v2/_angos/jobs/failed?key=0000018b-abc".parse().unwrap(),
     );
     match route {
         Some(Action::DeleteJob {
@@ -1191,7 +1198,7 @@ fn test_parse_delete_failed_job() {
 fn test_parse_delete_pending_job() {
     let route = parse(
         &Method::DELETE,
-        &"/_ext/_jobs/pending/0000018b-abc".parse().unwrap(),
+        &"/v2/_angos/jobs/pending?key=0000018b-abc".parse().unwrap(),
     );
     match route {
         Some(Action::DeleteJob {
@@ -1209,23 +1216,25 @@ fn test_parse_delete_pending_job() {
 
 #[test]
 fn test_parse_jobs_rejects_post_on_listing() {
-    let route = parse(&Method::POST, &"/_ext/_jobs".parse().unwrap());
+    let route = parse(&Method::POST, &"/v2/_angos/jobs/list".parse().unwrap());
     assert!(route.is_none());
 }
 
 #[test]
 fn test_parse_jobs_rejects_key_with_slash() {
     // A storage key is a single path segment; a nested path must not match.
-    let route = parse(&Method::DELETE, &"/_ext/_jobs/failed/a/b".parse().unwrap());
+    let route = parse(
+        &Method::DELETE,
+        &"/v2/_angos/jobs/failed?key=a/b".parse().unwrap(),
+    );
     assert!(route.is_none());
 }
 
+/// A retry names its job in `?key=`, since an extension path ends at its
+/// module. Without one there is nothing to retry.
 #[test]
-fn test_parse_retry_requires_retry_suffix() {
-    let route = parse(
-        &Method::POST,
-        &"/_ext/_jobs/failed/0000018b-abc".parse().unwrap(),
-    );
+fn test_parse_retry_without_a_key_is_not_a_route() {
+    let route = parse(&Method::POST, &"/v2/_angos/jobs/failed".parse().unwrap());
     assert!(route.is_none());
 }
 
@@ -1233,7 +1242,7 @@ fn test_parse_retry_requires_retry_suffix() {
 fn test_parse_list_jobs_selects_replication_queue() {
     let route = parse(
         &Method::GET,
-        &"/_ext/_jobs?queue=replication".parse().unwrap(),
+        &"/v2/_angos/jobs/list?queue=replication".parse().unwrap(),
     );
     match route {
         Some(Action::ListJobs { queue, .. }) => assert_eq!(queue, Queue::Replication),
@@ -1245,7 +1254,7 @@ fn test_parse_list_jobs_selects_replication_queue() {
 fn test_parse_delete_failed_job_selects_replication_queue() {
     let route = parse(
         &Method::DELETE,
-        &"/_ext/_jobs/failed/0000018b-abc?queue=replication"
+        &"/v2/_angos/jobs/failed?queue=replication&key=0000018b-abc"
             .parse()
             .unwrap(),
     );
@@ -1260,11 +1269,17 @@ fn test_parse_delete_failed_job_selects_replication_queue() {
 
 #[test]
 fn test_parse_jobs_rejects_unknown_queue() {
-    assert!(parse(&Method::GET, &"/_ext/_jobs?queue=bogus".parse().unwrap()).is_none());
+    assert!(
+        parse(
+            &Method::GET,
+            &"/v2/_angos/jobs/list?queue=bogus".parse().unwrap()
+        )
+        .is_none()
+    );
     assert!(
         parse(
             &Method::DELETE,
-            &"/_ext/_jobs/failed/0000018b-abc?queue=bogus"
+            &"/v2/_angos/jobs/failed?queue=bogus&key=0000018b-abc"
                 .parse()
                 .unwrap(),
         )
@@ -1279,21 +1294,25 @@ fn test_parse_jobs_rejects_malformed_query_instead_of_defaulting_queue() {
     assert!(
         parse(
             &Method::GET,
-            &"/_ext/_jobs?queue=replication&n=abc".parse().unwrap(),
+            &"/v2/_angos/jobs/list?queue=replication&n=abc"
+                .parse()
+                .unwrap(),
         )
         .is_none()
     );
     assert!(
         parse(
             &Method::GET,
-            &"/_ext/_jobs?queue=replication&n=99999999".parse().unwrap(),
+            &"/v2/_angos/jobs/list?queue=replication&n=99999999"
+                .parse()
+                .unwrap(),
         )
         .is_none()
     );
     assert!(
         parse(
             &Method::DELETE,
-            &"/_ext/_jobs/failed/0000018b-abc?queue=replication&n=abc"
+            &"/v2/_angos/jobs/failed?queue=replication&key=0000018b-abc&n=abc"
                 .parse()
                 .unwrap(),
         )

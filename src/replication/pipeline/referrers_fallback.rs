@@ -4,17 +4,19 @@
 //! GET/modify/PUT under one per-subject lock so concurrent jobs cannot drop
 //! each other's update.
 
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use serde_json::{Value, json};
 use tokio::time::timeout;
 use tracing::warn;
 
+use angos_oci::manifest_accept_types;
+use angos_oci::request::{DeleteManifestRequest, GetManifestRequest, PutManifestRequest};
+use angos_oci::{Content, Descriptor, Digest, Manifest, MediaType, Namespace, Reference, Tag};
+
 use crate::{
-    oci::{Digest, Namespace, OCI_INDEX_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, Reference},
     registry::{ParsedManifestDigests, metadata_store::MetadataStore, parse_manifest_digests},
     registry_client::{Error as ClientError, RegistryClient},
-    replication::{Error, manifest_accept_types},
+    replication::Error,
 };
 
 /// Upper bound on each downstream HTTP call inside the referrers-merge
@@ -33,7 +35,7 @@ pub async fn push_referrers_fallback(
     downstream: &RegistryClient,
     metadata_store: &Arc<MetadataStore>,
     namespace: &Namespace,
-    downstream_namespace: &str,
+    downstream_namespace: &Namespace,
     digest: &Digest,
     parsed: &ParsedManifestDigests,
     body: &[u8],
@@ -41,13 +43,13 @@ pub async fn push_referrers_fallback(
     let Some(subject) = &parsed.subject else {
         return Ok(());
     };
-    let (fallback_tag, location) =
-        fallback_tag_and_location(downstream, downstream_namespace, subject)?;
+    let fallback_tag = Tag::referrers_fallback(subject);
+    let reference = Reference::Tag(fallback_tag.clone());
     warn!(
         namespace = %namespace,
         %digest,
         %subject,
-        fallback_tag,
+        %fallback_tag,
         "Downstream did not index subject (OCI-1.0); merging referrers fallback index"
     );
     with_subject_lock(
@@ -55,7 +57,17 @@ pub async fn push_referrers_fallback(
         namespace,
         subject,
         &fallback_tag,
-        async || merge_referrers_fallback(downstream, &location, digest, parsed, body).await,
+        async || {
+            merge_referrers_fallback(
+                downstream,
+                downstream_namespace,
+                &reference,
+                digest,
+                parsed,
+                body,
+            )
+            .await
+        },
     )
     .await
 }
@@ -68,18 +80,20 @@ pub async fn remove_referrers_fallback(
     downstream: &RegistryClient,
     metadata_store: &Arc<MetadataStore>,
     namespace: &Namespace,
-    downstream_namespace: &str,
+    downstream_namespace: &Namespace,
     subject: &Digest,
     referrer: &Digest,
 ) -> Result<(), Error> {
-    let (fallback_tag, location) =
-        fallback_tag_and_location(downstream, downstream_namespace, subject)?;
+    let fallback_tag = Tag::referrers_fallback(subject);
+    let reference = Reference::Tag(fallback_tag.clone());
     with_subject_lock(
         metadata_store,
         namespace,
         subject,
         &fallback_tag,
-        async || prune_fallback_descriptor(downstream, &location, referrer).await,
+        async || {
+            prune_fallback_descriptor(downstream, downstream_namespace, &reference, referrer).await
+        },
     )
     .await
 }
@@ -89,33 +103,19 @@ pub async fn remove_referrers_fallback(
 /// subject) yields `None`, leaving the fallback index untouched.
 pub async fn deleted_referrer_subject(
     downstream: &RegistryClient,
-    downstream_namespace: &str,
+    downstream_namespace: &Namespace,
     digest: &Digest,
 ) -> Option<Digest> {
-    let location =
-        downstream.get_manifest_path(downstream_namespace, &Reference::Digest(digest.clone()));
     let fetched = downstream
-        .get_manifest(&manifest_accept_types(), &location)
+        .get_manifest(GetManifestRequest {
+            namespace: downstream_namespace.clone(),
+            reference: Reference::Digest(digest.clone()),
+            accepted_types: manifest_accept_types(),
+            allow_redirect: true,
+        })
         .await
         .ok()?;
     parse_manifest_digests(&fetched.body, None).ok()?.subject
-}
-
-/// The subject's fallback tag (`<alg>-<hash>`) and that tag's manifest
-/// location on the downstream.
-fn fallback_tag_and_location(
-    downstream: &RegistryClient,
-    downstream_namespace: &str,
-    subject: &Digest,
-) -> Result<(String, String), Error> {
-    let fallback_tag = format!("{}-{}", subject.algorithm(), subject.hash());
-    let reference = Reference::from_str(&fallback_tag).map_err(|e| {
-        Error::Internal(format!(
-            "invalid referrers fallback tag '{fallback_tag}': {e}"
-        ))
-    })?;
-    let location = downstream.get_manifest_path(downstream_namespace, &reference);
-    Ok((fallback_tag, location))
 }
 
 /// Runs `critical` (the GET/modify/PUT of one fallback index) under the
@@ -154,46 +154,35 @@ async fn with_subject_lock(
 /// absent, and PUTs the merged index back.
 async fn merge_referrers_fallback(
     downstream: &RegistryClient,
-    location: &str,
+    namespace: &Namespace,
+    reference: &Reference,
     digest: &Digest,
     parsed: &ParsedManifestDigests,
     body: &[u8],
 ) -> Result<(), Error> {
-    let mut manifests = fetch_fallback_manifests(downstream, location).await?;
+    let mut manifests = fetch_fallback_manifests(downstream, namespace, reference).await?;
 
-    // The blob store is content-addressed, so `digest` is already the body's
-    // digest; no re-hash or re-parse needed.
-    let descriptor = referrer_descriptor(
-        digest,
-        body.len(),
-        parsed.media_type.as_deref(),
-        parsed.artifact_type.as_deref(),
-    );
-
-    // Dedup by digest so a re-run is idempotent.
-    let digest_str = digest.to_string();
-    let already_present = manifests
-        .iter()
-        .any(|m| m.get("digest").and_then(Value::as_str) == Some(digest_str.as_str()));
-    if !already_present {
-        manifests.push(descriptor);
+    // Dedup by digest so a re-run is idempotent. The blob store is
+    // content-addressed, so `digest` is already the body's digest.
+    if !manifests.iter().any(|entry| entry.digest == *digest) {
+        manifests.push(referrer_descriptor(digest, body.len(), parsed));
     }
 
-    put_fallback_manifests(downstream, location, manifests).await
+    put_fallback_manifests(downstream, namespace, reference, manifests).await
 }
 
 /// Locked critical section of [`remove_referrers_fallback`]: GET the index, drop
 /// the descriptor, then PUT the remainder back, or DELETE the tag when empty.
 async fn prune_fallback_descriptor(
     downstream: &RegistryClient,
-    location: &str,
+    namespace: &Namespace,
+    reference: &Reference,
     referrer: &Digest,
 ) -> Result<(), Error> {
-    let mut manifests = fetch_fallback_manifests(downstream, location).await?;
+    let mut manifests = fetch_fallback_manifests(downstream, namespace, reference).await?;
 
-    let referrer_str = referrer.to_string();
     let before = manifests.len();
-    manifests.retain(|m| m.get("digest").and_then(Value::as_str) != Some(referrer_str.as_str()));
+    manifests.retain(|entry| entry.digest != *referrer);
     // Descriptor absent (already pruned, or a 1.1 downstream has no fallback tag
     // and the GET returned an empty base): nothing to do.
     if manifests.len() == before {
@@ -205,18 +194,23 @@ async fn prune_fallback_descriptor(
         // index. Timestamp-less, mirroring the merge PUT.
         timeout(
             REFERRERS_MERGE_HTTP_TIMEOUT,
-            downstream.delete_manifest(location, None),
+            downstream.delete_manifest(DeleteManifestRequest {
+                namespace: namespace.clone(),
+                reference: reference.clone(),
+                source_ts: None,
+            }),
         )
         .await
         .map_err(|_| {
             Error::Internal(format!(
-                "referrers fallback DELETE at '{location}' timed out inside the merge lock"
+                "referrers fallback DELETE of '{namespace}/{reference}' timed out inside the \
+                 merge lock"
             ))
         })??;
         return Ok(());
     }
 
-    put_fallback_manifests(downstream, location, manifests).await
+    put_fallback_manifests(downstream, namespace, reference, manifests).await
 }
 
 /// GETs the existing referrers fallback index at `location`, bounded by the
@@ -227,29 +221,34 @@ async fn prune_fallback_descriptor(
 /// the index from an empty base and drops the subject's sibling referrers.
 async fn fetch_fallback_manifests(
     downstream: &RegistryClient,
-    location: &str,
-) -> Result<Vec<Value>, Error> {
+    namespace: &Namespace,
+    reference: &Reference,
+) -> Result<Vec<Descriptor>, Error> {
     let accept = manifest_accept_types();
-    let get = downstream.get_manifest(&accept, location);
+    let get = downstream.get_manifest(GetManifestRequest {
+        namespace: namespace.clone(),
+        reference: reference.clone(),
+        accepted_types: accept,
+        allow_redirect: true,
+    });
     let body = match timeout(REFERRERS_MERGE_HTTP_TIMEOUT, get).await {
         Ok(Ok(fetched)) => fetched.body,
         Ok(Err(ClientError::ManifestUnknown)) => return Ok(Vec::new()),
         Ok(Err(e)) => return Err(Error::Client(e)),
         Err(_) => {
             return Err(Error::Internal(format!(
-                "referrers fallback GET at '{location}' timed out inside the merge lock"
+                "referrers fallback GET of '{namespace}/{reference}' timed out inside the merge \
+                 lock"
             )));
         }
     };
-    serde_json::from_slice::<Value>(&body)
-        .ok()
-        .and_then(|v| v.get("manifests").and_then(Value::as_array).cloned())
-        .ok_or_else(|| {
-            Error::Internal(format!(
-                "downstream referrers fallback index at '{location}' is not a parseable image \
-                 index (missing or non-array `manifests`); refusing to overwrite it"
-            ))
-        })
+    match Manifest::from_slice(&body).map(|index| index.content) {
+        Ok(Content::Index { manifests }) => Ok(manifests),
+        _ => Err(Error::Internal(format!(
+            "downstream referrers fallback index at '{namespace}/{reference}' is not a parseable \
+             image index; refusing to overwrite it"
+        ))),
+    }
 }
 
 /// Serializes `manifests` into an image index and PUTs it to `location`.
@@ -259,46 +258,48 @@ async fn fetch_fallback_manifests(
 /// merge-lock HTTP timeout.
 async fn put_fallback_manifests(
     downstream: &RegistryClient,
-    location: &str,
-    manifests: Vec<Value>,
+    namespace: &Namespace,
+    reference: &Reference,
+    manifests: Vec<Descriptor>,
 ) -> Result<(), Error> {
-    let index = json!({
-        "schemaVersion": 2,
-        "mediaType": OCI_INDEX_MEDIA_TYPE,
-        "manifests": manifests,
-    });
-    let index_body = serde_json::to_vec(&index).map_err(|e| {
+    let index_body = serde_json::to_vec(&Manifest::oci_index(manifests)).map_err(|e| {
         Error::Internal(format!("failed to serialize referrers fallback index: {e}"))
     })?;
     timeout(
         REFERRERS_MERGE_HTTP_TIMEOUT,
-        downstream.put_manifest(location, Some(OCI_INDEX_MEDIA_TYPE), index_body, None),
+        downstream.put_manifest(
+            PutManifestRequest {
+                namespace: namespace.clone(),
+                reference: reference.clone(),
+                content_type: Some(MediaType::oci_index()),
+                tags: Vec::new(),
+                source_ts: None,
+            },
+            index_body,
+        ),
     )
     .await
     .map_err(|_| {
         Error::Internal(format!(
-            "referrers fallback PUT at '{location}' timed out inside the merge lock"
+            "referrers fallback PUT of '{namespace}/{reference}' timed out inside the merge lock"
         ))
     })??;
     Ok(())
 }
 
-/// Builds the OCI descriptor for a referrer manifest to embed in the fallback
-/// index; `media_type` defaults to the OCI image-manifest type when the body
-/// declared none.
-fn referrer_descriptor(
-    referrer_digest: &Digest,
-    size: usize,
-    media_type: Option<&str>,
-    artifact_type: Option<&str>,
-) -> Value {
-    let mut descriptor = json!({
-        "mediaType": media_type.unwrap_or(OCI_MANIFEST_MEDIA_TYPE),
-        "digest": referrer_digest.to_string(),
-        "size": size,
-    });
-    if let Some(artifact_type) = artifact_type {
-        descriptor["artifactType"] = json!(artifact_type);
+/// The descriptor a referrer is listed under in the fallback index. A body that
+/// declared no `mediaType` is described as an OCI image manifest, which is what
+/// the referrers API says an entry without one is.
+fn referrer_descriptor(digest: &Digest, size: usize, parsed: &ParsedManifestDigests) -> Descriptor {
+    Descriptor {
+        media_type: parsed
+            .media_type
+            .clone()
+            .unwrap_or_else(MediaType::oci_manifest),
+        digest: digest.clone(),
+        size: size as u64,
+        annotations: HashMap::new(),
+        artifact_type: parsed.artifact_type.clone(),
+        platform: None,
     }
-    descriptor
 }

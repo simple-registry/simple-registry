@@ -1,60 +1,28 @@
 use std::collections::HashSet;
 
-use hyper::{
-    HeaderMap, Response, StatusCode,
-    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, HeaderValue, LOCATION},
-};
+use hyper::{HeaderMap, Response, StatusCode};
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info, instrument, warn};
+
+use angos_oci::http_range::RequestRange;
+use angos_oci::request::{DeleteBlobRequest, GetBlobRequest, HeadBlobRequest};
+use angos_oci::server;
+use angos_oci::{Digest, MediaRange, Namespace, UploadSessionId};
 
 use crate::{
     cache_fill::build_envelope,
     event_webhook::event::{Event, EventActor},
-    http_range::{RequestRange, ResponseRange},
     http_response::{ResponseBody, build_response},
     jobs::Queue,
     metrics_provider::metrics_provider,
-    oci::{Digest, MediaRange, Namespace, UploadSessionId},
     registry::{
-        DOCKER_CONTENT_DIGEST, Error, Registry, Repository,
+        Error, Registry, Repository,
         blob_ownership::promote_and_grant,
         blob_store::{BlobStore, BoxedReader},
         metadata_store::{LinkKind, MetadataStore},
         repository_name,
     },
 };
-
-/// Headers a blob answer carries whether or not it has a body: `Accept-Ranges`
-/// among them, so a `HEAD` advertises the ranges a `GET` will serve.
-fn blob_headers(digest: &Digest, size: u64) -> Result<HeaderMap, Error> {
-    let mut headers = HeaderMap::new();
-    headers.insert(DOCKER_CONTENT_DIGEST, HeaderValue::try_from(digest)?);
-    headers.insert(CONTENT_LENGTH, size.into());
-    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-
-    Ok(headers)
-}
-
-/// Headers for a `206`. `length` is the body actually streamed, which an
-/// upstream reports separately from the window it says it served.
-fn partial_blob_headers(
-    digest: &Digest,
-    length: u64,
-    range: ResponseRange,
-) -> Result<HeaderMap, Error> {
-    let mut headers = blob_headers(digest, length)?;
-    headers.insert(CONTENT_RANGE, HeaderValue::try_from(range)?);
-
-    Ok(headers)
-}
-
-fn get_blob_redirect_headers(url: &str, digest: &Digest) -> Result<HeaderMap, Error> {
-    let mut headers = HeaderMap::new();
-    headers.insert(LOCATION, HeaderValue::try_from(url)?);
-    headers.insert(DOCKER_CONTENT_DIGEST, HeaderValue::try_from(digest)?);
-
-    Ok(headers)
-}
 
 /// `200 OK` serving a blob in full, whether read locally or streamed from an
 /// upstream.
@@ -65,30 +33,9 @@ fn whole_blob_response(
 ) -> Result<Response<ResponseBody>, Error> {
     Ok(build_response(
         StatusCode::OK,
-        blob_headers(digest, total_length)?,
+        server::blob_headers(digest, total_length)?,
         ResponseBody::streaming(body),
     )?)
-}
-
-#[derive(Debug)]
-pub struct HeadBlobRequest {
-    pub namespace: Namespace,
-    pub digest: Digest,
-    pub accepted_types: Vec<MediaRange>,
-}
-
-pub struct GetBlobRequest {
-    pub namespace: Namespace,
-    pub digest: Digest,
-    pub accepted_types: Vec<MediaRange>,
-    pub range: Option<RequestRange>,
-    pub allow_redirect: bool,
-}
-
-#[derive(Debug)]
-pub struct DeleteBlobRequest {
-    pub namespace: Namespace,
-    pub digest: Digest,
 }
 
 fn has_non_ownership_reference(links: &HashSet<LinkKind>, digest: &Digest) -> bool {
@@ -213,7 +160,7 @@ impl Registry {
                 Ok(size) => {
                     return Ok(build_response(
                         StatusCode::OK,
-                        blob_headers(&request.digest, size)?,
+                        server::blob_headers(&request.digest, size)?,
                         ResponseBody::empty(),
                     )?);
                 }
@@ -234,7 +181,7 @@ impl Registry {
 
         Ok(build_response(
             StatusCode::OK,
-            blob_headers(&digest, size)?,
+            server::blob_headers(&digest, size)?,
             ResponseBody::empty(),
         )?)
     }
@@ -268,9 +215,8 @@ impl Registry {
         let Some(repository) = upstream else {
             return Err(Error::BlobUnknown);
         };
-        let requested_range = range.map(HeaderValue::try_from).transpose()?;
         let fetched = repository
-            .get_blob(accepted_types, namespace, digest, requested_range.as_ref())
+            .get_blob(accepted_types, namespace, digest, range)
             .await?;
 
         self.dispatch_cache_fill(namespace, digest).await;
@@ -283,7 +229,7 @@ impl Registry {
 
         Ok(build_response(
             StatusCode::PARTIAL_CONTENT,
-            partial_blob_headers(digest, fetched.length, content_range)?,
+            server::partial_blob_headers(digest, fetched.length, content_range)?,
             ResponseBody::streaming(fetched.reader),
         )?)
     }
@@ -332,7 +278,7 @@ impl Registry {
 
         Ok(build_response(
             StatusCode::PARTIAL_CONTENT,
-            partial_blob_headers(digest, served.length(), served)?,
+            server::partial_blob_headers(digest, served.length(), served)?,
             ResponseBody::streaming(reader),
         )?)
     }
@@ -414,7 +360,7 @@ impl Registry {
         {
             build_response(
                 StatusCode::TEMPORARY_REDIRECT,
-                get_blob_redirect_headers(&presigned_url, &request.digest)?,
+                server::blob_redirect_headers(&presigned_url, &request.digest)?,
                 ResponseBody::empty(),
             )?
         } else {
@@ -443,14 +389,10 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-    use crate::metrics_provider::init_for_tests;
+    use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE};
+
     use std::{io::Cursor, sync::Arc, time::Duration};
 
-    use angos_storage::{
-        Error as StorageError, MemoryObjectStore, ObjectStore,
-        fs::Backend as StorageFsBackend,
-        test_util::{HookedStore, StoreHook, StoreOp},
-    };
     use async_trait::async_trait;
     use tempfile::TempDir;
     use tokio::time::sleep;
@@ -459,11 +401,18 @@ mod tests {
         matchers::{header, method, path},
     };
 
-    use super::*;
+    use angos_oci::http_range::ByteWindow;
+    use angos_oci::{Namespace, Tag};
+    use angos_storage::{
+        Error as StorageError, MemoryObjectStore, ObjectStore,
+        fs::Backend as StorageFsBackend,
+        test_util::{HookedStore, StoreHook, StoreOp},
+    };
+
+    use crate::metrics_provider::init_for_tests;
+    use crate::registry::blob::*;
     use crate::{
         cache,
-        http_range::ByteWindow,
-        oci::{Namespace, Tag},
         registry::{
             manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
             metadata_store::{BlobIndexOperation, LinkOperation},
@@ -1421,52 +1370,5 @@ mod tests {
             );
         })
         .await;
-    }
-}
-
-#[cfg(test)]
-mod header_tests {
-    use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, LOCATION};
-
-    use super::{
-        Digest, ResponseRange, blob_headers, get_blob_redirect_headers, partial_blob_headers,
-    };
-    use crate::registry::DOCKER_CONTENT_DIGEST;
-
-    fn sample_digest() -> Digest {
-        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-            .parse()
-            .unwrap()
-    }
-
-    #[test]
-    /// `Accept-Ranges` rides on every blob answer, `HEAD` included: a client
-    /// must be able to learn a blob is rangeable without fetching it.
-    fn blob_headers_advertise_ranges() {
-        let headers = blob_headers(&sample_digest(), 42).unwrap();
-        assert_eq!(headers[&DOCKER_CONTENT_DIGEST], sample_digest().to_string());
-        assert_eq!(headers[&CONTENT_LENGTH], "42");
-        assert_eq!(headers[&ACCEPT_RANGES], "bytes");
-    }
-
-    /// `Content-Length` is the streamed body, which an upstream reports apart
-    /// from the window its `Content-Range` names.
-    #[test]
-    fn partial_blob_headers_carries_length_and_content_range() {
-        let range = ResponseRange {
-            start: 5,
-            end: 10,
-            total_length: Some(100),
-        };
-        let headers = partial_blob_headers(&sample_digest(), range.length(), range).unwrap();
-        assert_eq!(headers[&CONTENT_LENGTH], "6");
-        assert_eq!(headers[&CONTENT_RANGE], "bytes 5-10/100");
-    }
-
-    #[test]
-    fn get_blob_redirect_headers_carries_location_and_digest() {
-        let headers = get_blob_redirect_headers("https://cdn/blob", &sample_digest()).unwrap();
-        assert_eq!(headers[&LOCATION], "https://cdn/blob");
-        assert_eq!(headers[&DOCKER_CONTENT_DIGEST], sample_digest().to_string());
     }
 }

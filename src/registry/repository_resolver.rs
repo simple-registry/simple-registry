@@ -9,7 +9,9 @@
 
 use std::{collections::HashMap, fmt, sync::Arc};
 
-use crate::{oci::namespace_belongs_to, registry::Repository};
+use angos_oci::namespace_belongs_to;
+
+use crate::registry::Repository;
 
 /// The `ns` a repository key mirrors, for the construction-time uniqueness
 /// check.
@@ -125,9 +127,10 @@ impl RepositoryResolver {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use super::*;
+    use angos_oci::Namespace;
+
+    use crate::registry::repository_resolver::*;
     use crate::{
-        oci::Namespace,
         policy::{RetentionPolicy, RetentionPolicyConfig, SystemClock},
         registry::Repository,
     };

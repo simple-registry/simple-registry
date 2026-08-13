@@ -1,117 +1,32 @@
 use std::collections::{HashMap, HashSet};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
-use hyper::{
-    HeaderMap, Response, StatusCode,
-    header::{CONTENT_TYPE, HeaderValue, LINK},
-};
-use serde::Serialize;
+use hyper::{Response, StatusCode};
 use tracing::{instrument, warn};
 
+use angos_oci::request::{GetReferrersRequest, ListTagsRequest};
+use angos_oci::response::TagsListResponse;
+use angos_oci::server;
+use angos_oci::{Content, Descriptor, Digest, Manifest, MediaType, Namespace, Tag};
 use angos_storage::Page;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    http_response::{ResponseBody, build_response, json_headers},
-    oci::{
-        Content, Descriptor, Digest, Manifest, MediaType, Namespace, OCI_INDEX_MEDIA_TYPE,
-        OCI_MANIFEST_SCHEMA_VERSION, Tag,
-    },
-    registry::{
-        Error, OCI_FILTERS_APPLIED, Registry, Repository, metadata_store::LinkKind, pagination,
-    },
+    http_response::{ResponseBody, build_response},
+    registry::{Error, Registry, Repository, metadata_store::LinkKind, pagination},
 };
 
+/// The catalog is a Docker Registry V2 endpoint the OCI distribution spec does
+/// not define, so its shapes live here rather than in the protocol crate.
+#[derive(Debug)]
 pub struct ListCatalogRequest {
     pub n: Option<u16>,
     pub last: Option<String>,
 }
 
-pub struct ListTagsRequest {
-    pub namespace: Namespace,
-    pub n: Option<u16>,
-    pub last: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct CatalogBody {
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CatalogResponse {
     pub repositories: Vec<Namespace>,
-}
-
-#[derive(Serialize)]
-pub struct TagsBody {
-    pub name: Namespace,
-    pub tags: Vec<Tag>,
-}
-
-/// Advertises `link` as the next page, which a listing does only while it is
-/// not exhausted.
-fn insert_next_link(headers: &mut HeaderMap, link: Option<&str>) -> Result<(), Error> {
-    if let Some(link) = link {
-        headers.insert(
-            LINK,
-            HeaderValue::try_from(format!("<{link}>; rel=\"next\""))?,
-        );
-    }
-
-    Ok(())
-}
-
-fn paginated_json_headers(link: Option<&str>) -> Result<HeaderMap, Error> {
-    let mut headers = json_headers();
-    insert_next_link(&mut headers, link)?;
-
-    Ok(headers)
-}
-
-pub struct GetReferrersRequest {
-    pub namespace: Namespace,
-    pub digest: Digest,
-    pub artifact_type: Option<MediaType>,
-    pub n: Option<u16>,
-    pub last: Option<String>,
-}
-
-/// The OCI image-index body a referrers listing serves.
-#[derive(Serialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct ReferrerList {
-    schema_version: i32,
-    // The OCI index media type serializes as its string, so the constant is
-    // carried directly rather than re-parsed through the fallible `MediaType`.
-    media_type: &'static str,
-    manifests: Vec<Descriptor>,
-}
-
-/// A listing that honoured an `artifactType` filter must advertise it, so a
-/// client can tell a filtered index from a complete one.
-fn referrers_headers(artifact_type_filtered: bool, link: Option<&str>) -> Result<HeaderMap, Error> {
-    let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::try_from(OCI_INDEX_MEDIA_TYPE)?);
-    if artifact_type_filtered {
-        headers.insert(
-            OCI_FILTERS_APPLIED,
-            HeaderValue::from_static("artifactType"),
-        );
-    }
-    insert_next_link(&mut headers, link)?;
-
-    Ok(headers)
-}
-
-/// The tag a pre-API client records a subject's referrers under: the
-/// algorithm truncated to 32 characters and the encoded hash to 64, joined by a
-/// hyphen. A [`Digest`] admits no character a tag disallows, so the schema's
-/// substitution rule has nothing to replace.
-fn referrers_fallback_tag(subject: &Digest) -> Option<Tag> {
-    let algorithm = subject.algorithm().as_str();
-    let hash = subject.hash();
-    let schema = format!(
-        "{}-{}",
-        &algorithm[..algorithm.len().min(32)],
-        &hash[..hash.len().min(64)]
-    );
-
-    Tag::new(&schema).ok()
 }
 
 /// Whether `referrer` passes a listing's `artifactType` filter, which an
@@ -144,13 +59,13 @@ impl Registry {
             .as_ref()
             .map(|last| format!("/v2/_catalog?n={n}&last={last}"));
 
-        let body = CatalogBody {
+        let body = CatalogResponse {
             repositories: page.items,
         };
 
         Ok(build_response(
             StatusCode::OK,
-            paginated_json_headers(link.as_deref())?,
+            server::paginated_json_headers(link.as_deref())?,
             ResponseBody::fixed(serde_json::to_vec(&body)?),
         )?)
     }
@@ -184,14 +99,14 @@ impl Registry {
             .as_ref()
             .map(|last| format!("/v2/{namespace}/tags/list?n={n}&last={last}"));
 
-        let body = TagsBody {
-            name: request.namespace.clone(),
-            tags: page.items,
+        let body = TagsListResponse {
+            name: Some(request.namespace.clone()),
+            tags: page.items.iter().map(ToString::to_string).collect(),
         };
 
         Ok(build_response(
             StatusCode::OK,
-            paginated_json_headers(link.as_deref())?,
+            server::paginated_json_headers(link.as_deref())?,
             ResponseBody::fixed(serde_json::to_vec(&body)?),
         )?)
     }
@@ -232,15 +147,11 @@ impl Registry {
             format!("/v2/{namespace}/referrers/{digest}?{filter}n={n}&last={last}")
         });
 
-        let body = ReferrerList {
-            schema_version: OCI_MANIFEST_SCHEMA_VERSION,
-            media_type: OCI_INDEX_MEDIA_TYPE,
-            manifests: page.items,
-        };
+        let body = Manifest::oci_index(page.items);
 
         Ok(build_response(
             StatusCode::OK,
-            referrers_headers(filter.is_some(), link.as_deref())?,
+            server::referrers_headers(filter.is_some(), link.as_deref())?,
             ResponseBody::fixed(serde_json::to_vec(&body)?),
         )?)
     }
@@ -329,9 +240,7 @@ impl Registry {
         namespace: &Namespace,
         subject: &Digest,
     ) -> Vec<Descriptor> {
-        let Some(tag) = referrers_fallback_tag(subject) else {
-            return Vec::new();
-        };
+        let tag = Tag::referrers_fallback(subject);
         let Ok(link) = self
             .metadata_store
             .read_link(namespace, &LinkKind::Tag(tag))
@@ -447,16 +356,17 @@ mod tests {
     use std::collections::HashMap;
 
     use hyper::header::LINK;
-
     use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
 
-    use super::{
-        DEFAULT_PAGE_SIZE, GetReferrersRequest, ListCatalogRequest, ListTagsRequest,
-        OCI_INDEX_MEDIA_TYPE, Repository, Response, ResponseBody, referrers_fallback_tag,
+    use angos_oci::OCI_INDEX_MEDIA_TYPE;
+    use angos_oci::request::{GetReferrersRequest, ListTagsRequest};
+
+    use crate::registry::content_discovery::{
+        DEFAULT_PAGE_SIZE, ListCatalogRequest, Repository, Response, ResponseBody,
     };
 
     /// The `last` cursor a client would follow out of a `Link` header, or
@@ -504,9 +414,10 @@ mod tests {
         let (_, last) = link.rsplit_once("last=")?;
         Some(last.trim_end_matches(">; rel=\"next\"").to_string())
     }
+    use angos_oci::{Descriptor, Digest, Manifest, MediaType, Namespace, Reference, Tag};
+
     use crate::{
         cache,
-        oci::{Algorithm, Descriptor, Digest, Manifest, MediaType, Namespace, Reference, Tag},
         registry::{
             Error,
             manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
@@ -1090,22 +1001,6 @@ mod tests {
         assert!(result.is_none());
     }
 
-    /// The fallback tag follows the schema's truncation, so a sha512 subject
-    /// (128 hex characters) is looked up under the 64 a client would have used
-    /// and not a name no tag can even hold.
-    #[test]
-    fn referrers_fallback_tag_truncates_the_encoded_hash() {
-        let sha256 = Digest::sha256_of_bytes(b"subject");
-        assert_eq!(
-            referrers_fallback_tag(&sha256).map(|tag| tag.to_string()),
-            Some(format!("sha256-{}", sha256.hash()))
-        );
-
-        let sha512 = Digest::from_bytes(Algorithm::Sha512, b"subject");
-        let tag = referrers_fallback_tag(&sha512).expect("a sha512 subject must have a tag");
-        assert_eq!(tag.to_string(), format!("sha512-{}", &sha512.hash()[..64]));
-    }
-
     /// A repository imported from a registry whose clients used the referrers
     /// fallback tag keeps those entries: the spec's "Enabling the Referrers
     /// API" procedure has the tag's index folded into the listing.
@@ -1135,7 +1030,7 @@ mod tests {
         }))
         .unwrap();
         let fallback_digest = upload_blob(registry, &namespace, &fallback).await;
-        let tag = Tag::new(&format!("{}-{}", subject.algorithm(), subject.hash())).unwrap();
+        let tag = Tag::referrers_fallback(&subject);
         registry
             .metadata_store
             .update_links(

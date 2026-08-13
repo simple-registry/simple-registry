@@ -9,19 +9,17 @@ use std::collections::HashSet;
 use bytes::Bytes;
 use serde_json::Value;
 
+use angos_oci::{Digest, Namespace};
 use angos_tx_engine::{
     StorageError,
     store::Store,
     transaction::{Mutation, TransactionBuilder},
 };
 
-use crate::{
-    oci::{Digest, Namespace},
-    registry::{
-        Error,
-        metadata_store::{BlobIndexOperation, LinkKind},
-        path_builder,
-    },
+use crate::registry::{
+    Error,
+    metadata_store::{BlobIndexOperation, LinkKind},
+    path_builder,
 };
 
 // Pure shard operations (in-memory; no I/O)

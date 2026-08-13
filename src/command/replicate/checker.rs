@@ -9,16 +9,20 @@ use async_trait::async_trait;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use tracing::{debug, warn};
 
+use angos_oci::manifest_accept_types;
+use angos_oci::request::{HeadManifestRequest, ListTagsRequest};
+use angos_oci::response::ManifestHeadResponse;
+use angos_oci::{Digest, Namespace, Reference, Tag};
+
 use crate::{
     command::maintenance::{Error, action::Action, check::NamespaceChecker, executor::ActionSink},
-    oci::{Digest, Namespace, Reference, Tag},
     registry::{
         Error as RegistryError,
         metadata_store::{LinkKind, MetadataStore},
         repository_resolver::RepositoryResolver,
     },
-    registry_client::{Error as ClientError, ManifestHead},
-    replication::{ReplicationDownstream, manifest_accept_types, record_reconcile_outcome},
+    registry_client::Error as ClientError,
+    replication::{ReplicationDownstream, record_reconcile_outcome},
 };
 
 /// Fan-out for the local tag-digest link reads collected before reconciling a
@@ -120,10 +124,15 @@ impl ReplicationChecker {
                 return;
             }
         };
-        let location = downstream
+        let downstream_tags = match downstream
             .registry_client
-            .get_tags_list_path(remote.as_ref());
-        let downstream_tags = match downstream.registry_client.list_tags(&location).await {
+            .list_tags(ListTagsRequest {
+                namespace: remote.clone(),
+                n: None,
+                last: None,
+            })
+            .await
+        {
             Ok(tags) => tags,
             Err(e) => {
                 warn!(
@@ -211,15 +220,16 @@ async fn reconcile_push_step(
             let reference = Reference::Tag(tag.clone());
             // Only a 404 means absence; any other HEAD failure skips the tag this
             // pass rather than enqueuing a spurious push.
-            let location = downstream
-                .registry_client
-                .get_manifest_path(remote.as_ref(), &reference);
             match downstream
                 .registry_client
-                .head_manifest(&manifest_accept_types(), &location)
+                .head_manifest(HeadManifestRequest {
+                    namespace: remote.clone(),
+                    reference: reference.clone(),
+                    accepted_types: manifest_accept_types(),
+                })
                 .await
             {
-                Ok(ManifestHead {
+                Ok(ManifestHeadResponse {
                     digest: Some(digest),
                     ..
                 }) if digest == local => {
@@ -362,7 +372,10 @@ mod tests {
         matchers::{method, path},
     };
 
-    use super::ReplicationChecker;
+    use angos_oci::header::DOCKER_CONTENT_DIGEST;
+    use angos_oci::{Digest, Namespace, Tag};
+
+    use crate::command::replicate::checker::ReplicationChecker;
     use crate::{
         command::maintenance::{
             Error,
@@ -371,9 +384,8 @@ mod tests {
             executor::{ActionSink, Executor},
         },
         jobs::{Queue, runner::execute_one, store::JobStore},
-        oci::{Digest, Namespace, Tag},
         registry::{
-            DOCKER_CONTENT_DIGEST, Repository,
+            Repository,
             metadata_store::{LinkKind, LinkOperation},
             repository_resolver::RepositoryResolver,
             test_utils::{

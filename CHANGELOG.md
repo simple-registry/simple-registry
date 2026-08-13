@@ -21,6 +21,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the angos extension endpoints moved from `/_ext/...` to `/v2/_angos/...`, the extension namespace the distribution spec reserves (`_<extension>/<component>/<module>`). A path ends at its module, so a job names itself in `?key=` and a namespace listing names its repository in `?repository=`. The UI configuration endpoint moved from `/_ui/config` to `/v2/_angos/ui/config` with them; the UI itself still serves from `/`. The web UI still serves from `/`; see [Upgrade Angos](doc/how-to/upgrade.md) for the path-by-path mapping.
+- **Breaking:** the version check answers `GET /v2/` only, the endpoint the spec defines (end-1). The same path without its trailing slash used to answer it and now answers `404`.
+- **Breaking:** a listing rejects a `?n=` it cannot read (`n=abc`, a value above 65535) with `404` instead of silently serving an unpaginated page, matching how the referrers filter beside it is already parsed. An empty `?n=` still reads as absent, which is form syntax for "not given".
+- **Breaking:** a blob upload starts at `POST /v2/<name>/blobs/uploads/` only, the endpoint the spec defines. The same path without its trailing slash was accepted before and now answers `404`; every OCI client already sends the slash.
 - **Breaking:** CEL access policies read an upload session as `request.session_id`; the field was named `request.uuid`.
 - **Breaking:** OIDC providers are no longer typed. `provider = "github"` and `provider = "generic"` are gone; a provider is now an issuer plus how its tokens are validated, so every entry takes the same options. A GitHub Actions entry spells out the issuer it used to get for free; see [Upgrade Angos](doc/how-to/upgrade.md).
 - **Breaking:** `identity.oidc.provider_type` is removed from access policies and the denial audit log. It only ever distinguished the two built-in provider types; `identity.oidc.provider_name`, the entry's own name, tells providers apart.
@@ -31,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Replicating a sha512 subject to an OCI-1.0 downstream no longer fails: the referrers fallback tag is truncated to the schema the registry itself serves, instead of a name too long to be a tag.
 - A client that connects and then stalls no longer holds up every other connection on that listener: handshakes run per connection instead of inline in the accept loop, and each is bound by `handshake_timeout`.
 - A listener survives a transient accept failure such as an exhausted descriptor table, backing off and retrying instead of terminating the server.
 - Content pushed to a namespace no `[repository]` entry matches can now be pulled back: retrieval required a configured repository while every other route did not, so such a namespace was writable, listable, and unreadable.
@@ -50,6 +55,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A blob `HEAD` carries `Accept-Ranges`, which only `GET` sent, so a client learns a blob is rangeable without fetching it.
 - A manifest larger than `global.max_manifest_size` is refused with `413`, matching the blob size limit, instead of `400`.
 - A ranged blob pull on a pull-through repository forwards the range to the upstream instead of returning `416` until the blob is cached, so one URL no longer answers `206` or `416` depending on cache state.
+- `top_pushed(n)` and `top_pulled(n)` rank only the tags carrying the time they order by, so a namespace holding n tags or fewer no longer keeps every tag forever whatever its push and pull history.
 
 ## 1.4.5
 

@@ -1,12 +1,11 @@
 use bytes::Bytes;
 
-use crate::{
-    oci::{Namespace, Tag, UploadSessionId},
-    registry::{
-        metadata_store::{LinkKind, LinkOperation},
-        path_builder,
-        test_utils::{self, for_each_backend},
-    },
+use angos_oci::{Namespace, Tag, UploadSessionId};
+
+use crate::registry::{
+    metadata_store::{LinkKind, LinkOperation},
+    path_builder,
+    test_utils::{self, for_each_backend},
 };
 
 /// The catalog is derived directly from stored content: a namespace appears in

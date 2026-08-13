@@ -265,6 +265,8 @@ mod tests {
 
     use serde_json::json;
 
+    use angos_oci::{Namespace, Tag};
+
     use crate::{
         cache_fill::{CACHE_FETCH_BLOB_KIND, CacheFetchBlobPayload},
         command::{
@@ -278,7 +280,6 @@ mod tests {
             JobState, Queue,
             store::{FailOutcome, JobEnvelope, JobStore},
         },
-        oci::{Namespace, Tag},
         policy::{RetentionPolicy, RetentionPolicyConfig, SystemClock},
         registry::{
             Repository,

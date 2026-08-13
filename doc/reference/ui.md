@@ -51,7 +51,7 @@ URLs follow Docker reference format:
 ### UI Configuration
 
 ```
-GET /_ui/config
+GET /v2/_angos/ui/config
 ```
 
 Returns the UI configuration.
@@ -65,7 +65,7 @@ Returns the UI configuration.
 
 ### Static Assets
 
-Static assets have no dedicated URL prefix. Every `GET` or `HEAD` request outside the API routes (`/v2/...`, `/_ext/...`, `/_ui/config`, `/healthz`, `/readyz`, `/metrics`) serves the embedded single-page app, falling back to `index.html` for paths that match no bundled asset. Only the configuration endpoint above uses the `/_ui` prefix.
+Static assets have no dedicated URL prefix. Every `GET` or `HEAD` request outside the API routes (`/v2/...`, `/healthz`, `/readyz`, `/metrics`) serves the embedded single-page app, falling back to `index.html` for paths that match no bundled asset.
 
 ---
 
@@ -76,7 +76,7 @@ UI-specific actions for access policies:
 | Action              | Description                               |
 |---------------------|-------------------------------------------|
 | `ui-asset`          | Static files (JS, CSS, images)            |
-| `ui-config`         | UI configuration endpoint (`/_ui/config`) |
+| `ui-config`         | UI configuration endpoint (`/v2/_angos/ui/config`) |
 | `list-repositories` | Repository list view                      |
 | `list-namespaces`   | Namespace list view                       |
 | `list-revisions`    | Manifest list view                        |

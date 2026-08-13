@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 use tracing::{debug, warn};
 
+use angos_oci::{Digest, Namespace, Tag};
 use angos_tx_engine::StorageError;
 
 use crate::{
@@ -18,7 +19,6 @@ use crate::{
         },
         scrub::validate::Validator,
     },
-    oci::{Digest, Namespace, Tag},
     registry::{
         Error as RegistryError,
         metadata_store::{LinkKind, LinkMetadata},

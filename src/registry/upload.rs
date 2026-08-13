@@ -1,19 +1,20 @@
-use std::num::NonZeroU64;
-
-use hyper::{
-    HeaderMap, Response, StatusCode,
-    header::{CONTENT_LENGTH, HeaderValue, LOCATION, RANGE},
-};
+use hyper::{HeaderMap, Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt, copy, sink};
 use tracing::{instrument, warn};
 
+use angos_oci::http_range::ByteWindow;
+use angos_oci::request::{
+    BlobMount, CompleteUploadRequest, DeleteUploadRequest, GetUploadRequest, MountBlobRequest,
+    PatchUploadRequest, StartUploadRequest,
+};
+use angos_oci::server;
+use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
+
 use crate::{
     event_webhook::event::{Event, EventActor},
-    http_range::ByteWindow,
     http_response::{ResponseBody, build_response},
-    oci::{Algorithm, Digest, Namespace, UploadSessionId},
     registry::{
-        DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID, Error, Registry,
+        Error, Registry,
         blob_ownership::promote_and_grant,
         blob_store::{hashing_reader::HashingReader, resumable_hasher::Hasher},
     },
@@ -27,139 +28,6 @@ const MAX_FROM_LESS_MOUNT_CANDIDATES: usize = 32;
 /// Default cap on a blob's cumulative uploaded size, mirroring
 /// [`manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES`](crate::registry::manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES).
 pub const DEFAULT_MAX_BLOB_SIZE_BYTES: u64 = 100 * 1024 * 1024 * 1024;
-
-/// Headers for a completed blob: `StartUpload` when the digest already exists,
-/// and `CompleteUpload` when the upload finishes.
-fn blob_location_headers(namespace: &Namespace, digest: &Digest) -> Result<HeaderMap, Error> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        LOCATION,
-        HeaderValue::try_from(format!("/v2/{namespace}/blobs/{digest}"))?,
-    );
-    headers.insert(DOCKER_CONTENT_DIGEST, HeaderValue::try_from(digest)?);
-
-    Ok(headers)
-}
-
-fn upload_session_headers(
-    namespace: &Namespace,
-    session_id: &UploadSessionId,
-) -> Result<HeaderMap, Error> {
-    let mut headers = session_location_headers(namespace, session_id)?;
-    headers.insert(RANGE, HeaderValue::from_static("0-0"));
-
-    Ok(headers)
-}
-
-fn session_location_headers(
-    namespace: &Namespace,
-    session_id: &UploadSessionId,
-) -> Result<HeaderMap, Error> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        LOCATION,
-        HeaderValue::try_from(format!("/v2/{namespace}/blobs/uploads/{session_id}"))?,
-    );
-    headers.insert(
-        DOCKER_UPLOAD_UUID,
-        HeaderValue::try_from(session_id.to_string())?,
-    );
-
-    Ok(headers)
-}
-
-/// `Range` reports the bytes committed so far, so a resuming client knows where
-/// to continue. A `PATCH` also sends `Content-Length: 0`, a `GET` sends none.
-fn upload_progress_headers(
-    namespace: &Namespace,
-    session_id: &UploadSessionId,
-    size: u64,
-    content_length: Option<u64>,
-) -> Result<HeaderMap, Error> {
-    let mut headers = session_location_headers(namespace, session_id)?;
-    headers.insert(
-        RANGE,
-        HeaderValue::try_from(format!("0-{}", size.saturating_sub(1)))?,
-    );
-    if let Some(length) = content_length {
-        headers.insert(CONTENT_LENGTH, length.into());
-    }
-
-    Ok(headers)
-}
-
-/// An OCI cross-repository blob mount request
-/// (`POST /v2/<ns>/blobs/uploads/?mount=<digest>[&from=<repo>]`).
-/// An unsatisfiable mount falls back to a normal upload session rather than
-/// failing, per the distribution spec.
-#[derive(Debug)]
-pub struct BlobMount {
-    pub digest: Digest,
-    pub from: Option<Namespace>,
-}
-
-/// The `?digest=` target of an upload POST: the digest the client names, plus
-/// the length of the blob when the POST carries it, which is the single-request
-/// upload. A body without a digest is not a target, since there would be
-/// nothing to verify it against, so that POST only opens a session.
-#[derive(Debug)]
-pub struct StartUploadTarget {
-    pub digest: Digest,
-    pub content_length: Option<NonZeroU64>,
-}
-
-#[derive(Debug)]
-pub struct StartUploadRequest {
-    pub namespace: Namespace,
-    /// The algorithm the client says it will close the upload with, so the
-    /// session hashes under that one alone.
-    pub digest_algorithm: Option<Algorithm>,
-    pub target: Option<StartUploadTarget>,
-}
-
-#[derive(Debug)]
-pub struct DeleteUploadRequest {
-    pub namespace: Namespace,
-    pub session_id: UploadSessionId,
-}
-
-/// A cross-repository mount, with the source namespace the caller is allowed
-/// to read the blob from. `None` means the mount is unsatisfiable and degrades
-/// to an ordinary upload session.
-pub struct MountBlobRequest {
-    pub namespace: Namespace,
-    pub mount: BlobMount,
-    pub source: Option<Namespace>,
-}
-
-#[derive(Debug)]
-pub struct GetUploadRequest {
-    pub namespace: Namespace,
-    pub session_id: UploadSessionId,
-}
-
-/// The non-body inputs to [`Registry::patch_upload`]; the chunk is passed
-/// separately as the stream. A missing `content_length` is a chunked
-/// (`Transfer-Encoding: chunked`) upload, which docker push sends; the body is
-/// then streamed to EOF.
-#[derive(Debug)]
-pub struct PatchUploadRequest {
-    pub namespace: Namespace,
-    pub session_id: UploadSessionId,
-    pub content_range: Option<ByteWindow>,
-    pub content_length: Option<u64>,
-}
-
-/// The non-body inputs to [`Registry::complete_upload`]: the target session and
-/// digest, plus the optional resume offset and declared length. The blob body
-/// is passed separately as the stream.
-pub struct CompleteUploadRequest<'a> {
-    pub namespace: &'a Namespace,
-    pub session_id: &'a UploadSessionId,
-    pub digest: &'a Digest,
-    pub content_range: Option<ByteWindow>,
-    pub content_length: Option<u64>,
-}
 
 /// A chunk declaring where it resumes must resume where the session stands: a
 /// gap or a rewind is an out-of-order chunk, not a digest mismatch.
@@ -250,7 +118,7 @@ impl Registry {
 
         Ok(build_response(
             StatusCode::CREATED,
-            blob_location_headers(namespace, digest)?,
+            server::blob_location_headers(namespace, digest)?,
             ResponseBody::empty(),
         )?)
     }
@@ -330,7 +198,7 @@ impl Registry {
 
         Ok(build_response(
             StatusCode::ACCEPTED,
-            upload_session_headers(namespace, &session_id)?,
+            server::upload_session_headers(namespace, &session_id)?,
             ResponseBody::empty(),
         )?)
     }
@@ -363,7 +231,7 @@ impl Registry {
         {
             return Ok(build_response(
                 StatusCode::CREATED,
-                blob_location_headers(&request.namespace, &digest)?,
+                server::blob_location_headers(&request.namespace, &digest)?,
                 ResponseBody::empty(),
             )?);
         }
@@ -386,9 +254,9 @@ impl Registry {
         self.complete_upload(
             actor,
             CompleteUploadRequest {
-                namespace: &request.namespace,
-                session_id: &session_id,
-                digest: &digest,
+                namespace: request.namespace.clone(),
+                session_id: session_id.clone(),
+                digest: digest.clone(),
                 content_range: None,
                 content_length: Some(content_length.get()),
             },
@@ -397,7 +265,10 @@ impl Registry {
         .await
     }
 
-    /// Starts a cross-repository blob mount from the authorized `source`,
+    /// Starts a cross-repository blob mount from `source`, the namespace the
+    /// caller was authorized to read the blob from, which is resolved by the
+    /// serving side rather than named on the wire.
+    ///
     /// falling back to an ordinary upload session when the mount cannot be
     /// satisfied. The `blob.push` intent event fires before the mount attempt,
     /// so a mounted blob is as visible to webhook consumers as an uploaded
@@ -408,6 +279,7 @@ impl Registry {
         &self,
         actor: Option<EventActor>,
         request: MountBlobRequest,
+        source: Option<Namespace>,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.repository_name_for(&request.namespace);
         let event = Event::push_blob(
@@ -420,7 +292,7 @@ impl Registry {
 
         // An unsatisfiable mount degrades to an ordinary upload session, so the
         // caller is never told whether the blob exists.
-        let Some(source) = &request.source else {
+        let Some(source) = &source else {
             return self.open_upload_session(&request.namespace, None).await;
         };
 
@@ -430,7 +302,7 @@ impl Registry {
         {
             return Ok(build_response(
                 StatusCode::CREATED,
-                blob_location_headers(&request.namespace, &digest)?,
+                server::blob_location_headers(&request.namespace, &digest)?,
                 ResponseBody::empty(),
             )?);
         }
@@ -556,7 +428,12 @@ impl Registry {
 
         Ok(build_response(
             StatusCode::ACCEPTED,
-            upload_progress_headers(&request.namespace, &request.session_id, size, Some(0))?,
+            server::upload_progress_headers(
+                &request.namespace,
+                &request.session_id,
+                size,
+                Some(0),
+            )?,
             ResponseBody::empty(),
         )?)
     }
@@ -572,7 +449,7 @@ impl Registry {
     pub async fn complete_upload<S>(
         &self,
         actor: Option<EventActor>,
-        request: CompleteUploadRequest<'_>,
+        request: CompleteUploadRequest,
         stream: S,
     ) -> Result<Response<ResponseBody>, Error>
     where
@@ -585,6 +462,7 @@ impl Registry {
             content_range,
             content_length,
         } = request;
+        let (namespace, session_id, digest) = (&namespace, &session_id, &digest);
 
         // Intent-first emission: the event fires before the finalize, so a
         // completed blob can never go unnotified; a completion that fails
@@ -708,7 +586,12 @@ impl Registry {
 
         Ok(build_response(
             StatusCode::NO_CONTENT,
-            upload_progress_headers(&request.namespace, &request.session_id, summary.size, None)?,
+            server::upload_progress_headers(
+                &request.namespace,
+                &request.session_id,
+                summary.size,
+                None,
+            )?,
             ResponseBody::empty(),
         )?)
     }
@@ -716,35 +599,37 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+
     use std::{io::Cursor, num::NonZeroU64, str::FromStr, sync::Arc};
 
+    use async_trait::async_trait;
     use hyper::{
         StatusCode,
         header::{LOCATION, RANGE},
     };
 
-    use async_trait::async_trait;
-
-    use crate::{
-        http_range::ByteWindow,
-        oci::{Algorithm, Digest, Namespace, UploadSessionId},
-        registry::{
-            BlobMount, CompleteUploadRequest, Error, GetUploadRequest, MountBlobRequest,
-            PatchUploadRequest, Registry, RegistryConfig, StartUploadRequest, StartUploadTarget,
-            blob_store::BlobStore,
-            metadata_store::LinkKind,
-            path_builder,
-            repository_resolver::RepositoryResolver,
-            test_utils::{
-                FSRegistryTestCase, RegistryTestCase, create_test_registry,
-                create_test_repositories, for_each_backend, put_blob_direct, response_digest,
-                response_header, response_session_id,
-            },
-        },
+    use angos_oci::http_range::ByteWindow;
+    use angos_oci::request::{
+        BlobMount, CompleteUploadRequest, GetUploadRequest, MountBlobRequest, PatchUploadRequest,
+        StartUploadRequest, StartUploadTarget,
     };
+    use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
     use angos_storage::{
         Error as StorageError,
         test_util::{HookedStore, StoreHook, StoreOp},
+    };
+
+    use crate::registry::{
+        Error, Registry, RegistryConfig,
+        blob_store::BlobStore,
+        metadata_store::LinkKind,
+        path_builder,
+        repository_resolver::RepositoryResolver,
+        test_utils::{
+            FSRegistryTestCase, RegistryTestCase, create_test_registry, create_test_repositories,
+            for_each_backend, put_blob_direct, response_digest, response_header,
+            response_session_id,
+        },
     };
 
     /// Which storage operation the failing hook turns into a hard error.
@@ -891,8 +776,8 @@ mod tests {
                     MountBlobRequest {
                         namespace: target.clone(),
                         mount,
-                        source: Some(source.clone()),
                     },
+                    Some(source.clone()),
                 )
                 .await
                 .unwrap();
@@ -941,8 +826,8 @@ mod tests {
                     MountBlobRequest {
                         namespace: target.clone(),
                         mount,
-                        source: Some(source.clone()),
                     },
+                    Some(source.clone()),
                 )
                 .await
                 .unwrap();
@@ -994,8 +879,8 @@ mod tests {
                     MountBlobRequest {
                         namespace: target.clone(),
                         mount,
-                        source: Some(source.clone()),
                     },
+                    Some(source.clone()),
                 )
                 .await
                 .unwrap();
@@ -1034,8 +919,8 @@ mod tests {
                     MountBlobRequest {
                         namespace: target.clone(),
                         mount,
-                        source: Some(owner.clone()),
                     },
+                    Some(owner.clone()),
                 )
                 .await
                 .unwrap();
@@ -1078,8 +963,8 @@ mod tests {
                     MountBlobRequest {
                         namespace: target.clone(),
                         mount,
-                        source: Some(source.clone()),
                     },
+                    Some(source.clone()),
                 )
                 .await
                 .unwrap();
@@ -1121,8 +1006,8 @@ mod tests {
                     MountBlobRequest {
                         namespace: target.clone(),
                         mount,
-                        source: Some(authorized.clone()),
                     },
+                    Some(authorized.clone()),
                 )
                 .await
                 .unwrap();
@@ -1305,9 +1190,9 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &expected_digest,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: expected_digest.clone(),
                         content_range: None,
                         content_length: None,
                     },
@@ -1359,9 +1244,9 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &expected_digest,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: expected_digest.clone(),
                         content_range: None,
                         content_length: Some(0),
                     },
@@ -1409,9 +1294,9 @@ mod tests {
                     .complete_upload(
                         None,
                         CompleteUploadRequest {
-                            namespace,
-                            session_id: &session_id,
-                            digest: &expected_digest,
+                            namespace: namespace.clone(),
+                            session_id: session_id.clone(),
+                            digest: expected_digest.clone(),
                             content_range: None,
                             content_length: Some(content.len() as u64),
                         },
@@ -1444,9 +1329,9 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace,
-                    session_id: &UploadSessionId::generate(),
-                    digest: &digest,
+                    namespace: namespace.clone(),
+                    session_id: UploadSessionId::generate(),
+                    digest: digest.clone(),
                     content_range: None,
                     content_length: Some(content.len() as u64),
                 },
@@ -1475,9 +1360,9 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace,
-                    session_id: &UploadSessionId::generate(),
-                    digest: &digest,
+                    namespace: namespace.clone(),
+                    session_id: UploadSessionId::generate(),
+                    digest: digest.clone(),
                     content_range: None,
                     content_length: Some(content.len() as u64),
                 },
@@ -1537,9 +1422,9 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &expected_digest,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: expected_digest.clone(),
                         content_range: None,
                         content_length: Some(0),
                     },
@@ -1739,9 +1624,9 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &expected_digest,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: expected_digest.clone(),
                         content_range: None,
                         content_length: Some(0),
                     },
@@ -1787,9 +1672,9 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &Digest::sha256_of_bytes(content),
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: Digest::sha256_of_bytes(content),
                         content_range: None,
                         content_length: Some(0),
                     },
@@ -1837,9 +1722,9 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &wrong_digest,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: wrong_digest.clone(),
                         content_range: None,
                         content_length: Some(0),
                     },
@@ -1890,9 +1775,9 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace,
-                    session_id: &session_id,
-                    digest: &expected_digest,
+                    namespace: namespace.clone(),
+                    session_id: session_id.clone(),
+                    digest: expected_digest.clone(),
                     content_range: None,
                     content_length: Some(0),
                 },
@@ -1952,9 +1837,9 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace: second_namespace,
-                    session_id: &session_id,
-                    digest: &digest,
+                    namespace: second_namespace.clone(),
+                    session_id: session_id.clone(),
+                    digest: digest.clone(),
                     content_range: None,
                     content_length: Some(0),
                 },
@@ -2014,9 +1899,9 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace: second_namespace,
-                    session_id: &session_id,
-                    digest: &digest,
+                    namespace: second_namespace.clone(),
+                    session_id: session_id.clone(),
+                    digest: digest.clone(),
                     content_range: None,
                     content_length: Some(content.len() as u64),
                 },
@@ -2220,9 +2105,9 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &wrong_digest,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: wrong_digest.clone(),
                         content_range: None,
                         content_length: Some(0),
                     },
@@ -2265,9 +2150,9 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &digest,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: digest.clone(),
                         content_range: None,
                         content_length: Some(10),
                     },
@@ -2424,9 +2309,9 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace,
-                    session_id: &session_id,
-                    digest: &Digest::sha256_of_bytes(content),
+                    namespace: namespace.clone(),
+                    session_id: session_id.clone(),
+                    digest: Digest::sha256_of_bytes(content),
                     content_range: None,
                     content_length: Some(0),
                 },
@@ -2577,9 +2462,9 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace,
-                    session_id: &session_id,
-                    digest: &digest,
+                    namespace: namespace.clone(),
+                    session_id: session_id.clone(),
+                    digest: digest.clone(),
                     content_range: None,
                     content_length: None,
                 },
@@ -2652,79 +2537,5 @@ mod tests {
             summary.size, 8,
             "cumulative size must reach the cap exactly"
         );
-    }
-}
-
-#[cfg(test)]
-mod header_tests {
-    use hyper::header::{CONTENT_LENGTH, LOCATION, RANGE};
-
-    use super::{
-        Digest, Namespace, UploadSessionId, blob_location_headers, upload_progress_headers,
-        upload_session_headers,
-    };
-    use crate::registry::{DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID};
-
-    const SAMPLE_SESSION: &str = "067e6162-3b6f-4ae2-a171-2470b63dff00";
-
-    fn sample_namespace() -> Namespace {
-        Namespace::new("test-repo").unwrap()
-    }
-
-    fn sample_session_id() -> UploadSessionId {
-        UploadSessionId::new(SAMPLE_SESSION).unwrap()
-    }
-
-    fn sample_digest() -> Digest {
-        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-            .parse()
-            .unwrap()
-    }
-
-    #[test]
-    fn blob_location_headers_carry_location_and_digest() {
-        let namespace = sample_namespace();
-        let digest = sample_digest();
-        let headers = blob_location_headers(&namespace, &digest).unwrap();
-        assert_eq!(
-            headers[&LOCATION],
-            format!("/v2/{namespace}/blobs/{digest}")
-        );
-        assert_eq!(headers[&DOCKER_CONTENT_DIGEST], digest.to_string());
-    }
-
-    #[test]
-    fn upload_session_headers_start_at_zero_range() {
-        let namespace = sample_namespace();
-        let headers = upload_session_headers(&namespace, &sample_session_id()).unwrap();
-        assert_eq!(
-            headers[&LOCATION],
-            format!("/v2/{namespace}/blobs/uploads/{SAMPLE_SESSION}")
-        );
-        assert_eq!(headers[&RANGE], "0-0");
-        assert_eq!(headers[&DOCKER_UPLOAD_UUID], SAMPLE_SESSION);
-    }
-
-    #[test]
-    fn upload_progress_headers_report_current_range() {
-        let namespace = sample_namespace();
-        let headers = upload_progress_headers(&namespace, &sample_session_id(), 42, None).unwrap();
-        assert_eq!(
-            headers[&LOCATION],
-            format!("/v2/{namespace}/blobs/uploads/{SAMPLE_SESSION}")
-        );
-        assert_eq!(headers[&RANGE], "0-41");
-        assert_eq!(headers[&DOCKER_UPLOAD_UUID], SAMPLE_SESSION);
-        assert!(!headers.contains_key(CONTENT_LENGTH));
-    }
-
-    /// A PATCH answers with an empty body, so it declares `Content-Length: 0`.
-    #[test]
-    fn upload_progress_headers_carry_a_declared_content_length() {
-        let headers =
-            upload_progress_headers(&sample_namespace(), &sample_session_id(), 42, Some(0))
-                .unwrap();
-        assert_eq!(headers[&RANGE], "0-41");
-        assert_eq!(headers[&CONTENT_LENGTH], "0");
     }
 }

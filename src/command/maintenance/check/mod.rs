@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use futures_util::stream::{self, StreamExt};
 use tracing::warn;
 
+use angos_oci::Namespace;
+
 use crate::{
     command::maintenance::{error::Error, executor::ActionSink},
-    oci::Namespace,
     registry::metadata_store::MetadataStore,
 };
 

@@ -4,12 +4,10 @@ use cel_interpreter::SerializationError;
 use hyper::{header::InvalidHeaderValue, http::uri::InvalidUri};
 use sha2::digest::common::hazmat::DeserializeStateError;
 
+use angos_oci::{Error as OciError, http_range};
 use angos_tx_engine::{StorageError, error::Error as TxError, lock};
 
-use crate::{
-    configuration, http_range, jobs::store as job_store, oci, policy, registry::cache,
-    registry_client,
-};
+use crate::{configuration, jobs::store as job_store, policy, registry::cache, registry_client};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -206,9 +204,9 @@ impl From<http_range::Error> for Error {
     }
 }
 
-// `oci::Error` routes to `NameInvalid`: preserve that semantic.
-impl From<oci::Error> for Error {
-    fn from(_: oci::Error) -> Self {
+// `OciError` routes to `NameInvalid`: preserve that semantic.
+impl From<OciError> for Error {
+    fn from(_: OciError) -> Self {
         Error::NameInvalid
     }
 }
@@ -228,7 +226,7 @@ mod tests {
     use chrono::DateTime;
     use x509_parser::error::X509Error;
 
-    use super::*;
+    use crate::registry::error::*;
 
     #[test]
     fn from_io_error_preserves_source() {
@@ -305,7 +303,7 @@ mod tests {
 
     #[test]
     fn from_oci_error_routes_to_name_invalid() {
-        let err: Error = oci::Error::InvalidDigest("bad digest".to_string()).into();
+        let err: Error = OciError::InvalidDigest("bad digest".to_string()).into();
         assert!(matches!(err, Error::NameInvalid));
     }
 

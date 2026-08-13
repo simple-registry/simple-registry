@@ -10,7 +10,6 @@ use std::{
     time::Duration,
 };
 
-use auth::token_index_cache_key;
 use futures_util::TryStreamExt;
 use reqwest::{
     Client, Method, RequestBuilder, Response, StatusCode,
@@ -26,21 +25,24 @@ use tokio_util::io::StreamReader;
 use tracing::{debug, instrument, warn};
 use url::Url;
 
-pub use crate::registry_client::{
-    error::Error,
-    write::{DeleteManifestOutcome, PutManifestOutcome, UploadSession},
+use angos_oci::client;
+use angos_oci::header::DOCKER_CONTENT_DIGEST;
+use angos_oci::http_range::ResponseRange;
+use angos_oci::request::{
+    GetBlobRequest, GetManifestRequest, GetReferrersRequest, HeadBlobRequest, HeadManifestRequest,
+    ListTagsRequest,
 };
+use angos_oci::response::{ManifestHeadResponse, ManifestResponse, TagsListResponse};
+use angos_oci::{Content, Descriptor, Digest, Manifest, MediaRange, Tag};
 
+pub use crate::registry_client::{error::Error, write::UploadSession};
 use crate::{
     cache::Cache,
     http_client::apply_tls_files,
-    http_range::ResponseRange,
-    oci::{Descriptor, Digest, MediaRange, MediaType, Reference, Tag},
-    registry::{
-        DOCKER_CONTENT_DIGEST, blob_store::BoxedReader, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
-    },
+    registry::{blob_store::BoxedReader, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES},
     secret::Secret,
 };
+use auth::token_index_cache_key;
 
 /// Header carrying the originating event timestamp (RFC 3339) of a replication
 /// request; the receiver rejects with a 409 [`REPLICATION_SUPERSEDED_CODE`]
@@ -193,17 +195,6 @@ pub struct BasicAuth {
     pub password: Secret<String>,
 }
 
-/// A fetched manifest. The `digest` is absent when the upstream omits
-/// `Docker-Content-Digest`, which the OCI spec states as optional.
-/// What a manifest `HEAD` reports. The `digest` is absent when the upstream
-/// omits `Docker-Content-Digest`, which the OCI spec states as optional.
-#[derive(Clone, Debug)]
-pub struct ManifestHead {
-    pub media_type: Option<MediaType>,
-    pub digest: Option<Digest>,
-    pub size: u64,
-}
-
 /// A blob body streamed from an upstream. `content_range` carries the window
 /// the upstream says it served when it answered a ranged fetch with `206`; when
 /// it is absent the reader carries the whole blob and `length` its full size.
@@ -211,13 +202,6 @@ pub struct FetchedBlob {
     pub length: u64,
     pub content_range: Option<ResponseRange>,
     pub reader: BoxedReader,
-}
-
-#[derive(Clone, Debug)]
-pub struct FetchedManifest {
-    pub media_type: Option<MediaType>,
-    pub digest: Option<Digest>,
-    pub body: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -228,21 +212,6 @@ pub struct RegistryClient {
     cache: Arc<Cache>,
     token_refresh: Mutex<()>,
     max_manifest_size_bytes: usize,
-}
-
-/// Body of an OCI `GET /v2/<ns>/tags/list` response.
-#[derive(Deserialize)]
-struct TagsListBody {
-    #[serde(default)]
-    tags: Vec<String>,
-}
-
-/// Body of an OCI `GET /v2/<ns>/referrers/<digest>` response: an image index
-/// whose `manifests` are the referring descriptors.
-#[derive(Deserialize)]
-struct ReferrersBody {
-    #[serde(default)]
-    manifests: Vec<Descriptor>,
 }
 
 impl RegistryClient {
@@ -329,35 +298,6 @@ impl RegistryClient {
             .basic_auth(basic_auth)
             .max_manifest_size_bytes(max_manifest_size_bytes)
             .build())
-    }
-
-    /// Build an OCI request URL from a final namespace. These are pure formatters;
-    /// the caller resolves the remote namespace, the client only joins the path.
-    pub fn get_manifest_path(&self, namespace: &str, reference: &Reference) -> String {
-        format!("{}/v2/{namespace}/manifests/{reference}", self.url)
-    }
-
-    pub fn get_blob_path(&self, namespace: &str, digest: &Digest) -> String {
-        format!("{}/v2/{namespace}/blobs/{digest}", self.url)
-    }
-
-    /// URL to start a resumable blob upload session (OCI `POST /v2/<ns>/blobs/uploads/`).
-    ///
-    /// Session-continuation URLs are server-assigned via `Location`, never built here.
-    pub fn get_uploads_start_path(&self, namespace: &str) -> String {
-        format!("{}/v2/{namespace}/blobs/uploads/", self.url)
-    }
-
-    /// URL to list a repository's tags (OCI `GET /v2/<ns>/tags/list`), without
-    /// pagination parameters.
-    pub fn get_tags_list_path(&self, namespace: &str) -> String {
-        format!("{}/v2/{namespace}/tags/list", self.url)
-    }
-
-    /// URL to list a subject's referrers (OCI `GET /v2/<ns>/referrers/<digest>`),
-    /// without pagination parameters or an `artifactType` filter.
-    pub fn get_referrers_path(&self, namespace: &str, digest: &Digest) -> String {
-        format!("{}/v2/{namespace}/referrers/{digest}", self.url)
     }
 
     async fn query(
@@ -533,13 +473,10 @@ impl RegistryClient {
     ///
     /// Returns an error when the upstream request fails, rejects access, omits required
     /// headers, or reports that the blob is unknown.
-    pub async fn head_blob(
-        &self,
-        accepted_types: &[MediaRange],
-        location: &str,
-    ) -> Result<(Digest, u64), Error> {
+    pub async fn head_blob(&self, request: HeadBlobRequest) -> Result<(Digest, u64), Error> {
+        let location = client::blob_path(&self.url, &request.namespace, &request.digest);
         let response = self
-            .query(&Method::HEAD, accepted_types, location, None)
+            .query(&Method::HEAD, &request.accepted_types, &location, None)
             .await?;
 
         if !response.status().is_success() {
@@ -563,11 +500,14 @@ impl RegistryClient {
     ///
     /// Returns an error when the request fails or the downstream returns a
     /// non-success status other than `404`.
-    pub async fn blob_exists(&self, location: &str) -> Result<bool, Error> {
+    pub async fn blob_exists(&self, request: HeadBlobRequest) -> Result<bool, Error> {
         // Unlike `head_blob` this never reads `Docker-Content-Digest`, which the
         // OCI spec makes a SHOULD on blob HEAD: a conformant downstream that
         // omits it must read as present, not as a probe failure.
-        let response = self.query(&Method::HEAD, &[], location, None).await?;
+        let location = client::blob_path(&self.url, &request.namespace, &request.digest);
+        let response = self
+            .query(&Method::HEAD, &request.accepted_types, &location, None)
+            .await?;
         let status = response.status();
         if status.is_success() {
             return Ok(true);
@@ -591,9 +531,10 @@ impl RegistryClient {
     /// Returns an error when a request fails, access is rejected, or a non-404
     /// page has a non-success status or unparseable body.
     #[instrument(skip(self))]
-    pub async fn list_tags(&self, location: &str) -> Result<Vec<Tag>, Error> {
-        self.list_paginated(location, "list_tags", |body| {
-            let parsed: TagsListBody = serde_json::from_slice(body)
+    pub async fn list_tags(&self, request: ListTagsRequest) -> Result<Vec<Tag>, Error> {
+        let location = client::tags_list_path(&self.url, &request);
+        self.list_paginated(&location, "list_tags", |body| {
+            let parsed: TagsListResponse = serde_json::from_slice(body)
                 .map_err(|e| Error::Internal(format!("failed to parse tags/list body: {e}")))?;
             Ok(parsed
                 .tags
@@ -619,11 +560,20 @@ impl RegistryClient {
     /// Returns an error when a request fails, access is rejected, or a non-404
     /// page has a non-success status or unparseable body.
     #[instrument(skip(self))]
-    pub async fn list_referrers(&self, location: &str) -> Result<Vec<Descriptor>, Error> {
-        self.list_paginated(location, "list_referrers", |body| {
-            let parsed: ReferrersBody = serde_json::from_slice(body)
-                .map_err(|e| Error::Internal(format!("failed to parse referrers body: {e}")))?;
-            Ok(parsed.manifests)
+    pub async fn list_referrers(
+        &self,
+        request: GetReferrersRequest,
+    ) -> Result<Vec<Descriptor>, Error> {
+        let location = client::referrers_path(&self.url, &request);
+        self.list_paginated(&location, "list_referrers", |body| {
+            // The listing is an image index, which is what the serving side
+            // builds; anything else is not a referrers answer.
+            match Manifest::from_slice(body).map(|index| index.content) {
+                Ok(Content::Index { manifests }) => Ok(manifests),
+                _ => Err(Error::Internal(
+                    "failed to parse referrers body as an image index".to_string(),
+                )),
+            }
         })
         .await
     }
@@ -687,15 +637,8 @@ impl RegistryClient {
     /// resolved against the response's final URL, or `None` when absent.
     fn parse_next_link(response: &Response) -> Option<String> {
         let header = response.headers().get(LINK)?.to_str().ok()?;
-        let url = header
-            .split(',')
-            .filter(|entry| entry.contains("rel=\"next\"") || entry.contains("rel=next"))
-            .find_map(|entry| {
-                let start = entry.find('<')?;
-                let end = entry[start + 1..].find('>')? + start + 1;
-                Some(&entry[start + 1..end])
-            })?;
-        response.url().join(url).ok().map(|u| u.to_string())
+        let target = client::next_page_target(header)?;
+        response.url().join(target).ok().map(|u| u.to_string())
     }
 
     /// Streams a blob from the upstream registry, optionally under `range` (a
@@ -705,14 +648,22 @@ impl RegistryClient {
     ///
     /// Returns an error when the upstream request fails, rejects access, omits required
     /// headers, cannot satisfy `range`, or reports that the blob is unknown.
-    pub async fn get_blob(
-        &self,
-        accepted_types: &[MediaRange],
-        location: &str,
-        range: Option<&HeaderValue>,
-    ) -> Result<FetchedBlob, Error> {
+    pub async fn get_blob(&self, request: GetBlobRequest) -> Result<FetchedBlob, Error> {
+        let location = client::blob_path(&self.url, &request.namespace, &request.digest);
+        // A formatted range is always a valid header value, so a failure here is
+        // a bug rather than anything the upstream did.
+        let range = request
+            .range
+            .map(HeaderValue::try_from)
+            .transpose()
+            .map_err(|e| Error::Internal(format!("unusable Range header: {e}")))?;
         let response = self
-            .query(&Method::GET, accepted_types, location, range)
+            .query(
+                &Method::GET,
+                &request.accepted_types,
+                &location,
+                range.as_ref(),
+            )
             .await?;
 
         if !response.status().is_success() {
@@ -752,11 +703,11 @@ impl RegistryClient {
     /// headers, or reports that the manifest is unknown.
     pub async fn head_manifest(
         &self,
-        accepted_types: &[MediaRange],
-        location: &str,
-    ) -> Result<ManifestHead, Error> {
+        request: HeadManifestRequest,
+    ) -> Result<ManifestHeadResponse, Error> {
+        let location = client::manifest_path(&self.url, &request.namespace, &request.reference);
         let response = self
-            .query(&Method::HEAD, accepted_types, location, None)
+            .query(&Method::HEAD, &request.accepted_types, &location, None)
             .await?;
 
         if !response.status().is_success() {
@@ -771,7 +722,7 @@ impl RegistryClient {
         let digest = parse_header(&response, DOCKER_CONTENT_DIGEST).ok();
         let size = parse_header(&response, CONTENT_LENGTH)?;
 
-        Ok(ManifestHead {
+        Ok(ManifestHeadResponse {
             media_type,
             digest,
             size,
@@ -789,11 +740,11 @@ impl RegistryClient {
     /// headers, reports that the manifest is unknown, or the response body cannot be read.
     pub async fn get_manifest(
         &self,
-        accepted_types: &[MediaRange],
-        location: &str,
-    ) -> Result<FetchedManifest, Error> {
+        request: GetManifestRequest,
+    ) -> Result<ManifestResponse, Error> {
+        let location = client::manifest_path(&self.url, &request.namespace, &request.reference);
         let response = self
-            .query(&Method::GET, accepted_types, location, None)
+            .query(&Method::GET, &request.accepted_types, &location, None)
             .await?;
 
         if !response.status().is_success() {
@@ -830,7 +781,7 @@ impl RegistryClient {
             return Err(Error::ManifestBodyTooLarge { limit });
         }
 
-        Ok(FetchedManifest {
+        Ok(ManifestResponse {
             media_type,
             digest,
             body: content,

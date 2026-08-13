@@ -6,7 +6,7 @@ use std::{
 
 use regex::Regex;
 
-use crate::oci::{Error, MediaType};
+use crate::types::{Error, MediaType};
 
 // RFC 9110 media-range: `*/*`, `type/*` or `type/subtype`, each optionally
 // followed by parameters (a `q` weight above all). The name grammar matches
@@ -65,10 +65,25 @@ impl Display for MediaRange {
     }
 }
 
+/// Manifest media types stamped as `Accept` headers on every manifest probe.
+/// Without them a content-negotiating registry may return a converted
+/// representation whose digest never matches the one asked for.
+#[must_use]
+pub fn manifest_accept_types() -> Vec<MediaRange> {
+    [
+        MediaType::oci_manifest(),
+        MediaType::oci_index(),
+        MediaType::docker_manifest(),
+        MediaType::docker_manifest_list(),
+    ]
+    .map(MediaRange::from)
+    .to_vec()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::MediaRange;
-    use crate::oci::MediaType;
+    use crate::types::MediaType;
+    use crate::types::media_range::MediaRange;
 
     /// The wildcard forms are why an `Accept` member is not a `MediaType`:
     /// clients send `*/*` by default, and it must survive to the upstream.

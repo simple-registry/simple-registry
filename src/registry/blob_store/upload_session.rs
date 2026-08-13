@@ -41,20 +41,18 @@ use tokio::{
 };
 use tracing::{instrument, warn};
 
+use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
 use angos_storage::paginated;
 use angos_tx_engine::StorageError;
 
-use crate::{
-    oci::{Algorithm, Digest, Namespace, UploadSessionId},
-    registry::{
-        Error,
-        blob_store::{
-            BlobStore, UploadSummary,
-            hashing_reader::{HashingReader, hashing_stream},
-            resumable_hasher::{HashState, Hasher},
-        },
-        pagination, path_builder,
+use crate::registry::{
+    Error,
+    blob_store::{
+        BlobStore, UploadSummary,
+        hashing_reader::{HashingReader, hashing_stream},
+        resumable_hasher::{HashState, Hasher},
     },
+    pagination, path_builder,
 };
 
 /// Bytes peeked from a chunked (`None`) body to tell an empty finalize from one

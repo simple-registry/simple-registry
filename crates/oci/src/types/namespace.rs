@@ -9,7 +9,7 @@ use std::{
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::oci::Error;
+use crate::types::Error;
 
 /// The distribution-spec repository-name grammar, anchored:
 /// `[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*(/[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*)*`.
@@ -34,6 +34,10 @@ impl Namespace {
         s.len() <= MAX_NAMESPACE_LENGTH && NAMESPACE_RE.is_match(s)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when `s` breaks the namespace grammar or exceeds the
+    /// length cap.
     pub fn new(s: &str) -> Result<Self, Error> {
         if Self::is_valid(s) {
             Ok(Self(s.to_owned()))
@@ -45,6 +49,11 @@ impl Namespace {
     /// Remove the leading whole-segment `prefix`, returning the sub-namespace,
     /// which is still a valid namespace by construction. Errors when `prefix` is
     /// not a segment prefix or matches exactly (which would leave nothing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `prefix` is not a whole-segment prefix of this
+    /// namespace, or is the whole of it.
     pub fn strip_prefix(&self, prefix: &Namespace) -> Result<Namespace, Error> {
         match self
             .0
@@ -62,6 +71,10 @@ impl Namespace {
     /// Nest this namespace under `prefix`, yielding `prefix/self`. Joining two
     /// valid namespaces always yields valid grammar, so only the total length
     /// cap is checked here, keeping the request path off the full regex.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the joined namespace exceeds the length cap.
     pub fn prepend(&self, prefix: &Namespace) -> Result<Namespace, Error> {
         let joined = format!("{}/{}", prefix.0, self.0);
         if joined.len() <= MAX_NAMESPACE_LENGTH {
@@ -75,6 +88,11 @@ impl Namespace {
     /// prefix when set, then nest under `target_namespace` when set. At the
     /// repository root (namespace equals `local_namespace`) the remote is
     /// `target_namespace` alone, or this namespace verbatim when no target is set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `local_namespace` is not a prefix of this namespace,
+    /// or when nesting under `target_namespace` exceeds the length cap.
     pub fn remote(
         &self,
         local_namespace: Option<&Namespace>,
@@ -197,6 +215,7 @@ impl Borrow<str> for Namespace {
 ///
 /// The `/` separator check is intentional: without it, `"myrepo2"` would
 /// spuriously match `"myrepo"` via `starts_with`.
+#[must_use]
 pub fn namespace_belongs_to(namespace: &str, repository_name: &str) -> bool {
     namespace == repository_name
         || namespace
@@ -206,7 +225,7 @@ pub fn namespace_belongs_to(namespace: &str, repository_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::types::namespace::*;
 
     #[test]
     fn test_valid_simple_namespace() {

@@ -4,6 +4,9 @@ use hyper::http::request::Parts;
 use reqwest::{Client, redirect::Policy};
 use tracing::{debug, info, instrument, warn};
 
+use angos_oci::Namespace;
+use angos_oci::request::BlobMount;
+
 use crate::{
     auth::Error,
     auth::webhook::{self, WebhookAuthorizer},
@@ -11,9 +14,8 @@ use crate::{
     configuration::Configuration,
     http_client::apply_tls_files,
     identity::{Action, ClientIdentity},
-    oci::Namespace,
     policy::{AccessPolicy, PolicyDecision},
-    registry::{BlobMount, Registry, Repository},
+    registry::{Registry, Repository},
 };
 
 const ACCESS_DENIED: &str = "Access denied";

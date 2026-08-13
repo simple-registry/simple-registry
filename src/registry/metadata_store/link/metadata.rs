@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::oci::{Descriptor, Digest, MediaType};
+use angos_oci::{Descriptor, Digest, MediaType};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkMetadata {
@@ -111,7 +111,7 @@ impl LinkMetadata {
 mod tests {
     use std::collections::HashMap;
 
-    use super::*;
+    use crate::registry::metadata_store::link::metadata::*;
     use crate::registry::test_utils::media_type;
 
     const VALID_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

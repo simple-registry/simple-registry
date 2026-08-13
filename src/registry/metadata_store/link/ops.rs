@@ -17,6 +17,7 @@ use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
 use tracing::warn;
 
+use angos_oci::{Descriptor, Digest, MediaType, Namespace};
 use angos_tx_engine::{
     StorageError,
     error::Error as TxError,
@@ -25,20 +26,16 @@ use angos_tx_engine::{
     transaction::{Mutation, Transaction, TransactionBuilder},
 };
 
-use crate::{
-    oci::{Descriptor, Digest, MediaType, Namespace},
-    registry::{
-        Error,
-        metadata_store::{
-            BlobIndexOperation, LinkKind, LinkMetadata, LinkOperation, MetadataStore,
-            ReferencePolicy,
-            blob_index::shard::{
-                any_other_namespace_references_blob, append_shard_for_digest, append_shard_ops,
-                apply_blob_index_operations, read_shard,
-            },
+use crate::registry::{
+    Error,
+    metadata_store::{
+        BlobIndexOperation, LinkKind, LinkMetadata, LinkOperation, MetadataStore, ReferencePolicy,
+        blob_index::shard::{
+            any_other_namespace_references_blob, append_shard_for_digest, append_shard_ops,
+            apply_blob_index_operations, read_shard,
         },
-        path_builder,
     },
+    path_builder,
 };
 
 // Consolidated transaction planner

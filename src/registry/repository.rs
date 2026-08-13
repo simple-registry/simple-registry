@@ -1,19 +1,24 @@
 use std::{collections::HashSet, num::NonZeroUsize, sync::Arc};
 
 use futures_util::future::BoxFuture;
-use hyper::header::HeaderValue;
 use serde::Deserialize;
 use tokio::task;
 use tracing::{instrument, warn};
+
+use angos_oci::http_range::RequestRange;
+use angos_oci::request::{
+    GetBlobRequest, GetManifestRequest, GetReferrersRequest, HeadBlobRequest, HeadManifestRequest,
+};
+use angos_oci::response::{ManifestHeadResponse, ManifestResponse};
+use angos_oci::{Descriptor, Digest, Error as OciError, MediaRange, Namespace, Reference};
 
 pub use crate::registry_client::RegistryClientConfig;
 use crate::{
     cache::Cache,
     configuration::RegexPattern,
-    oci::{Descriptor, Digest, Error as OciError, MediaRange, Namespace, Reference},
     policy::{AccessPolicyConfig, RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::Error,
-    registry_client::{FetchedBlob, FetchedManifest, ManifestHead, RegistryClient},
+    registry_client::{FetchedBlob, RegistryClient},
     replication::{ReplicationDownstream, ReplicationDownstreamConfig},
 };
 
@@ -328,10 +333,15 @@ impl Repository {
     ) -> Result<(Digest, u64), Error> {
         self.try_upstreams(namespace, Error::BlobUnknown, |upstream| {
             Box::pin(async move {
-                let location = upstream
+                let remote = upstream.remote(namespace)?;
+                Ok(upstream
                     .client
-                    .get_blob_path(upstream.remote(namespace)?.as_ref(), digest);
-                Ok(upstream.client.head_blob(accepted_types, &location).await?)
+                    .head_blob(HeadBlobRequest {
+                        namespace: remote,
+                        digest: digest.clone(),
+                        accepted_types: accepted_types.to_vec(),
+                    })
+                    .await?)
             })
         })
         .await
@@ -348,10 +358,17 @@ impl Repository {
     ) -> Result<Vec<Descriptor>, Error> {
         self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
             Box::pin(async move {
-                let location = upstream
+                let remote = upstream.remote(namespace)?;
+                Ok(upstream
                     .client
-                    .get_referrers_path(upstream.remote(namespace)?.as_ref(), digest);
-                Ok(upstream.client.list_referrers(&location).await?)
+                    .list_referrers(GetReferrersRequest {
+                        namespace: remote,
+                        digest: digest.clone(),
+                        artifact_type: None,
+                        n: None,
+                        last: None,
+                    })
+                    .await?)
             })
         })
         .await
@@ -365,16 +382,20 @@ impl Repository {
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
-        range: Option<&HeaderValue>,
+        range: Option<RequestRange>,
     ) -> Result<FetchedBlob, Error> {
         self.try_upstreams(namespace, Error::BlobUnknown, |upstream| {
             Box::pin(async move {
-                let location = upstream
-                    .client
-                    .get_blob_path(upstream.remote(namespace)?.as_ref(), digest);
+                let remote = upstream.remote(namespace)?;
                 Ok(upstream
                     .client
-                    .get_blob(accepted_types, &location, range)
+                    .get_blob(GetBlobRequest {
+                        namespace: remote,
+                        digest: digest.clone(),
+                        accepted_types: accepted_types.to_vec(),
+                        range,
+                        allow_redirect: false,
+                    })
                     .await?)
             })
         })
@@ -387,15 +408,17 @@ impl Repository {
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: &Reference,
-    ) -> Result<ManifestHead, Error> {
+    ) -> Result<ManifestHeadResponse, Error> {
         self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
             Box::pin(async move {
-                let location = upstream
-                    .client
-                    .get_manifest_path(upstream.remote(namespace)?.as_ref(), reference);
+                let remote = upstream.remote(namespace)?;
                 Ok(upstream
                     .client
-                    .head_manifest(accepted_types, &location)
+                    .head_manifest(HeadManifestRequest {
+                        namespace: remote,
+                        reference: reference.clone(),
+                        accepted_types: accepted_types.to_vec(),
+                    })
                     .await?)
             })
         })
@@ -408,15 +431,18 @@ impl Repository {
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: &Reference,
-    ) -> Result<FetchedManifest, Error> {
+    ) -> Result<ManifestResponse, Error> {
         self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
             Box::pin(async move {
-                let location = upstream
-                    .client
-                    .get_manifest_path(upstream.remote(namespace)?.as_ref(), reference);
+                let remote = upstream.remote(namespace)?;
                 Ok(upstream
                     .client
-                    .get_manifest(accepted_types, &location)
+                    .get_manifest(GetManifestRequest {
+                        namespace: remote,
+                        reference: reference.clone(),
+                        accepted_types: accepted_types.to_vec(),
+                        allow_redirect: false,
+                    })
                     .await?)
             })
         })
@@ -434,9 +460,10 @@ mod tests {
         matchers::{method, path},
     };
 
+    use angos_oci::{Digest, Namespace, Reference, Tag};
+
     use crate::{
         cache,
-        oci::{Digest, Namespace, Reference, Tag},
         registry::{
             Error,
             manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,

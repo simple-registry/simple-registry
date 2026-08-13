@@ -9,7 +9,7 @@ use std::{
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::oci::Error;
+use crate::types::{Digest, Error};
 
 // ASCII-only tag grammar per the OCI Distribution Spec: `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`.
 // The regex crate makes `\w` Unicode-aware, which would wrongly accept non-ASCII tags.
@@ -27,12 +27,36 @@ impl Tag {
         TAG_REGEX.is_match(s)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when `s` breaks the OCI tag grammar.
     pub fn new(s: &str) -> Result<Self, Error> {
         if Self::is_valid(s) {
             Ok(Self(s.to_owned()))
         } else {
             Err(Error::InvalidReference(format!("Invalid tag: '{s}'")))
         }
+    }
+
+    /// The tag a subject's referrers are recorded under for a registry that
+    /// does not implement the Referrers API: the digest's algorithm truncated
+    /// to 32 characters and its encoded hash to 64, joined by a hyphen.
+    ///
+    /// Infallible by construction: a [`Digest`] is a registered algorithm plus
+    /// lowercase hex, so the schema can only produce characters the grammar
+    /// admits, and the truncation keeps it inside the length cap. The spec's
+    /// substitution rule therefore has nothing to replace.
+    /// REF: <https://github.com/opencontainers/distribution-spec/blob/v1.1.0/spec.md#referrers-tag-schema>
+    #[must_use]
+    pub fn referrers_fallback(subject: &Digest) -> Self {
+        let algorithm = subject.algorithm().as_str();
+        let hash = subject.hash();
+
+        Self(format!(
+            "{}-{}",
+            &algorithm[..algorithm.len().min(32)],
+            &hash[..hash.len().min(64)]
+        ))
     }
 }
 
@@ -117,7 +141,7 @@ impl<'de> Deserialize<'de> for Tag {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::types::tag::*;
 
     #[test]
     fn test_valid_tag() {
@@ -159,6 +183,23 @@ mod tests {
     fn test_129_chars_rejected() {
         let tag = "a".repeat(129);
         assert!(Tag::new(&tag).is_err());
+    }
+
+    // sha256 fits the 64-character cap exactly; sha512 is 128 and must be cut,
+    // or the tag would exceed the grammar's 128-character limit outright.
+    #[test]
+    fn referrers_fallback_truncates_the_encoded_hash() {
+        let sha256 = Digest::sha256_of_bytes(b"subject");
+        let tag = Tag::referrers_fallback(&sha256);
+        assert_eq!(tag.to_string(), format!("sha256-{}", sha256.hash()));
+
+        let sha512 = Digest::from_bytes(crate::Algorithm::Sha512, b"subject");
+        let tag = Tag::referrers_fallback(&sha512);
+        assert_eq!(tag.to_string(), format!("sha512-{}", &sha512.hash()[..64]));
+        assert!(
+            Tag::new(tag.as_ref()).is_ok(),
+            "the truncated schema must stay inside the tag grammar"
+        );
     }
 
     #[test]

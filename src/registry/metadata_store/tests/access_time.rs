@@ -4,11 +4,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{test_backend_with_debounce, test_config};
+use angos_oci::{Digest, Namespace, Tag};
+
+use crate::registry::metadata_store::tests::{test_backend_with_debounce, test_config};
 use crate::{
     cache::Cache as CacheEnum,
     cache::memory::Backend as CacheMemoryBackend,
-    oci::{Digest, Namespace, Tag},
     registry::{
         metadata_store::{LinkKind, LinkOperation},
         path_builder,

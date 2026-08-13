@@ -3,10 +3,9 @@ use std::sync::Arc;
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::{
-    oci::{Error, Namespace},
-    registry_client::RegistryClient,
-};
+use angos_oci::{Error, Namespace};
+
+use crate::registry_client::RegistryClient;
 
 /// Whether a downstream participates in the event-driven push path, the scrub
 /// reconciliation path, or both.

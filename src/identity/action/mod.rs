@@ -2,10 +2,9 @@ use std::slice;
 
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
-use crate::{
-    jobs::{JobState, Queue},
-    oci::{Algorithm, Digest, MediaType, Namespace, Reference, Tag, UploadSessionId},
-};
+use angos_oci::{Algorithm, Digest, MediaType, Namespace, Reference, Tag, UploadSessionId};
+
+use crate::jobs::{JobState, Queue};
 
 /// Action represents a parsed HTTP request: both the domain operation (for CEL policies)
 /// and the routing information (for handler dispatch).

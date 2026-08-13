@@ -10,15 +10,16 @@ use serde::Serialize;
 use tokio::try_join;
 use tracing::instrument;
 
+use angos_oci::{
+    Content, DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
+    MediaType, Namespace, Platform as OciPlatform, Tag, UploadSessionId, namespace_belongs_to,
+};
+
 use crate::{
     configuration::RegexPattern,
     http_response::{ResponseBody, build_response, json_response},
     jobs::store as job_store,
     jobs::{JobState, Queue},
-    oci::{
-        Content, DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
-        MediaType, Namespace, Platform as OciPlatform, Tag, UploadSessionId, namespace_belongs_to,
-    },
     registry::{Error, Registry, content_discovery::DEFAULT_PAGE_SIZE, metadata_store::LinkKind},
 };
 
@@ -854,25 +855,25 @@ impl Registry {
 mod tests {
     use std::collections::HashMap;
 
-    use super::ListNamespacesRequest;
-    use super::{
+    use bytes::Bytes;
+
+    use angos_oci::{
+        DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest, Namespace,
+        Platform as OciPlatform, Tag, UploadSessionId,
+    };
+
+    use crate::registry::admin::ListNamespacesRequest;
+    use crate::registry::admin::{
         ExtPlatform, analyze_manifest, build_digest_to_tags_map_from_pairs,
         extract_docker_referrer, extract_in_toto_predicate, parent_refs_for,
     };
-    use crate::{
-        oci::{
-            DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
-            Namespace, Platform as OciPlatform, Tag, UploadSessionId,
-        },
-        registry::{
-            metadata_store::{LinkKind, LinkOperation},
-            test_utils::{
-                FSRegistryTestCase, RegistryTestCase, create_test_blob, for_each_backend,
-                media_type, response_json,
-            },
+    use crate::registry::{
+        metadata_store::{LinkKind, LinkOperation},
+        test_utils::{
+            FSRegistryTestCase, RegistryTestCase, create_test_blob, for_each_backend, media_type,
+            response_json,
         },
     };
-    use bytes::Bytes;
 
     fn digest(hex_suffix: &str) -> Digest {
         // Pad to 64 hex chars with the suffix at the end.

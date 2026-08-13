@@ -5,6 +5,7 @@
 use chrono::DateTime;
 use tracing::warn;
 
+use angos_oci::{Digest, Namespace};
 use angos_tx_engine::StorageError;
 
 use crate::{
@@ -16,7 +17,6 @@ use crate::{
         },
         scrub::validate::Validator,
     },
-    oci::{Digest, Namespace},
     registry::Error as RegistryError,
 };
 

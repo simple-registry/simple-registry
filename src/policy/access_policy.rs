@@ -129,8 +129,9 @@ impl AccessPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::oci::{Digest, Namespace, Reference, Tag};
+    use angos_oci::{Digest, Namespace, Reference, Tag};
+
+    use crate::policy::access_policy::*;
 
     fn rule(s: &str) -> CelRule {
         CelRule::compile(s).unwrap()

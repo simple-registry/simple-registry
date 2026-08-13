@@ -188,7 +188,7 @@ docker push localhost:8000/test/image:latest  # Succeeds again
 ### Check Current Configuration
 
 ```bash
-curl http://localhost:8000/_ext/_repositories | jq
+curl http://localhost:8000/v2/_angos/repositories/list | jq
 ```
 
 Response includes `immutable_tags: true/false` per repository.

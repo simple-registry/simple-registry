@@ -233,7 +233,7 @@ On a pull-through repository the listing reports the tags this registry has cach
 GET /v2/_catalog
 ```
 
-List repositories.
+List repositories. A Docker Registry V2 endpoint the OCI distribution specification does not define; angos serves it at its long-standing path.
 
 Query parameters:
 - `n` - Maximum number of results
@@ -266,14 +266,16 @@ A subject with more referrers than the page size is served one page at a time, w
 
 ## Extension API (not part of the OCI specification)
 
-Base path: `/_ext/`
+Base path: `/v2/_angos/` for the registry, `/v2/<name>/_angos/` for one namespace (`<name>` being the OCI repository name).
 
-> **Migration note:** These endpoints moved from `/v2/_ext/` to the top-level `/_ext/` prefix in 1.2.0, so `/v2` is reserved for the OCI Distribution API. Clients written against v1.1.1 must update any `/v2/_ext/...` paths to `/_ext/...`.
+These sit in the extension namespace the distribution spec reserves, whose shape is `_<extension>/<component>/<module>`; `angos` is the extension name. See the spec's [extensions document](https://github.com/opencontainers/distribution-spec/blob/main/extensions/README.md).
+
+> **Migration note:** these endpoints were served under the top-level `/_ext/` prefix before 1.5.0. Clients must update `/_ext/...` paths to their `/v2/_angos/...` equivalents; the table below lists each one.
 
 ### List Repositories
 
 ```
-GET /_ext/_repositories
+GET /v2/_angos/repositories/list
 ```
 
 List all configured repositories with their namespace counts.
@@ -295,7 +297,7 @@ List all configured repositories with their namespace counts.
 ### List Namespaces
 
 ```
-GET /_ext/{repository}/_namespaces
+GET /v2/_angos/namespaces/list?repository={repository}
 ```
 
 List namespaces within a repository, with the repository's effective configuration.
@@ -321,7 +323,7 @@ List namespaces within a repository, with the repository's effective configurati
 ### List Revisions
 
 ```
-GET /_ext/{namespace}/_revisions
+GET /v2/{namespace}/_angos/revisions/list
 ```
 
 List all manifest revisions with tags, parent relationships, and referrers.
@@ -359,7 +361,7 @@ List all manifest revisions with tags, parent relationships, and referrers.
 ### List Uploads
 
 ```
-GET /_ext/{namespace}/_uploads
+GET /v2/{namespace}/_angos/uploads/list
 ```
 
 List blob uploads in progress.
@@ -381,7 +383,7 @@ List blob uploads in progress.
 ### List Jobs
 
 ```
-GET /_ext/_jobs
+GET /v2/_angos/jobs/list
 ```
 
 List pending and in-flight jobs on a durable job queue (see
@@ -426,11 +428,11 @@ time prefix. `next` is present only when another page follows; pass it back as `
 ### List Failed Jobs
 
 ```
-GET /_ext/_jobs/failed
+GET /v2/_angos/jobs/failed
 ```
 
 List dead-lettered jobs, i.e. jobs that exhausted their retry budget. Same query parameters and
-rejection rules as `GET /_ext/_jobs`.
+rejection rules as `GET /v2/_angos/jobs/list`.
 
 **Response:**
 ```json
@@ -455,7 +457,7 @@ rejection rules as `GET /_ext/_jobs`.
 ### Retry Failed Job
 
 ```
-POST /_ext/_jobs/failed/{key}/retry
+POST /v2/_angos/jobs/failed?key={key}
 ```
 
 Requeue a dead-lettered job with its attempt counter reset to zero. `{key}` is the job's
@@ -465,8 +467,8 @@ Requeue a dead-lettered job with its attempt counter reset to zero. `{key}` is t
 ### Delete Job
 
 ```
-DELETE /_ext/_jobs/failed/{key}
-DELETE /_ext/_jobs/pending/{key}
+DELETE /v2/_angos/jobs/failed?key={key}
+DELETE /v2/_angos/jobs/pending?key={key}
 ```
 
 Delete a dead-lettered or pending job by `storage_key`. Accepts `?queue=` like the listings.
@@ -531,7 +533,7 @@ When the UI is enabled, non-API paths serve the web interface.
 ### UI Configuration
 
 ```
-GET /_ui/config
+GET /v2/_angos/ui/config
 ```
 
 Returns UI configuration.

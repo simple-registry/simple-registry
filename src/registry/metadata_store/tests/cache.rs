@@ -1,13 +1,12 @@
 use std::{str::FromStr, time::Duration};
 
-use super::{test_backend_with_cache, test_config};
-use crate::{
-    oci::{Digest, Namespace, Tag},
-    registry::{
-        Error,
-        metadata_store::{LinkKind, LinkMetadata, LinkOperation},
-        path_builder,
-    },
+use angos_oci::{Digest, Namespace, Tag};
+
+use crate::registry::metadata_store::tests::{test_backend_with_cache, test_config};
+use crate::registry::{
+    Error,
+    metadata_store::{LinkKind, LinkMetadata, LinkOperation},
+    path_builder,
 };
 
 #[tokio::test]

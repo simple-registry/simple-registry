@@ -54,7 +54,8 @@ fn every_4xx_code_is_one_the_spec_defines() {
             error.status_code().is_client_error(),
             "{error:?} is not a 4XX, so it does not belong here"
         );
-        let code = error.as_json(None)["errors"][0]["code"].clone();
+        let code =
+            serde_json::to_value(error.error_body(None)).unwrap()["errors"][0]["code"].clone();
         assert!(
             OCI_ERROR_CODES.contains(&code.as_str().expect("a code is a string")),
             "{error:?} answers with {code}, which the spec does not define"
@@ -78,7 +79,10 @@ fn oversized_bodies_are_payload_too_large() {
     ] {
         let converted = Error::from(error);
         assert_eq!(converted.status_code(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(converted.as_json(None)["errors"][0]["code"], code);
+        assert_eq!(
+            serde_json::to_value(converted.error_body(None)).unwrap()["errors"][0]["code"],
+            code
+        );
     }
 }
 
@@ -142,7 +146,7 @@ fn test_error_display() {
 fn test_as_json_with_request_id() {
     let error = Error::BadRequest("Missing parameter".to_string());
     let request_id = Some("req-12345".to_string());
-    let json = error.as_json(request_id.as_ref());
+    let json = serde_json::to_value(error.error_body(request_id.as_ref())).unwrap();
 
     assert_eq!(json["errors"][0]["code"], "UNSUPPORTED");
     assert_eq!(json["errors"][0]["message"], "Missing parameter");
@@ -195,7 +199,7 @@ fn test_as_json_all_error_types() {
     ];
 
     for (error, expected_code, expected_message) in errors {
-        let json = error.as_json(None);
+        let json = serde_json::to_value(error.error_body(None)).unwrap();
         assert_eq!(json["errors"][0]["code"], expected_code);
         // 5xx bodies suppress the internal message; 4xx surface it.
         if error.status_code().is_server_error() {
@@ -230,7 +234,9 @@ fn test_5xx_body_omits_internal_error_string() {
     let request_id = "req-abc".to_string();
     for error in errors {
         assert!(error.status_code().is_server_error());
-        let body = error.as_json(Some(&request_id)).to_string();
+        let body = serde_json::to_value(error.error_body(Some(&request_id)))
+            .unwrap()
+            .to_string();
         assert!(
             !body.contains(secret),
             "5xx body leaked internal detail: {body}"
@@ -251,7 +257,7 @@ fn test_as_json_custom_error() {
         code: "TOOMANYREQUESTS".to_string(),
         msg: Some("Rate limit exceeded".to_string()),
     };
-    let json = error.as_json(None);
+    let json = serde_json::to_value(error.error_body(None)).unwrap();
 
     assert_eq!(json["errors"][0]["code"], "TOOMANYREQUESTS");
     assert_eq!(json["errors"][0]["message"], "Rate limit exceeded");
@@ -264,7 +270,7 @@ fn test_as_json_custom_error_without_message() {
         code: "NOT_IMPLEMENTED".to_string(),
         msg: None,
     };
-    let json = error.as_json(None);
+    let json = serde_json::to_value(error.error_body(None)).unwrap();
 
     assert_eq!(json["errors"][0]["code"], "NOT_IMPLEMENTED");
     assert!(json["errors"][0]["message"].is_null());
@@ -364,7 +370,7 @@ fn test_registry_error_to_server_error_mapping() {
     for (registry_error, expected_status, expected_code, expected_message) in cases {
         let error: Error = registry_error.into();
         assert_eq!(error.status_code(), expected_status);
-        let json = error.as_json(None);
+        let json = serde_json::to_value(error.error_body(None)).unwrap();
         assert_eq!(json["errors"][0]["code"], expected_code);
         match expected_message {
             Some(msg) => assert_eq!(json["errors"][0]["message"], msg),
@@ -381,7 +387,7 @@ fn test_blob_referenced_registry_error_mapping() {
     let error: Error = registry::Error::BlobReferenced.into();
     assert_eq!(error.status_code(), StatusCode::METHOD_NOT_ALLOWED);
 
-    let json = error.as_json(None);
+    let json = serde_json::to_value(error.error_body(None)).unwrap();
     assert_eq!(json["errors"][0]["code"], "DENIED");
     assert_eq!(json["errors"][0]["message"], "blob is still referenced");
 }
@@ -416,7 +422,7 @@ fn test_typed_registry_variants_route_to_internal_server_error() {
             server_error.status_code(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
-        let json = server_error.as_json(None);
+        let json = serde_json::to_value(server_error.error_body(None)).unwrap();
         assert_eq!(json["errors"][0]["code"], "INTERNAL_ERROR");
         assert!(
             json["errors"][0]["message"].is_null(),
@@ -429,7 +435,7 @@ fn test_typed_registry_variants_route_to_internal_server_error() {
 fn test_json_structure_completeness() {
     let error = Error::NotFound("Resource missing".to_string());
     let request_id = Some("abc-123".to_string());
-    let json = error.as_json(request_id.as_ref());
+    let json = serde_json::to_value(error.error_body(request_id.as_ref())).unwrap();
 
     assert!(json.get("errors").is_some());
     assert!(json["errors"].is_array());

@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use angos_oci::{Digest, Namespace};
 use angos_tx_engine::transaction::Transaction;
 
 use crate::{
@@ -18,7 +19,6 @@ use crate::{
     },
     jobs::Queue,
     jobs::store::{Error, JobEnvelope, JobHandler},
-    oci::{Digest, Namespace},
     registry::{
         Error as RegistryError, blob::cache_blob, blob_ownership::BlobOwnership,
         blob_store::BlobStore, metadata_store::MetadataStore,

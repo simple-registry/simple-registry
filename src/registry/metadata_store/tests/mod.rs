@@ -10,11 +10,11 @@ use std::{
 
 use bytes::Bytes;
 use chrono::{Duration, Utc};
-
-use angos_storage::Page;
 use futures_util::TryStreamExt;
 
+use angos_oci::{Algorithm, Descriptor, Digest, MediaType, Namespace, Tag};
 use angos_s3_client::Backend as S3HttpBackend;
+use angos_storage::Page;
 use angos_storage::{ConditionalStore, ObjectStore, s3::Backend as StorageS3Backend};
 use angos_tx_engine::{lock::LockStrategy, store::Store};
 
@@ -22,7 +22,6 @@ use crate::{
     cache::Cache,
     cache::memory::Backend as CacheMemoryBackend,
     metrics_provider,
-    oci::{Algorithm, Descriptor, Digest, MediaType, Namespace, Tag},
     registry::{
         Error, Registry,
         content_discovery::DEFAULT_PAGE_SIZE,

@@ -1,9 +1,8 @@
 use tracing::warn;
 
-use crate::{
-    oci::{Content, Digest, Manifest, MediaType, OCI_MANIFEST_SCHEMA_VERSION},
-    registry::{Error, metadata_store::LinkKind},
-};
+use angos_oci::{Content, Digest, Manifest, MediaType, OCI_MANIFEST_SCHEMA_VERSION};
+
+use crate::registry::{Error, metadata_store::LinkKind};
 
 pub struct ParsedManifestDigests {
     /// The manifest body's declared `mediaType`, surfaced from the single parse
@@ -167,8 +166,11 @@ pub fn parse_manifest_digests(
 mod tests {
     use serde_json::json;
 
-    use super::{parse_manifest_digests, parse_pushed_manifest, recover_media_type};
-    use crate::oci::MediaType;
+    use angos_oci::MediaType;
+
+    use crate::registry::manifest::parse::{
+        parse_manifest_digests, parse_pushed_manifest, recover_media_type,
+    };
 
     const CHILD_DIGEST: &str =
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";

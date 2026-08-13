@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::oci::{Digest, MediaType};
+use crate::types::{Digest, MediaType};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct Platform {
@@ -45,7 +45,7 @@ pub struct Descriptor {
 mod tests {
     use std::str::FromStr;
 
-    use super::*;
+    use crate::types::descriptor::*;
 
     #[test]
     fn test_descriptor_round_trip_minimal() {

@@ -4,13 +4,11 @@ use chrono::{Duration, Utc};
 use futures_util::TryStreamExt;
 use tokio::io::AsyncReadExt;
 
+use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
 use angos_storage::test_util::frame;
 
-use super::*;
-use crate::{
-    oci::{Algorithm, Digest, Namespace, UploadSessionId},
-    registry::Error,
-};
+use crate::registry::Error;
+use crate::registry::blob_store::*;
 
 pub async fn test_datastore_stream_uploads(store: &BlobStore) {
     let namespace = &Namespace::new("test-repo").unwrap();

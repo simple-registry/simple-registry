@@ -8,11 +8,19 @@
 
 use std::{collections::HashSet, sync::Arc};
 
+use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt};
 use tracing::{debug, info, instrument, warn};
 
+use angos_oci::manifest_accept_types;
+use angos_oci::request::{
+    BlobMount, DeleteManifestRequest, HeadBlobRequest, HeadManifestRequest, MountBlobRequest,
+    PutManifestRequest, StartUploadRequest,
+};
+use angos_oci::response::{DeleteManifestOutcome, PutManifestOutcome};
+use angos_oci::{Digest, MediaType, Namespace, Reference, Tag};
+
 use crate::{
-    oci::{Digest, MediaType, Namespace, Reference, Tag},
     registry::{
         ParsedManifestDigests,
         blob_ownership::BlobOwnership,
@@ -20,9 +28,9 @@ use crate::{
         metadata_store::{LinkKind, MetadataStore},
         parse_manifest_digests,
     },
-    registry_client::{DeleteManifestOutcome, PutManifestOutcome, RegistryClient, UploadSession},
+    registry_client::{RegistryClient, UploadSession},
+    replication::Error,
     replication::ReplicationDownstream,
-    replication::{Error, manifest_accept_types},
 };
 
 mod referrers_fallback;
@@ -64,7 +72,7 @@ pub struct PushContext<'a> {
     /// The remote namespace this push targets on the downstream, derived by the
     /// handler via [`ReplicationDownstream::remote`].
     pub downstream_namespace: &'a Namespace,
-    pub source_ts: Option<&'a str>,
+    pub source_ts: Option<DateTime<Utc>>,
 }
 
 /// Pushes the manifest at `digest` (and everything it references) to
@@ -99,11 +107,6 @@ pub async fn push_manifest(
         ),
         None => Reference::Digest(digest.clone()),
     };
-    let location = ctx
-        .downstream
-        .registry_client
-        .get_manifest_path(ctx.downstream_namespace.as_ref(), &reference);
-
     // The converged skip runs before child recursion and the blob sweep: a
     // digest-matching HEAD means the downstream validated this manifest's
     // references at PUT time, so its children and blobs are already present
@@ -116,7 +119,11 @@ pub async fn push_manifest(
         && ctx
             .downstream
             .registry_client
-            .head_manifest(&manifest_accept_types(), &location)
+            .head_manifest(HeadManifestRequest {
+                namespace: ctx.downstream_namespace.clone(),
+                reference: reference.clone(),
+                accepted_types: manifest_accept_types(),
+            })
             .await
             .is_ok_and(|head| head.digest.as_ref() == Some(digest))
     {
@@ -154,10 +161,14 @@ pub async fn push_manifest(
         .downstream
         .registry_client
         .put_manifest(
-            &location,
-            effective_media_type.as_deref(),
+            PutManifestRequest {
+                namespace: ctx.downstream_namespace.clone(),
+                reference: reference.clone(),
+                content_type: effective_media_type.clone(),
+                tags: Vec::new(),
+                source_ts: ctx.source_ts,
+            },
             body,
-            ctx.source_ts,
         )
         .await?;
 
@@ -197,7 +208,7 @@ pub async fn push_manifest(
             &ctx.downstream.registry_client,
             ctx.metadata_store,
             ctx.namespace,
-            ctx.downstream_namespace.as_ref(),
+            ctx.downstream_namespace,
             digest,
             &parsed,
             &body,
@@ -275,22 +286,18 @@ async fn mount_candidate(
     namespace: &Namespace,
     digest: &Digest,
     downstream: &ReplicationDownstream,
-) -> Option<String> {
+) -> Option<Namespace> {
     let sibling = BlobOwnership::new(metadata_store)
         .smallest_referencing_namespace(digest, namespace)
         .await
         .ok()
         .flatten()?;
-    downstream.remote(&sibling).ok().map(|m| m.to_string())
+    downstream.remote(&sibling).ok()
 }
 
 /// Transfers a single blob to the downstream if it is not already present,
 /// attempting a cross-repo mount before a full upload.
 async fn push_one_blob(ctx: &PushContext<'_>, digest: &Digest) -> Result<(), Error> {
-    let head_location = ctx
-        .downstream
-        .registry_client
-        .get_blob_path(ctx.downstream_namespace.as_ref(), digest);
     // Existence-only probe: any 2xx means present (the optional
     // Docker-Content-Digest header is not required, so a converged blob never
     // dead-letters on a minimal downstream); a 404 means absent; a transient
@@ -299,17 +306,16 @@ async fn push_one_blob(ctx: &PushContext<'_>, digest: &Digest) -> Result<(), Err
     if ctx
         .downstream
         .registry_client
-        .blob_exists(&head_location)
+        .blob_exists(HeadBlobRequest {
+            namespace: ctx.downstream_namespace.clone(),
+            digest: digest.clone(),
+            accepted_types: Vec::new(),
+        })
         .await?
     {
         debug!(namespace = %ctx.namespace, %digest, "Blob already present on downstream; skipping");
         return Ok(());
     }
-
-    let start_location = ctx
-        .downstream
-        .registry_client
-        .get_uploads_start_path(ctx.downstream_namespace.as_ref());
 
     // The mount is a pure optimization: a miss opens a session and a policy
     // rejection falls through to a plain upload, so it can never fail the push.
@@ -319,7 +325,13 @@ async fn push_one_blob(ctx: &PushContext<'_>, digest: &Digest) -> Result<(), Err
         match ctx
             .downstream
             .registry_client
-            .mount_blob(&start_location, digest, Some(&from))
+            .mount_blob(MountBlobRequest {
+                namespace: ctx.downstream_namespace.clone(),
+                mount: BlobMount {
+                    digest: digest.clone(),
+                    from: Some(from.clone()),
+                },
+            })
             .await
         {
             Ok(None) => {
@@ -338,7 +350,11 @@ async fn push_one_blob(ctx: &PushContext<'_>, digest: &Digest) -> Result<(), Err
     let session = ctx
         .downstream
         .registry_client
-        .start_upload(&start_location)
+        .start_upload(StartUploadRequest {
+            namespace: ctx.downstream_namespace.clone(),
+            digest_algorithm: None,
+            target: None,
+        })
         .await?;
     upload_into_session(ctx, digest, &session).await
 }
@@ -418,10 +434,10 @@ pub async fn delete_manifest(
     downstream: &RegistryClient,
     metadata_store: &Arc<MetadataStore>,
     namespace: &Namespace,
-    downstream_namespace: &str,
+    downstream_namespace: &Namespace,
     reference: &Reference,
     subject: Option<&Digest>,
-    source_ts: Option<&str>,
+    source_ts: Option<DateTime<Utc>>,
 ) -> Result<PushOutcome, Error> {
     // The carried subject is preferred because it survives a retry that finds
     // the manifest already gone; the probe covers jobs enqueued without one.
@@ -433,8 +449,13 @@ pub async fn delete_manifest(
         Reference::Tag(_) => None,
     };
 
-    let location = downstream.get_manifest_path(downstream_namespace, reference);
-    let outcome = downstream.delete_manifest(&location, source_ts).await?;
+    let outcome = downstream
+        .delete_manifest(DeleteManifestRequest {
+            namespace: downstream_namespace.clone(),
+            reference: reference.clone(),
+            source_ts,
+        })
+        .await?;
     let push_outcome = match outcome {
         DeleteManifestOutcome::Deleted => {
             info!(namespace = %namespace, %reference, "Deleted manifest on downstream");

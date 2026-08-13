@@ -10,6 +10,7 @@ use chrono::{DateTime, Duration, Utc};
 use futures_util::TryStreamExt;
 use tracing::{debug, error, info, warn};
 
+use angos_oci::{Digest, Namespace, UploadSessionId};
 use angos_tx_engine::StorageError;
 
 use crate::{
@@ -20,7 +21,6 @@ use crate::{
         executor::ActionSink,
         walk,
     },
-    oci::{Digest, Namespace, UploadSessionId},
     registry::{
         Error as RegistryError,
         blob_store::{BlobStore, MultipartCleanup, UploadSummary},
@@ -224,7 +224,7 @@ async fn sweep_one_shard(
 mod tests {
     use chrono::TimeZone;
 
-    use super::*;
+    use crate::command::prune::uploads::*;
 
     fn fixed_now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2024, 6, 1, 12, 0, 0).unwrap()
@@ -292,9 +292,10 @@ mod tests {
 
     use async_trait::async_trait;
 
+    use angos_oci::{Digest, Namespace};
+
     use crate::{
         command::maintenance::executor::Executor,
-        oci::{Digest, Namespace},
         registry::{
             blob_store::OrphanMultipartUpload,
             metadata_store::{BlobIndexOperation, LinkKind},

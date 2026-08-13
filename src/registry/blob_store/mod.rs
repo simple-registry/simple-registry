@@ -23,26 +23,23 @@ use std::{
     time::Duration,
 };
 
+// Inner config structs are only constructed by tests; production code builds
+// backends through `BlobStoreConfig`. Re-export them for test builds only.
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::stream::{self, Stream, StreamExt, TryStreamExt};
 use tokio::io::AsyncRead;
 use tracing::instrument;
 
+use angos_oci::{Algorithm, Digest};
 use angos_storage::{ObjectStore, PresignedStore, paginated};
 use angos_tx_engine::StorageError;
 
+use crate::registry::{Error, pagination, path_builder};
 pub use config::BlobStoreConfig;
-// Inner config structs are only constructed by tests; production code builds
-// backends through `BlobStoreConfig`. Re-export them for test builds only.
 #[cfg(test)]
 pub use config::{FsBackendConfig, S3BackendConfig, TransportFields};
 pub use multipart_cleanup::{MultipartCleanup, OrphanMultipartUpload};
-
-use crate::{
-    oci::{Algorithm, Digest},
-    registry::{Error, pagination, path_builder},
-};
 
 pub type BoxedReader = Box<dyn AsyncRead + Unpin + Send + Sync>;
 

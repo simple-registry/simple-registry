@@ -3,10 +3,18 @@ use std::{collections::BTreeSet, str::FromStr};
 use hyper::{Method, Uri};
 use serde::{Deserialize, de::DeserializeOwned};
 
+use angos_oci::path::API_PREFIX;
+
+/// Angos's extension name and the two forms it is reached under. The spec fixes
+/// the `_<extension>` shape; the name itself is ours.
+const EXTENSION: &str = "_angos/";
+const REPOSITORY_EXTENSION: &str = "/_angos/";
+use angos_oci::server;
+use angos_oci::{Algorithm, Digest, MediaType, Namespace, Reference, Tag, UploadSessionId};
+
 use crate::{
     identity::{Action, ManifestPutTarget},
     jobs::{JobState, Queue},
-    oci::{Algorithm, Digest, MediaType, Namespace, Reference, Tag, UploadSessionId},
 };
 
 /// Deserializes a query string, returning `None` when a value fails to
@@ -28,32 +36,30 @@ pub fn parse(method: &Method, uri: &Uri) -> Option<Action> {
         "/healthz" if method == Method::GET => return Some(Action::Healthz),
         "/readyz" if method == Method::GET => return Some(Action::Readyz),
         "/metrics" if method == Method::GET => return Some(Action::Metrics),
-        "/_ui/config" if method == Method::GET => return Some(Action::UiConfig),
         // Matched for every method: guarded by `if method == GET` a HEAD would
         // fall through to the UI-asset arm below and answer with `index.html`.
         "/token" => return (method == Method::GET).then_some(Action::Token),
         // HEAD as well as GET: the version check is the OCI conformance probe,
         // and without this it falls through to the UI-asset arm below and
         // answers with `index.html`.
-        "/v2" | "/v2/" if method == Method::GET || method == Method::HEAD => {
+        "/v2/" if method == Method::GET || method == Method::HEAD => {
             return Some(Action::ApiVersion);
         }
+        // end-1 is `/v2/`; the same path without its slash is not the version
+        // endpoint, and must not reach the UI-asset arm below either.
+        "/v2" => return None,
+        // A Docker Registry V2 endpoint the OCI spec does not define. It keeps
+        // its long-standing path, which clients already call.
         "/v2/_catalog" if method == Method::GET => {
-            let PaginationQuery { n, last } = parse_pagination(params);
+            let PaginationQuery { n, last } = parse_pagination(params)?;
             return Some(Action::ListCatalog { n, last });
         }
         _ => {}
     }
 
-    // Angos-specific extension API lives at the top level so `/v2` stays purely
-    // OCI. Unknown `_ext` paths return `None` (404) rather than falling back to
-    // the UI-asset handler below.
-    if let Some(ext_path) = path.strip_prefix("/_ext/") {
-        return try_parse_extension(method, ext_path, params);
-    }
-
-    if let Some(api_path) = path.strip_prefix("/v2/") {
-        return try_parse_upload(method, api_path, params)
+    if let Some(api_path) = path.strip_prefix(API_PREFIX) {
+        return try_parse_extension(method, api_path, params)
+            .or_else(|| try_parse_upload(method, api_path, params))
             .or_else(|| try_find_blobs(method, api_path))
             .or_else(|| try_find_manifests(method, api_path, params))
             .or_else(|| try_find_referrers(method, api_path, params))
@@ -132,8 +138,21 @@ struct PaginationQuery {
     last: Option<String>,
 }
 
-fn parse_pagination(params: Option<&str>) -> PaginationQuery {
-    params.and_then(parse_query).unwrap_or_default()
+/// Strict parse: a malformed `?n=` or `?last=` is a bad cursor, not an absent
+/// one, so it must not degrade into an unpaginated listing.
+fn parse_pagination(params: Option<&str>) -> Option<PaginationQuery> {
+    match params {
+        Some(params) => parse_query(params),
+        None => Some(PaginationQuery::default()),
+    }
+}
+
+/// The angos repository whose namespaces are listed. A repository is angos's
+/// own grouping, not an OCI name, so it cannot sit in the `<name>` slot of the
+/// path without claiming a scoping the registry does not have.
+#[derive(Deserialize)]
+struct NamespacesQuery {
+    repository: Namespace,
 }
 
 #[derive(Deserialize)]
@@ -142,6 +161,9 @@ struct JobsQuery {
     after: Option<String>,
     #[serde(default = "default_jobs_queue")]
     queue: Queue,
+    /// The job a retry or a delete addresses. An extension path ends at its
+    /// module, so the storage key rides in the query rather than the path.
+    key: Option<String>,
 }
 
 fn default_jobs_queue() -> Queue {
@@ -159,90 +181,103 @@ fn parse_jobs_query(params: Option<&str>) -> Option<JobsQuery> {
             n: None,
             after: None,
             queue: default_jobs_queue(),
+            key: None,
         }),
     }
 }
 
-/// Parse the angos-specific extension API routes. `path` is relative to the
-/// top-level `/_ext/` prefix (already stripped by the caller).
-///
-/// Routes are grouped by method, then by endpoint. Within `GET`, the bare
-/// listings (`_repositories`, `_jobs`, `_jobs/failed`) are matched before the
-/// namespace-suffixed routes. Job storage keys are a single path segment
-/// (`<hex-millis>-<uuid>`, no `/`), so a segment containing `/` is rejected by
-/// [`is_job_key`].
-fn try_parse_extension(method: &Method, path: &str, params: Option<&str>) -> Option<Action> {
+/// Angos's own endpoints, under the extension namespace the distribution spec
+/// reserves: `_<extension>/<component>/<module>` for the registry and
+/// `<name>/_<extension>/<component>/<module>` for one repository. `api_path` is
+/// the path after the API prefix.
+/// REF: <https://github.com/opencontainers/distribution-spec/blob/main/extensions/README.md>
+fn try_parse_extension(method: &Method, api_path: &str, params: Option<&str>) -> Option<Action> {
+    if let Some(rest) = api_path.strip_prefix(EXTENSION) {
+        return registry_extension(method, rest, params);
+    }
+
+    // The marker is a whole path segment, so a namespace may hold the name.
+    let (namespace, rest) = api_path.split_once(REPOSITORY_EXTENSION)?;
+
+    repository_extension(method, Namespace::new(namespace).ok()?, rest)
+}
+
+/// `_angos/<component>/<module>`: what the registry as a whole answers. The
+/// path ends at the module, so a mutation names its job in `?key=`.
+fn registry_extension(method: &Method, path: &str, params: Option<&str>) -> Option<Action> {
     match *method {
         Method::GET => match path {
-            "_repositories" => Some(Action::ListRepositories),
-            "_jobs" => {
-                let JobsQuery { n, after, queue } = parse_jobs_query(params)?;
+            "ui/config" => Some(Action::UiConfig),
+            "repositories/list" => Some(Action::ListRepositories),
+            "namespaces/list" => {
+                let NamespacesQuery { repository } = parse_query(params?)?;
+                Some(Action::ListNamespaces { repository })
+            }
+            "jobs/list" => {
+                let JobsQuery {
+                    n, after, queue, ..
+                } = parse_jobs_query(params)?;
                 Some(Action::ListJobs { queue, n, after })
             }
-            "_jobs/failed" => {
-                let JobsQuery { n, after, queue } = parse_jobs_query(params)?;
+            "jobs/failed" => {
+                let JobsQuery {
+                    n, after, queue, ..
+                } = parse_jobs_query(params)?;
                 Some(Action::ListFailedJobs { queue, n, after })
             }
-            _ => {
-                if let Some(repository_str) = path.strip_suffix("/_namespaces") {
-                    let repository = Namespace::new(repository_str).ok()?;
-                    return Some(Action::ListNamespaces { repository });
-                }
-                if let Some(namespace_str) = path.strip_suffix("/_revisions") {
-                    let namespace = Namespace::new(namespace_str).ok()?;
-                    return Some(Action::ListRevisions { namespace });
-                }
-                if let Some(namespace_str) = path.strip_suffix("/_uploads") {
-                    let namespace = Namespace::new(namespace_str).ok()?;
-                    return Some(Action::ListUploads { namespace });
-                }
-                None
-            }
+            _ => None,
         },
-        Method::POST => {
-            let key = path
-                .strip_prefix("_jobs/failed/")
-                .and_then(|rest| rest.strip_suffix("/retry"))
-                .filter(|key| is_job_key(key))?;
-            let queue = parse_jobs_query(params)?.queue;
+        Method::POST if path == "jobs/failed" => {
+            let JobsQuery { queue, key, .. } = parse_jobs_query(params)?;
             Some(Action::RetryJob {
                 queue,
-                storage_key: key.to_string(),
+                storage_key: job_key(key)?,
             })
         }
         Method::DELETE => {
-            if let Some(key) = path.strip_prefix("_jobs/failed/").filter(|k| is_job_key(k)) {
-                let queue = parse_jobs_query(params)?.queue;
-                return Some(Action::DeleteJob {
-                    queue,
-                    state: JobState::Failed,
-                    storage_key: key.to_string(),
-                });
-            }
-            let key = path
-                .strip_prefix("_jobs/pending/")
-                .filter(|k| is_job_key(k))?;
-            let queue = parse_jobs_query(params)?.queue;
+            let state = match path {
+                "jobs/failed" => JobState::Failed,
+                "jobs/pending" => JobState::Pending,
+                _ => return None,
+            };
+            let JobsQuery { queue, key, .. } = parse_jobs_query(params)?;
             Some(Action::DeleteJob {
                 queue,
-                state: JobState::Pending,
-                storage_key: key.to_string(),
+                state,
+                storage_key: job_key(key)?,
             })
         }
         _ => None,
     }
 }
 
+/// `<name>/_angos/<component>/<module>`: what one namespace answers, `<name>`
+/// being the OCI repository name.
+fn repository_extension(method: &Method, namespace: Namespace, path: &str) -> Option<Action> {
+    if *method != Method::GET {
+        return None;
+    }
+
+    match path {
+        "revisions/list" => Some(Action::ListRevisions { namespace }),
+        "uploads/list" => Some(Action::ListUploads { namespace }),
+        _ => None,
+    }
+}
+
 /// A job storage key is a single non-empty path segment.
+/// The job a mutation addresses. A storage key is one path-free token
+/// (`<hex-millis>-<uuid>`), so one holding a `/` is refused.
+fn job_key(key: Option<String>) -> Option<String> {
+    key.filter(|key| is_job_key(key))
+}
+
 fn is_job_key(key: &str) -> bool {
     !key.is_empty() && !key.contains('/')
 }
 
 fn try_parse_upload(method: &Method, path: &str, params: Option<&str>) -> Option<Action> {
-    if let Some(namespace_str) = path
-        .strip_suffix("/blobs/uploads")
-        .or_else(|| path.strip_suffix("/blobs/uploads/"))
-    {
+    if let Some(namespace_str) = server::split_uploads_start_path(path) {
         let namespace = Namespace::new(namespace_str).ok()?;
 
         if *method != Method::POST {
@@ -270,7 +305,7 @@ fn try_parse_upload(method: &Method, path: &str, params: Option<&str>) -> Option
         });
     }
 
-    let (namespace_str, session_id) = path.rsplit_once("/blobs/uploads/")?;
+    let (namespace_str, session_id) = server::split_upload_session_path(path)?;
     let namespace = Namespace::new(namespace_str).ok()?;
     let session_id = UploadSessionId::from_str(session_id).ok()?;
 
@@ -300,7 +335,7 @@ fn try_parse_upload(method: &Method, path: &str, params: Option<&str>) -> Option
 }
 
 fn try_find_blobs(method: &Method, path: &str) -> Option<Action> {
-    if let Some((namespace_str, digest)) = path.rsplit_once("/blobs/") {
+    if let Some((namespace_str, digest)) = server::split_blob_path(path) {
         let namespace = Namespace::new(namespace_str).ok()?;
         let digest = Digest::from_str(digest).ok()?;
 
@@ -316,7 +351,7 @@ fn try_find_blobs(method: &Method, path: &str) -> Option<Action> {
 }
 
 fn try_find_manifests(method: &Method, path: &str, params: Option<&str>) -> Option<Action> {
-    if let Some((namespace_str, reference)) = path.rsplit_once("/manifests/") {
+    if let Some((namespace_str, reference)) = server::split_manifest_path(path) {
         let namespace = Namespace::new(namespace_str).ok()?;
         let reference = Reference::from_str(reference).ok()?;
 
@@ -375,8 +410,8 @@ pub fn is_invalid_referrers_request(method: &Method, uri: &Uri) -> bool {
 
     let Some((namespace, _)) = uri
         .path()
-        .strip_prefix("/v2/")
-        .and_then(|api_path| api_path.rsplit_once("/referrers/"))
+        .strip_prefix(API_PREFIX)
+        .and_then(server::split_referrers_path)
     else {
         return false;
     };
@@ -385,7 +420,7 @@ pub fn is_invalid_referrers_request(method: &Method, uri: &Uri) -> bool {
 }
 
 fn try_find_referrers(method: &Method, path: &str, params: Option<&str>) -> Option<Action> {
-    if let Some((namespace_str, digest)) = path.rsplit_once("/referrers/") {
+    if let Some((namespace_str, digest)) = server::split_referrers_path(path) {
         let namespace = Namespace::new(namespace_str).ok()?;
         let digest = Digest::from_str(digest).ok()?;
 
@@ -397,7 +432,7 @@ fn try_find_referrers(method: &Method, path: &str, params: Option<&str>) -> Opti
         };
 
         if *method == Method::GET {
-            let PaginationQuery { n, last } = parse_pagination(params);
+            let PaginationQuery { n, last } = parse_pagination(params)?;
             return Some(Action::GetReferrer {
                 namespace,
                 digest,
@@ -412,11 +447,11 @@ fn try_find_referrers(method: &Method, path: &str, params: Option<&str>) -> Opti
 }
 
 fn try_find_tags(method: &Method, path: &str, params: Option<&str>) -> Option<Action> {
-    if let Some(namespace_str) = path.strip_suffix("/tags/list")
+    if let Some(namespace_str) = server::split_tags_list_path(path)
         && *method == Method::GET
     {
         let namespace = Namespace::new(namespace_str).ok()?;
-        let PaginationQuery { n, last } = parse_pagination(params);
+        let PaginationQuery { n, last } = parse_pagination(params)?;
         return Some(Action::ListTags { namespace, n, last });
     }
 

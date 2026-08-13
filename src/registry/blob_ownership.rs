@@ -1,12 +1,11 @@
 use std::collections::HashSet;
 
-use crate::{
-    oci::{Digest, Namespace, UploadSessionId},
-    registry::{
-        Error,
-        blob_store::BlobStore,
-        metadata_store::{BlobIndexOperation, LinkKind, MetadataStore},
-    },
+use angos_oci::{Digest, Namespace, UploadSessionId};
+
+use crate::registry::{
+    Error,
+    blob_store::BlobStore,
+    metadata_store::{BlobIndexOperation, LinkKind, MetadataStore},
 };
 
 /// Promote the upload session's staged bytes to the canonical blob path and

@@ -1,17 +1,17 @@
 use chrono::{TimeZone, Utc};
 use hyper::{
     Request,
-    header::{ACCEPT, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderName, HeaderValue, RANGE},
+    header::{ACCEPT, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderName, RANGE},
 };
+
+use angos_oci::http_range::{ByteWindow, RequestRange};
+use angos_oci::{MediaRange, MediaType};
 
 use crate::{
     command::server::{
         error::Error,
         request::{RequestHeaders, X_ANGOS_NO_REDIRECT},
     },
-    http_range::{ByteWindow, RequestRange},
-    http_response::ResponseBody,
-    oci::{MediaRange, MediaType},
     registry_client::X_ANGOS_SOURCE_TIMESTAMP,
 };
 
@@ -357,98 +357,6 @@ fn test_range_overflow() {
 
     let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
-}
-
-#[test]
-fn test_accepted_content_types_multiple() {
-    let request = Request::builder()
-        .header(ACCEPT, HeaderValue::from_static("application/json"))
-        .header(ACCEPT, HeaderValue::from_static("application/xml"))
-        .header(ACCEPT, HeaderValue::from_static("text/plain"));
-    let request = request.body(ResponseBody::empty()).unwrap();
-    let (parts, _) = request.into_parts();
-
-    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
-    assert_eq!(
-        result,
-        vec!["application/json", "application/xml", "text/plain"]
-    );
-}
-
-#[test]
-fn test_accepted_content_types_single() {
-    let request = Request::builder()
-        .header(ACCEPT, "application/json")
-        .body(())
-        .unwrap();
-    let (parts, ()) = request.into_parts();
-
-    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
-    assert_eq!(result, vec!["application/json"]);
-}
-
-#[test]
-fn test_accepted_content_types_empty() {
-    let request = Request::builder().body(()).unwrap();
-    let (parts, ()) = request.into_parts();
-
-    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
-    assert!(result.is_empty());
-}
-
-#[test]
-fn test_accepted_content_types_with_quality() {
-    let request = Request::builder()
-        .header(ACCEPT, "application/json;q=0.9")
-        .header(ACCEPT, "text/html;q=0.8")
-        .body(())
-        .unwrap();
-    let (parts, ()) = request.into_parts();
-
-    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
-    assert_eq!(result, vec!["application/json;q=0.9", "text/html;q=0.8"]);
-}
-
-#[test]
-fn test_accepted_content_types_splits_commas_and_orders_by_quality() {
-    let request = Request::builder()
-        .header(ACCEPT, "text/plain;q=0.2, application/json;q=0.9")
-        .header(ACCEPT, "application/xml")
-        .body(())
-        .unwrap();
-    let (parts, ()) = request.into_parts();
-
-    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
-    assert_eq!(
-        result,
-        vec![
-            "application/xml",
-            "application/json;q=0.9",
-            "text/plain;q=0.2"
-        ]
-    );
-}
-
-#[test]
-fn test_accepted_content_types_keeps_original_order_for_equal_quality() {
-    let request = Request::builder()
-        .header(ACCEPT, "application/json, application/xml;q=1.0")
-        .header(ACCEPT, "text/plain")
-        .body(())
-        .unwrap();
-    let (parts, ()) = request.into_parts();
-
-    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
-    assert_eq!(
-        result,
-        vec!["application/json", "application/xml;q=1.0", "text/plain"]
-    );
 }
 
 #[test]

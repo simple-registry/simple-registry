@@ -23,6 +23,7 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use tracing::{debug, info, warn};
 
+use angos_oci::{Digest, MediaType};
 use angos_tx_engine::{
     error::Error as TxError, executor::DEFAULT_RETRY_BUDGET, store::Store, transaction::Mutation,
 };
@@ -30,7 +31,6 @@ use angos_tx_engine::{
 use crate::{
     command::bootstrap,
     configuration::Configuration,
-    oci::{Digest, MediaType},
     registry::{
         self, blob_store::BlobStore, metadata_store::LinkMetadata, path_builder, recover_media_type,
     },
@@ -341,19 +341,17 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
+    use angos_oci::{Namespace, Tag};
     use angos_storage::{
         Error as StorageError, ObjectStore,
         test_util::{HookedStore, StoreHook, StoreOp},
     };
 
-    use super::*;
-    use crate::{
-        oci::{Namespace, Tag},
-        registry::{
-            metadata_store::LinkKind,
-            test_utils::{
-                FSRegistryTestCase, RegistryTestCase, metadata_store_over_cached, put_link_raw,
-            },
+    use crate::command::migrate::*;
+    use crate::registry::{
+        metadata_store::LinkKind,
+        test_utils::{
+            FSRegistryTestCase, RegistryTestCase, metadata_store_over_cached, put_link_raw,
         },
     };
 

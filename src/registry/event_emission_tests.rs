@@ -20,6 +20,11 @@ use url::Url;
 use uuid::Uuid;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
+use angos_oci::request::{
+    BlobMount, GetBlobRequest, GetManifestRequest, MountBlobRequest, PutManifestRequest,
+};
+use angos_oci::{Digest, MediaRange, MediaType, Namespace, Reference, Tag};
+
 use crate::metrics_provider::init_for_tests;
 use crate::{
     event_webhook::{
@@ -29,9 +34,7 @@ use crate::{
     },
     jobs::Queue,
     jobs::store::JobStore,
-    oci::{Digest, MediaRange, MediaType, Namespace, Reference, Tag},
     registry::{
-        BlobMount, GetBlobRequest, GetManifestRequest, MountBlobRequest, PutManifestRequest,
         Registry, RegistryConfig, Repository,
         blob_ownership::BlobOwnership,
         metadata_store::LinkKind,
@@ -168,9 +171,9 @@ async fn tag_push_emits_manifest_push_and_tag_create_events() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
-                mime_type,
+                content_type: Some(mime_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -225,9 +228,9 @@ async fn digest_push_suppresses_tag_create_event() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("seed").unwrap()),
-                mime_type: mime_type.clone(),
+                content_type: Some(mime_type.clone()),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -245,9 +248,9 @@ async fn digest_push_suppresses_tag_create_event() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Digest(digest),
-                mime_type,
+                content_type: Some(mime_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -287,9 +290,9 @@ async fn tag_delete_emits_manifest_delete_and_tag_delete_events() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("v1").unwrap()),
-                mime_type,
+                content_type: Some(mime_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -339,9 +342,9 @@ async fn digest_delete_suppresses_tag_delete_event() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("to-delete").unwrap()),
-                mime_type,
+                content_type: Some(mime_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -393,9 +396,9 @@ async fn tag_push_event_payload_has_all_required_fields() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("stable").unwrap()),
-                mime_type,
+                content_type: Some(mime_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -470,9 +473,9 @@ async fn digest_push_with_tag_params_emits_tag_create_per_tag() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Digest(digest.clone()),
-                mime_type,
+                content_type: Some(mime_type),
                 tags: vec![Tag::new("1.2.3").unwrap(), Tag::new("latest").unwrap()],
                 source_ts: None,
             },
@@ -521,9 +524,9 @@ async fn noop_push_still_emits_events() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
-                mime_type: mime_type.clone(),
+                content_type: Some(mime_type.clone()),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -538,9 +541,9 @@ async fn noop_push_still_emits_events() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
-                mime_type,
+                content_type: Some(mime_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -610,8 +613,8 @@ async fn mount_emits_blob_push_event() {
             MountBlobRequest {
                 namespace: target.clone(),
                 mount,
-                source: Some(source.clone()),
             },
+            Some(source.clone()),
         )
         .await
         .unwrap();
@@ -651,8 +654,8 @@ async fn mount_fallback_still_emits_intent_event() {
             MountBlobRequest {
                 namespace: target.clone(),
                 mount,
-                source: Some(source.clone()),
             },
+            Some(source.clone()),
         )
         .await
         .unwrap();
@@ -688,9 +691,9 @@ async fn failing_required_webhook_blocks_the_write() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(tag.clone()),
-                mime_type,
+                content_type: Some(mime_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -786,9 +789,9 @@ async fn fresh_local_tag_push_enqueues_replication_job() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
-                mime_type,
+                content_type: Some(mime_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -1023,9 +1026,9 @@ async fn get_manifest_emits_pull_event() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
-                mime_type: media_type.clone(),
+                content_type: Some(media_type.clone()),
                 tags: Vec::new(),
                 source_ts: None,
             },

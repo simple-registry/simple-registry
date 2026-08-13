@@ -20,17 +20,15 @@ use futures_util::stream::{self, StreamExt};
 use tokio::{spawn, sync::Mutex, time::sleep};
 use tracing::{instrument, warn};
 
+use angos_oci::Namespace;
 use angos_tx_engine::{
     error::Error as TxError, executor::DEFAULT_RETRY_BUDGET, store::Store, transaction::Mutation,
 };
 
-use crate::{
-    oci::Namespace,
-    registry::{
-        Error,
-        metadata_store::{LinkKind, LinkMetadata, MetadataStore},
-        path_builder,
-    },
+use crate::registry::{
+    Error,
+    metadata_store::{LinkKind, LinkMetadata, MetadataStore},
+    path_builder,
 };
 
 // Build-time wiring

@@ -10,14 +10,16 @@ use hyper::{
 };
 use tracing::instrument;
 
+use angos_oci::request::BlobMount;
+use angos_oci::{Namespace, namespace_belongs_to};
+
 use crate::{
     auth::{Authenticator, Authorizer, TokenIssuer},
     cache::Cache,
     command::server::{error::Error, router},
     configuration::{Configuration, TrustedProxy},
     identity::{Action, ClientIdentity, RequestScheme},
-    oci::{Namespace, namespace_belongs_to},
-    registry::{BlobMount, Registry},
+    registry::Registry,
 };
 
 pub struct ServerContext {

@@ -169,10 +169,11 @@ mod tests {
     use bytes::Bytes;
     use tempfile::TempDir;
 
-    use super::*;
+    use angos_oci::{Digest, Namespace};
+
+    use crate::command::scrub::command::*;
     use crate::{
         command::maintenance::action::LOST_AND_FOUND_PREFIX,
-        oci::{Digest, Namespace},
         registry::{
             metadata_store::LinkMetadata, path_builder as paths, test_utils::seed_manifest,
         },

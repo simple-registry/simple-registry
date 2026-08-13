@@ -11,6 +11,7 @@ use futures_util::{Stream, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
+use angos_oci::{Digest, Namespace};
 use angos_storage::paginated;
 use angos_tx_engine::{
     StorageError,
@@ -19,13 +20,10 @@ use angos_tx_engine::{
     transaction::Transaction,
 };
 
-use crate::{
-    oci::{Digest, Namespace},
-    registry::{
-        Error,
-        metadata_store::{LinkKind, LinksTx, MetadataStore},
-        path_builder,
-    },
+use crate::registry::{
+    Error,
+    metadata_store::{LinkKind, LinksTx, MetadataStore},
+    path_builder,
 };
 
 pub mod shard;

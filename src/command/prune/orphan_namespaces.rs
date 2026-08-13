@@ -10,9 +10,10 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use tracing::{error, warn};
 
+use angos_oci::Namespace;
+
 use crate::{
     command::maintenance::{Error, action::Action, executor::ActionSink},
-    oci::Namespace,
     registry::{
         blob_store::BlobStore, metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
@@ -106,10 +107,11 @@ async fn clear_uploads(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use angos_oci::UploadSessionId;
+
+    use crate::command::prune::orphan_namespaces::*;
     use crate::{
         command::maintenance::executor::Executor,
-        oci::UploadSessionId,
         registry::{
             repository_resolver::RepositoryResolver,
             test_utils::{create_test_repositories, for_each_backend, seed_manifest},

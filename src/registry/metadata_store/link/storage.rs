@@ -6,15 +6,13 @@
 use bytes::Bytes;
 use tracing::{instrument, warn};
 
+use angos_oci::Namespace;
 use angos_tx_engine::StorageError;
 
-use crate::{
-    oci::Namespace,
-    registry::{
-        Error,
-        metadata_store::{LinkKind, LinkMetadata, MetadataStore},
-        path_builder,
-    },
+use crate::registry::{
+    Error,
+    metadata_store::{LinkKind, LinkMetadata, MetadataStore},
+    path_builder,
 };
 
 impl MetadataStore {

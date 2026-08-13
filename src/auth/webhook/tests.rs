@@ -8,6 +8,8 @@ use wiremock::{
     matchers::{header, method},
 };
 
+use angos_oci::{Namespace, Reference, Tag};
+
 use crate::metrics_provider::init_for_tests;
 use crate::{
     auth::Error,
@@ -19,7 +21,6 @@ use crate::{
     cache::{self, Cache},
     http_client::apply_tls_files,
     identity::{Action, ClientIdentity, RequestScheme},
-    oci::{Namespace, Reference, Tag},
     secret::Secret,
     test_fixtures::{
         requests::parts_with_uri,

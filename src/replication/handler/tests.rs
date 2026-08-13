@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-
 use serde_json::json;
 use tempfile::TempDir;
 use wiremock::{
@@ -9,8 +8,9 @@ use wiremock::{
     matchers::{header, method, path},
 };
 
+use angos_oci::header::DOCKER_CONTENT_DIGEST;
+use angos_oci::{Digest, Namespace, Tag};
 use angos_storage::{ObjectStore, fs::Backend as StorageFsBackend};
-
 use angos_tx_engine::store::Store;
 
 use crate::{
@@ -18,9 +18,8 @@ use crate::{
     jobs::Queue,
     jobs::store::{Error, JobEnvelope, JobHandler},
     metrics_provider,
-    oci::{Digest, Namespace, Tag},
     registry::{
-        DOCKER_CONTENT_DIGEST, Repository,
+        Repository,
         blob_store::BlobStore,
         metadata_store::{LinkKind, LinkOperation, MetadataStore},
         test_utils::{

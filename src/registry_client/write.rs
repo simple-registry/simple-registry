@@ -15,31 +15,18 @@ use tokio::io::AsyncRead;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, instrument, warn};
 
-use crate::{
-    oci::Digest,
-    registry::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT},
-    registry_client::{
-        Error, REPLICATION_SUPERSEDED_CODE, RegistryClient, X_ANGOS_SOURCE_TIMESTAMP, parse_header,
-        without_query,
-    },
+use angos_oci::client::{self, append_query};
+use angos_oci::header::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT};
+use angos_oci::request::{
+    DeleteManifestRequest, MountBlobRequest, PutManifestRequest, StartUploadRequest,
 };
+use angos_oci::response::{DeleteManifestOutcome, ErrorResponse, PutManifestOutcome};
+use angos_oci::{Digest, MediaType};
 
-/// Outcome of a manifest push.
-#[derive(Debug)]
-pub enum PutManifestOutcome {
-    /// Downstream stored the manifest (2xx), echoing what it saw.
-    Stored {
-        /// The `Docker-Content-Digest` echo, absent when the downstream sent
-        /// none or an unparseable one.
-        digest: Option<Digest>,
-        /// The `OCI-Subject` echo. Absent on an OCI-1.0 downstream, which does
-        /// not auto-index the subject and so needs the referrers fallback tag.
-        subject: Option<String>,
-    },
-    /// Push rejected by last-writer-wins (`409` with the
-    /// replication-superseded OCI code): convergence, not failure.
-    Superseded,
-}
+use crate::registry_client::{
+    Error, REPLICATION_SUPERSEDED_CODE, RegistryClient, X_ANGOS_SOURCE_TIMESTAMP, parse_header,
+    without_query,
+};
 
 /// An open downstream blob-upload session: the server-assigned continuation
 /// URL plus the auth header that opened it.
@@ -53,41 +40,14 @@ pub struct UploadSession {
     pub auth: Option<String>,
 }
 
-/// Outcome of a manifest delete.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeleteManifestOutcome {
-    /// Downstream applied the delete (2xx).
-    Deleted,
-    /// Manifest already absent downstream (`404`): a converged no-op.
-    AlreadyAbsent,
-    /// Delete rejected by last-writer-wins (`409` with the
-    /// replication-superseded OCI code): convergence, not failure.
-    Superseded,
-    /// Downstream rejects this delete method (`405`): it does not support
-    /// deleting by this reference (stock `distribution` rejects tag deletes
-    /// this way). Retrying cannot help, so the caller records it distinctly
-    /// instead of dead-lettering one job per deletion event.
-    Unsupported,
-}
-
 /// Returns the first OCI error `code` from a `{"errors":[{"code":"..."}]}`
 /// response body, or `None` when the body is malformed or absent.
 async fn parse_oci_error_code(response: Response) -> Option<String> {
     let bytes = response.bytes().await.ok()?;
-    serde_json::from_slice::<serde_json::Value>(&bytes)
+    serde_json::from_slice::<ErrorResponse>(&bytes)
         .ok()?
-        .get("errors")?
-        .as_array()?
-        .first()?
-        .get("code")?
-        .as_str()
+        .first_code()
         .map(ToString::to_string)
-}
-
-/// Appends a query string to a URL, choosing '?' or '&' for the separator.
-fn append_query(base: &str, query: &str) -> String {
-    let separator = if base.contains('?') { '&' } else { '?' };
-    format!("{base}{separator}{query}")
 }
 
 /// The digest a write response advertises. `Ok(None)` means the remote sent no
@@ -266,9 +226,10 @@ impl RegistryClient {
     /// Returns an error when the request fails, access is rejected, or the
     /// response lacks a success status or `Location` header.
     #[instrument(skip(self))]
-    pub async fn start_upload(&self, location: &str) -> Result<UploadSession, Error> {
+    pub async fn start_upload(&self, request: StartUploadRequest) -> Result<UploadSession, Error> {
+        let location = client::uploads_start_path(&self.url, &request.namespace);
         let (response, auth) = self
-            .send_body_with_auth(&Method::POST, location, None, Vec::new(), None)
+            .send_body_with_auth(&Method::POST, &location, None, Vec::new(), None)
             .await?;
 
         if !response.status().is_success() {
@@ -295,15 +256,17 @@ impl RegistryClient {
     #[instrument(skip(self))]
     pub async fn mount_blob(
         &self,
-        location: &str,
-        mount: &Digest,
-        from: Option<&str>,
+        request: MountBlobRequest,
     ) -> Result<Option<UploadSession>, Error> {
-        let query = match from {
+        let mount = &request.mount.digest;
+        let query = match &request.mount.from {
             Some(from) => format!("mount={mount}&from={from}"),
             None => format!("mount={mount}"),
         };
-        let location = append_query(location, &query);
+        let location = append_query(
+            &client::uploads_start_path(&self.url, &request.namespace),
+            &query,
+        );
 
         let (response, auth) = self
             .send_body_with_auth(&Method::POST, &location, None, Vec::new(), None)
@@ -444,13 +407,19 @@ impl RegistryClient {
     #[instrument(skip(self, body))]
     pub async fn put_manifest(
         &self,
-        location: &str,
-        content_type: Option<&str>,
+        request: PutManifestRequest,
         body: Vec<u8>,
-        source_ts: Option<&str>,
     ) -> Result<PutManifestOutcome, Error> {
+        let location = client::manifest_path(&self.url, &request.namespace, &request.reference);
+        let source_ts = request.source_ts.map(|ts| ts.to_rfc3339());
         let response = self
-            .send_body(&Method::PUT, location, content_type, body, source_ts)
+            .send_body(
+                &Method::PUT,
+                &location,
+                request.content_type.as_ref().map(MediaType::as_ref),
+                body,
+                source_ts.as_deref(),
+            )
             .await?;
 
         if response.status() == StatusCode::CONFLICT {
@@ -491,11 +460,18 @@ impl RegistryClient {
     #[instrument(skip(self))]
     pub async fn delete_manifest(
         &self,
-        location: &str,
-        source_ts: Option<&str>,
+        request: DeleteManifestRequest,
     ) -> Result<DeleteManifestOutcome, Error> {
+        let location = client::manifest_path(&self.url, &request.namespace, &request.reference);
+        let source_ts = request.source_ts.map(|ts| ts.to_rfc3339());
         let response = self
-            .send_body(&Method::DELETE, location, None, Vec::new(), source_ts)
+            .send_body(
+                &Method::DELETE,
+                &location,
+                None,
+                Vec::new(),
+                source_ts.as_deref(),
+            )
             .await?;
 
         if response.status() == StatusCode::CONFLICT {

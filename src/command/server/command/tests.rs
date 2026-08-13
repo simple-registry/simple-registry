@@ -6,6 +6,7 @@ use std::{
 use tempfile::TempDir;
 
 use crate::metrics_provider::init_for_tests;
+use crate::registry::content_discovery::ListCatalogRequest;
 use crate::{
     cache,
     command::{
@@ -20,8 +21,8 @@ use crate::{
     configuration::{self, Configuration},
     policy::{AccessMode, AccessPolicyConfig, CelRule},
     registry::{
-        ListCatalogRequest, Registry, RegistryConfig, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
-        repository, test_utils::response_json,
+        Registry, RegistryConfig, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES, repository,
+        test_utils::response_json,
     },
     secret::Secret,
     test_fixtures::client::test_client_config,

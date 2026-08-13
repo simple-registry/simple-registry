@@ -1,15 +1,15 @@
 use std::{cmp::Reverse, pin::pin, sync::Arc};
 
 use async_trait::async_trait;
+use chrono::Duration;
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, TryStreamExt};
 use tracing::{debug, error};
 
-use chrono::Duration;
+use angos_oci::{Digest, Namespace, Tag};
 
 use crate::{
     command::maintenance::{Error, action::Action, check::NamespaceChecker, executor::ActionSink},
-    oci::{Digest, Namespace, Tag},
     policy::{ManifestImage, RetentionPolicy},
     registry::{
         Error as RegistryError, Repository,
@@ -314,10 +314,20 @@ impl RetentionChecker {
         (last_pushed, last_pulled)
     }
 
-    fn rank_by<K: Ord>(tags: &[TagWithMetadata], key: impl Fn(&LinkMetadata) -> K) -> Vec<String> {
-        let mut indices: Vec<usize> = (0..tags.len()).collect();
-        indices.sort_by_cached_key(|&i| Reverse(key(&tags[i].metadata)));
-        indices.iter().map(|&i| tags[i].name.to_string()).collect()
+    /// Ranks tags most recent first, leaving out those carrying no such time: a
+    /// tag never pulled is not one of the "n most recently pulled", and ranking
+    /// it would make `top_pulled(n)` retain untouched tags forever in every
+    /// namespace holding n tags or fewer.
+    fn rank_by(
+        tags: &[TagWithMetadata],
+        key: impl Fn(&LinkMetadata) -> Option<DateTime<Utc>>,
+    ) -> Vec<String> {
+        let mut ranked: Vec<(Reverse<DateTime<Utc>>, String)> = tags
+            .iter()
+            .filter_map(|t| Some((Reverse(key(&t.metadata)?), t.name.to_string())))
+            .collect();
+        ranked.sort_by_key(|t| t.0);
+        ranked.into_iter().map(|(_, name)| name).collect()
     }
 
     fn get_deletable_tags<'a>(
@@ -528,16 +538,18 @@ mod tests {
         time::Duration as StdDuration,
     };
 
-    use angos_storage::{
-        Error as StorageError, ObjectStore,
-        test_util::{HookedStore, StoreHook, StoreOp},
-    };
     use chrono::{TimeZone, Utc};
     use tokio::time::sleep;
     use url::Url;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
-    use super::*;
+    use angos_oci::{Digest, Namespace};
+    use angos_storage::{
+        Error as StorageError, ObjectStore,
+        test_util::{HookedStore, StoreHook, StoreOp},
+    };
+
+    use crate::command::prune::checker::*;
     use crate::{
         command::maintenance::{
             action::Action,
@@ -549,7 +561,6 @@ mod tests {
             event::EventKind,
         },
         jobs::store::JobStore,
-        oci::{Digest, Namespace},
         policy::{CelRule, RetentionPolicy, RetentionPolicyConfig, SystemClock},
         registry::{
             Registry, RegistryConfig,
@@ -655,7 +666,7 @@ mod tests {
         let t2 = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
         let t3 = Utc.with_ymd_and_hms(2024, 12, 1, 0, 0, 0).unwrap();
 
-        let tags = vec![
+        let tags = [
             tag_with_times("oldest", Some(t1), None),
             tag_with_times("newest", Some(t3), None),
             tag_with_times("middle", Some(t2), None),
@@ -672,16 +683,19 @@ mod tests {
         assert!(ranked.is_empty());
     }
 
+    /// A tag carrying no such timestamp is unranked, so `top_pushed(n)` and
+    /// `top_pulled(n)` cannot retain it on a slot it never earned.
     #[test]
-    fn rank_by_all_none_timestamps_returns_all_names() {
-        let tags = vec![
+    fn rank_by_drops_tags_without_the_timestamp() {
+        let pushed = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let tags = [
             tag_with_times("alpha", None, None),
-            tag_with_times("beta", None, None),
+            tag_with_times("beta", Some(pushed), None),
         ];
+
         let ranked = RetentionChecker::rank_by(&tags, |m| m.created_at);
-        assert_eq!(ranked.len(), 2);
-        assert!(ranked.contains(&"alpha".to_string()));
-        assert!(ranked.contains(&"beta".to_string()));
+
+        assert_eq!(ranked, vec!["beta".to_string()]);
     }
 
     // build_sorted_rankings
@@ -700,7 +714,26 @@ mod tests {
 
         assert_eq!(last_pushed[0], "new");
         assert_eq!(last_pushed[1], "old");
-        assert_eq!(last_pulled.len(), 2);
+        assert!(last_pulled.is_empty());
+    }
+
+    /// A never-pulled tag is absent from the pull ranking, so `top_pulled(n)`
+    /// cannot retain it: without this, a namespace with n tags or fewer keeps
+    /// every tag forever, whatever their pull times.
+    #[test]
+    fn build_sorted_rankings_skips_never_pulled() {
+        let pushed = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let pulled = Utc.with_ymd_and_hms(2024, 12, 1, 0, 0, 0).unwrap();
+
+        let tags = vec![
+            tag_with_times("never-pulled", Some(pushed), None),
+            tag_with_times("pulled", Some(pushed), Some(pulled)),
+        ];
+
+        let (last_pushed, last_pulled) = RetentionChecker::build_sorted_rankings(&tags);
+
+        assert_eq!(last_pushed.len(), 2);
+        assert_eq!(last_pulled, vec!["pulled".to_string()]);
     }
 
     #[test]

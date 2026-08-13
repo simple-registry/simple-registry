@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, io};
+use std::io;
 
 use chrono::{DateTime, Utc};
 use futures_util::TryStreamExt;
@@ -6,19 +6,16 @@ use http_body_util::BodyExt;
 use hyper::{
     HeaderMap,
     body::Incoming,
-    header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue, RANGE},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue, RANGE},
 };
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
 
-use crate::{
-    command::server::error::Error,
-    http_range::{ByteWindow, Error as RangeError, RequestRange},
-    oci::{MediaRange, MediaType},
-    registry_client::X_ANGOS_SOURCE_TIMESTAMP,
-};
+use angos_oci::http_range::{ByteWindow, Error as RangeError, RequestRange};
+use angos_oci::server;
+use angos_oci::{MediaRange, MediaType};
 
-static QUALITY_PARAM: &str = "q";
+use crate::{command::server::error::Error, registry_client::X_ANGOS_SOURCE_TIMESTAMP};
 
 /// Set by the web UI to force an inline body instead of a presigned S3
 /// redirect: a browser `fetch` cannot follow the cross-origin redirect (the
@@ -37,38 +34,7 @@ impl<'a> RequestHeaders<'a> {
     }
 
     pub fn accepted_content_types(&self) -> Vec<MediaRange> {
-        let mut media_ranges = Vec::new();
-
-        for header in self.headers.get_all(ACCEPT) {
-            let Ok(header) = header.to_str() else {
-                continue;
-            };
-
-            for media_range in header.split(',') {
-                // A member that is not a media range is dropped rather than
-                // forwarded: angos re-sends these upstream and must not relay a
-                // malformed `Accept`.
-                let Ok(value) = MediaRange::new(media_range.trim()) else {
-                    continue;
-                };
-
-                media_ranges.push(AcceptMediaRange {
-                    quality: quality_for_media_range(value.as_str()),
-                    value,
-                    order: media_ranges.len(),
-                });
-            }
-        }
-
-        media_ranges.sort_by(|left, right| match right.quality.cmp(&left.quality) {
-            Ordering::Equal => left.order.cmp(&right.order),
-            ordering => ordering,
-        });
-
-        media_ranges
-            .into_iter()
-            .map(|media_range| media_range.value)
-            .collect()
+        server::accepted_content_types(self.headers)
     }
 
     pub fn content_length(&self) -> Result<Option<u64>, Error> {
@@ -176,13 +142,6 @@ impl<'a> RequestHeaders<'a> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct AcceptMediaRange {
-    value: MediaRange,
-    quality: u16,
-    order: usize,
-}
-
 fn not_satisfiable(error: &RangeError) -> Error {
     Error::RangeNotSatisfiable(error.to_string())
 }
@@ -196,40 +155,6 @@ fn parse_content_length(value: &HeaderValue) -> Result<u64, Error> {
         .trim()
         .parse::<u64>()
         .map_err(|error| Error::BadRequest(format!("Invalid Content-Length header value: {error}")))
-}
-
-fn quality_for_media_range(media_range: &str) -> u16 {
-    for parameter in media_range.split(';').skip(1) {
-        let Some((name, value)) = parameter.trim().split_once('=') else {
-            continue;
-        };
-
-        if name.trim().eq_ignore_ascii_case(QUALITY_PARAM) {
-            return parse_quality(value.trim()).unwrap_or(0);
-        }
-    }
-
-    1000
-}
-
-fn parse_quality(value: &str) -> Option<u16> {
-    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
-
-    match whole {
-        "1" if fraction.chars().all(|digit| digit == '0') && fraction.len() <= 3 => Some(1000),
-        "0" if fraction.chars().all(|digit| digit.is_ascii_digit()) && fraction.len() <= 3 => {
-            let mut quality = 0;
-            for index in 0..3 {
-                quality *= 10;
-                if let Some(digit) = fraction.as_bytes().get(index) {
-                    quality += u16::from(*digit - b'0');
-                }
-            }
-
-            Some(quality)
-        }
-        _ => None,
-    }
 }
 
 pub fn incoming_into_async_read(incoming: Incoming) -> impl AsyncRead {

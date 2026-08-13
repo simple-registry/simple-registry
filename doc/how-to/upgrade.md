@@ -456,3 +456,21 @@ The field is also gone from the denial audit log, and from the payload of regist
 ### Cached JWKS Refetched Once
 
 JWKS and discovery documents are now cached by issuer alone rather than by issuer and provider type. Existing cache entries are not read after the upgrade, so each issuer is fetched once more than usual on the first requests. No action is required.
+
+### Extension API Moved Into the Reserved Namespace (Breaking Change)
+
+The angos extension endpoints moved from the top-level `/_ext/` prefix into the extension namespace the distribution spec reserves, `/v2/_angos/`. The spec fixes the shape (`_<extension>/<component>/<module>`); `angos` is the extension name.
+
+| Before | After |
+| --- | --- |
+| `GET /_ext/_repositories` | `GET /v2/_angos/repositories/list` |
+| `GET /_ext/<repository>/_namespaces` | `GET /v2/_angos/namespaces/list?repository=<repository>` |
+| `GET /_ext/<namespace>/_revisions` | `GET /v2/<namespace>/_angos/revisions/list` |
+| `GET /_ext/<namespace>/_uploads` | `GET /v2/<namespace>/_angos/uploads/list` |
+| `GET /_ext/_jobs` | `GET /v2/_angos/jobs/list` |
+| `GET /_ext/_jobs/failed` | `GET /v2/_angos/jobs/failed` |
+| `POST /_ext/_jobs/failed/<key>/retry` | `POST /v2/_angos/jobs/failed?key=<key>` |
+| `DELETE /_ext/_jobs/<state>/<key>` | `DELETE /v2/_angos/jobs/<state>?key=<key>` |
+| `GET /_ui/config` | `GET /v2/_angos/ui/config` |
+
+Query parameters are unchanged. The web UI is served from `/` as before; only the API moved. Update any script or dashboard calling the old paths.

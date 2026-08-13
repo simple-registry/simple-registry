@@ -101,7 +101,7 @@ rules = [
 ]
 ```
 
-`top_pushed` and `top_pulled` rank tags, so untagged manifests and grant-only blobs never match them. With only count-based rules, everything untagged is deleted, including the revisions its own tag deletions orphan; that is what lets a top-n policy reclaim storage. Add a time-based rule such as `image.pushed_at > now() - days(7)` if recent untagged content must survive.
+`top_pushed` and `top_pulled` rank tags, so untagged manifests and grant-only blobs never match them. Each ranking lists the tags carrying the time it orders by: `top_pulled(5)` keeps up to five pulled tags, not five tags regardless, and a tag with no recorded push time is outside `top_pushed`. With only count-based rules, everything untagged is deleted, including the revisions its own tag deletions orphan; that is what lets a top-n policy reclaim storage. Add a time-based rule such as `image.pushed_at > now() - days(7)` if recent untagged content must survive.
 
 ### Semantic Version Tags
 
@@ -285,7 +285,7 @@ RUST_LOG=info ./angos prune --dry-run
 ### List Current Manifests
 
 ```bash
-curl http://localhost:8000/_ext/myrepo/myimage/_revisions | jq
+curl http://localhost:8000/v2/myrepo/myimage/_angos/revisions/list | jq
 ```
 
 ---
