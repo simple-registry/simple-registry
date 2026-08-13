@@ -143,6 +143,10 @@ namespace does not already own is not made readable: it resolves as unknown on a
 (`BLOB_UNKNOWN` for a blob, `MANIFEST_UNKNOWN` for a child manifest) until its content is pushed.
 Subject digests used for referrers are not required to exist in either mode.
 
+A `Content-Type` that disagrees with the body's own `mediaType` is rejected with `MANIFEST_INVALID`.
+Parameters on the header (`; charset=utf-8`) take no part in that comparison and are not stored, so a
+pull serves the bare media type whatever the push sent.
+
 When pushing by digest, one or more `?tag=` query parameters create the listed tags pointing at the
 pushed manifest, for example `PUT /v2/{namespace}/manifests/{digest}?tag=1.2.3&tag=latest`. Each
 value must be a valid tag; a value that is not a valid tag is rejected at routing with a generic

@@ -30,7 +30,9 @@ static MEDIA_TYPE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// A validated media type as carried by a manifest's `mediaType`, a descriptor,
 /// and the `Content-Type` of a manifest request. The private field forces
 /// construction through the validating constructors so a stored or wire value is
-/// always a well-formed RFC 6838 media type.
+/// always a well-formed RFC 6838 media type, reduced to its essence: a
+/// parameter section is accepted on the way in and dropped, since the spec has a
+/// registry ignore parameters on `Content-Type` and never send them back.
 #[derive(Clone, Debug, Ord, Eq, Hash, PartialEq, PartialOrd)]
 pub struct MediaType(String);
 
@@ -40,9 +42,18 @@ impl MediaType {
         MEDIA_TYPE_REGEX.is_match(s)
     }
 
+    /// The `type/subtype` ahead of any parameter section, which is what a
+    /// comparison and a stored value are made of.
+    fn essence(s: &str) -> &str {
+        match s.split_once(';') {
+            Some((essence, _)) => essence.trim_end(),
+            None => s,
+        }
+    }
+
     pub fn new(s: &str) -> Result<Self, Error> {
         if Self::is_valid(s) {
-            Ok(Self(s.to_owned()))
+            Ok(Self(Self::essence(s).to_owned()))
         } else {
             Err(Error::InvalidMediaType(s.to_string()))
         }
@@ -85,12 +96,15 @@ impl FromStr for MediaType {
 impl TryFrom<String> for MediaType {
     type Error = Error;
 
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        if Self::is_valid(&s) {
-            Ok(Self(s))
-        } else {
-            Err(Error::InvalidMediaType(s))
+    fn try_from(mut s: String) -> Result<Self, Self::Error> {
+        if !Self::is_valid(&s) {
+            return Err(Error::InvalidMediaType(s));
         }
+
+        let essence = Self::essence(&s).len();
+        s.truncate(essence);
+
+        Ok(Self(s))
     }
 }
 
@@ -191,10 +205,21 @@ mod tests {
         }
     }
 
+    /// A `Content-Type` parameter is accepted and dropped, so a header carrying
+    /// one compares equal to, and is served as, the bare media type.
     #[test]
-    fn test_content_type_with_parameters_accepted() {
-        let mt = MediaType::new("application/json; charset=utf-8").unwrap();
-        assert_eq!(mt.as_ref(), "application/json; charset=utf-8");
+    fn test_content_type_parameters_are_dropped() {
+        for input in [
+            "application/json; charset=utf-8",
+            "application/json;charset=utf-8",
+            "application/json\t; charset=utf-8; boundary=x",
+        ] {
+            assert_eq!(MediaType::new(input).unwrap(), "application/json");
+            assert_eq!(
+                MediaType::try_from(input.to_string()).unwrap(),
+                "application/json"
+            );
+        }
     }
 
     #[test]

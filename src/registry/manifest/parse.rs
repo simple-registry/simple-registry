@@ -177,12 +177,27 @@ pub fn parse_manifest_digests(
 mod tests {
     use serde_json::json;
 
-    use super::{parse_manifest_digests, recover_media_type};
+    use super::{parse_manifest_digests, parse_pushed_manifest, recover_media_type};
     use crate::oci::MediaType;
 
     const CHILD_DIGEST: &str =
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
     const MEDIA_TYPE_V2: &str = "application/vnd.docker.distribution.manifest.v2+json";
+
+    /// A `Content-Type` parameter is the sender's business: a header carrying
+    /// one still matches a body declaring the bare media type.
+    #[test]
+    fn a_parameterized_content_type_matches_the_body_media_type() {
+        let body = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "mediaType": MEDIA_TYPE_V2,
+        }))
+        .unwrap();
+        let content_type = MediaType::new(&format!("{MEDIA_TYPE_V2}; charset=utf-8")).unwrap();
+
+        parse_pushed_manifest(&body, Some(&content_type))
+            .expect("a parameterized content type must not fail the media type check");
+    }
 
     #[test]
     fn recover_media_type_prefers_the_body_media_type() {
