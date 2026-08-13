@@ -7,11 +7,11 @@ use hyper::{
 use crate::{
     command::server::{
         error::Error,
-        request::{ByteRange, RequestHeaders, X_ANGOS_NO_REDIRECT},
+        request::{RequestHeaders, X_ANGOS_NO_REDIRECT},
     },
+    http_range::RequestRange,
     http_response::ResponseBody,
     oci::{MediaRange, MediaType},
-    registry::BlobRange,
     registry_client::X_ANGOS_SOURCE_TIMESTAMP,
 };
 
@@ -29,7 +29,7 @@ fn test_range_with_bytes_prefix() {
         .unwrap();
     assert_eq!(
         range,
-        ByteRange {
+        RequestRange::FromTo {
             start: 0,
             end: Some(499)
         }
@@ -65,7 +65,7 @@ fn test_blob_range_with_bytes_prefix() {
         .unwrap();
     assert_eq!(
         range,
-        BlobRange::FromTo {
+        RequestRange::FromTo {
             start: 0,
             end: Some(499)
         }
@@ -86,7 +86,7 @@ fn test_blob_range_unit_is_case_insensitive() {
         .unwrap();
     assert_eq!(
         range,
-        BlobRange::FromTo {
+        RequestRange::FromTo {
             start: 0,
             end: Some(499)
         }
@@ -107,7 +107,7 @@ fn test_range_without_bytes_prefix() {
         .unwrap();
     assert_eq!(
         range,
-        ByteRange {
+        RequestRange::FromTo {
             start: 100,
             end: Some(200)
         }
@@ -128,7 +128,7 @@ fn test_content_range_without_bytes_prefix() {
         .unwrap();
     assert_eq!(
         range,
-        ByteRange {
+        RequestRange::FromTo {
             start: 100,
             end: Some(200)
         }
@@ -161,7 +161,7 @@ fn test_range_no_end() {
         .unwrap();
     assert_eq!(
         range,
-        ByteRange {
+        RequestRange::FromTo {
             start: 0,
             end: None
         }
@@ -180,7 +180,7 @@ fn test_blob_range_suffix_range() {
         .blob_range()
         .unwrap()
         .unwrap();
-    assert_eq!(range, BlobRange::Suffix(499));
+    assert_eq!(range, RequestRange::Suffix(499));
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn test_blob_range_zero_suffix_range() {
         .blob_range()
         .unwrap()
         .unwrap();
-    assert_eq!(range, BlobRange::Suffix(0));
+    assert_eq!(range, RequestRange::Suffix(0));
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn test_range_large_numbers() {
         .unwrap();
     assert_eq!(
         range,
-        ByteRange {
+        RequestRange::FromTo {
             start: 1_000_000_000,
             end: Some(2_000_000_000)
         }
@@ -243,7 +243,7 @@ fn test_range_custom_header_name() {
         .unwrap();
     assert_eq!(
         range,
-        ByteRange {
+        RequestRange::FromTo {
             start: 50,
             end: Some(100)
         }

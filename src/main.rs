@@ -26,6 +26,7 @@ mod command;
 mod configuration;
 mod event_webhook;
 pub mod http_client;
+mod http_range;
 mod http_response;
 mod identity;
 mod jobs;

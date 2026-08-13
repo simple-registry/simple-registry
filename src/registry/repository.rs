@@ -1,6 +1,7 @@
 use std::{collections::HashSet, num::NonZeroUsize, sync::Arc};
 
 use futures_util::future::BoxFuture;
+use hyper::header::HeaderValue;
 use serde::Deserialize;
 use tokio::task;
 use tracing::{instrument, warn};
@@ -332,7 +333,7 @@ impl Repository {
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
-        range: Option<&str>,
+        range: Option<&HeaderValue>,
     ) -> Result<FetchedBlob, Error> {
         self.try_upstreams(namespace, Error::BlobUnknown, |upstream| {
             Box::pin(async move {

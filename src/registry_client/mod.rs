@@ -14,7 +14,10 @@ use auth::token_index_cache_key;
 use futures_util::TryStreamExt;
 use reqwest::{
     Client, Method, RequestBuilder, Response, StatusCode,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LINK, RANGE},
+    header::{
+        ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderValue, LINK,
+        RANGE,
+    },
     redirect::Policy,
 };
 use serde::Deserialize;
@@ -31,6 +34,7 @@ pub use crate::registry_client::{
 use crate::{
     cache::Cache,
     http_client::apply_tls_files,
+    http_range::ResponseRange,
     oci::{Digest, MediaRange, MediaType, Reference, Tag},
     registry::{
         DOCKER_CONTENT_DIGEST, blob_store::BoxedReader, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
@@ -200,12 +204,12 @@ pub struct ManifestHead {
     pub size: u64,
 }
 
-/// A blob body streamed from an upstream. `content_range` carries the
-/// upstream's `Content-Range` when it answered a ranged fetch with `206`; when
+/// A blob body streamed from an upstream. `content_range` carries the window
+/// the upstream says it served when it answered a ranged fetch with `206`; when
 /// it is absent the reader carries the whole blob and `length` its full size.
 pub struct FetchedBlob {
     pub length: u64,
-    pub content_range: Option<String>,
+    pub content_range: Option<ResponseRange>,
     pub reader: BoxedReader,
 }
 
@@ -347,7 +351,7 @@ impl RegistryClient {
         method: &Method,
         accepted_types: &[MediaRange],
         location: &str,
-        range: Option<&str>,
+        range: Option<&HeaderValue>,
     ) -> Result<Response, Error> {
         debug!("Requesting from upstream: {}", without_query(location));
 
@@ -480,7 +484,7 @@ impl RegistryClient {
         accepted_types: &[MediaRange],
         location: &str,
         auth_header: Option<&str>,
-        range: Option<&str>,
+        range: Option<&HeaderValue>,
     ) -> Result<Response, Error> {
         self.build_request(method, accepted_types, location, auth_header, range)
             .send()
@@ -494,7 +498,7 @@ impl RegistryClient {
         accepted_types: &[MediaRange],
         location: &str,
         auth_header: Option<&str>,
-        range: Option<&str>,
+        range: Option<&HeaderValue>,
     ) -> RequestBuilder {
         let mut request = self.client.request(method.clone(), location);
         for accepted_type in accepted_types {
@@ -652,7 +656,7 @@ impl RegistryClient {
         &self,
         accepted_types: &[MediaRange],
         location: &str,
-        range: Option<&str>,
+        range: Option<&HeaderValue>,
     ) -> Result<FetchedBlob, Error> {
         let response = self
             .query(&Method::GET, accepted_types, location, range)

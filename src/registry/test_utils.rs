@@ -9,15 +9,14 @@ use uuid::Uuid;
 use crate::{
     cache,
     configuration::{GlobalConfig, RegexPattern},
+    http_range::RequestRange,
     jobs::Queue,
     jobs::store::JobStore,
     metrics_provider,
     oci::{Digest, MediaRange, MediaType, Namespace, Tag, UploadSessionId},
     policy::{RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::{
-        CompleteUploadRequest, Error, Registry, RegistryConfig, Repository,
-        blob::BlobRange,
-        blob_store,
+        CompleteUploadRequest, Error, Registry, RegistryConfig, Repository, blob_store,
         blob_store::{BlobStore, BlobStoreConfig},
         manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
         metadata_store::{LinkKind, LinkOperation, MetadataStore},
@@ -277,7 +276,7 @@ pub async fn get_blob(
     accepted_types: &[MediaRange],
     namespace: &Namespace,
     digest: &Digest,
-    range: Option<BlobRange>,
+    range: Option<RequestRange>,
 ) -> Result<Response<ResponseBody>, Error> {
     let has_access = registry
         .blob_ownership()

@@ -13,6 +13,7 @@ use crate::{
         request::{RequestHeaders, incoming_into_async_read},
     },
     event_webhook::event::EventActor,
+    http_range::RequestRange,
     http_response::ResponseBody,
     identity::{Action, ClientIdentity},
     registry::{
@@ -124,7 +125,7 @@ async fn dispatch_route<'a>(
                 PatchUploadRequest {
                     namespace,
                     session_id,
-                    start_offset: headers.range(CONTENT_RANGE)?.map(|range| range.start),
+                    start_offset: headers.range(CONTENT_RANGE)?.and_then(RequestRange::start),
                     content_length: headers.content_length()?,
                 },
                 incoming_into_async_read(incoming),
@@ -141,7 +142,7 @@ async fn dispatch_route<'a>(
                     namespace: &namespace,
                     session_id: &session_id,
                     digest: &digest,
-                    start_offset: headers.range(CONTENT_RANGE)?.map(|range| range.start),
+                    start_offset: headers.range(CONTENT_RANGE)?.and_then(RequestRange::start),
                     content_length: headers.content_length()?,
                 },
                 incoming_into_async_read(incoming),

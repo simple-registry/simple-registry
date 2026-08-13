@@ -7,7 +7,8 @@ use sha2::digest::common::hazmat::DeserializeStateError;
 use angos_tx_engine::{StorageError, error::Error as TxError, lock};
 
 use crate::{
-    configuration, jobs::store as job_store, oci, policy, registry::cache, registry_client,
+    configuration, http_range, jobs::store as job_store, oci, policy, registry::cache,
+    registry_client,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -195,6 +196,13 @@ impl From<registry_client::Error> for Error {
             registry_client::Error::RangeNotSatisfiable => Error::RangeNotSatisfiable,
             registry_client::Error::Internal(msg) => Error::Internal(msg),
         }
+    }
+}
+
+// A malformed range and an unservable one are both a 416 to the client.
+impl From<http_range::Error> for Error {
+    fn from(_: http_range::Error) -> Self {
+        Error::RangeNotSatisfiable
     }
 }
 

@@ -13,12 +13,11 @@ use tokio_util::io::StreamReader;
 
 use crate::{
     command::server::error::Error,
+    http_range::{Error as RangeError, RequestRange},
     oci::{MediaRange, MediaType},
-    registry::BlobRange,
     registry_client::X_ANGOS_SOURCE_TIMESTAMP,
 };
 
-static BYTES_RANGE_PREFIX: &str = "bytes=";
 static QUALITY_PARAM: &str = "q";
 
 /// Set by the web UI to force an inline body instead of a presigned S3
@@ -26,14 +25,6 @@ static QUALITY_PARAM: &str = "q";
 /// presigned URL carries no CORS headers) and loses `Docker-Content-Digest`.
 /// OCI clients never send it, so their redirect fast path is unaffected.
 pub const X_ANGOS_NO_REDIRECT: &str = "X-Angos-No-Redirect";
-
-/// A `start-end` byte range parsed from a `Range` or `Content-Range` header;
-/// `end` is absent for an open-ended one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ByteRange {
-    pub start: u64,
-    pub end: Option<u64>,
-}
 
 #[derive(Clone, Debug)]
 pub struct RequestHeaders<'a> {
@@ -147,44 +138,26 @@ impl<'a> RequestHeaders<'a> {
         Some(parsed.min(Utc::now()))
     }
 
-    pub fn range(&self, header: HeaderName) -> Result<Option<ByteRange>, Error> {
+    /// The upload offset carried by `header`, which chunked-upload clients send
+    /// both bare and `bytes=`-prefixed.
+    pub fn range(&self, header: HeaderName) -> Result<Option<RequestRange>, Error> {
         let Some(range_header) = self.header_string(header)? else {
             return Ok(None);
         };
 
-        // The prefix is optional here: ranged offsets arrive both bare and
-        // `bytes=`-prefixed in the wild.
-        let range_value = strip_bytes_prefix(&range_header).unwrap_or(&range_header);
-        parse_start_end_range(range_value).map(Some)
+        RequestRange::parse_offset(&range_header)
+            .map(Some)
+            .map_err(|error| not_satisfiable(&error))
     }
 
-    pub fn blob_range(&self) -> Result<Option<BlobRange>, Error> {
+    /// The window a blob `GET` asks for, `None` when it names none or names
+    /// several (which is answered with the whole blob).
+    pub fn blob_range(&self) -> Result<Option<RequestRange>, Error> {
         let Some(range_header) = self.header_string(RANGE)? else {
             return Ok(None);
         };
 
-        let Some(range_value) = strip_bytes_prefix(&range_header) else {
-            return Err(invalid_range_header(&range_header));
-        };
-
-        if range_value.contains(',') {
-            return Ok(None);
-        }
-
-        if let Some(suffix) = range_value.strip_prefix('-') {
-            if !is_digits(suffix) {
-                return Err(invalid_range_header(&range_header));
-            }
-            return Ok(Some(BlobRange::Suffix(parse_range_number(
-                suffix, "suffix",
-            )?)));
-        }
-
-        let range = parse_start_end_range(range_value)?;
-        Ok(Some(BlobRange::FromTo {
-            start: range.start,
-            end: range.end,
-        }))
+        RequestRange::parse(&range_header).map_err(|error| not_satisfiable(&error))
     }
 
     fn header_string(&self, header: HeaderName) -> Result<Option<String>, Error> {
@@ -207,55 +180,8 @@ struct AcceptMediaRange {
     order: usize,
 }
 
-fn strip_bytes_prefix(range_header: &str) -> Option<&str> {
-    if range_header.len() < BYTES_RANGE_PREFIX.len() {
-        return None;
-    }
-
-    let (prefix, range_value) = range_header.split_at(BYTES_RANGE_PREFIX.len());
-    prefix
-        .eq_ignore_ascii_case(BYTES_RANGE_PREFIX)
-        .then_some(range_value)
-}
-
-fn invalid_range_header(range_header: &str) -> Error {
-    let msg = format!("Invalid Range header format: '{range_header}'");
-    Error::RangeNotSatisfiable(msg)
-}
-
-/// Parses a `start-end` range value where `end` is optional (`100-200`, `0-`).
-fn parse_start_end_range(range_value: &str) -> Result<ByteRange, Error> {
-    let (start, end) = range_value
-        .split_once('-')
-        .filter(|(start, end)| is_digits(start) && (end.is_empty() || is_digits(end)))
-        .ok_or_else(|| invalid_range_header(range_value))?;
-
-    let start = parse_range_number(start, "start")?;
-    if end.is_empty() {
-        return Ok(ByteRange { start, end: None });
-    }
-
-    let end = parse_range_number(end, "end")?;
-    if start > end {
-        let msg = format!("Invalid Range header: start ({start}) > end ({end})");
-        return Err(Error::RangeNotSatisfiable(msg));
-    }
-
-    Ok(ByteRange {
-        start,
-        end: Some(end),
-    })
-}
-
-fn is_digits(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn parse_range_number(value: &str, part: &str) -> Result<u64, Error> {
-    value.parse::<u64>().map_err(|error| {
-        let msg = format!("Error parsing '{part}' in Range header: {error}");
-        Error::RangeNotSatisfiable(msg)
-    })
+fn not_satisfiable(error: &RangeError) -> Error {
+    Error::RangeNotSatisfiable(error.to_string())
 }
 
 fn parse_content_length(value: &HeaderValue) -> Result<u64, Error> {

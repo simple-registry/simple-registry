@@ -53,7 +53,7 @@ pub use admin::{
     DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
     ListUploadsRequest, RetryJobRequest,
 };
-pub use blob::{BlobRange, DeleteBlobRequest, GetBlobRequest, HeadBlobRequest};
+pub use blob::{DeleteBlobRequest, GetBlobRequest, HeadBlobRequest};
 use blob_ownership::BlobOwnership;
 pub use content_discovery::{GetReferrersRequest, ListCatalogRequest, ListTagsRequest};
 pub use error::Error;
