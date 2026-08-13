@@ -2,7 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import { getRegistryName } from '$lib/config.svelte';
-	import { fetchRevisions, fetchUploads, fetchManifest, fetchNamespaces, deleteManifest as apiDeleteManifest, cancelUpload as apiCancelUpload, blobUrl, type UploadEntry, type ParentRef, type Manifest, type ReferrerInfo } from '$lib/api';
+	import { fetchRevisions, fetchUploads, fetchManifest, fetchNamespaces, fetchReferrers, deleteManifest as apiDeleteManifest, cancelUpload as apiCancelUpload, blobUrl, type UploadEntry, type ParentRef, type Manifest, type ReferrerInfo } from '$lib/api';
 	import { buildTree, buildTreeRows, descendantNamespaces, isInteractiveTarget, pathUrl, manifestUrl, type NamespaceDescendant, type TreeRowNode } from '$lib/utils';
 	import LoadingState from '$lib/components/LoadingState.svelte';
 	import ErrorState from '$lib/components/ErrorState.svelte';
@@ -38,6 +38,10 @@
 	let tags: string[] = $state([]);
 	let referencedBy: ParentRef[] = $state([]);
 	let childReferrers: Map<string, ReferrerInfo[]> = $state(new Map());
+	// Where each manifest's referrer listing continues; a manifest absent from
+	// the map has none left to load.
+	let childReferrersNext: Map<string, string> = $state(new Map());
+	let loadingReferrers: string | null = $state(null);
 
 	let loading = $state(true);
 	let error: string | null = $state(null);
@@ -137,6 +141,7 @@
 			tags = [];
 			referencedBy = [];
 			childReferrers = new Map();
+			childReferrersNext = new Map();
 		}
 
 		const result = await fetchManifest(namespace, reference);
@@ -160,15 +165,48 @@
 					referencedBy = entry.parents ?? [];
 				}
 				const newChildReferrers = new Map<string, ReferrerInfo[]>();
+				const newChildReferrersNext = new Map<string, string>();
 				for (const m of revisionsResult.data.manifests) {
 					if (m.referrers && m.referrers.length > 0) {
 						newChildReferrers.set(m.digest, m.referrers);
 					}
+					if (m.referrers_next) {
+						newChildReferrersNext.set(m.digest, m.referrers_next);
+					}
 				}
 				childReferrers = newChildReferrers;
+				childReferrersNext = newChildReferrersNext;
 			}
 		}
 		loading = false;
+	}
+
+	// Append the next page of a manifest's referrers, keeping the cursor the
+	// server hands back so the control disappears once the listing is exhausted.
+	async function loadMoreReferrers(childDigest: string) {
+		const last = childReferrersNext.get(childDigest);
+		if (!last) return;
+
+		loadingReferrers = childDigest;
+		actionError = null;
+		const result = await fetchReferrers(data.path, childDigest, last);
+		loadingReferrers = null;
+		if (result.error || !result.data) {
+			actionError = `Loading more referrers failed (${result.error}).`;
+			return;
+		}
+
+		const merged = new Map(childReferrers);
+		merged.set(childDigest, [...(merged.get(childDigest) ?? []), ...result.data.referrers]);
+		childReferrers = merged;
+
+		const cursors = new Map(childReferrersNext);
+		if (result.data.next) {
+			cursors.set(childDigest, result.data.next);
+		} else {
+			cursors.delete(childDigest);
+		}
+		childReferrersNext = cursors;
 	}
 
 	// Refresh the view a delete was taken from. Reloading by a reference that
@@ -277,6 +315,9 @@
 		{tags}
 		{referencedBy}
 		{childReferrers}
+		{childReferrersNext}
+		{loadingReferrers}
+		onloadmorereferrers={loadMoreReferrers}
 		{deleteConfirm}
 		{deleting}
 		ondeletetag={deleteByReference}

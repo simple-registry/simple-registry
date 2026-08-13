@@ -1,10 +1,12 @@
-use futures_util::stream::TryStreamExt;
+use futures_util::stream::{self, StreamExt};
 use hyper::{
     HeaderMap, Response, StatusCode,
     header::{CONTENT_TYPE, HeaderValue, LINK},
 };
 use serde::Serialize;
 use tracing::{instrument, warn};
+
+use angos_storage::Page;
 
 use crate::{
     http_response::{ResponseBody, build_response, json_headers},
@@ -37,14 +39,22 @@ pub struct TagsBody {
     pub tags: Vec<Tag>,
 }
 
-fn paginated_json_headers(link: Option<&str>) -> Result<HeaderMap, Error> {
-    let mut headers = json_headers();
+/// Advertises `link` as the next page, which a listing does only while it is
+/// not exhausted.
+fn insert_next_link(headers: &mut HeaderMap, link: Option<&str>) -> Result<(), Error> {
     if let Some(link) = link {
         headers.insert(
             LINK,
             HeaderValue::try_from(format!("<{link}>; rel=\"next\""))?,
         );
     }
+
+    Ok(())
+}
+
+fn paginated_json_headers(link: Option<&str>) -> Result<HeaderMap, Error> {
+    let mut headers = json_headers();
+    insert_next_link(&mut headers, link)?;
 
     Ok(headers)
 }
@@ -53,6 +63,8 @@ pub struct GetReferrersRequest {
     pub namespace: Namespace,
     pub digest: Digest,
     pub artifact_type: Option<MediaType>,
+    pub n: Option<u16>,
+    pub last: Option<String>,
 }
 
 /// The OCI image-index body a referrers listing serves.
@@ -68,7 +80,7 @@ pub struct ReferrerList {
 
 /// A listing that honoured an `artifactType` filter must advertise it, so a
 /// client can tell a filtered index from a complete one.
-fn referrers_headers(artifact_type_filtered: bool) -> Result<HeaderMap, Error> {
+fn referrers_headers(artifact_type_filtered: bool, link: Option<&str>) -> Result<HeaderMap, Error> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::try_from(OCI_INDEX_MEDIA_TYPE)?);
     if artifact_type_filtered {
@@ -77,6 +89,7 @@ fn referrers_headers(artifact_type_filtered: bool) -> Result<HeaderMap, Error> {
             HeaderValue::from_static("artifactType"),
         );
     }
+    insert_next_link(&mut headers, link)?;
 
     Ok(headers)
 }
@@ -145,65 +158,87 @@ impl Registry {
         )?)
     }
 
-    /// Resolves a subject's referrers into the OCI image index that serves them.
+    /// Resolves one page of a subject's referrers into the OCI image index that
+    /// serves them, advertising the next page through the `Link` header when
+    /// the listing is not exhausted.
     #[instrument(skip(request))]
     pub async fn get_referrers(
         &self,
         request: GetReferrersRequest,
     ) -> Result<Response<ResponseBody>, Error> {
-        let filter_applied = request.artifact_type.is_some();
-        let manifests = self
-            .list_referrers(&request.namespace, &request.digest, request.artifact_type)
+        let n = request.n.unwrap_or(DEFAULT_PAGE_SIZE);
+        let filter = request.artifact_type;
+        let page = self
+            .list_referrers(
+                &request.namespace,
+                &request.digest,
+                filter.clone(),
+                n,
+                request.last,
+            )
             .await?;
+
+        // The filter rides along on the next page: dropping it there would
+        // widen the listing halfway through a client's walk.
+        let namespace = &request.namespace;
+        let digest = &request.digest;
+        let link = page.next_token.as_ref().map(|last| {
+            let filter = filter
+                .as_ref()
+                .map_or_else(String::new, |filter| format!("artifactType={filter}&"));
+            format!("/v2/{namespace}/referrers/{digest}?{filter}n={n}&last={last}")
+        });
 
         let body = ReferrerList {
             schema_version: OCI_MANIFEST_SCHEMA_VERSION,
             media_type: OCI_INDEX_MEDIA_TYPE,
-            manifests,
+            manifests: page.items,
         };
 
         Ok(build_response(
             StatusCode::OK,
-            referrers_headers(filter_applied)?,
+            referrers_headers(filter.is_some(), link.as_deref())?,
             ResponseBody::fixed(serde_json::to_vec(&body)?),
         )?)
     }
 
-    /// Resolves every referrer of `digest` in `namespace` to a sorted
+    /// Resolves one page of `digest`'s referrers in `namespace` to a sorted
     /// descriptor list, filtered by `artifact_type` when given.
+    ///
+    /// The page is cut over the candidate digests, so a filter that drops
+    /// entries yields a page shorter than `n` while the continuation token
+    /// still names where to resume.
     #[instrument]
     pub async fn list_referrers(
         &self,
         namespace: &Namespace,
         digest: &Digest,
         artifact_type: Option<MediaType>,
-    ) -> Result<Vec<Descriptor>, Error> {
+        n: u16,
+        last: Option<String>,
+    ) -> Result<Page<Descriptor>, Error> {
         let artifact_type = artifact_type.as_ref();
-
-        // Candidate digests stream off the listing while up to
-        // `REFERRER_RESOLVE_CONCURRENCY` of them resolve concurrently, so the
-        // resolution window spans page boundaries and overlaps the page fetches.
-        let mut referrers: Vec<Descriptor> = self
+        let candidates = self
             .metadata_store
-            .stream_referrer_digests(namespace, digest)
-            .map_ok(|manifest_digest| async move {
-                Ok::<_, Error>(
-                    self.resolve_referrer_descriptor(
-                        namespace,
-                        digest,
-                        manifest_digest,
-                        artifact_type,
-                    )
-                    .await,
-                )
-            })
-            .try_buffer_unordered(REFERRER_RESOLVE_CONCURRENCY)
-            .try_filter_map(|descriptor| async move { Ok(descriptor) })
-            .try_collect()
+            .list_referrer_digests(namespace, digest, n, last)
             .await?;
 
+        // Up to `REFERRER_RESOLVE_CONCURRENCY` candidates resolve at once, each
+        // one an independent manifest read.
+        let mut referrers: Vec<Descriptor> = stream::iter(candidates.items)
+            .map(|manifest_digest| {
+                self.resolve_referrer_descriptor(namespace, digest, manifest_digest, artifact_type)
+            })
+            .buffer_unordered(REFERRER_RESOLVE_CONCURRENCY)
+            .filter_map(|descriptor| async move { descriptor })
+            .collect()
+            .await;
+
         referrers.sort_by(|a, b| a.digest.cmp(&b.digest));
-        Ok(referrers)
+        Ok(Page {
+            items: referrers,
+            next_token: candidates.next_token,
+        })
     }
 
     /// Resolves a single referrer entry to an OCI [`Descriptor`], applying an
@@ -274,7 +309,10 @@ mod tests {
 
     use hyper::header::LINK;
 
-    use super::{ListCatalogRequest, ListTagsRequest, Response, ResponseBody};
+    use super::{
+        DEFAULT_PAGE_SIZE, GetReferrersRequest, ListCatalogRequest, ListTagsRequest, Response,
+        ResponseBody,
+    };
 
     /// The `last` cursor a client would follow out of a `Link` header, or
     /// `None` once the listing is exhausted and no `Link` is advertised.
@@ -294,6 +332,25 @@ mod tests {
             .expect("the listing field must be an array")
             .iter()
             .map(|value| value.as_str().expect("entries are strings").to_string())
+            .collect()
+    }
+
+    /// The `field` of every object in a response's `array` field.
+    async fn json_strings_at(
+        response: Response<ResponseBody>,
+        array: &str,
+        field: &str,
+    ) -> Vec<String> {
+        response_json(response).await[array]
+            .as_array()
+            .expect("the listing field must be an array")
+            .iter()
+            .map(|entry| {
+                entry[field]
+                    .as_str()
+                    .expect("entries carry the field")
+                    .to_string()
+            })
             .collect()
     }
 
@@ -552,12 +609,12 @@ mod tests {
                 .unwrap();
 
             let referrers = registry
-                .list_referrers(namespace, &base_manifest_digest, None)
+                .list_referrers(namespace, &base_manifest_digest, None, DEFAULT_PAGE_SIZE, None)
                 .await
                 .unwrap();
 
-            assert_eq!(referrers.len(), 1);
-            assert_eq!(referrers[0].digest, referrer_manifest_digest);
+            assert_eq!(referrers.items.len(), 1);
+            assert_eq!(referrers.items[0].digest, referrer_manifest_digest);
         })
         .await;
     }
@@ -821,10 +878,69 @@ mod tests {
         create_referrer_link(&registry.metadata_store, &manifest_digest, None).await;
 
         let referrers = registry
-            .list_referrers(&referrer_namespace(), &subject(), None)
+            .list_referrers(
+                &referrer_namespace(),
+                &subject(),
+                None,
+                DEFAULT_PAGE_SIZE,
+                None,
+            )
             .await
             .unwrap();
-        assert_eq!(referrers.len(), 1);
-        assert_eq!(referrers[0].digest, manifest_digest);
+        assert_eq!(referrers.items.len(), 1);
+        assert_eq!(referrers.items[0].digest, manifest_digest);
+    }
+
+    /// A wide fan-out is served one page at a time: following `Link` visits
+    /// every referrer exactly once and no single response carries them all.
+    #[tokio::test]
+    async fn get_referrers_pages_through_the_fan_out() {
+        let case = FSRegistryTestCase::with_split_backends();
+        let registry = case.registry();
+
+        // A cached descriptor answers each candidate, so the page size alone
+        // decides how many entries a response resolves.
+        let mut expected = Vec::new();
+        for index in 0..5u8 {
+            let digest = Digest::sha256_of_bytes([index]);
+            create_referrer_link(
+                &registry.metadata_store,
+                &digest,
+                Some(descriptor_with(None, &digest)),
+            )
+            .await;
+            expected.push(digest.to_string());
+        }
+        expected.sort();
+
+        let mut served = Vec::new();
+        let mut last = None;
+        loop {
+            let response = registry
+                .get_referrers(GetReferrersRequest {
+                    namespace: referrer_namespace(),
+                    digest: subject(),
+                    artifact_type: None,
+                    n: Some(2),
+                    last,
+                })
+                .await
+                .unwrap();
+            let cursor = next_cursor(&response);
+            let page = json_strings_at(response, "manifests", "digest").await;
+            assert!(page.len() <= 2, "a page must not exceed the requested size");
+            served.extend(page);
+
+            // Follow the advertised `Link` exactly as a paging client would.
+            match cursor {
+                None => break,
+                Some(cursor) => last = Some(cursor),
+            }
+        }
+
+        assert_eq!(
+            served, expected,
+            "paging must visit every referrer exactly once, in digest order"
+        );
     }
 }

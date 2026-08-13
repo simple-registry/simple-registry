@@ -8,6 +8,7 @@ export interface Descriptor {
 	mediaType: string;
 	digest: string;
 	size: number;
+	artifactType?: string;
 	platform?: Platform;
 	annotations?: Record<string, string>;
 }
@@ -39,8 +40,15 @@ export interface ManifestEntry {
 	tags: string[];
 	parents?: ParentRef[];
 	referrers?: ReferrerInfo[];
+	/// Cursor the referrers listing continues from, absent once exhausted.
+	referrers_next?: string;
 	pushed_at?: string;
 	last_pulled_at?: string;
+}
+
+export interface ReferrersPage {
+	referrers: ReferrerInfo[];
+	next?: string;
 }
 
 export interface UploadEntry {
@@ -129,6 +137,9 @@ const MANIFEST_ACCEPT_HEADER = [
 	'application/vnd.oci.image.index.v1+json',
 	'application/vnd.docker.distribution.manifest.list.v2+json'
 ].join(', ');
+
+/// Referrers fetched per request when browsing past the first page.
+const REFERRERS_PAGE = 100;
 
 interface FetchResult<T> {
 	data: T | null;
@@ -243,6 +254,43 @@ export async function fetchManifest(namespace: string, reference: string): Promi
 		return { manifest, digest, error: null };
 	} catch (e) {
 		return { manifest: null, digest: null, error: e instanceof Error ? e.message : 'Request failed' };
+	}
+}
+
+/// The `last` cursor of a `Link: <...?last=X>; rel="next"` header, absent when
+/// the listing is exhausted and no such header is sent.
+function nextCursor(response: Response): string | undefined {
+	const link = response.headers.get('Link');
+	const cursor = link?.split('last=')[1]?.split('>')[0];
+	return cursor ? decodeURIComponent(cursor) : undefined;
+}
+
+/// One page of a subject's referrers, resuming from `last` when given.
+export async function fetchReferrers(
+	namespace: string,
+	digest: string,
+	last?: string
+): Promise<FetchResult<ReferrersPage>> {
+	const params = new URLSearchParams({ n: String(REFERRERS_PAGE) });
+	if (last) {
+		params.set('last', last);
+	}
+	try {
+		const response = await fetch(`/v2/${namespace}/referrers/${digest}?${params}`, {
+			headers: { 'X-Angos-No-Redirect': '1' }
+		});
+		if (!response.ok) {
+			return { data: null, error: `HTTP ${response.status}` };
+		}
+		const index: { manifests?: Descriptor[] } = await response.json();
+		const referrers = (index.manifests ?? []).map(descriptor => ({
+			digest: descriptor.digest,
+			artifactType: descriptor.artifactType,
+			annotations: descriptor.annotations
+		}));
+		return { data: { referrers, next: nextCursor(response) }, error: null };
+	} catch (e) {
+		return { data: null, error: e instanceof Error ? e.message : 'Request failed' };
 	}
 }
 

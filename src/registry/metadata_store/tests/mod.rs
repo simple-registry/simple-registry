@@ -25,6 +25,7 @@ use crate::{
     oci::{Algorithm, Descriptor, Digest, MediaType, Namespace, Tag},
     registry::{
         Error, Registry,
+        content_discovery::DEFAULT_PAGE_SIZE,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation, MetadataStore},
         path_builder,
         s3_connection::S3ConnectionConfig,
@@ -365,7 +366,9 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
 
     create_link(&m, namespace, &referrers_link, &referrer_digest).await;
 
-    let referrers = registry.list_referrers(namespace, &base_digest, None).await;
+    let referrers = registry
+        .list_referrers(namespace, &base_digest, None, DEFAULT_PAGE_SIZE, None)
+        .await;
 
     let expected = vec![Descriptor {
         media_type: media_type("application/vnd.oci.image.manifest.v1+json"),
@@ -376,29 +379,33 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
         platform: None,
     }];
 
-    assert_eq!(referrers.unwrap(), expected);
+    assert_eq!(referrers.unwrap().items, expected);
 
     let filtered_referrers = registry
         .list_referrers(
             namespace,
             &base_digest,
             Some(media_type("application/vnd.example.test-artifact")),
+            DEFAULT_PAGE_SIZE,
+            None,
         )
         .await
         .unwrap();
 
-    assert!(!filtered_referrers.is_empty());
+    assert!(!filtered_referrers.items.is_empty());
 
     let non_matching_referrers = registry
         .list_referrers(
             namespace,
             &base_digest,
             Some(media_type("application/vnd.non-existent")),
+            DEFAULT_PAGE_SIZE,
+            None,
         )
         .await
         .unwrap();
 
-    assert!(non_matching_referrers.is_empty());
+    assert!(non_matching_referrers.items.is_empty());
 }
 
 pub async fn test_datastore_stream_revisions(m: Arc<MetadataStore>) {
@@ -945,18 +952,18 @@ pub async fn test_datastore_list_referrers_parallel_correctness(registry: &Regis
     }
 
     let descriptors = registry
-        .list_referrers(namespace, &subject_digest, None)
+        .list_referrers(namespace, &subject_digest, None, DEFAULT_PAGE_SIZE, None)
         .await
         .unwrap();
 
     assert_eq!(
-        descriptors.len(),
+        descriptors.items.len(),
         5,
         "Expected 5 referrer descriptors but got {}",
-        descriptors.len()
+        descriptors.items.len()
     );
 
-    for pair in descriptors.windows(2) {
+    for pair in descriptors.items.windows(2) {
         assert!(
             pair[0].digest.to_string() <= pair[1].digest.to_string(),
             "Descriptors should be sorted by digest: {} should come before {}",
@@ -1042,18 +1049,20 @@ pub async fn test_datastore_list_referrers_with_artifact_type_filter(registry: &
             namespace,
             &subject_digest,
             Some(media_type("application/vnd.example.sbom")),
+            DEFAULT_PAGE_SIZE,
+            None,
         )
         .await
         .unwrap();
 
     assert_eq!(
-        descriptors.len(),
+        descriptors.items.len(),
         3,
         "Expected 3 SBOM referrer descriptors but got {}",
-        descriptors.len()
+        descriptors.items.len()
     );
 
-    for desc in &descriptors {
+    for desc in &descriptors.items {
         assert_eq!(
             desc.artifact_type.as_deref(),
             Some("application/vnd.example.sbom"),
@@ -1102,23 +1111,23 @@ pub async fn test_datastore_list_referrers_deterministic_order(registry: &Regist
     }
 
     let result1 = registry
-        .list_referrers(namespace, &subject_digest, None)
+        .list_referrers(namespace, &subject_digest, None, DEFAULT_PAGE_SIZE, None)
         .await
         .unwrap();
     let result2 = registry
-        .list_referrers(namespace, &subject_digest, None)
+        .list_referrers(namespace, &subject_digest, None, DEFAULT_PAGE_SIZE, None)
         .await
         .unwrap();
     let result3 = registry
-        .list_referrers(namespace, &subject_digest, None)
+        .list_referrers(namespace, &subject_digest, None, DEFAULT_PAGE_SIZE, None)
         .await
         .unwrap();
 
     assert_eq!(
-        result1.len(),
+        result1.items.len(),
         10,
         "Expected 10 referrer descriptors but got {}",
-        result1.len()
+        result1.items.len()
     );
     assert_eq!(
         result1, result2,
@@ -1129,7 +1138,7 @@ pub async fn test_datastore_list_referrers_deterministic_order(registry: &Regist
         "Second and third list_referrers calls should return identical results"
     );
 
-    for pair in result1.windows(2) {
+    for pair in result1.items.windows(2) {
         assert!(
             pair[0].digest.to_string() <= pair[1].digest.to_string(),
             "Descriptors should be sorted by digest: {} should come before {}",
@@ -2065,34 +2074,38 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
 
     // list_referrers should return the stored descriptor without reading a blob
     let referrers = registry
-        .list_referrers(namespace, &base_digest, None)
+        .list_referrers(namespace, &base_digest, None, DEFAULT_PAGE_SIZE, None)
         .await
         .unwrap();
 
-    assert_eq!(referrers.len(), 1, "Expected 1 referrer descriptor");
-    assert_eq!(referrers[0], descriptor);
+    assert_eq!(referrers.items.len(), 1, "Expected 1 referrer descriptor");
+    assert_eq!(referrers.items[0], descriptor);
 
     let filtered = registry
         .list_referrers(
             namespace,
             &base_digest,
             Some(media_type("application/vnd.example.test-artifact")),
+            DEFAULT_PAGE_SIZE,
+            None,
         )
         .await
         .unwrap();
-    assert_eq!(filtered.len(), 1, "Should match artifact type filter");
-    assert_eq!(filtered[0], descriptor);
+    assert_eq!(filtered.items.len(), 1, "Should match artifact type filter");
+    assert_eq!(filtered.items[0], descriptor);
 
     let non_matching = registry
         .list_referrers(
             namespace,
             &base_digest,
             Some(media_type("application/vnd.non-existent")),
+            DEFAULT_PAGE_SIZE,
+            None,
         )
         .await
         .unwrap();
     assert!(
-        non_matching.is_empty(),
+        non_matching.items.is_empty(),
         "Should return empty for non-matching artifact type"
     );
 }

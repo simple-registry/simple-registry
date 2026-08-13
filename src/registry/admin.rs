@@ -19,7 +19,7 @@ use crate::{
         Content, DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
         MediaType, Namespace, Platform as OciPlatform, Tag, UploadSessionId, namespace_belongs_to,
     },
-    registry::{Error, Registry, metadata_store::LinkKind},
+    registry::{Error, Registry, content_discovery::DEFAULT_PAGE_SIZE, metadata_store::LinkKind},
 };
 
 #[derive(Debug)]
@@ -156,6 +156,10 @@ pub struct ManifestEntry {
     parents: Vec<ParentRef>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     referrers: Vec<ReferrerInfo>,
+    /// Where the OCI referrers listing continues, absent once it is exhausted.
+    /// The UI feeds it back to `/v2/{namespace}/referrers/{digest}?last=`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    referrers_next: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pushed_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -746,8 +750,15 @@ impl Registry {
 
         stream::iter(seeds)
             .map(|(digest, tags, parents, mut referrers)| async move {
-                if let Ok(oci_referrers) = self.list_referrers(namespace, &digest, None).await {
-                    referrers.extend(oci_referrers.into_iter().map(ReferrerInfo::from));
+                // One page per manifest: the rest is browsed through the OCI
+                // referrers endpoint, from the cursor handed back here.
+                let mut referrers_next = None;
+                if let Ok(page) = self
+                    .list_referrers(namespace, &digest, None, DEFAULT_PAGE_SIZE, None)
+                    .await
+                {
+                    referrers.extend(page.items.into_iter().map(ReferrerInfo::from));
+                    referrers_next = page.next_token;
                 }
 
                 let (pushed_at, last_pulled_at) = self
@@ -761,6 +772,7 @@ impl Registry {
                     tags,
                     parents,
                     referrers,
+                    referrers_next,
                     pushed_at,
                     last_pulled_at,
                 }

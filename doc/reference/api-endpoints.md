@@ -228,6 +228,10 @@ List manifests that reference a subject digest.
 
 Query parameters:
 - `artifactType` - Filter by artifact type
+- `n` - Maximum number of results (default 100)
+- `last` - Pagination marker
+
+A subject with more referrers than the page size is served one page at a time, with the next page advertised in a `Link` header carrying `rel="next"`; the link repeats the `artifactType` filter so following it keeps the listing filtered. A filtered page holds at most `n` entries and may hold fewer, since the filter is applied after the page is cut.
 
 ---
 

@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Breaking:** `identity.oidc.provider_type` is removed from access policies and the denial audit log. It only ever distinguished the two built-in provider types; `identity.oidc.provider_name`, the entry's own name, tells providers apart.
 - Cached JWKS and discovery documents are keyed by issuer alone rather than by issuer and provider type, so two entries trusting one issuer share a fetch. Existing entries are refetched once on upgrade.
 - Response header names are emitted lowercase (`docker-content-digest`, `oci-subject`). HTTP header names are case-insensitive, so OCI clients are unaffected; a script matching the previous mixed-case spelling is not.
+- The referrers endpoint accepts `?n=` and `?last=` and pages at 100 entries by default, advertising the next page in a `Link` header, so a widely referenced subject no longer resolves and serves every referrer in one response. The web UI loads the first page with the manifest and reaches the rest through a "Load more referrers" control.
 
 ### Fixed
 

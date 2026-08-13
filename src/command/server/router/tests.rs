@@ -632,6 +632,7 @@ fn test_parse_get_referrer() {
         namespace,
         digest,
         artifact_type,
+        ..
     }) = route
     {
         assert_eq!(namespace, "myrepo/app");
@@ -654,6 +655,7 @@ fn test_parse_get_referrer_with_artifact_type() {
         namespace,
         digest,
         artifact_type,
+        ..
     }) = route
     {
         assert_eq!(namespace, "myrepo/app");

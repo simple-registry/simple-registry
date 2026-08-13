@@ -106,6 +106,7 @@ rules = [
   "request.action == 'ui-asset' || request.action == 'ui-config'",
   "identity.username != null && request.action.startsWith('list-')",
   "identity.username != null && request.action == 'get-manifest'",
+  "identity.username != null && request.action == 'get-referrers'",
   "identity.username != null && request.action == 'get-blob'"
 ]
 ```
@@ -183,7 +184,7 @@ Complete manifest information:
 - **Layers/Children**: For images or indexes
 - **Annotations**: Expandable metadata
 - **Files**: For ORAS artifacts with download links
-- **Referrers**: Linked signatures, SBOMs, etc.
+- **Referrers**: Linked signatures, SBOMs, etc. The first 100 per manifest load with the view; a "Load more referrers" control fetches the next page from the referrers endpoint, so browsing past the first page needs the `get-referrers` action.
 - **Parent**: Link to parent index if applicable
 
 ### Uploads

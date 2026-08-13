@@ -355,10 +355,13 @@ fn try_find_referrers(method: &Method, path: &str, params: Option<&str>) -> Opti
         };
 
         if *method == Method::GET {
+            let PaginationQuery { n, last } = parse_pagination(params);
             return Some(Action::GetReferrer {
                 namespace,
                 digest,
                 artifact_type,
+                n,
+                last,
             });
         }
     }

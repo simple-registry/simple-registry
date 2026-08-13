@@ -240,11 +240,15 @@ async fn dispatch_route<'a>(
             namespace,
             digest,
             artifact_type,
+            n,
+            last,
         } => Ok(registry
             .get_referrers(GetReferrersRequest {
                 namespace,
                 digest,
                 artifact_type,
+                n,
+                last,
             })
             .await?),
         Action::ListCatalog { n, last } => Ok(registry
