@@ -210,6 +210,8 @@ Query parameters:
 
 A namespace holding no manifest content at all returns `NAME_UNKNOWN` (HTTP 404), so a client can probe existence here. A namespace whose tags were all deleted still holds its revisions and returns `200` with an empty list, until those are deleted too.
 
+On a pull-through repository the listing reports the tags this registry has cached, not the upstream's catalogue: enumerating the upstream would walk its whole tag list on every request. Pull a tag to cache it, or list tags against the upstream directly.
+
 ### Catalog
 
 ```
@@ -238,6 +240,8 @@ Query parameters:
 - `last` - Pagination marker
 
 A digest that is not valid syntax, or an `artifactType` that is not a media type, is rejected with `DIGEST_INVALID` (HTTP 400) rather than served as an unfiltered or empty listing.
+
+On a pull-through repository the listing merges the upstream's referrers with the cached ones, since nothing fills a referrer index on its own and an uncached subject would otherwise report none. An upstream that cannot be reached is left out rather than failing the request, so the cached referrers are still served. The `artifactType` filter is applied to both.
 
 A subject with more referrers than the page size is served one page at a time, with the next page advertised in a `Link` header carrying `rel="next"`; the link repeats the `artifactType` filter so following it keeps the listing filtered. A filtered page holds at most `n` entries and may hold fewer, since the filter is applied after the page is cut.
 

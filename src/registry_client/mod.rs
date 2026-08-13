@@ -35,7 +35,7 @@ use crate::{
     cache::Cache,
     http_client::apply_tls_files,
     http_range::ResponseRange,
-    oci::{Digest, MediaRange, MediaType, Reference, Tag},
+    oci::{Descriptor, Digest, MediaRange, MediaType, Reference, Tag},
     registry::{
         DOCKER_CONTENT_DIGEST, blob_store::BoxedReader, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
     },
@@ -237,6 +237,14 @@ struct TagsListBody {
     tags: Vec<String>,
 }
 
+/// Body of an OCI `GET /v2/<ns>/referrers/<digest>` response: an image index
+/// whose `manifests` are the referring descriptors.
+#[derive(Deserialize)]
+struct ReferrersBody {
+    #[serde(default)]
+    manifests: Vec<Descriptor>,
+}
+
 impl RegistryClient {
     /// Configured basic-auth username, `None` when the client is anonymous.
     /// Scopes cached bearer tokens so clients never share across identities.
@@ -344,6 +352,12 @@ impl RegistryClient {
     /// pagination parameters.
     pub fn get_tags_list_path(&self, namespace: &str) -> String {
         format!("{}/v2/{namespace}/tags/list", self.url)
+    }
+
+    /// URL to list a subject's referrers (OCI `GET /v2/<ns>/referrers/<digest>`),
+    /// without pagination parameters or an `artifactType` filter.
+    pub fn get_referrers_path(&self, namespace: &str, digest: &Digest) -> String {
+        format!("{}/v2/{namespace}/referrers/{digest}", self.url)
     }
 
     async fn query(
@@ -578,34 +592,81 @@ impl RegistryClient {
     /// page has a non-success status or unparseable body.
     #[instrument(skip(self))]
     pub async fn list_tags(&self, location: &str) -> Result<Vec<Tag>, Error> {
+        self.list_paginated(location, "list_tags", |body| {
+            let parsed: TagsListBody = serde_json::from_slice(body)
+                .map_err(|e| Error::Internal(format!("failed to parse tags/list body: {e}")))?;
+            Ok(parsed
+                .tags
+                .into_iter()
+                .filter_map(|name| match Tag::try_from(name) {
+                    Ok(tag) => Some(tag),
+                    Err(e) => {
+                        warn!("ignoring invalid tag in downstream tags/list: {e}");
+                        None
+                    }
+                })
+                .collect())
+        })
+        .await
+    }
+
+    /// Lists a subject's referrers on the remote, following `Link` rel="next"
+    /// pagination. A remote that serves no referrers for the subject, or does
+    /// not implement the endpoint, yields an empty list rather than an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a request fails, access is rejected, or a non-404
+    /// page has a non-success status or unparseable body.
+    #[instrument(skip(self))]
+    pub async fn list_referrers(&self, location: &str) -> Result<Vec<Descriptor>, Error> {
+        self.list_paginated(location, "list_referrers", |body| {
+            let parsed: ReferrersBody = serde_json::from_slice(body)
+                .map_err(|e| Error::Internal(format!("failed to parse referrers body: {e}")))?;
+            Ok(parsed.manifests)
+        })
+        .await
+    }
+
+    /// Walks a paginated listing from `location`, accumulating what `parse`
+    /// reads out of each page body. `op` names the listing in errors.
+    async fn list_paginated<T, F>(
+        &self,
+        location: &str,
+        op: &str,
+        parse: F,
+    ) -> Result<Vec<T>, Error>
+    where
+        F: Fn(&[u8]) -> Result<Vec<T>, Error>,
+    {
         // Guards against non-terminating pagination: `visited` stops an exact
         // page-URL cycle; `MAX_PAGES` backstops endless distinct pages.
         const MAX_PAGES: usize = 10_000;
 
-        let mut tags: Vec<Tag> = Vec::new();
+        let mut items: Vec<T> = Vec::new();
         let mut next = Some(location.to_string());
         let mut visited = HashSet::new();
 
         while let Some(page_location) = next.take() {
             if visited.len() >= MAX_PAGES {
                 return Err(Error::Internal(format!(
-                    "list_tags exceeded {MAX_PAGES} pages; downstream pagination does not terminate"
+                    "{op} exceeded {MAX_PAGES} pages; remote pagination does not terminate"
                 )));
             }
             if !visited.insert(page_location.clone()) {
-                // Cyclic `rel="next"`: stop with the tags gathered so far (a
-                // partial list only under-reconciles).
+                // Cyclic `rel="next"`: stop with what was gathered so far (a
+                // partial list only under-reports).
                 break;
             }
 
             let response = self.query(&Method::GET, &[], &page_location, None).await?;
 
             if response.status() == StatusCode::NOT_FOUND {
-                return Ok(tags);
+                return Ok(items);
             }
             if !response.status().is_success() {
                 return Err(Error::Internal(format!(
-                    "list_tags failed with status {}",
+                    "{op} failed with status {}",
                     response.status()
                 )));
             }
@@ -615,19 +676,11 @@ impl RegistryClient {
             let body = response
                 .bytes()
                 .await
-                .map_err(|e| Error::Internal(format!("failed to read tags/list body: {e}")))?;
-            let parsed: TagsListBody = serde_json::from_slice(&body)
-                .map_err(|e| Error::Internal(format!("failed to parse tags/list body: {e}")))?;
-
-            for name in parsed.tags {
-                match Tag::try_from(name) {
-                    Ok(tag) => tags.push(tag),
-                    Err(e) => warn!("ignoring invalid tag in downstream tags/list: {e}"),
-                }
-            }
+                .map_err(|e| Error::Internal(format!("failed to read {op} body: {e}")))?;
+            items.extend(parse(&body)?);
         }
 
-        Ok(tags)
+        Ok(items)
     }
 
     /// Extracts the `Link` rel="next" continuation URL (`<...>; rel="next"`),

@@ -166,28 +166,6 @@ impl MetadataStore {
             .await
     }
 
-    /// Lists a subject's candidate referrer digests, sorted, one page at a
-    /// time. Only a page's candidates are resolved to descriptors by the
-    /// caller, so a wide referrer fan-out costs one manifest read per served
-    /// entry rather than one per referrer.
-    pub async fn list_referrer_digests(
-        &self,
-        namespace: &Namespace,
-        digest: &Digest,
-        n: u16,
-        last: Option<String>,
-    ) -> Result<Page<Digest>, Error> {
-        debug!("Listing {n} referrer(s) of '{digest}' in '{namespace}' starting with '{last:?}'");
-
-        let mut digests: Vec<Digest> = self
-            .stream_referrer_digests(namespace, digest)
-            .try_collect()
-            .await?;
-        digests.sort();
-
-        Ok(pagination::paginate_sorted(&digests, n, last.as_deref()))
-    }
-
     /// Streams the candidate referrer manifest digests recorded under
     /// `digest`'s referrers directory, unresolved and unordered. Callers
     /// resolve each candidate to a descriptor at registry altitude, where the

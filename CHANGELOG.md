@@ -39,6 +39,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A referrers request whose digest or `artifactType` is malformed is answered with `400 DIGEST_INVALID` as the spec requires, instead of the `404` an unserved path gets.
 - A manifest pushed with parameters on its `Content-Type` (`; charset=utf-8`) is accepted rather than refused as a media-type mismatch, and the parameters are dropped instead of stored and echoed on pull.
 - Listing the tags of a namespace that holds nothing answers `404 NAME_UNKNOWN` instead of `200` with an empty list, so a client can tell an absent repository from an empty one. A repository whose tags were all deleted still answers `200`.
+- A referrers listing on a pull-through repository now merges the upstream's referrers with the cached ones, so a subject that was never pulled no longer reports none. An unreachable upstream is left out rather than failing the request. The tag listing still reports cached tags only; see [API Endpoints](doc/reference/api-endpoints.md).
 - A manifest larger than `global.max_manifest_size` is refused with `413`, matching the blob size limit, instead of `400`.
 - A ranged blob pull on a pull-through repository forwards the range to the upstream instead of returning `416` until the blob is cached, so one URL no longer answers `206` or `416` depending on cache state.
 

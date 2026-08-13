@@ -750,11 +750,13 @@ impl Registry {
 
         stream::iter(seeds)
             .map(|(digest, tags, parents, mut referrers)| async move {
-                // One page per manifest: the rest is browsed through the OCI
-                // referrers endpoint, from the cursor handed back here.
+                // One page per manifest, and what this registry holds alone: a
+                // listing that queried the upstream would do so once per
+                // manifest. The rest is browsed through the OCI referrers
+                // endpoint, from the cursor handed back here.
                 let mut referrers_next = None;
                 if let Ok(page) = self
-                    .list_referrers(namespace, &digest, None, DEFAULT_PAGE_SIZE, None)
+                    .list_referrers(None, namespace, &digest, None, DEFAULT_PAGE_SIZE, None)
                     .await
                 {
                     referrers.extend(page.items.into_iter().map(ReferrerInfo::from));

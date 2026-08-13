@@ -367,7 +367,7 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
     create_link(&m, namespace, &referrers_link, &referrer_digest).await;
 
     let referrers = registry
-        .list_referrers(namespace, &base_digest, None, DEFAULT_PAGE_SIZE, None)
+        .list_referrers(None, namespace, &base_digest, None, DEFAULT_PAGE_SIZE, None)
         .await;
 
     let expected = vec![Descriptor {
@@ -383,6 +383,7 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
 
     let filtered_referrers = registry
         .list_referrers(
+            None,
             namespace,
             &base_digest,
             Some(media_type("application/vnd.example.test-artifact")),
@@ -396,6 +397,7 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
 
     let non_matching_referrers = registry
         .list_referrers(
+            None,
             namespace,
             &base_digest,
             Some(media_type("application/vnd.non-existent")),
@@ -952,7 +954,14 @@ pub async fn test_datastore_list_referrers_parallel_correctness(registry: &Regis
     }
 
     let descriptors = registry
-        .list_referrers(namespace, &subject_digest, None, DEFAULT_PAGE_SIZE, None)
+        .list_referrers(
+            None,
+            namespace,
+            &subject_digest,
+            None,
+            DEFAULT_PAGE_SIZE,
+            None,
+        )
         .await
         .unwrap();
 
@@ -1046,6 +1055,7 @@ pub async fn test_datastore_list_referrers_with_artifact_type_filter(registry: &
 
     let descriptors = registry
         .list_referrers(
+            None,
             namespace,
             &subject_digest,
             Some(media_type("application/vnd.example.sbom")),
@@ -1111,15 +1121,36 @@ pub async fn test_datastore_list_referrers_deterministic_order(registry: &Regist
     }
 
     let result1 = registry
-        .list_referrers(namespace, &subject_digest, None, DEFAULT_PAGE_SIZE, None)
+        .list_referrers(
+            None,
+            namespace,
+            &subject_digest,
+            None,
+            DEFAULT_PAGE_SIZE,
+            None,
+        )
         .await
         .unwrap();
     let result2 = registry
-        .list_referrers(namespace, &subject_digest, None, DEFAULT_PAGE_SIZE, None)
+        .list_referrers(
+            None,
+            namespace,
+            &subject_digest,
+            None,
+            DEFAULT_PAGE_SIZE,
+            None,
+        )
         .await
         .unwrap();
     let result3 = registry
-        .list_referrers(namespace, &subject_digest, None, DEFAULT_PAGE_SIZE, None)
+        .list_referrers(
+            None,
+            namespace,
+            &subject_digest,
+            None,
+            DEFAULT_PAGE_SIZE,
+            None,
+        )
         .await
         .unwrap();
 
@@ -2074,7 +2105,7 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
 
     // list_referrers should return the stored descriptor without reading a blob
     let referrers = registry
-        .list_referrers(namespace, &base_digest, None, DEFAULT_PAGE_SIZE, None)
+        .list_referrers(None, namespace, &base_digest, None, DEFAULT_PAGE_SIZE, None)
         .await
         .unwrap();
 
@@ -2083,6 +2114,7 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
 
     let filtered = registry
         .list_referrers(
+            None,
             namespace,
             &base_digest,
             Some(media_type("application/vnd.example.test-artifact")),
@@ -2096,6 +2128,7 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
 
     let non_matching = registry
         .list_referrers(
+            None,
             namespace,
             &base_digest,
             Some(media_type("application/vnd.non-existent")),

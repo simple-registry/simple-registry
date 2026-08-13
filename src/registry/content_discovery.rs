@@ -1,4 +1,6 @@
-use futures_util::stream::{self, StreamExt};
+use std::collections::{HashMap, HashSet};
+
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use hyper::{
     HeaderMap, Response, StatusCode,
     header::{CONTENT_TYPE, HeaderValue, LINK},
@@ -14,7 +16,9 @@ use crate::{
         Descriptor, Digest, Manifest, MediaType, Namespace, OCI_INDEX_MEDIA_TYPE,
         OCI_MANIFEST_SCHEMA_VERSION, Tag,
     },
-    registry::{Error, OCI_FILTERS_APPLIED, Registry, metadata_store::LinkKind},
+    registry::{
+        Error, OCI_FILTERS_APPLIED, Registry, Repository, metadata_store::LinkKind, pagination,
+    },
 };
 
 pub struct ListCatalogRequest {
@@ -180,8 +184,13 @@ impl Registry {
     ) -> Result<Response<ResponseBody>, Error> {
         let n = request.n.unwrap_or(DEFAULT_PAGE_SIZE);
         let filter = request.artifact_type;
+        let upstream = self
+            .get_repository_for_namespace(&request.namespace)
+            .ok()
+            .filter(|repository| repository.is_pull_through());
         let page = self
             .list_referrers(
+                upstream,
                 &request.namespace,
                 &request.digest,
                 filter.clone(),
@@ -215,14 +224,17 @@ impl Registry {
     }
 
     /// Resolves one page of `digest`'s referrers in `namespace` to a sorted
-    /// descriptor list, filtered by `artifact_type` when given.
+    /// descriptor list, filtered by `artifact_type` when given. `upstream` is
+    /// the pull-through repository whose referrers join the local ones, or
+    /// `None` to list what this registry holds alone.
     ///
     /// The page is cut over the candidate digests, so a filter that drops
     /// entries yields a page shorter than `n` while the continuation token
     /// still names where to resume.
-    #[instrument]
+    #[instrument(skip(upstream))]
     pub async fn list_referrers(
         &self,
+        upstream: Option<&Repository>,
         namespace: &Namespace,
         digest: &Digest,
         artifact_type: Option<MediaType>,
@@ -230,16 +242,40 @@ impl Registry {
         last: Option<String>,
     ) -> Result<Page<Descriptor>, Error> {
         let artifact_type = artifact_type.as_ref();
-        let candidates = self
-            .metadata_store
-            .list_referrer_digests(namespace, digest, n, last)
-            .await?;
+        let upstream = self
+            .upstream_referrers(upstream, namespace, digest, artifact_type)
+            .await;
 
-        // Up to `REFERRER_RESOLVE_CONCURRENCY` candidates resolve at once, each
-        // one an independent manifest read.
-        let mut referrers: Vec<Descriptor> = stream::iter(candidates.items)
-            .map(|manifest_digest| {
-                self.resolve_referrer_descriptor(namespace, digest, manifest_digest, artifact_type)
+        let local: HashSet<Digest> = self
+            .metadata_store
+            .stream_referrer_digests(namespace, digest)
+            .try_collect()
+            .await?;
+        let mut candidates: Vec<Digest> = local
+            .iter()
+            .chain(upstream.keys().filter(|digest| !local.contains(*digest)))
+            .cloned()
+            .collect();
+        candidates.sort();
+
+        let page = pagination::paginate_sorted(&candidates, n, last.as_deref());
+        // Up to `REFERRER_RESOLVE_CONCURRENCY` local candidates resolve at once,
+        // each one an independent manifest read. An upstream-only candidate is
+        // already resolved, its descriptor coming from the listing.
+        let (local, upstream) = (&local, &upstream);
+        let mut referrers: Vec<Descriptor> = stream::iter(page.items)
+            .map(async |manifest_digest| {
+                if local.contains(&manifest_digest) {
+                    return self
+                        .resolve_referrer_descriptor(
+                            namespace,
+                            digest,
+                            manifest_digest,
+                            artifact_type,
+                        )
+                        .await;
+                }
+                upstream.get(&manifest_digest).cloned()
             })
             .buffer_unordered(REFERRER_RESOLVE_CONCURRENCY)
             .filter_map(|descriptor| async move { descriptor })
@@ -249,8 +285,42 @@ impl Registry {
         referrers.sort_by(|a, b| a.digest.cmp(&b.digest));
         Ok(Page {
             items: referrers,
-            next_token: candidates.next_token,
+            next_token: page.next_token,
         })
+    }
+
+    /// The referrers `upstream` holds for `digest`, keyed by their own digest
+    /// and filtered like the local ones. Nothing fills a referrer index on its
+    /// own, so a pull-through namespace that listed only what it cached would
+    /// answer an uncached subject with nothing at all.
+    ///
+    /// An upstream that cannot be reached yields none: a mirror still lists
+    /// what it holds when its upstream is down.
+    async fn upstream_referrers(
+        &self,
+        upstream: Option<&Repository>,
+        namespace: &Namespace,
+        digest: &Digest,
+        artifact_type: Option<&MediaType>,
+    ) -> HashMap<Digest, Descriptor> {
+        let Some(repository) = upstream else {
+            return HashMap::new();
+        };
+
+        match repository.list_referrers(namespace, digest).await {
+            Ok(referrers) => referrers
+                .into_iter()
+                .filter(|referrer| {
+                    artifact_type
+                        .is_none_or(|filter| referrer.artifact_type.as_ref() == Some(filter))
+                })
+                .map(|referrer| (referrer.digest.clone(), referrer))
+                .collect(),
+            Err(error) => {
+                warn!("Upstream referrer listing failed for {namespace}@{digest}: {error}");
+                HashMap::new()
+            }
+        }
     }
 
     /// Resolves a single referrer entry to an OCI [`Descriptor`], applying an
@@ -321,9 +391,15 @@ mod tests {
 
     use hyper::header::LINK;
 
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
     use super::{
-        DEFAULT_PAGE_SIZE, GetReferrersRequest, ListCatalogRequest, ListTagsRequest, Response,
-        ResponseBody,
+        DEFAULT_PAGE_SIZE, GetReferrersRequest, ListCatalogRequest, ListTagsRequest,
+        OCI_INDEX_MEDIA_TYPE, Repository, Response, ResponseBody,
     };
 
     /// The `last` cursor a client would follow out of a `Link` header, or
@@ -372,15 +448,19 @@ mod tests {
         Some(last.trim_end_matches(">; rel=\"next\"").to_string())
     }
     use crate::{
+        cache,
         oci::{Descriptor, Digest, Manifest, MediaType, Namespace, Reference, Tag},
         registry::{
             Error,
+            manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
             metadata_store::{LinkKind, LinkOperation, MetadataStore},
+            repository::Config,
             test_utils::{
                 FSRegistryTestCase, create_test_blob, for_each_backend, media_type,
                 put_blob_direct, response_json, upload_blob,
             },
         },
+        test_fixtures::client::test_client_config,
     };
 
     #[tokio::test]
@@ -655,7 +735,7 @@ mod tests {
                 .unwrap();
 
             let referrers = registry
-                .list_referrers(namespace, &base_manifest_digest, None, DEFAULT_PAGE_SIZE, None)
+                .list_referrers(None, namespace, &base_manifest_digest, None, DEFAULT_PAGE_SIZE, None)
                 .await
                 .unwrap();
 
@@ -716,10 +796,29 @@ mod tests {
         (case, digest)
     }
 
+    /// A pull-through repository owning `mirror/*`, so a request for
+    /// `mirror/app` maps to the upstream's `app`.
+    async fn pull_through_repository(upstream: &str) -> Repository {
+        let config = Config {
+            upstream: vec![test_client_config(upstream)],
+            ..Default::default()
+        };
+        let cache_backend = cache::Config::Memory.to_backend().unwrap();
+        Repository::new(
+            "mirror",
+            &config,
+            &cache_backend,
+            DEFAULT_MAX_MANIFEST_SIZE_BYTES,
+        )
+        .await
+        .unwrap()
+    }
+
     /// Creates the referrer link `subject() -> manifest`, optionally carrying
     /// a cached descriptor.
     async fn create_referrer_link(
         m: &MetadataStore,
+        namespace: &Namespace,
         manifest: &Digest,
         descriptor: Option<Descriptor>,
     ) {
@@ -733,7 +832,7 @@ mod tests {
             media_type: None,
             descriptor: descriptor.map(Box::new),
         }];
-        m.update_links(&referrer_namespace(), &ops).await.unwrap();
+        m.update_links(namespace, &ops).await.unwrap();
     }
 
     #[tokio::test]
@@ -746,6 +845,7 @@ mod tests {
         let desc = descriptor_with(Some("application/vnd.foo"), &manifest_digest);
         create_referrer_link(
             &registry.metadata_store,
+            &referrer_namespace(),
             &manifest_digest,
             Some(desc.clone()),
         )
@@ -766,6 +866,7 @@ mod tests {
         let desc = descriptor_with(Some(&at), &manifest_digest);
         create_referrer_link(
             &registry.metadata_store,
+            &referrer_namespace(),
             &manifest_digest,
             Some(desc.clone()),
         )
@@ -789,7 +890,13 @@ mod tests {
         let (case, manifest_digest) = split_case_with_blob(Some("application/vnd.bar")).await;
         let registry = case.registry();
         let desc = descriptor_with(Some("application/vnd.foo"), &manifest_digest);
-        create_referrer_link(&registry.metadata_store, &manifest_digest, Some(desc)).await;
+        create_referrer_link(
+            &registry.metadata_store,
+            &referrer_namespace(),
+            &manifest_digest,
+            Some(desc),
+        )
+        .await;
 
         let filter = media_type("application/vnd.bar");
         let result = registry
@@ -811,7 +918,13 @@ mod tests {
         let (case, manifest_digest) = split_case_with_blob(Some("application/vnd.foo")).await;
         let registry = case.registry();
         let desc = descriptor_with(None, &manifest_digest);
-        create_referrer_link(&registry.metadata_store, &manifest_digest, Some(desc)).await;
+        create_referrer_link(
+            &registry.metadata_store,
+            &referrer_namespace(),
+            &manifest_digest,
+            Some(desc),
+        )
+        .await;
 
         let at = media_type("application/vnd.foo");
         let result = registry
@@ -840,7 +953,13 @@ mod tests {
     async fn falls_through_to_blob_when_link_carries_no_descriptor() {
         let (case, manifest_digest) = split_case_with_blob(None).await;
         let registry = case.registry();
-        create_referrer_link(&registry.metadata_store, &manifest_digest, None).await;
+        create_referrer_link(
+            &registry.metadata_store,
+            &referrer_namespace(),
+            &manifest_digest,
+            None,
+        )
+        .await;
 
         let result = registry
             .resolve_referrer_descriptor(&referrer_namespace(), &subject(), manifest_digest, None)
@@ -914,6 +1033,92 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// A pull-through namespace lists what the upstream holds alongside what it
+    /// cached: nothing ever fills a referrer index on its own, so an uncached
+    /// subject would otherwise answer with nothing at all.
+    #[tokio::test]
+    async fn list_referrers_merges_the_upstream_listing() {
+        let case = FSRegistryTestCase::with_split_backends();
+        let registry = case.registry();
+        let namespace = Namespace::new("mirror/app").unwrap();
+        let cached = Digest::sha256_of_bytes(b"cached referrer");
+        create_referrer_link(
+            &registry.metadata_store,
+            &namespace,
+            &cached,
+            Some(descriptor_with(None, &cached)),
+        )
+        .await;
+
+        let remote = Digest::sha256_of_bytes(b"upstream referrer");
+        let subject = subject();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/app/referrers/{subject}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "schemaVersion": 2,
+                "mediaType": OCI_INDEX_MEDIA_TYPE,
+                "manifests": [descriptor_with(None, &remote)],
+            })))
+            .mount(&mock_server)
+            .await;
+        let repository = pull_through_repository(&mock_server.uri()).await;
+
+        let page = registry
+            .list_referrers(
+                Some(&repository),
+                &namespace,
+                &subject,
+                None,
+                DEFAULT_PAGE_SIZE,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut served: Vec<Digest> = page.items.into_iter().map(|d| d.digest).collect();
+        served.sort();
+        let mut expected = vec![cached, remote];
+        expected.sort();
+        assert_eq!(
+            served, expected,
+            "a pull-through listing must hold the cached and the upstream referrer"
+        );
+    }
+
+    /// An upstream that cannot be reached must not take the cached referrers
+    /// down with it.
+    #[tokio::test]
+    async fn list_referrers_serves_the_cache_when_the_upstream_fails() {
+        let case = FSRegistryTestCase::with_split_backends();
+        let registry = case.registry();
+        let namespace = Namespace::new("mirror/app").unwrap();
+        let cached = Digest::sha256_of_bytes(b"cached referrer");
+        create_referrer_link(
+            &registry.metadata_store,
+            &namespace,
+            &cached,
+            Some(descriptor_with(None, &cached)),
+        )
+        .await;
+        let repository = pull_through_repository("http://127.0.0.1:1").await;
+
+        let page = registry
+            .list_referrers(
+                Some(&repository),
+                &namespace,
+                &subject(),
+                None,
+                DEFAULT_PAGE_SIZE,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].digest, cached);
+    }
+
     // End-to-end pin of the cross-store contract: a referrer whose link
     // carries no cached descriptor resolves through the public listing even
     // when blob and metadata stores use separate roots.
@@ -921,10 +1126,17 @@ mod tests {
     async fn list_referrers_resolves_manifests_on_split_backends() {
         let (case, manifest_digest) = split_case_with_blob(Some("application/vnd.foo")).await;
         let registry = case.registry();
-        create_referrer_link(&registry.metadata_store, &manifest_digest, None).await;
+        create_referrer_link(
+            &registry.metadata_store,
+            &referrer_namespace(),
+            &manifest_digest,
+            None,
+        )
+        .await;
 
         let referrers = registry
             .list_referrers(
+                None,
                 &referrer_namespace(),
                 &subject(),
                 None,
@@ -951,6 +1163,7 @@ mod tests {
             let digest = Digest::sha256_of_bytes([index]);
             create_referrer_link(
                 &registry.metadata_store,
+                &referrer_namespace(),
                 &digest,
                 Some(descriptor_with(None, &digest)),
             )

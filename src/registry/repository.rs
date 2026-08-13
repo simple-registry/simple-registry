@@ -10,7 +10,7 @@ pub use crate::registry_client::RegistryClientConfig;
 use crate::{
     cache::Cache,
     configuration::RegexPattern,
-    oci::{Digest, Error as OciError, MediaRange, Namespace, Reference},
+    oci::{Descriptor, Digest, Error as OciError, MediaRange, Namespace, Reference},
     policy::{AccessPolicyConfig, RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::Error,
     registry_client::{FetchedBlob, FetchedManifest, ManifestHead, RegistryClient},
@@ -320,6 +320,26 @@ impl Repository {
                     .client
                     .get_blob_path(upstream.remote(namespace)?.as_ref(), digest);
                 Ok(upstream.client.head_blob(accepted_types, &location).await?)
+            })
+        })
+        .await
+    }
+
+    /// Lists a subject's referrers on the first upstream that answers, so a
+    /// pull-through namespace can advertise what the upstream holds alongside
+    /// what it cached.
+    #[instrument(skip(self))]
+    pub async fn list_referrers(
+        &self,
+        namespace: &Namespace,
+        digest: &Digest,
+    ) -> Result<Vec<Descriptor>, Error> {
+        self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
+            Box::pin(async move {
+                let location = upstream
+                    .client
+                    .get_referrers_path(upstream.remote(namespace)?.as_ref(), digest);
+                Ok(upstream.client.list_referrers(&location).await?)
             })
         })
         .await
