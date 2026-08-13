@@ -58,8 +58,9 @@ DELETE /v2/{namespace}/blobs/{digest}
 ```
 
 Delete a blob owned by the namespace. If the digest is still referenced by manifest metadata in
-that namespace, Angos returns `DENIED` (HTTP 409) and leaves the blob unchanged: the reference is a
-state the client can resolve by deleting the manifest first, not a method the registry refuses. After those references are
+that namespace, Angos returns `DENIED` (HTTP 405, the status the spec lists for a refused blob
+delete) and leaves the blob unchanged; the message names the reason, which the client resolves by
+deleting the manifest first. After those references are
 removed, deleting the blob removes that namespace's ownership; the underlying blob data is removed
 only when no namespace references the digest.
 
@@ -646,7 +647,7 @@ Errors follow OCI Distribution error format:
 | `NAME_UNKNOWN`        | 404          | Repository not found      |
 | `SIZE_INVALID`        | 416          | Requested range not satisfiable |
 | `UNAUTHORIZED`        | 401          | Authentication required   |
-| `DENIED`              | 403 or 409   | Access denied by policy, or a write was rejected: a still-referenced blob, an immutable tag that cannot be overwritten |
+| `DENIED`              | 403, 405, or 409 | Access denied by policy, a still-referenced blob (405), or a write rejected such as an immutable tag that cannot be overwritten (409) |
 | `UNSUPPORTED`         | 400          | Unsupported operation, and the code carried by any other malformed request |
 | `REPLICATION_SUPERSEDED` | 409       | Replication write rejected by last-writer-wins (the local copy is strictly newer) |
 

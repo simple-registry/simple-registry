@@ -98,6 +98,22 @@ fn referrers_headers(artifact_type_filtered: bool, link: Option<&str>) -> Result
     Ok(headers)
 }
 
+/// The tag a pre-API client records a subject's referrers under: the
+/// algorithm truncated to 32 characters and the encoded hash to 64, joined by a
+/// hyphen. A [`Digest`] admits no character a tag disallows, so the schema's
+/// substitution rule has nothing to replace.
+fn referrers_fallback_tag(subject: &Digest) -> Option<Tag> {
+    let algorithm = subject.algorithm().as_str();
+    let hash = subject.hash();
+    let schema = format!(
+        "{}-{}",
+        &algorithm[..algorithm.len().min(32)],
+        &hash[..hash.len().min(64)]
+    );
+
+    Tag::new(&schema).ok()
+}
+
 /// Whether `referrer` passes a listing's `artifactType` filter, which an
 /// already-resolved descriptor is checked against rather than re-read.
 fn matches_filter(referrer: &Descriptor, artifact_type: Option<&MediaType>) -> bool {
@@ -313,7 +329,7 @@ impl Registry {
         namespace: &Namespace,
         subject: &Digest,
     ) -> Vec<Descriptor> {
-        let Ok(tag) = Tag::new(&format!("{}-{}", subject.algorithm(), subject.hash())) else {
+        let Some(tag) = referrers_fallback_tag(subject) else {
             return Vec::new();
         };
         let Ok(link) = self
@@ -440,7 +456,7 @@ mod tests {
 
     use super::{
         DEFAULT_PAGE_SIZE, GetReferrersRequest, ListCatalogRequest, ListTagsRequest,
-        OCI_INDEX_MEDIA_TYPE, Repository, Response, ResponseBody,
+        OCI_INDEX_MEDIA_TYPE, Repository, Response, ResponseBody, referrers_fallback_tag,
     };
 
     /// The `last` cursor a client would follow out of a `Link` header, or
@@ -490,7 +506,7 @@ mod tests {
     }
     use crate::{
         cache,
-        oci::{Descriptor, Digest, Manifest, MediaType, Namespace, Reference, Tag},
+        oci::{Algorithm, Descriptor, Digest, Manifest, MediaType, Namespace, Reference, Tag},
         registry::{
             Error,
             manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
@@ -1072,6 +1088,22 @@ mod tests {
             .resolve_referrer_descriptor(&referrer_namespace(), &subject(), manifest_digest, None)
             .await;
         assert!(result.is_none());
+    }
+
+    /// The fallback tag follows the schema's truncation, so a sha512 subject
+    /// (128 hex characters) is looked up under the 64 a client would have used
+    /// and not a name no tag can even hold.
+    #[test]
+    fn referrers_fallback_tag_truncates_the_encoded_hash() {
+        let sha256 = Digest::sha256_of_bytes(b"subject");
+        assert_eq!(
+            referrers_fallback_tag(&sha256).map(|tag| tag.to_string()),
+            Some(format!("sha256-{}", sha256.hash()))
+        );
+
+        let sha512 = Digest::from_bytes(Algorithm::Sha512, b"subject");
+        let tag = referrers_fallback_tag(&sha512).expect("a sha512 subject must have a tag");
+        assert_eq!(tag.to_string(), format!("sha512-{}", &sha512.hash()[..64]));
     }
 
     /// A repository imported from a registry whose clients used the referrers

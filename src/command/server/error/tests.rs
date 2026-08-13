@@ -373,12 +373,13 @@ fn test_registry_error_to_server_error_mapping() {
     }
 }
 
-/// A blob a manifest still names is a conflict the client can resolve, not a
-/// method the registry refuses: `405` would read as "blob deletion is off".
+/// end-10 lists `404/400/405` as the failure statuses of a blob delete, so a
+/// still-referenced blob answers within that set and explains itself in the
+/// message.
 #[test]
 fn test_blob_referenced_registry_error_mapping() {
     let error: Error = registry::Error::BlobReferenced.into();
-    assert_eq!(error.status_code(), StatusCode::CONFLICT);
+    assert_eq!(error.status_code(), StatusCode::METHOD_NOT_ALLOWED);
 
     let json = error.as_json(None);
     assert_eq!(json["errors"][0]["code"], "DENIED");
