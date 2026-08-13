@@ -43,7 +43,8 @@ a digest that exists in storage but is not linked to the requested namespace ret
 - If `<end>` is beyond the blob length, Angos clamps it to the final byte.
 - If `<suffix-length>` is longer than the blob, Angos returns the full blob as `206 Partial Content`.
 - Multiple ranges are not supported; Angos ignores them and returns the normal full `200 OK` response.
-- A range whose start is at or beyond the blob length, or a zero-length suffix range, returns `416 Range Not Satisfiable`.
+- A `Range` Angos cannot read is ignored the same way, returning `200 OK`: an unknown unit (`items=0-5`), a missing one (`100-200`), a non-numeric bound, or an inverted window (`bytes=500-499`).
+- A range that reads correctly but cannot be met returns `416 Range Not Satisfiable`: a start at or beyond the blob length, or a zero-length suffix range.
 - For an empty blob, Angos ignores a syntactically valid range and returns the normal `200 OK` empty body.
 
 On a pull-through repository, a range over a blob that is not cached yet is forwarded to the upstream: its `206` is passed through with the upstream's `Content-Range`, and an upstream that ignores the range answers the full `200 OK` body. The blob is still queued for caching, so later ranges are served locally.

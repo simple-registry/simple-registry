@@ -150,14 +150,17 @@ impl<'a> RequestHeaders<'a> {
             .map_err(|error| not_satisfiable(&error))
     }
 
-    /// The window a blob `GET` asks for, `None` when it names none or names
-    /// several (which is answered with the whole blob).
+    /// The window a blob `GET` asks for, `None` when it names none, names
+    /// several, or names one this server cannot read: RFC 9110 has a `Range`
+    /// whose unit is unknown or whose syntax does not parse ignored and the
+    /// whole representation served. A `416` is for a range that parses and
+    /// cannot be met.
     pub fn blob_range(&self) -> Result<Option<RequestRange>, Error> {
         let Some(range_header) = self.header_string(RANGE)? else {
             return Ok(None);
         };
 
-        RequestRange::parse(&range_header).map_err(|error| not_satisfiable(&error))
+        Ok(RequestRange::parse(&range_header).ok().flatten())
     }
 
     fn header_string(&self, header: HeaderName) -> Result<Option<String>, Error> {

@@ -36,19 +36,28 @@ fn test_range_with_bytes_prefix() {
     );
 }
 
+/// RFC 9110 has a `Range` the server cannot parse, or whose unit it does not
+/// know, ignored: the whole blob is served, as for a multi-range request. Only
+/// a range that parses and cannot be met is a `416`.
 #[test]
-fn test_blob_range_double_bytes_prefix_rejected() {
-    let request = Request::builder()
-        .header(RANGE, "bytes=bytes=0-5")
-        .body(())
-        .unwrap();
-    let (parts, ()) = request.into_parts();
+fn test_unreadable_blob_range_is_ignored() {
+    for value in [
+        // A doubled unit, an absent one, an inverted window, and a
+        // non-numeric bound.
+        "bytes=bytes=0-5",
+        "100-200",
+        "bytes=500-499",
+        "bytes=abc-100",
+        "items=0-5",
+    ] {
+        let request = Request::builder().header(RANGE, value).body(()).unwrap();
+        let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).blob_range();
-    assert!(
-        result.is_err(),
-        "a doubled bytes= prefix must be rejected, got: {result:?}"
-    );
+        let range = RequestHeaders::new(&parts.headers)
+            .blob_range()
+            .expect("an unreadable range must not fail the request");
+        assert!(range.is_none(), "'{value}' must be ignored, got: {range:?}");
+    }
 }
 
 #[test]
@@ -133,18 +142,6 @@ fn test_content_range_without_bytes_prefix() {
             end: Some(200)
         }
     );
-}
-
-#[test]
-fn test_blob_range_requires_bytes_prefix() {
-    let request = Request::builder()
-        .header(RANGE, "100-200")
-        .body(())
-        .unwrap();
-    let (parts, ()) = request.into_parts();
-
-    let result = RequestHeaders::new(&parts.headers).blob_range();
-    assert!(result.is_err());
 }
 
 #[test]
