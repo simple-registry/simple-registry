@@ -271,51 +271,29 @@ mod tests {
         assert_eq!(Algorithm::Sha512.to_string(), "sha512");
     }
 
+    /// The image spec spells both the algorithm and the encoded hash in
+    /// lowercase, and fixes the hash length per algorithm.
     #[test]
-    fn test_parse_invalid() {
-        assert!(Digest::from_str("sha256:invalid").is_err());
-    }
-
-    #[test]
-    fn test_reject_uppercase_algorithm() {
-        assert!(Digest::from_str(&format!("SHA256:{VALID_HASH}")).is_err());
-    }
-
-    #[test]
-    fn test_reject_mixed_case_algorithm() {
-        assert!(Digest::from_str(&format!("Sha256:{VALID_HASH}")).is_err());
-    }
-
-    #[test]
-    fn test_reject_uppercase_hex() {
-        assert!(
-            Digest::from_str(
-                "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn test_reject_mixed_case_hex() {
-        assert!(
-            Digest::from_str(
-                "sha256:0123456789aBcDeF0123456789abcdef0123456789abcdef0123456789abcdef"
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn test_sha512_rejects_sha256_length() {
-        // 64 hex chars is a valid sha256 hash but too short for sha512.
-        assert!(Digest::from_str(&format!("sha512:{VALID_HASH}")).is_err());
-    }
-
-    #[test]
-    fn test_sha256_rejects_sha512_length() {
-        // 128 hex chars is a valid sha512 hash but too long for sha256.
-        assert!(Digest::from_str(&format!("sha256:{VALID_HASH_512}")).is_err());
+    fn rejects_what_the_digest_grammar_forbids() {
+        let upper_hex = "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mixed_hex = "sha256:0123456789aBcDeF0123456789abcdef0123456789abcdef0123456789abcdef";
+        for value in [
+            "sha256:invalid".to_string(),
+            // The algorithm is lowercase, and so is the encoded hash.
+            format!("SHA256:{VALID_HASH}"),
+            format!("Sha256:{VALID_HASH}"),
+            upper_hex.to_string(),
+            mixed_hex.to_string(),
+            // 64 hex chars is a valid sha256 hash but too short for sha512;
+            // 128 is a valid sha512 but too long for sha256.
+            format!("sha512:{VALID_HASH}"),
+            format!("sha256:{VALID_HASH_512}"),
+        ] {
+            assert!(
+                Digest::from_str(&value).is_err(),
+                "'{value}' is not a digest the image spec defines"
+            );
+        }
     }
 
     #[test]

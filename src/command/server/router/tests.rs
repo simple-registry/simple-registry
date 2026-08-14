@@ -1,3 +1,6 @@
+use angos_oci::client::referrers_path;
+use angos_oci::request::GetReferrersRequest;
+
 use super::*;
 
 #[test]
@@ -1346,17 +1349,91 @@ fn artifact_type_filter_keeps_an_encoded_media_type_suffix() {
 }
 
 /// A value that is not a media type is a bad filter, not an absent one: it must
-/// never degrade into an unfiltered listing of every referrer.
+/// never degrade into an unfiltered listing of every referrer. A parameter
+/// section is not a media type either: only a header may carry one, so a filter
+/// naming parameters is refused rather than quietly reduced to the type ahead
+/// of them.
 #[test]
 fn artifact_type_filter_rejects_a_malformed_value() {
     let digest = format!("sha256:{}", "a".repeat(64));
-    let uri: Uri = format!("/v2/lib/nginx/referrers/{digest}?artifactType=not-a-media-type")
-        .parse()
-        .unwrap();
-    assert!(
-        parse(&Method::GET, &uri).is_none(),
-        "a malformed artifactType must not resolve to an unfiltered listing"
+    for filter in ["not-a-media-type", "application/json;charset=utf-8"] {
+        let uri: Uri = format!("/v2/lib/nginx/referrers/{digest}?artifactType={filter}")
+            .parse()
+            .unwrap();
+        assert!(
+            parse(&Method::GET, &uri).is_none(),
+            "'{filter}' must not resolve to a listing"
+        );
+    }
+}
+
+/// The referrers endpoint must never answer a `404` while it serves the API, so
+/// every way of malforming the request owes a `400`.
+#[test]
+fn every_malformed_referrers_request_is_a_bad_request() {
+    let digest = format!("sha256:{}", "a".repeat(64));
+
+    for bad in [
+        format!("/v2/lib/nginx/referrers/{digest}?artifactType=not-a-media-type"),
+        "/v2/lib/nginx/referrers/not-a-digest".to_string(),
+    ] {
+        let uri: Uri = bad.parse().unwrap();
+        assert!(
+            parse(&Method::GET, &uri).is_none(),
+            "{bad} must not resolve to a listing"
+        );
+        assert!(
+            is_invalid_referrers_request(&Method::GET, &uri),
+            "{bad} must be a bad request, not the miss an unserved path gets"
+        );
+    }
+}
+
+/// The spec defines no page size for this endpoint, so `?n=` is not part of it
+/// and is ignored like any other unknown parameter rather than rejected.
+#[test]
+fn a_referrers_page_size_is_not_a_parameter() {
+    let digest = format!("sha256:{}", "a".repeat(64));
+
+    for query in ["n=abc", "n=65536", "n=10"] {
+        let uri: Uri = format!("/v2/lib/nginx/referrers/{digest}?{query}")
+            .parse()
+            .unwrap();
+        assert!(
+            matches!(parse(&Method::GET, &uri), Some(Action::GetReferrer { .. })),
+            "?{query} must be ignored, not refused"
+        );
+    }
+}
+
+/// The `Link` a filtered listing advertises is composed by the serving side and
+/// parsed back by this one, so the filter has to survive the round trip. A raw
+/// `+` would come back as a space and fail the media-type grammar.
+#[test]
+fn a_rendered_referrers_link_parses_back_into_the_same_filter() {
+    let digest: Digest = format!("sha256:{}", "a".repeat(64)).parse().unwrap();
+    let filter = MediaType::new("application/vnd.example.sbom.v1+json").unwrap();
+    let link = referrers_path(
+        "",
+        &GetReferrersRequest {
+            namespace: Namespace::new("lib/nginx").unwrap(),
+            digest: digest.clone(),
+            artifact_type: Some(filter.clone()),
+            last: Some(digest.to_string()),
+        },
     );
+
+    match parse(&Method::GET, &link.parse().unwrap()) {
+        Some(Action::GetReferrer {
+            artifact_type,
+            last,
+            ..
+        }) => {
+            assert_eq!(artifact_type.as_ref(), Some(&filter));
+            assert_eq!(last.as_deref(), Some(digest.to_string().as_str()));
+        }
+        other => panic!("the advertised next page must route, got {other:?}"),
+    }
 }
 
 /// No filter at all still lists every referrer.

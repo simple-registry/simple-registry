@@ -19,7 +19,7 @@ use crate::{
     command::server::{error::Error, router},
     configuration::{Configuration, TrustedProxy},
     identity::{Action, ClientIdentity, RequestScheme},
-    registry::Registry,
+    registry::{self, Registry},
 };
 
 pub struct ServerContext {
@@ -71,19 +71,39 @@ impl ServerContext {
 
     /// Resolves a pull's proxy `?ns=` to the repository mirroring that registry
     /// namespace, rewriting `action` to address it. Returns the namespace
-    /// served, which the response echoes in `OCI-Namespace`; `None` leaves the
-    /// request exactly as it arrived, which is what an unclaimed `ns`, a
+    /// served, which the response echoes in `OCI-Namespace`; `Ok(None)` leaves
+    /// the request exactly as it arrived, which is what an unclaimed `ns`, a
     /// non-pull route, and a request already addressing that repository all get.
-    pub fn apply_proxy_namespace(&self, action: Option<&mut Action>, uri: &Uri) -> Option<String> {
-        let ns = router::proxy_namespace(uri)?;
-        let repository = self.registry.repository_for_ns(&ns)?;
-        let namespace = action?.pull_namespace_mut()?;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`registry::Error::NameInvalid`] when nesting under the
+    /// repository breaks the namespace length cap.
+    pub fn apply_proxy_namespace(
+        &self,
+        action: Option<&mut Action>,
+        uri: &Uri,
+    ) -> Result<Option<String>, Error> {
+        let Some(ns) = router::proxy_namespace(uri) else {
+            return Ok(None);
+        };
+        let Some(repository) = self.registry.repository_for_ns(&ns) else {
+            return Ok(None);
+        };
+        let Some(namespace) = action.and_then(Action::pull_namespace_mut) else {
+            return Ok(None);
+        };
 
         if !namespace_belongs_to(namespace.as_ref(), repository.name.as_ref()) {
-            *namespace = namespace.prepend(&repository.name).ok()?;
+            // Refused rather than left unprefixed: serving the namespace the
+            // client spelled out would answer from different content than the
+            // one it asked for.
+            *namespace = namespace
+                .prepend(&repository.name)
+                .map_err(|_| registry::Error::NameInvalid)?;
         }
 
-        Some(ns)
+        Ok(Some(ns))
     }
 
     /// The scheme and host a bearer challenge is derived from, or `None` when no

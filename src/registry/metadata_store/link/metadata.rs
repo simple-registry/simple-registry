@@ -1,9 +1,25 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
 
 use angos_oci::{Descriptor, Digest, MediaType};
+
+/// Reads a recorded media type, dropping a parameter section that an angos
+/// before 1.5.0 copied verbatim out of the `Content-Type` a manifest was pushed
+/// under. Values written since are bare, so this only rescues what is already on
+/// disk: refusing them would have scrub delete the link as corrupt.
+fn stored_media_type<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<MediaType>, D::Error> {
+    let Some(recorded) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+
+    MediaType::from_content_type(&recorded)
+        .map(Some)
+        .map_err(DeError::custom)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkMetadata {
@@ -12,7 +28,11 @@ pub struct LinkMetadata {
     pub accessed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub referenced_by: HashSet<Digest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "stored_media_type",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub media_type: Option<MediaType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor: Option<Descriptor>,
@@ -119,6 +139,27 @@ mod tests {
 
     fn digest() -> Digest {
         Digest::sha256(VALID_HASH).unwrap()
+    }
+
+    /// An angos before 1.5.0 recorded the `Content-Type` a manifest was pushed
+    /// under verbatim, parameters included. Refusing those on read would have
+    /// scrub delete the link as corrupt, so they are read bare instead.
+    #[test]
+    fn a_recorded_media_type_keeps_reading_when_it_carries_parameters() {
+        let stored = serde_json::json!({
+            "target": format!("sha256:{VALID_HASH}"),
+            "created_at": null,
+            "accessed_at": null,
+            "media_type": "application/vnd.oci.image.manifest.v1+json; charset=utf-8",
+        });
+
+        let metadata: LinkMetadata =
+            serde_json::from_value(stored).expect("a legacy link must stay readable");
+
+        assert_eq!(
+            metadata.media_type,
+            Some(media_type("application/vnd.oci.image.manifest.v1+json"))
+        );
     }
 
     fn other_digest() -> Digest {

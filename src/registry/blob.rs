@@ -330,13 +330,15 @@ impl Registry {
     /// Resolves a blob GET request to either a presigned redirect URL or a
     /// stream, then emits a `blob.pull` event for the served digest.
     ///
-    /// The redirect fast-path is only taken when `enable_blob_redirect` is set, the
+    /// The redirect fast-path is only taken when the caller allows it (a client
+    /// opts out with `X-Angos-No-Redirect`), `enable_blob_redirect` is set, the
     /// range is absent, and the blob is locally available (for pull-through repos).
     #[instrument(skip(self, request))]
     pub async fn resolve_get_blob(
         &self,
         actor: Option<EventActor>,
         request: GetBlobRequest,
+        allow_redirect: bool,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.get_repository_for_namespace(&request.namespace).ok();
 
@@ -351,7 +353,7 @@ impl Registry {
 
         let repository_name = repository_name(repository);
         let response = if request.range.is_none()
-            && request.allow_redirect
+            && allow_redirect
             && self.enable_blob_redirect
             && has_access
             && self.blob_store.size(&request.digest).await.is_ok()
@@ -389,11 +391,10 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-    use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE};
-
     use std::{io::Cursor, sync::Arc, time::Duration};
 
     use async_trait::async_trait;
+    use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE};
     use tempfile::TempDir;
     use tokio::time::sleep;
     use wiremock::{

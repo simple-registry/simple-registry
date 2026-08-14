@@ -229,8 +229,8 @@ async fn an_unconfigured_namespace_round_trips() {
                     namespace: namespace.clone(),
                     reference: tag,
                     accepted_types: vec![MediaRange::from(media_type)],
-                    allow_redirect: false,
                 },
+                false,
             )
             .await
             .unwrap();
@@ -1495,60 +1495,59 @@ async fn concurrent_same_digest_pushes_keep_upload_ownership() {
 }
 
 #[test]
-fn test_parse_manifest_digests() {
-    let (content, media_type) = create_raw_test_manifest();
-    let digests = parse_manifest_digests(&content, Some(&media_type)).unwrap();
+fn revision_links_cover_the_config_layers_and_subject_of_a_manifest() {
+    let revision = Digest::sha256_of_bytes(b"revision");
+    let subject =
+        Digest::sha256("9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba").unwrap();
+    let config =
+        Digest::sha256("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef").unwrap();
+    let layer =
+        Digest::sha256("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890").unwrap();
 
+    let (content, _) = create_raw_test_manifest();
+    let manifest = Manifest::from_slice(&content).unwrap();
     assert_eq!(
-        digests.media_type.as_ref(),
-        Some(&media_type),
-        "the parse must surface the body's declared mediaType"
-    );
-    assert!(digests.subject.is_none());
-    assert_eq!(
-        digests.config.unwrap().to_string(),
-        "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-    );
-    assert_eq!(
-        digests.layers[0].to_string(),
-        "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
-    );
-
-    let (content, media_type) = create_raw_test_manifest_with_subject();
-    let digests = parse_manifest_digests(&content, Some(&media_type)).unwrap();
-
-    assert_eq!(
-        digests.subject.unwrap().to_string(),
-        "sha256:9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba"
-    );
-    assert_eq!(
-        digests.config.unwrap().to_string(),
-        "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-    );
-    assert_eq!(
-        digests.layers[0].to_string(),
-        "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        link_plan::revision_links(&manifest, &revision),
+        vec![
+            (LinkKind::Config(config.clone()), config.clone()),
+            (LinkKind::Layer(layer.clone()), layer.clone()),
+        ]
     );
 
-    let wrong_media_type = MediaType::new("application/wrong.media.type").unwrap();
-    assert!(parse_manifest_digests(&content, Some(&wrong_media_type)).is_err());
+    let (content, _) = create_raw_test_manifest_with_subject();
+    let manifest = Manifest::from_slice(&content).unwrap();
+    assert_eq!(
+        link_plan::revision_links(&manifest, &revision),
+        vec![
+            (LinkKind::Config(config.clone()), config),
+            (LinkKind::Layer(layer.clone()), layer),
+            (
+                LinkKind::Referrer {
+                    subject,
+                    referrer: revision.clone(),
+                },
+                revision,
+            ),
+        ],
+        "a subject-bearing manifest also links the referrer back to its subject"
+    );
 }
 
 #[tokio::test]
 async fn test_malformed_json_yields_same_error_shape() {
     let malformed = b"not json";
 
-    let parse_err = parse_manifest_digests(malformed, None)
-        .err()
-        .expect("expected Err from parse_manifest_digests");
+    let parse_err = Manifest::from_slice(malformed)
+        .map_err(|e| Error::manifest_invalid(&e))
+        .expect_err("expected Err from a malformed body");
     match parse_err {
         crate::registry::Error::ManifestInvalid(s) => {
             assert!(
                 s.starts_with("invalid manifest JSON:"),
-                "parse_manifest_digests error should start with 'invalid manifest JSON:'; got: {s}"
+                "the parse error should start with 'invalid manifest JSON:'; got: {s}"
             );
         }
-        other => panic!("expected ManifestInvalid from parse_manifest_digests, got {other:?}"),
+        other => panic!("expected ManifestInvalid from the parse error mapper, got {other:?}"),
     }
 
     // Parse failure is detected before any blob/metadata store access, so a
@@ -1577,16 +1576,27 @@ async fn test_malformed_json_yields_same_error_shape() {
     }
 }
 
-#[test]
-fn parse_manifest_digests_media_type_mismatch_returns_manifest_invalid() {
+/// A body whose `mediaType` contradicts the `Content-Type` it was pushed under
+/// is refused before any store access, as a manifest the client got wrong.
+#[tokio::test]
+async fn put_manifest_media_type_mismatch_returns_manifest_invalid() {
     let (content, _) = create_raw_test_manifest();
     let wrong_type = MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap();
+    let test_case = FSRegistryTestCase::new();
 
-    let err = parse_manifest_digests(&content, Some(&wrong_type))
+    let err = test_case
+        .registry()
+        .put_manifest(
+            &Namespace::new("test-repo").unwrap(),
+            &Reference::Tag(Tag::new("latest").unwrap()),
+            Some(&wrong_type),
+            &content,
+        )
+        .await
         .err()
         .expect("expected error on media type mismatch");
     assert!(
-        matches!(err, crate::registry::Error::ManifestInvalid(_)),
+        matches!(err, Error::ManifestInvalid(_)),
         "expected ManifestInvalid for media type mismatch, got: {err:?}"
     );
 }
@@ -1624,7 +1634,7 @@ async fn accept_put_manifest_rejects_body_above_limit() {
 }
 
 #[test]
-fn parse_manifest_digests_empty_layers_succeeds_with_empty_vec() {
+fn a_manifest_without_layers_links_only_its_config() {
     let body = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
@@ -1637,15 +1647,14 @@ fn parse_manifest_digests_empty_layers_succeeds_with_empty_vec() {
     }))
     .unwrap();
 
-    let digests =
-        parse_manifest_digests(&body, None).expect("empty layers must parse successfully");
-    assert!(digests.layers.is_empty(), "layers must be empty");
-    assert!(digests.config.is_some(), "config must be present");
+    let manifest = Manifest::from_slice(&body).expect("empty layers must parse successfully");
+    let links = link_plan::referenced_links(&manifest, &Digest::sha256_of_bytes(b"revision"));
+    assert_eq!(links.len(), 1, "only the config is referenced: {links:?}");
+    assert!(matches!(links[0].0, LinkKind::Config(_)));
 }
 
 #[test]
-fn parse_manifest_digests_only_subject_succeeds() {
-    // A manifest carrying only a subject (no config/layers) must parse successfully.
+fn a_subject_only_manifest_links_nothing_but_its_referrer_back_link() {
     let body = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
         "subject": {
@@ -1656,15 +1665,16 @@ fn parse_manifest_digests_only_subject_succeeds() {
     }))
     .unwrap();
 
-    let digests = parse_manifest_digests(&body, None).expect("subject-only manifest must parse");
-    assert!(digests.subject.is_some(), "subject must be populated");
-    assert!(digests.config.is_none());
-    assert!(digests.layers.is_empty());
-    assert!(digests.manifests.is_empty());
+    let revision = Digest::sha256_of_bytes(b"revision");
+    let manifest = Manifest::from_slice(&body).expect("subject-only manifest must parse");
+    assert!(link_plan::referenced_links(&manifest, &revision).is_empty());
+    let links = link_plan::revision_links(&manifest, &revision);
+    assert_eq!(links.len(), 1, "only the referrer back-link: {links:?}");
+    assert!(matches!(links[0].0, LinkKind::Referrer { .. }));
 }
 
 #[test]
-fn parse_manifest_digests_index_manifest_populates_manifests_vec() {
+fn an_index_links_each_of_its_children() {
     // An OCI image index carries a `manifests` array, no `layers`.
     let body = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
@@ -1686,14 +1696,14 @@ fn parse_manifest_digests_index_manifest_populates_manifests_vec() {
     }))
     .unwrap();
 
-    let digests = parse_manifest_digests(&body, None).expect("index manifest must parse");
-    assert_eq!(
-        digests.manifests.len(),
-        2,
-        "both child manifests must be collected"
-    );
-    assert!(digests.layers.is_empty());
-    assert!(digests.config.is_none());
+    let revision = Digest::sha256_of_bytes(b"revision");
+    let manifest = Manifest::from_slice(&body).expect("index manifest must parse");
+    let links = link_plan::referenced_links(&manifest, &revision);
+    assert_eq!(links.len(), 2, "both children must be linked: {links:?}");
+    assert!(links.iter().all(|(link, target)| matches!(
+        link,
+        LinkKind::Manifest { index, child } if index == &revision && child == target
+    )));
 }
 
 #[tokio::test]
@@ -1721,8 +1731,8 @@ async fn test_handle_get_manifest() {
                     namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new(tag).unwrap()),
                     accepted_types: Vec::new(),
-                    allow_redirect: true,
                 },
+                true,
             )
             .await
             .unwrap();

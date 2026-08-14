@@ -3,6 +3,7 @@ use std::{num::TryFromIntError, string::FromUtf8Error};
 use cel_interpreter::SerializationError;
 use hyper::{header::InvalidHeaderValue, http::uri::InvalidUri};
 use sha2::digest::common::hazmat::DeserializeStateError;
+use tracing::warn;
 
 use angos_oci::{Error as OciError, http_range};
 use angos_tx_engine::{StorageError, error::Error as TxError, lock};
@@ -208,6 +209,17 @@ impl From<http_range::Error> for Error {
 impl From<OciError> for Error {
     fn from(_: OciError) -> Self {
         Error::NameInvalid
+    }
+}
+
+impl Error {
+    /// Maps a manifest parse or ingress-validation failure to the code the OCI
+    /// spec gives a malformed manifest. The blanket `From<OciError>` above
+    /// answers `NameInvalid` instead, so every manifest body goes through here
+    /// to keep one error shape.
+    pub fn manifest_invalid(error: &OciError) -> Self {
+        warn!("Rejecting manifest: {error}");
+        Error::ManifestInvalid(error.to_string())
     }
 }
 

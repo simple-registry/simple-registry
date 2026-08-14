@@ -113,10 +113,24 @@ mod tests {
         }
     }
 
+    /// The `From` impl skips the media-range grammar on the strength of every
+    /// media type already satisfying it. That claim is what is checked here: a
+    /// media-range grammar tightened past the media-type one would make the
+    /// bypass produce values `new` itself rejects.
     #[test]
     fn a_media_type_converts_without_re_validation() {
-        let media_type = MediaType::oci_manifest();
-        let range = MediaRange::from(media_type.clone());
-        assert_eq!(range.as_str(), media_type.to_string());
+        for media_type in [
+            MediaType::oci_manifest(),
+            MediaType::oci_index(),
+            MediaType::docker_manifest(),
+            MediaType::docker_manifest_list(),
+        ] {
+            let range = MediaRange::from(media_type.clone());
+            assert_eq!(range.as_str(), media_type.as_ref());
+            assert!(
+                MediaRange::new(range.as_str()).is_ok(),
+                "'{media_type}' must satisfy the media-range grammar the bypass assumes"
+            );
+        }
     }
 }

@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{Descriptor, Digest, Error, MediaType};
 
-/// OCI image-spec manifest `schemaVersion`. Enforced where a manifest enters
-/// the store, not on this DTO, so angos keeps reading what it once accepted.
+/// OCI image-spec manifest `schemaVersion`. Pinned on ingress by
+/// [`Manifest::from_pushed`], never on a read, so angos keeps reading what it
+/// once accepted.
 pub const OCI_MANIFEST_SCHEMA_VERSION: i32 = 2;
 
 /// The descriptor payload of a manifest. The image spec makes the two shapes
@@ -16,7 +17,7 @@ pub const OCI_MANIFEST_SCHEMA_VERSION: i32 = 2;
 /// carrying `manifests` and `Image` for every other one. Each variant emits
 /// only its own array, which is the one the spec requires of that shape.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-#[serde(untagged, rename_all = "camelCase")]
+#[serde(untagged)]
 pub enum Content {
     Index {
         manifests: Vec<Descriptor>,
@@ -79,9 +80,11 @@ impl Manifest {
         Ok(serde_json::from_slice(s)?)
     }
 
-    /// Parses a manifest a client is pushing, refusing one that declares both
-    /// image and index content. The image spec makes them mutually exclusive,
-    /// and accepting the hybrid would store a document neither shape describes.
+    /// Parses a manifest a client is pushing, applying the ingress rules
+    /// [`Self::from_slice`] stays lenient about: image and index content are
+    /// mutually exclusive in the spec (the hybrid would store a document
+    /// neither shape describes), `schemaVersion` is pinned, and the declared
+    /// `mediaType` must agree with the `Content-Type` it was sent under.
     ///
     /// The shapes are read off the raw object because the flattened [`Content`]
     /// keeps only the one it selects, which is what lets an already-stored
@@ -90,15 +93,38 @@ impl Manifest {
     /// # Errors
     ///
     /// Returns an error when the bytes are not a JSON manifest object, or when
-    /// the object declares both image and index content.
-    pub fn from_pushed(s: &[u8]) -> Result<Self, Error> {
+    /// the object breaks one of those rules.
+    pub fn from_pushed(s: &[u8], content_type: Option<&MediaType>) -> Result<Self, Error> {
         let raw: serde_json::Value = serde_json::from_slice(s)?;
         if declares_both_shapes(&raw) {
             return Err(Error::InvalidManifest(
                 "a manifest carries either config/layers or manifests, never both".to_string(),
             ));
         }
-        Ok(serde_json::from_value(raw)?)
+        let manifest: Self = serde_json::from_value(raw)?;
+        if manifest.schema_version != OCI_MANIFEST_SCHEMA_VERSION {
+            return Err(Error::InvalidManifest(format!(
+                "unsupported schemaVersion {}, expected {OCI_MANIFEST_SCHEMA_VERSION}",
+                manifest.schema_version
+            )));
+        }
+        if !manifest.media_type_matches(content_type) {
+            return Err(Error::InvalidManifest(
+                "Expected manifest media type mismatch".to_string(),
+            ));
+        }
+        Ok(manifest)
+    }
+
+    /// Whether the declared `mediaType` agrees with the `Content-Type` the
+    /// manifest travelled under. Either side being absent is no disagreement:
+    /// the spec leaves the manifest's own field optional.
+    #[must_use]
+    pub fn media_type_matches(&self, content_type: Option<&MediaType>) -> bool {
+        match (self.media_type.as_ref(), content_type) {
+            (Some(declared), Some(sent)) => declared == sent,
+            _ => true,
+        }
     }
 
     /// Returns `true` if `artifact_type` equals either the manifest's top-level
@@ -159,9 +185,7 @@ impl Manifest {
             size,
         }
     }
-}
 
-impl Manifest {
     /// An OCI image index listing `manifests`, typed as one so it serializes
     /// under the media type a client negotiates the listing on.
     #[must_use]
@@ -193,6 +217,7 @@ impl Default for Manifest {
 impl Manifest {
     /// An image manifest carrying `config` and `layers`, every other field left
     /// at its default.
+    #[must_use]
     pub fn image(config: Option<Descriptor>, layers: Vec<Descriptor>) -> Self {
         Self {
             content: Content::Image {
@@ -399,28 +424,19 @@ mod tests {
         assert_eq!(index.media_type, MediaType::oci_index());
     }
 
-    // artifact_type_matches: None filter matches anything
+    /// The filter is optional and, when given, defers to
+    /// [`Manifest::has_artifact_type`]: an absent one lists everything, and a
+    /// present one matches the manifest's own type or its config fallback.
     #[test]
-    fn test_artifact_type_matches_none_filter_always_matches() {
-        assert!(demo_manifest().artifact_type_matches(None));
-        let bare = Manifest::default();
-        assert!(bare.artifact_type_matches(None));
-    }
-
-    // artifact_type_matches: filter matches the manifest's own artifact_type
-    #[test]
-    fn test_artifact_type_matches_filter_matches_artifact_type() {
+    fn artifact_type_matches_only_filters_when_asked() {
         let manifest = demo_manifest();
-        let filter = media_type(ARTIFACT_TYPE_INDEX);
-        assert!(manifest.artifact_type_matches(Some(&filter)));
-    }
 
-    // artifact_type_matches: filter matches the config media_type
-    #[test]
-    fn test_artifact_type_matches_filter_matches_config_media_type() {
-        let manifest = demo_manifest();
-        let filter = media_type(MEDIA_TYPE_CONFIG);
-        assert!(manifest.artifact_type_matches(Some(&filter)));
+        assert!(manifest.artifact_type_matches(None));
+        assert!(manifest.artifact_type_matches(Some(&media_type(ARTIFACT_TYPE_INDEX))));
+        assert!(manifest.artifact_type_matches(Some(&media_type(MEDIA_TYPE_CONFIG))));
+        assert!(
+            !manifest.artifact_type_matches(Some(&media_type("application/vnd.example.other")))
+        );
     }
 
     /// A stored hybrid predates the ingress refusal and must stay readable: it
@@ -453,7 +469,10 @@ mod tests {
         .unwrap();
 
         assert!(
-            matches!(Manifest::from_pushed(&body), Err(Error::InvalidManifest(_))),
+            matches!(
+                Manifest::from_pushed(&body, None),
+                Err(Error::InvalidManifest(_))
+            ),
             "a document carrying both shapes must not enter the store"
         );
     }
@@ -474,10 +493,74 @@ mod tests {
         ] {
             let raw = serde_json::to_vec(&body).unwrap();
             assert!(
-                Manifest::from_pushed(&raw).is_ok(),
+                Manifest::from_pushed(&raw, None).is_ok(),
                 "a single-shape manifest must be accepted: {body}"
             );
         }
+    }
+
+    /// The pushed `Content-Type` and the body's own `mediaType` must agree,
+    /// but neither side is required to speak: a body declaring none travels
+    /// under any content type, and a parameterized header still matches the
+    /// bare type it carries.
+    #[test]
+    fn pushing_a_media_type_the_content_type_contradicts_is_refused() {
+        let declared = |media_type: Option<&str>| {
+            serde_json::to_vec(&json!({
+                "schemaVersion": 2,
+                "mediaType": media_type,
+            }))
+            .unwrap()
+        };
+        let sent = MediaType::from_content_type(&format!("{MEDIA_TYPE_MANIFEST}; charset=utf-8"))
+            .expect("a header may carry a parameter section");
+
+        assert!(
+            matches!(
+                Manifest::from_pushed(&declared(Some(OCI_INDEX_MEDIA_TYPE)), Some(&sent)),
+                Err(Error::InvalidManifest(_))
+            ),
+            "a body contradicting its Content-Type must not enter the store"
+        );
+        assert!(
+            Manifest::from_pushed(&declared(Some(MEDIA_TYPE_MANIFEST)), Some(&sent)).is_ok(),
+            "a Content-Type parameter is the sender's business, not a mismatch"
+        );
+        assert!(
+            Manifest::from_pushed(&declared(None), Some(&sent)).is_ok(),
+            "a body declaring no mediaType agrees with any Content-Type"
+        );
+    }
+
+    /// The schema version the image spec defines is pinned on push, and the
+    /// refusal names what it found next to what it wanted.
+    #[test]
+    fn pushing_a_foreign_schema_version_is_refused() {
+        let body = serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "mediaType": MEDIA_TYPE_MANIFEST,
+        }))
+        .unwrap();
+
+        let Err(Error::InvalidManifest(message)) = Manifest::from_pushed(&body, None) else {
+            panic!("a foreign schemaVersion must not enter the store");
+        };
+        assert_eq!(message, "unsupported schemaVersion 1, expected 2");
+    }
+
+    /// Reads stay lenient so a scrub or a replication push never trips over an
+    /// object an older angos accepted; only the write paths reject it.
+    #[test]
+    fn a_stored_foreign_schema_version_is_still_parsed() {
+        let body = serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "mediaType": MEDIA_TYPE_MANIFEST,
+        }))
+        .unwrap();
+
+        let parsed = Manifest::from_slice(&body)
+            .expect("a stored manifest must stay readable whatever its schemaVersion");
+        assert_eq!(parsed.media_type.as_deref(), Some(MEDIA_TYPE_MANIFEST));
     }
 
     /// An index round-trips through the wire form without gaining an image's
@@ -599,7 +682,7 @@ mod tests {
         ];
         for (name, body) in images {
             let raw = serde_json::to_vec(&body).unwrap();
-            let manifest = Manifest::from_pushed(&raw)
+            let manifest = Manifest::from_pushed(&raw, None)
                 .unwrap_or_else(|e| panic!("{name} must be accepted on push: {e}"));
             assert!(
                 matches!(manifest.content, Content::Image { .. }),
@@ -613,7 +696,7 @@ mod tests {
             ("oci index", oci_index),
         ] {
             let raw = serde_json::to_vec(&body).unwrap();
-            let manifest = Manifest::from_pushed(&raw)
+            let manifest = Manifest::from_pushed(&raw, None)
                 .unwrap_or_else(|e| panic!("{name} must be accepted on push: {e}"));
             assert!(
                 matches!(manifest.content, Content::Index { .. }),
@@ -632,15 +715,7 @@ mod tests {
             "mediaType": MEDIA_TYPE_MANIFEST,
         }))
         .unwrap();
-        let manifest = Manifest::from_pushed(&body).expect("a config-less image must parse");
+        let manifest = Manifest::from_pushed(&body, None).expect("a config-less image must parse");
         assert!(matches!(manifest.content, Content::Image { .. }));
-    }
-
-    // artifact_type_matches: filter doesn't match any type
-    #[test]
-    fn test_artifact_type_matches_filter_no_match() {
-        let manifest = demo_manifest();
-        let filter = media_type("application/vnd.example.unknown");
-        assert!(!manifest.artifact_type_matches(Some(&filter)));
     }
 }

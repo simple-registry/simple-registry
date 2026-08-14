@@ -96,7 +96,6 @@ name = "angos-oci"
 version = "0.1.0"
 dependencies = [
  "angos-oci",
- "bytes",
  "chrono",
  "hex",
  "hyper",

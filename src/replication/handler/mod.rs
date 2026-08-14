@@ -32,11 +32,13 @@ use crate::{
 };
 
 /// Maps a replication error to a job error, preserving a downstream
-/// authorization denial as the terminal [`Error::Denied`] so the worker
-/// dead-letters it instead of retrying against an unchangeable outcome.
+/// authorization denial and an invalid manifest body as [`Error::Terminal`] so
+/// the worker dead-letters them instead of retrying against an outcome that
+/// cannot change.
 fn job_error(error: ReplicationError) -> Error {
     match error {
-        ReplicationError::Client(RegistryClientError::Denied(msg)) => Error::Denied(msg),
+        ReplicationError::Client(RegistryClientError::Denied(msg))
+        | ReplicationError::InvalidManifest(msg) => Error::Terminal(msg),
         other => Error::Execution(other.to_string()),
     }
 }
@@ -435,7 +437,7 @@ impl ReplicationJobHandler {
             downstream_namespace,
             source_ts,
         };
-        let outcome = pipeline::push_manifest(&ctx, &digest, None, target.tag.as_deref(), body)
+        let outcome = pipeline::push_manifest(&ctx, &digest, target.tag.as_deref(), body)
             .await
             .map_err(job_error)?;
         Self::record_success(&target.downstream, outcome);

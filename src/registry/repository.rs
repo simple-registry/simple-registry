@@ -291,10 +291,13 @@ impl Repository {
 
         Ok(Self {
             name,
+            // Lowercased once here: `ns` names a host, and a host is
+            // case-insensitive, so the resolver never has to care.
             namespace: config
                 .namespace
-                .clone()
-                .filter(|namespace| !namespace.is_empty()),
+                .as_deref()
+                .filter(|namespace| !namespace.is_empty())
+                .map(str::to_ascii_lowercase),
             upstreams,
             replication,
             retention_policy,
@@ -365,7 +368,6 @@ impl Repository {
                         namespace: remote,
                         digest: digest.clone(),
                         artifact_type: None,
-                        n: None,
                         last: None,
                     })
                     .await?)
@@ -394,7 +396,6 @@ impl Repository {
                         digest: digest.clone(),
                         accepted_types: accepted_types.to_vec(),
                         range,
-                        allow_redirect: false,
                     })
                     .await?)
             })
@@ -441,7 +442,6 @@ impl Repository {
                         namespace: remote,
                         reference: reference.clone(),
                         accepted_types: accepted_types.to_vec(),
-                        allow_redirect: false,
                     })
                     .await?)
             })

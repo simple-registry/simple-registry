@@ -40,7 +40,6 @@ export interface ManifestEntry {
 	tags: string[];
 	parents?: ParentRef[];
 	referrers?: ReferrerInfo[];
-	/// Cursor the referrers listing continues from, absent once exhausted.
 	referrers_next?: string;
 	pushed_at?: string;
 	last_pulled_at?: string;
@@ -138,9 +137,6 @@ const MANIFEST_ACCEPT_HEADER = [
 	'application/vnd.docker.distribution.manifest.list.v2+json'
 ].join(', ');
 
-/// Referrers fetched per request when browsing past the first page.
-const REFERRERS_PAGE = 100;
-
 interface FetchResult<T> {
 	data: T | null;
 	error: string | null;
@@ -226,7 +222,7 @@ export async function fetchFailedJobs(
 }
 
 export async function retryJob(queue: JobQueue, storageKey: string): Promise<string | null> {
-	return postAction(`/v2/_angos/jobs/failed/${encodeURIComponent(storageKey)}/retry?queue=${queue}`);
+	return postAction(`/v2/_angos/jobs/failed?queue=${queue}&key=${encodeURIComponent(storageKey)}`);
 }
 
 export async function deleteJob(
@@ -234,7 +230,9 @@ export async function deleteJob(
 	state: JobState,
 	storageKey: string
 ): Promise<string | null> {
-	return deleteResource(`/v2/_angos/jobs/${state}/${encodeURIComponent(storageKey)}?queue=${queue}`);
+	return deleteResource(
+		`/v2/_angos/jobs/${state}?queue=${queue}&key=${encodeURIComponent(storageKey)}`
+	);
 }
 
 export interface ManifestResult {
@@ -259,28 +257,25 @@ export async function fetchManifest(namespace: string, reference: string): Promi
 	}
 }
 
-/// The `last` cursor of a `Link: <...?last=X>; rel="next"` header, absent when
-/// the listing is exhausted and no such header is sent.
+// The `last` cursor of a `Link: <...>; rel="next"` header, absent when the
+// listing is exhausted and no such header is sent. The target is resolved
+// against the request's own URL, since the registry advertises it as a path.
 function nextCursor(response: Response): string | undefined {
-	const link = response.headers.get('Link');
-	const cursor = link?.split('last=')[1]?.split('>')[0];
-	return cursor ? decodeURIComponent(cursor) : undefined;
+	const target = response.headers.get('Link')?.match(/<([^>]*)>/)?.[1];
+	if (!target) return undefined;
+	return new URL(target, response.url).searchParams.get('last') ?? undefined;
 }
 
-/// One page of a subject's referrers, resuming from `last` when given.
+// One page of a subject's referrers, resuming from `last` when given. The
+// registry sizes the page; the endpoint takes no page-size parameter.
 export async function fetchReferrers(
 	namespace: string,
 	digest: string,
 	last?: string
 ): Promise<FetchResult<ReferrersPage>> {
-	const params = new URLSearchParams({ n: String(REFERRERS_PAGE) });
-	if (last) {
-		params.set('last', last);
-	}
+	const params = new URLSearchParams(last ? { last } : {});
 	try {
-		const response = await fetch(`/v2/${namespace}/referrers/${digest}?${params}`, {
-			headers: { 'X-Angos-No-Redirect': '1' }
-		});
+		const response = await fetch(`/v2/${namespace}/referrers/${digest}?${params}`);
 		if (!response.ok) {
 			return { data: null, error: `HTTP ${response.status}` };
 		}

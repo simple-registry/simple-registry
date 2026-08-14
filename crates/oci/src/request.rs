@@ -6,8 +6,6 @@
 //! assigns, which the spec keeps opaque, so only the receiving side of those
 //! operations names a session by [`UploadSessionId`].
 
-use std::num::NonZeroU64;
-
 use chrono::{DateTime, Utc};
 
 use crate::types::http_range::{ByteWindow, RequestRange};
@@ -22,12 +20,14 @@ pub struct ListTagsRequest {
     pub last: Option<String>,
 }
 
+/// `last` is the cursor a registry mints inside the `Link` it must advertise
+/// when the listing does not fit one page; the spec defines no page-size
+/// parameter here, so the serving side alone sizes the page.
 #[derive(Debug)]
 pub struct GetReferrersRequest {
     pub namespace: Namespace,
     pub digest: Digest,
     pub artifact_type: Option<MediaType>,
-    pub n: Option<u16>,
     pub last: Option<String>,
 }
 
@@ -46,10 +46,6 @@ pub struct GetBlobRequest {
     pub digest: Digest,
     pub accepted_types: Vec<MediaRange>,
     pub range: Option<RequestRange>,
-    /// Whether the answer may be a redirect to storage. Read by the serving
-    /// side, which the requester steers with `X-Angos-No-Redirect`; an outbound
-    /// client follows its own configured redirect policy instead.
-    pub allow_redirect: bool,
 }
 
 #[derive(Debug)]
@@ -70,19 +66,19 @@ pub struct GetManifestRequest {
     pub namespace: Namespace,
     pub reference: Reference,
     pub accepted_types: Vec<MediaRange>,
-    /// See [`GetBlobRequest::allow_redirect`].
-    pub allow_redirect: bool,
 }
 
 /// The manifest body is passed separately, as a stream on the receiving side
-/// and as bytes on the sending one. `tags` are the extra tags a push by digest
-/// binds in the same operation; `source_ts` is the origin timestamp of a
+/// and as bytes on the sending one. `source_ts` is the origin timestamp of a
 /// replication write, which settles last-writer-wins on the receiver.
 #[derive(Debug)]
 pub struct PutManifestRequest {
     pub namespace: Namespace,
     pub reference: Reference,
     pub content_type: Option<MediaType>,
+    /// The `?tag=` parameters a push by digest binds in the same operation.
+    /// Read by the receiving side only: an outbound client pushes one reference
+    /// per request, so it leaves this empty.
     pub tags: Vec<Tag>,
     pub source_ts: Option<DateTime<Utc>>,
 }
@@ -105,13 +101,14 @@ pub struct BlobMount {
 }
 
 /// The `?digest=` target of an upload POST: the digest the client names, plus
-/// the length of the blob when the POST carries it, which is the single-request
-/// upload. A body without a digest is not a target, since there would be
-/// nothing to verify it against, so that POST only opens a session.
+/// the length the POST declares, which is the single-request upload. A declared
+/// zero is the empty blob, not an absent body; only a POST declaring no length
+/// at all opens a session instead. A body without a digest is not a target,
+/// since there would be nothing to verify it against.
 #[derive(Debug)]
 pub struct StartUploadTarget {
     pub digest: Digest,
-    pub content_length: Option<NonZeroU64>,
+    pub content_length: Option<u64>,
 }
 
 #[derive(Debug)]

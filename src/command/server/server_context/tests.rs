@@ -8,7 +8,7 @@ use argon2::{
 };
 use base64::Engine;
 use hyper::{
-    Request, Uri,
+    Request, StatusCode, Uri,
     header::{HOST, HeaderMap, HeaderValue},
 };
 use uuid::Uuid;
@@ -344,7 +344,9 @@ async fn proxy_namespace_resolves_to_the_mirroring_repository() {
         reference: Reference::Tag(Tag::new("latest").unwrap()),
     };
 
-    let served = context.apply_proxy_namespace(Some(&mut action), &uri);
+    let served = context
+        .apply_proxy_namespace(Some(&mut action), &uri)
+        .expect("a mapped namespace must apply");
 
     assert_eq!(served.as_deref(), Some("docker.io"));
     assert_eq!(
@@ -380,7 +382,9 @@ async fn proxy_namespace_leaves_an_already_prefixed_request() {
         last: None,
     };
 
-    let served = context.apply_proxy_namespace(Some(&mut action), &uri);
+    let served = context
+        .apply_proxy_namespace(Some(&mut action), &uri)
+        .expect("a mapped namespace must apply");
 
     assert_eq!(served.as_deref(), Some("docker.io"));
     assert_eq!(
@@ -416,6 +420,7 @@ async fn an_unclaimed_proxy_namespace_is_ignored() {
     assert!(
         context
             .apply_proxy_namespace(Some(&mut action), &uri)
+            .expect("an ignored ns is not a failure")
             .is_none()
     );
     assert_eq!(
@@ -452,6 +457,7 @@ async fn proxy_namespace_leaves_a_write_alone() {
     assert!(
         context
             .apply_proxy_namespace(Some(&mut action), &uri)
+            .expect("an ignored ns is not a failure")
             .is_none(),
         "a write must not be scoped by ns, so nothing is echoed"
     );
@@ -459,6 +465,48 @@ async fn proxy_namespace_leaves_a_write_alone() {
         panic!("the action must be untouched");
     };
     assert_eq!(namespace.as_ref(), "library/nginx");
+}
+
+/// Nesting under the mirror can breach the namespace length cap. Falling
+/// through would serve the unprefixed namespace, which is different content
+/// than the client asked for, so the request is refused instead.
+#[tokio::test]
+async fn proxy_namespace_refuses_a_name_it_cannot_map() {
+    let config = load_config(
+        r#"
+        [repository."docker-hub"]
+        namespace = "docker.io"
+
+        [[repository."docker-hub".upstream]]
+        url = "https://registry-1.docker.io"
+    "#,
+    );
+    let context = create_test_server_context_from_config(&config).await;
+
+    // One character short of the cap, so any prefix overflows it.
+    let long = "a".repeat(255);
+    let uri: Uri = format!("/v2/{long}/tags/list?ns=docker.io")
+        .parse()
+        .unwrap();
+    let mut action = Action::ListTags {
+        namespace: Namespace::new(&long).unwrap(),
+        n: None,
+        last: None,
+    };
+
+    let error = context
+        .apply_proxy_namespace(Some(&mut action), &uri)
+        .expect_err("a namespace that cannot be mapped must fail the request");
+
+    assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+    let Action::ListTags { namespace, .. } = &action else {
+        panic!("the action must keep its shape");
+    };
+    assert_eq!(
+        namespace.as_ref(),
+        long,
+        "a refused mapping must not leave a half-applied namespace"
+    );
 }
 
 #[tokio::test]

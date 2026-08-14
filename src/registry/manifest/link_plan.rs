@@ -74,35 +74,12 @@ pub fn push(
         ));
     }
 
-    match &manifest.content {
-        Content::Image { config, layers } => {
-            if let Some(config) = config {
-                ops.push(LinkOperation::create_with_referrer(
-                    LinkKind::Config(config.digest.clone()),
-                    config.digest.clone(),
-                    digest.clone(),
-                ));
-            }
-            for layer in layers {
-                ops.push(LinkOperation::create_with_referrer(
-                    LinkKind::Layer(layer.digest.clone()),
-                    layer.digest.clone(),
-                    digest.clone(),
-                ));
-            }
-        }
-        Content::Index { manifests } => {
-            for child in manifests {
-                ops.push(LinkOperation::create_with_referrer(
-                    LinkKind::Manifest {
-                        index: digest.clone(),
-                        child: child.digest.clone(),
-                    },
-                    child.digest.clone(),
-                    digest.clone(),
-                ));
-            }
-        }
+    for (link, target) in referenced_links(manifest, digest) {
+        ops.push(LinkOperation::create_with_referrer(
+            link,
+            target,
+            digest.clone(),
+        ));
     }
 
     ops
@@ -144,37 +121,64 @@ pub fn delete(
                     }));
                 }
 
-                match &m.content {
-                    Content::Image { config, layers } => {
-                        if let Some(config) = config {
-                            ops.push(LinkOperation::delete_with_referrer(
-                                LinkKind::Config(config.digest.clone()),
-                                digest.clone(),
-                            ));
-                        }
-                        for layer in layers {
-                            ops.push(LinkOperation::delete_with_referrer(
-                                LinkKind::Layer(layer.digest.clone()),
-                                digest.clone(),
-                            ));
-                        }
-                    }
-                    Content::Index { manifests } => {
-                        for child in manifests {
-                            ops.push(LinkOperation::delete_with_referrer(
-                                LinkKind::Manifest {
-                                    index: digest.clone(),
-                                    child: child.digest.clone(),
-                                },
-                                digest.clone(),
-                            ));
-                        }
-                    }
+                for (link, _) in referenced_links(m, digest) {
+                    ops.push(LinkOperation::delete_with_referrer(link, digest.clone()));
                 }
             }
 
             ops
         }
+    }
+}
+
+/// The links a stored revision implies, each paired with the digest it targets:
+/// the manifest's referenced links plus, for a subject-bearing manifest, the
+/// referrer back-link pointing at the revision itself.
+pub fn revision_links(manifest: &Manifest, revision: &Digest) -> Vec<(LinkKind, Digest)> {
+    let mut links = referenced_links(manifest, revision);
+
+    if let Some(subject) = &manifest.subject {
+        links.push((
+            LinkKind::Referrer {
+                subject: subject.digest.clone(),
+                referrer: revision.clone(),
+            },
+            revision.clone(),
+        ));
+    }
+
+    links
+}
+
+/// The config / layer / child-manifest links `manifest` implies under
+/// `revision`, each paired with the digest it targets. Config and layers come
+/// in manifest order, and an index yields its children instead.
+pub fn referenced_links(manifest: &Manifest, revision: &Digest) -> Vec<(LinkKind, Digest)> {
+    match &manifest.content {
+        Content::Image { config, layers } => {
+            let config = config.iter().map(|config| {
+                (
+                    LinkKind::Config(config.digest.clone()),
+                    config.digest.clone(),
+                )
+            });
+            let layers = layers
+                .iter()
+                .map(|layer| (LinkKind::Layer(layer.digest.clone()), layer.digest.clone()));
+            config.chain(layers).collect()
+        }
+        Content::Index { manifests } => manifests
+            .iter()
+            .map(|child| {
+                (
+                    LinkKind::Manifest {
+                        index: revision.clone(),
+                        child: child.digest.clone(),
+                    },
+                    child.digest.clone(),
+                )
+            })
+            .collect(),
     }
 }
 

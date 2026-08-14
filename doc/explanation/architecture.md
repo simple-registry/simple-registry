@@ -43,7 +43,8 @@ Built on Hyper for high-performance async I/O:
 ### Router
 
 Parses incoming requests and maps them to operations:
-- OCI Distribution Specification v1.1 endpoints
+- OCI Distribution Specification v1.1 endpoints, plus two the specification added after it: the
+  `digest-algorithm` upload parameter (end-4c) and the `ns` proxy parameter
 - Extension API endpoints (`/v2/_angos/`)
 - Health and metrics endpoints
 - Web UI routes

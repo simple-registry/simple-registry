@@ -162,8 +162,6 @@ pub enum Action {
         #[serde(skip_serializing_if = "Option::is_none")]
         artifact_type: Option<MediaType>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        n: Option<u16>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         last: Option<String>,
     },
     #[serde(rename = "list-revisions")]

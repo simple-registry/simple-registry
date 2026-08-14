@@ -2,7 +2,6 @@ use hyper::{HeaderMap, Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt, copy, sink};
 use tracing::{instrument, warn};
 
-use angos_oci::http_range::ByteWindow;
 use angos_oci::request::{
     BlobMount, CompleteUploadRequest, DeleteUploadRequest, GetUploadRequest, MountBlobRequest,
     PatchUploadRequest, StartUploadRequest,
@@ -28,27 +27,6 @@ const MAX_FROM_LESS_MOUNT_CANDIDATES: usize = 32;
 /// Default cap on a blob's cumulative uploaded size, mirroring
 /// [`manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES`](crate::registry::manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES).
 pub const DEFAULT_MAX_BLOB_SIZE_BYTES: u64 = 100 * 1024 * 1024 * 1024;
-
-/// A chunk declaring where it resumes must resume where the session stands: a
-/// gap or a rewind is an out-of-order chunk, not a digest mismatch.
-fn verify_chunk_start(range: Option<ByteWindow>, committed: u64) -> Result<(), Error> {
-    match range {
-        Some(range) if range.start != committed => Err(Error::RangeNotSatisfiable),
-        _ => Ok(()),
-    }
-}
-
-/// A chunk declaring its last byte must carry exactly that many: a body longer
-/// or shorter than the window it announced is refused rather than committed as
-/// whatever arrived.
-fn verify_chunk_extent(range: Option<ByteWindow>, committed: u64, total: u64) -> Result<(), Error> {
-    match range {
-        Some(range) if !range.covers(total.saturating_sub(committed)) => {
-            Err(Error::RangeNotSatisfiable)
-        }
-        _ => Ok(()),
-    }
-}
 
 impl Registry {
     async fn complete_existing_upload<S>(
@@ -236,13 +214,12 @@ impl Registry {
             )?);
         }
 
-        // A `?digest=` POST carrying the blob is the single-request upload:
-        // close it here rather than have the client send every byte again. A
-        // body of undeclared length falls back to a session, which the spec
-        // allows and which no client sending this form uses.
+        // A `?digest=` POST carrying the blob is the single-request upload, a
+        // declared zero being the empty blob. Only an undeclared length falls
+        // back to a session, which hashes the target's algorithm alone.
         let Some(content_length) = target.content_length else {
             return self
-                .open_upload_session(&request.namespace, request.digest_algorithm)
+                .open_upload_session(&request.namespace, Some(digest.algorithm()))
                 .await;
         };
 
@@ -258,7 +235,7 @@ impl Registry {
                 session_id: session_id.clone(),
                 digest: digest.clone(),
                 content_range: None,
-                content_length: Some(content_length.get()),
+                content_length: Some(content_length),
             },
             stream,
         )
@@ -267,13 +244,13 @@ impl Registry {
 
     /// Starts a cross-repository blob mount from `source`, the namespace the
     /// caller was authorized to read the blob from, which is resolved by the
-    /// serving side rather than named on the wire.
+    /// serving side rather than named on the wire. A mount that cannot be
+    /// satisfied falls back to an ordinary upload session.
     ///
-    /// falling back to an ordinary upload session when the mount cannot be
-    /// satisfied. The `blob.push` intent event fires before the mount attempt,
-    /// so a mounted blob is as visible to webhook consumers as an uploaded
-    /// one; the session fallback leaves a false-positive event behind and its
-    /// eventual upload completion emits one of its own.
+    /// The `blob.push` intent event fires before the mount attempt, so a mounted
+    /// blob is as visible to webhook consumers as an uploaded one; the session
+    /// fallback leaves a false-positive event behind and its eventual upload
+    /// completion emits one of its own.
     #[instrument(skip(request))]
     pub async fn mount_blob(
         &self,
@@ -398,7 +375,17 @@ impl Registry {
             .upload_summary(&request.namespace, &request.session_id)
             .await?;
 
-        verify_chunk_start(request.content_range, summary.size)?;
+        // Refused before a byte is committed: a chunk must resume where the
+        // session stands, and a declared length must match the window it
+        // announced.
+        if let Some(range) = request.content_range
+            && (!range.starts_at(summary.size)
+                || request
+                    .content_length
+                    .is_some_and(|length| !range.covers(length)))
+        {
+            return Err(Error::RangeNotSatisfiable);
+        }
 
         self.reject_oversized_known_length(
             &request.namespace,
@@ -424,7 +411,18 @@ impl Registry {
 
         self.reject_if_oversized(&request.namespace, &request.session_id, size)
             .await?;
-        verify_chunk_extent(request.content_range, summary.size, size)?;
+
+        // A chunked body's length is only known once read, so its window can
+        // only be checked here. The session now holds bytes the client will
+        // never account for and the 416 cannot say so, hence the abort.
+        if request.content_length.is_none()
+            && let Some(range) = request.content_range
+            && !range.covers(size.saturating_sub(summary.size))
+        {
+            self.abort_upload_quietly(&request.namespace, &request.session_id)
+                .await;
+            return Err(Error::RangeNotSatisfiable);
+        }
 
         Ok(build_response(
             StatusCode::ACCEPTED,
@@ -482,9 +480,15 @@ impl Registry {
         let has_prior_writes = committed > 0;
 
         // A final-chunk PUT carrying a Content-Range must resume from the
-        // committed offset; a gap or rewind is an out-of-order chunk (416), not
-        // a digest mismatch.
-        verify_chunk_start(content_range, committed)?;
+        // committed offset and, when it declares a length, carry the window it
+        // announced: both are out-of-order chunks (416), not digest mismatches,
+        // and both are refused before a byte is committed.
+        if let Some(range) = content_range
+            && (!range.starts_at(committed)
+                || content_length.is_some_and(|length| !range.covers(length)))
+        {
+            return Err(Error::RangeNotSatisfiable);
+        }
 
         self.reject_oversized_known_length(namespace, session_id, committed, content_length)
             .await?;
@@ -533,7 +537,17 @@ impl Registry {
 
         self.reject_if_oversized(namespace, session_id, new_total)
             .await?;
-        verify_chunk_extent(content_range, committed, new_total)?;
+
+        // A chunked body's length is only known once read, so its window can
+        // only be checked here. The session now holds bytes the client will
+        // never account for and the 416 cannot say so, hence the abort.
+        if content_length.is_none()
+            && let Some(range) = content_range
+            && !range.covers(new_total.saturating_sub(committed))
+        {
+            self.abort_upload_quietly(namespace, session_id).await;
+            return Err(Error::RangeNotSatisfiable);
+        }
 
         if &upload_digest != digest {
             warn!("Expected digest '{digest}', got '{upload_digest}'");
@@ -599,8 +613,7 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-
-    use std::{io::Cursor, num::NonZeroU64, str::FromStr, sync::Arc};
+    use std::{io::Cursor, str::FromStr, sync::Arc};
 
     use async_trait::async_trait;
     use hyper::{
@@ -610,8 +623,8 @@ mod tests {
 
     use angos_oci::http_range::ByteWindow;
     use angos_oci::request::{
-        BlobMount, CompleteUploadRequest, GetUploadRequest, MountBlobRequest, PatchUploadRequest,
-        StartUploadRequest, StartUploadTarget,
+        BlobMount, CompleteUploadRequest, DeleteUploadRequest, GetUploadRequest, MountBlobRequest,
+        PatchUploadRequest, StartUploadRequest, StartUploadTarget,
     };
     use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
     use angos_storage::{
@@ -1480,6 +1493,76 @@ mod tests {
                 matches!(result, Err(Error::RangeNotSatisfiable)),
                 "a chunk that undershoots its window must be refused, got {result:?}"
             );
+            assert!(
+                registry
+                    .blob_store
+                    .upload_summary(namespace, &session_id)
+                    .await
+                    .is_err(),
+                "a chunked chunk refused after its write must reclaim the session"
+            );
+        })
+        .await;
+    }
+
+    /// A declared length disagreeing with the window is refused before anything
+    /// is written, so the session keeps standing where it stood.
+    #[tokio::test]
+    async fn a_known_length_contradicting_its_content_range_keeps_the_session() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let committed = b"first chunk";
+            let session_id = UploadSessionId::generate();
+
+            registry
+                .blob_store
+                .create_upload(namespace, &session_id, None)
+                .await
+                .unwrap();
+            registry
+                .patch_upload(
+                    PatchUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        content_range: None,
+                        content_length: Some(committed.len() as u64),
+                    },
+                    Cursor::new(committed.to_vec()),
+                )
+                .await
+                .unwrap();
+
+            let offset = committed.len() as u64;
+            let result = registry
+                .patch_upload(
+                    PatchUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        // Declares a hundred bytes while announcing ten.
+                        content_range: Some(ByteWindow {
+                            start: offset,
+                            end: Some(offset + 99),
+                        }),
+                        content_length: Some(10),
+                    },
+                    Cursor::new(b"ten bytes!".to_vec()),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(Error::RangeNotSatisfiable)),
+                "a declared length outside its window must be refused, got {result:?}"
+            );
+            let summary = registry
+                .blob_store
+                .upload_summary(namespace, &session_id)
+                .await
+                .expect("a chunk refused before its write must leave the session open");
+            assert_eq!(
+                summary.size, offset,
+                "the refused chunk must not have been committed"
+            );
         })
         .await;
     }
@@ -1521,6 +1604,37 @@ mod tests {
         .await;
     }
 
+    /// The empty blob is pushed in one request like any other: a declared zero
+    /// is the whole body, not an absent one.
+    #[tokio::test]
+    async fn single_post_upload_stores_the_empty_blob() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let digest = Digest::sha256_of_bytes(b"");
+
+            let response = registry
+                .start_upload(
+                    None,
+                    StartUploadRequest {
+                        namespace: namespace.clone(),
+                        digest_algorithm: None,
+                        target: Some(StartUploadTarget {
+                            digest: digest.clone(),
+                            content_length: Some(0),
+                        }),
+                    },
+                    Cursor::new(Vec::new()),
+                )
+                .await
+                .expect("an empty single-POST body must close the upload");
+
+            assert_eq!(response.status(), StatusCode::CREATED);
+            assert!(registry.blob_store.read(&digest).await.unwrap().is_empty());
+        })
+        .await;
+    }
+
     /// A `?digest=` POST carrying the blob completes in that one request, so the
     /// client never sends the bytes twice.
     #[tokio::test]
@@ -1539,7 +1653,7 @@ mod tests {
                         digest_algorithm: None,
                         target: Some(StartUploadTarget {
                             digest: digest.clone(),
-                            content_length: NonZeroU64::new(content.len() as u64),
+                            content_length: Some(content.len() as u64),
                         }),
                     },
                     Cursor::new(content.to_vec()),
@@ -1575,7 +1689,7 @@ mod tests {
                         digest_algorithm: None,
                         target: Some(StartUploadTarget {
                             digest: claimed.clone(),
-                            content_length: NonZeroU64::new(content.len() as u64),
+                            content_length: Some(content.len() as u64),
                         }),
                     },
                     Cursor::new(content.to_vec()),
@@ -1950,7 +2064,7 @@ mod tests {
             );
 
             registry
-                .delete_upload(super::DeleteUploadRequest {
+                .delete_upload(DeleteUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
                 })

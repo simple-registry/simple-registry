@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use tracing::{debug, warn};
 
-use angos_oci::{Digest, Namespace, Tag};
+use angos_oci::{Digest, Manifest, Namespace, Tag};
 use angos_tx_engine::StorageError;
 
 use crate::{
@@ -21,8 +21,9 @@ use crate::{
     },
     registry::{
         Error as RegistryError,
+        manifest::link_plan,
         metadata_store::{LinkKind, LinkMetadata},
-        parse_manifest_digests, path_builder,
+        path_builder,
     },
 };
 
@@ -155,7 +156,8 @@ impl Validator {
             }
             Err(e) => return Err(e.into()),
         };
-        let manifest = parse_manifest_digests(&content, None)?;
+        let manifest =
+            Manifest::from_slice(&content).map_err(|e| RegistryError::manifest_invalid(&e))?;
 
         // The revision's own grant pins the manifest blob.
         self.ensure_grant(namespace, revision, &LinkKind::Digest(revision.clone()))
@@ -165,8 +167,13 @@ impl Validator {
         // withholds the link and the grant for a digest the namespace does not
         // own, so re-deriving them from the manifest body would hand it exactly
         // the cross-namespace read access the write path refused.
-        let mut held = HashSet::new();
-        for (link, target) in manifest.links_for_revision(revision) {
+        // The referrer back-link is a revision link but not a referenced one, so
+        // it is repaired without gaining a `referenced_by` entry of its own.
+        let referenced: HashSet<LinkKind> = link_plan::referenced_links(&manifest, revision)
+            .into_iter()
+            .map(|(link, _)| link)
+            .collect();
+        for (link, target) in link_plan::revision_links(&manifest, revision) {
             if !self.holds_reference(namespace, &target, &link).await? {
                 debug!(
                     "scrub: '{namespace}' holds no reference to '{target}'; \
@@ -176,14 +183,10 @@ impl Validator {
             }
             self.ensure_link(namespace, &link, &target).await?;
             self.ensure_grant(namespace, &target, &link).await?;
-            held.insert(link);
-        }
-        for (link, target) in manifest.referenced_links_for_revision(revision) {
-            if !held.contains(&link) {
-                continue;
+            if referenced.contains(&link) {
+                self.ensure_referenced_by(namespace, &link, &target, revision)
+                    .await?;
             }
-            self.ensure_referenced_by(namespace, &link, &target, revision)
-                .await?;
         }
         Ok(())
     }

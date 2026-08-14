@@ -29,10 +29,11 @@ use crate::{
     },
     registry_client::{REPLICATION_SUPERSEDED_CODE, RegistryClient, X_ANGOS_SOURCE_TIMESTAMP},
     replication::{
-        REPLICATION_DELETE_MANIFEST_KIND, REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream,
+        Error as ReplicationError, REPLICATION_DELETE_MANIFEST_KIND,
+        REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream,
         handler::{
             ReplicationJob, ReplicationJobHandler, ReplicationTarget, build_envelope,
-            build_prune_delete_envelope, replication_lock_key,
+            build_prune_delete_envelope, job_error, replication_lock_key,
         },
     },
     test_fixtures::mocks::{mount_blob_upload_accepted, mount_blobs_present},
@@ -208,6 +209,24 @@ fn build_envelope_sets_queue_kind_and_lock_key() {
     assert_eq!(round_trip, payload);
 }
 
+#[test]
+fn job_error_dead_letters_invalid_manifest_content() {
+    // A body that will never parse must not spend the retry budget, while a
+    // replication-internal fault stays retryable.
+    assert!(matches!(
+        job_error(ReplicationError::InvalidManifest(
+            "manifest parse failed".to_string()
+        )),
+        Error::Terminal(_)
+    ));
+    assert!(matches!(
+        job_error(ReplicationError::Internal(
+            "namespace mapping failed".to_string()
+        )),
+        Error::Execution(_)
+    ));
+}
+
 fn repository_with_downstream(client: Arc<RegistryClient>) -> Repository {
     repository_with_named_downstream(DOWNSTREAM, client)
 }
@@ -338,10 +357,10 @@ async fn execute_pushes_manifest_with_head_before_put() {
 }
 
 /// A downstream `403` on the manifest push is a terminal denial: the handler
-/// surfaces `Error::Denied` (not a retryable `Storage`) so the worker
+/// surfaces `Error::Terminal` (not a retryable `Storage`) so the worker
 /// dead-letters it instead of retrying against revoked credentials.
 #[tokio::test]
-async fn execute_maps_downstream_403_to_denied() {
+async fn execute_maps_downstream_403_to_terminal() {
     metrics_provider::init_for_tests();
     let mock_server = MockServer::start().await;
 
@@ -371,8 +390,8 @@ async fn execute_maps_downstream_403_to_denied() {
     let envelope = build_envelope(&sample_payload()).unwrap();
     let result = handler.execute(&envelope).await;
     assert!(
-        matches!(result, Err(Error::Denied(_))),
-        "a downstream 403 must surface as a terminal Denied, got {result:?}"
+        matches!(result, Err(Error::Terminal(_))),
+        "a downstream 403 must surface as a terminal failure, got {result:?}"
     );
 }
 

@@ -16,23 +16,20 @@ use crate::types::constants::{
 };
 
 // RFC 6838 media type: `type/subtype` where each name is a `restricted-name`
-// (alphanumeric first char, then alphanumerics and `!#$&-^_.+`, max 127 chars),
-// with an optional trailing parameter section so a `Content-Type` header value
-// such as `application/json; charset=utf-8` is accepted. The `+suffix` of a
-// structured syntax (e.g. `+json`) is already covered by the `+` in the name.
+// (alphanumeric first char, then alphanumerics and `!#$&-^_.+`, max 127 chars).
+// The `+suffix` of a structured syntax (e.g. `+json`) is already covered by the
+// `+` in the name.
 static MEDIA_TYPE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}(?:[ \t]*;.*)?$",
-    )
-    .unwrap()
+    Regex::new(r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$")
+        .unwrap()
 });
 
 /// A validated media type as carried by a manifest's `mediaType`, a descriptor,
 /// and the `Content-Type` of a manifest request. The private field forces
 /// construction through the validating constructors so a stored or wire value is
-/// always a well-formed RFC 6838 media type, reduced to its essence: a
-/// parameter section is accepted on the way in and dropped, since the spec has a
-/// registry ignore parameters on `Content-Type` and never send them back.
+/// always a bare RFC 6838 media type. Only a header carries a parameter section,
+/// which [`Self::from_content_type`] drops; a `mediaType` or an `artifactType`
+/// naming one is malformed rather than reduced.
 #[derive(Clone, Debug, Ord, Eq, Hash, PartialEq, PartialOrd)]
 pub struct MediaType(String);
 
@@ -42,23 +39,28 @@ impl MediaType {
         MEDIA_TYPE_REGEX.is_match(s)
     }
 
-    /// The `type/subtype` ahead of any parameter section, which is what a
-    /// comparison and a stored value are made of.
-    fn essence(s: &str) -> &str {
-        match s.split_once(';') {
-            Some((essence, _)) => essence.trim_end(),
-            None => s,
-        }
-    }
-
     /// # Errors
     ///
     /// Returns an error when `s` is not a `type/subtype` media type.
     pub fn new(s: &str) -> Result<Self, Error> {
         if Self::is_valid(s) {
-            Ok(Self(Self::essence(s).to_owned()))
+            Ok(Self(s.to_owned()))
         } else {
             Err(Error::InvalidMediaType(s.to_string()))
+        }
+    }
+
+    /// The media type of a `Content-Type` header, dropping the parameter
+    /// section (`; charset=utf-8`) a sender may attach: the spec has a registry
+    /// ignore parameters there and never send them back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when what precedes the parameters is not a media type.
+    pub fn from_content_type(value: &str) -> Result<Self, Error> {
+        match value.split_once(';') {
+            Some((essence, _)) => Self::new(essence.trim_end()),
+            None => Self::new(value),
         }
     }
 
@@ -103,15 +105,12 @@ impl FromStr for MediaType {
 impl TryFrom<String> for MediaType {
     type Error = Error;
 
-    fn try_from(mut s: String) -> Result<Self, Self::Error> {
-        if !Self::is_valid(&s) {
-            return Err(Error::InvalidMediaType(s));
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        if Self::is_valid(&s) {
+            Ok(Self(s))
+        } else {
+            Err(Error::InvalidMediaType(s))
         }
-
-        let essence = Self::essence(&s).len();
-        s.truncate(essence);
-
-        Ok(Self(s))
     }
 }
 
@@ -212,20 +211,23 @@ mod tests {
         }
     }
 
-    /// A `Content-Type` parameter is accepted and dropped, so a header carrying
-    /// one compares equal to, and is served as, the bare media type.
+    /// A parameter section belongs to a header alone: it is dropped there, so a
+    /// `Content-Type` carrying one compares equal to and is served as the bare
+    /// media type. A `mediaType` or an `artifactType` naming one is malformed,
+    /// not silently reduced.
     #[test]
-    fn test_content_type_parameters_are_dropped() {
+    fn test_content_type_parameters_are_dropped_only_for_a_header() {
         for input in [
             "application/json; charset=utf-8",
             "application/json;charset=utf-8",
             "application/json\t; charset=utf-8; boundary=x",
         ] {
-            assert_eq!(MediaType::new(input).unwrap(), "application/json");
             assert_eq!(
-                MediaType::try_from(input.to_string()).unwrap(),
+                MediaType::from_content_type(input).unwrap(),
                 "application/json"
             );
+            assert!(MediaType::new(input).is_err(), "'{input}' is not bare");
+            assert!(MediaType::try_from(input.to_string()).is_err());
         }
     }
 

@@ -18,15 +18,13 @@ use angos_oci::request::{
     PutManifestRequest, StartUploadRequest,
 };
 use angos_oci::response::{DeleteManifestOutcome, PutManifestOutcome};
-use angos_oci::{Digest, MediaType, Namespace, Reference, Tag};
+use angos_oci::{Content, Digest, Manifest, Namespace, Reference, Tag};
 
 use crate::{
     registry::{
-        ParsedManifestDigests,
         blob_ownership::BlobOwnership,
         blob_store::BlobStore,
         metadata_store::{LinkKind, MetadataStore},
-        parse_manifest_digests,
     },
     registry_client::{RegistryClient, UploadSession},
     replication::Error,
@@ -86,19 +84,19 @@ pub struct PushContext<'a> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Client`] when a local read or downstream operation fails
-/// with anything other than an LWW-superseded 409, which converges as
+/// Returns [`Error::InvalidManifest`] when `body` does not parse, and
+/// [`Error::Client`] when a local read or downstream operation fails with
+/// anything other than an LWW-superseded 409, which converges as
 /// [`PushOutcome::Superseded`].
 #[instrument(skip(ctx, body))]
 pub async fn push_manifest(
     ctx: &PushContext<'_>,
     digest: &Digest,
-    media_type: Option<MediaType>,
     tag: Option<&str>,
     body: Vec<u8>,
 ) -> Result<PushOutcome, Error> {
-    let parsed = parse_manifest_digests(&body, media_type.as_ref())
-        .map_err(|e| Error::Internal(format!("manifest parse failed: {e}")))?;
+    let manifest = Manifest::from_slice(&body)
+        .map_err(|e| Error::InvalidManifest(format!("manifest parse failed: {e}")))?;
 
     // Pushing by tag binds tag -> digest atomically on the downstream.
     let reference = match tag {
@@ -115,7 +113,7 @@ pub async fn push_manifest(
     // whether the downstream needs the referrers fallback, and a converged
     // primary does not imply the fallback landed. A downstream that omits
     // `Docker-Content-Digest` never converges and is pushed to instead.
-    if parsed.subject.is_none()
+    if manifest.subject.is_none()
         && ctx
             .downstream
             .registry_client
@@ -136,19 +134,19 @@ pub async fn push_manifest(
         return Ok(PushOutcome::Converged);
     }
 
-    push_child_manifests(ctx, &parsed).await?;
+    push_child_manifests(ctx, &manifest).await?;
 
-    push_blobs(ctx, &parsed).await?;
+    push_blobs(ctx, &manifest).await?;
 
     // Retain a body copy only for the subject-bearing fallback path; the common
     // path moves the body into the PUT.
-    let fallback_body = parsed.subject.is_some().then(|| body.clone());
+    let fallback_body = manifest.subject.is_some().then(|| body.clone());
 
     // A body may legitimately omit `mediaType` while the original push carried
     // it in `Content-Type` (recorded on the revision link), and the receiver
     // rejects a PUT without a `Content-Type`, so fall back to the link's type.
-    let effective_media_type = match media_type.or_else(|| parsed.media_type.clone()) {
-        Some(media_type) => Some(media_type),
+    let effective_media_type = match &manifest.media_type {
+        Some(media_type) => Some(media_type.clone()),
         None => ctx
             .metadata_store
             .read_link(ctx.namespace, &LinkKind::Digest(digest.clone()))
@@ -210,7 +208,7 @@ pub async fn push_manifest(
             ctx.namespace,
             ctx.downstream_namespace,
             digest,
-            &parsed,
+            manifest,
             &body,
         )
         .await?;
@@ -223,16 +221,18 @@ pub async fn push_manifest(
 /// to `max_concurrent_pushes` so a wide multi-arch index is not serialized one
 /// child at a time. The caller awaits this before it pushes the parent, so the
 /// parent index never lands before its children.
-async fn push_child_manifests(
-    ctx: &PushContext<'_>,
-    parsed: &ParsedManifestDigests,
-) -> Result<(), Error> {
-    let results = stream::iter(parsed.manifests.clone())
+async fn push_child_manifests(ctx: &PushContext<'_>, manifest: &Manifest) -> Result<(), Error> {
+    let Content::Index { manifests } = &manifest.content else {
+        return Ok(());
+    };
+    let children: Vec<Digest> = manifests.iter().map(|child| child.digest.clone()).collect();
+
+    let results = stream::iter(children)
         .map(|child| async move {
             let child_body = ctx.blob_store.read(&child).await.map_err(|e| {
                 Error::Internal(format!("failed to read local manifest blob '{child}': {e}"))
             })?;
-            Box::pin(push_manifest(ctx, &child, None, None, child_body))
+            Box::pin(push_manifest(ctx, &child, None, child_body))
                 .await
                 .map(|_| ())
         })
@@ -245,14 +245,17 @@ async fn push_child_manifests(
 }
 
 /// HEAD-before-PUT every referenced blob; transfer only the absent ones.
-async fn push_blobs(ctx: &PushContext<'_>, parsed: &ParsedManifestDigests) -> Result<(), Error> {
+async fn push_blobs(ctx: &PushContext<'_>, manifest: &Manifest) -> Result<(), Error> {
+    let Content::Image { config, layers } = &manifest.content else {
+        return Ok(());
+    };
     // Dedup: a manifest may legally repeat a digest, and two concurrent pushes
     // of the same absent blob would both HEAD-miss and upload.
     let mut seen = HashSet::new();
-    let blobs: Vec<Digest> = parsed
-        .config
+    let blobs: Vec<Digest> = config
         .iter()
-        .chain(parsed.layers.iter())
+        .map(|config| &config.digest)
+        .chain(layers.iter().map(|layer| &layer.digest))
         .filter(|digest| seen.insert(*digest))
         .cloned()
         .collect();

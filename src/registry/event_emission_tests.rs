@@ -993,8 +993,8 @@ async fn get_blob_emits_pull_event() {
                 digest: digest.clone(),
                 accepted_types: Vec::new(),
                 range: None,
-                allow_redirect: true,
             },
+            true,
         )
         .await
         .expect("the pull must succeed");
@@ -1046,8 +1046,8 @@ async fn get_manifest_emits_pull_event() {
                 namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
                 accepted_types: vec![MediaRange::from(media_type)],
-                allow_redirect: true,
             },
+            true,
         )
         .await
         .expect("the pull must succeed");

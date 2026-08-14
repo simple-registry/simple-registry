@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, num::NonZeroU64, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use hyper::{
     Method, Request, Response, body::Incoming, header::CONTENT_RANGE, http::request::Parts,
@@ -92,7 +92,7 @@ async fn dispatch_route<'a>(
         } => {
             // A body with no `?digest=` has nothing to verify it against, so it
             // opens a session and is not read.
-            let content_length = headers.content_length()?.and_then(NonZeroU64::new);
+            let content_length = headers.content_length()?;
             Ok(registry
                 .start_upload(
                     actor,
@@ -182,8 +182,8 @@ async fn dispatch_route<'a>(
                     digest,
                     accepted_types: headers.accepted_content_types(),
                     range: headers.blob_range()?,
-                    allow_redirect: !headers.redirect_suppressed(),
                 },
+                !headers.redirect_suppressed(),
             )
             .await?),
         Action::HeadBlob { namespace, digest } => Ok(registry
@@ -206,8 +206,8 @@ async fn dispatch_route<'a>(
                     namespace,
                     reference,
                     accepted_types: headers.accepted_content_types(),
-                    allow_redirect: !headers.redirect_suppressed(),
                 },
+                !headers.redirect_suppressed(),
             )
             .await?),
         Action::HeadManifest {
@@ -257,14 +257,12 @@ async fn dispatch_route<'a>(
             namespace,
             digest,
             artifact_type,
-            n,
             last,
         } => Ok(registry
             .get_referrers(GetReferrersRequest {
                 namespace,
                 digest,
                 artifact_type,
-                n,
                 last,
             })
             .await?),

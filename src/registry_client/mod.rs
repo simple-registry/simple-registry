@@ -33,7 +33,7 @@ use angos_oci::request::{
     ListTagsRequest,
 };
 use angos_oci::response::{ManifestHeadResponse, ManifestResponse, TagsListResponse};
-use angos_oci::{Content, Descriptor, Digest, Manifest, MediaRange, Tag};
+use angos_oci::{Content, Descriptor, Digest, Manifest, MediaRange, MediaType, Tag};
 
 pub use crate::registry_client::{error::Error, write::UploadSession};
 use crate::{
@@ -84,6 +84,15 @@ fn denied_if_forbidden(response: &Response) -> Result<(), Error> {
         return Err(Error::Denied("Access forbidden".to_string()));
     }
     Ok(())
+}
+
+/// The media type a manifest answer was served under, `None` when the remote
+/// sent no `Content-Type` or one that is not a media type. Read apart from the
+/// other headers because only this one may carry a parameter section.
+fn response_media_type(response: &Response) -> Option<MediaType> {
+    let content_type = response.headers().get(CONTENT_TYPE)?.to_str().ok()?;
+
+    MediaType::from_content_type(content_type).ok()
 }
 
 /// Reads and parses a required response header, naming it in an `Internal` error
@@ -718,7 +727,7 @@ impl RegistryClient {
             ));
         }
 
-        let media_type = parse_header(&response, CONTENT_TYPE).ok();
+        let media_type = response_media_type(&response);
         let digest = parse_header(&response, DOCKER_CONTENT_DIGEST).ok();
         let size = parse_header(&response, CONTENT_LENGTH)?;
 
@@ -755,7 +764,7 @@ impl RegistryClient {
             ));
         }
 
-        let media_type = parse_header(&response, CONTENT_TYPE).ok();
+        let media_type = response_media_type(&response);
         let digest = parse_header(&response, DOCKER_CONTENT_DIGEST).ok();
 
         let limit = self.max_manifest_size_bytes;

@@ -15,7 +15,7 @@ use crate::types::Error;
 /// `/v2/<name>/blobs/uploads/<session>` request. The OCI spec treats it as
 /// server-defined; angos issues a version-4 UUID, so the private field is the
 /// canonical hyphenated form and the validating constructors reject anything
-/// that is not a UUID, which also keeps it safe as a single storage path segment.
+/// that is not one, which also keeps it safe as a single storage path segment.
 #[derive(Clone, Debug, Ord, Eq, Hash, PartialEq, PartialOrd)]
 pub struct UploadSessionId(String);
 
@@ -28,11 +28,13 @@ impl UploadSessionId {
 
     /// # Errors
     ///
-    /// Returns an error when `s` is not a UUID.
+    /// Returns an error when `s` is not a session identifier this registry
+    /// issued. Only the canonical hyphenated form is one: the braced, URN and
+    /// unhyphenated UUID spellings address a session nobody was ever handed.
     pub fn new(s: &str) -> Result<Self, Error> {
         match Uuid::try_parse(s) {
-            Ok(uuid) => Ok(Self(uuid.to_string())),
-            Err(_) => Err(Error::InvalidUploadSessionId(s.to_string())),
+            Ok(uuid) if uuid.as_hyphenated().to_string() == s => Ok(Self(s.to_owned())),
+            _ => Err(Error::InvalidUploadSessionId(s.to_string())),
         }
     }
 }
@@ -130,17 +132,21 @@ mod tests {
         assert_eq!(id.as_ref(), SAMPLE);
     }
 
-    // Non-canonical UUID forms are accepted but normalized to the canonical
-    // hyphenated representation, so the stored path segment is always path-safe.
+    // The registry hands out the canonical hyphenated form and the client
+    // echoes it back, so every other UUID spelling names a session that was
+    // never opened.
     #[test]
-    fn test_non_canonical_forms_normalize() {
+    fn test_non_canonical_forms_rejected() {
         for input in [
             "067E6162-3B6F-4AE2-A171-2470B63DFF00",
             "067e61623b6f4ae2a1712470b63dff00",
             "{067e6162-3b6f-4ae2-a171-2470b63dff00}",
             "urn:uuid:067e6162-3b6f-4ae2-a171-2470b63dff00",
         ] {
-            assert_eq!(UploadSessionId::new(input).unwrap().as_ref(), SAMPLE);
+            assert!(
+                UploadSessionId::new(input).is_err(),
+                "'{input}' is not the form the registry issued"
+            );
         }
     }
 

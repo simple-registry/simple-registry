@@ -92,7 +92,7 @@ fn job_error_preserves_denied_as_terminal() {
         job_error(RegistryError::Denied(
             "upstream forbade the fetch".to_string()
         )),
-        JobError::Denied(_)
+        JobError::Terminal(_)
     ));
     assert!(matches!(
         job_error(RegistryError::BlobUnknown),

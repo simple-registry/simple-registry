@@ -50,6 +50,25 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// The whole set, for a caller checking that a body names a code the spec
+    /// defines.
+    pub const ALL: &'static [Self] = &[
+        Self::BlobUnknown,
+        Self::BlobUploadInvalid,
+        Self::BlobUploadUnknown,
+        Self::DigestInvalid,
+        Self::ManifestBlobUnknown,
+        Self::ManifestInvalid,
+        Self::ManifestUnknown,
+        Self::NameInvalid,
+        Self::NameUnknown,
+        Self::SizeInvalid,
+        Self::Unauthorized,
+        Self::Denied,
+        Self::Unsupported,
+        Self::TooManyRequests,
+    ];
+
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -200,10 +219,11 @@ mod tests {
     }
 
     // The spelling is the wire contract, so each variant is pinned rather than
-    // derived from its name.
+    // derived from its name. The table doubles as the completeness check of
+    // `ErrorCode::ALL`, which no `match` forces to stay exhaustive.
     #[test]
     fn every_error_code_spells_its_wire_form() {
-        for (code, wire) in [
+        let pinned = [
             (ErrorCode::BlobUnknown, "BLOB_UNKNOWN"),
             (ErrorCode::BlobUploadInvalid, "BLOB_UPLOAD_INVALID"),
             (ErrorCode::BlobUploadUnknown, "BLOB_UPLOAD_UNKNOWN"),
@@ -218,7 +238,11 @@ mod tests {
             (ErrorCode::Denied, "DENIED"),
             (ErrorCode::Unsupported, "UNSUPPORTED"),
             (ErrorCode::TooManyRequests, "TOOMANYREQUESTS"),
-        ] {
+        ];
+        assert_eq!(ErrorCode::ALL.len(), pinned.len());
+
+        for (code, wire) in pinned {
+            assert!(ErrorCode::ALL.contains(&code));
             assert_eq!(code.as_str(), wire);
             assert_eq!(code.to_string(), wire);
         }

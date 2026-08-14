@@ -27,11 +27,11 @@ use crate::{
 };
 
 /// Maps a registry error to a job error, preserving an upstream authorization
-/// denial as the terminal [`Error::Denied`] so the worker dead-letters it
-/// instead of retrying against an unchangeable outcome.
+/// denial as [`Error::Terminal`] so the worker dead-letters it instead of
+/// retrying against an unchangeable outcome.
 fn job_error(error: RegistryError) -> Error {
     match error {
-        RegistryError::Denied(msg) => Error::Denied(msg),
+        RegistryError::Denied(msg) => Error::Terminal(msg),
         other => Error::Execution(other.to_string()),
     }
 }

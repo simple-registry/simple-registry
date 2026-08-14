@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use angos_oci::header::{DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID};
 use angos_oci::http_range::RequestRange;
-use angos_oci::request::CompleteUploadRequest;
+use angos_oci::request::{CompleteUploadRequest, GetReferrersRequest};
 use angos_oci::{Digest, MediaRange, MediaType, Namespace, Tag, UploadSessionId};
 use angos_s3_client::Backend as S3HttpBackend;
 use angos_s3_client::test_util::{
@@ -206,6 +206,17 @@ pub async fn put_link_raw(store: &Store, namespace: &Namespace, link: &LinkKind,
 /// Parse a media type that tests know to be valid.
 pub fn media_type(value: &str) -> MediaType {
     MediaType::new(value).unwrap()
+}
+
+/// An unfiltered referrers listing of `subject`, at the default page size.
+/// Tests needing a filter or a cursor spread their own fields over it.
+pub fn referrers_request(namespace: &Namespace, subject: &Digest) -> GetReferrersRequest {
+    GetReferrersRequest {
+        namespace: namespace.clone(),
+        digest: subject.clone(),
+        artifact_type: None,
+        last: None,
+    }
 }
 
 /// Upload `content` through the full registry upload state machine (session

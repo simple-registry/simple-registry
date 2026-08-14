@@ -56,7 +56,6 @@ pub use admin::{
 };
 use blob_ownership::BlobOwnership;
 pub use error::Error;
-pub use manifest::{ParsedManifestDigests, parse_manifest_digests, recover_media_type};
 pub use repository::Repository;
 
 /// Angos's own response header, alongside the distribution API's own names in

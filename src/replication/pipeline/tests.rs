@@ -16,7 +16,8 @@ use wiremock::{
 
 use angos_oci::header::{DOCKER_CONTENT_DIGEST, OCI_SUBJECT};
 use angos_oci::{
-    Digest, MediaType, Namespace, OCI_INDEX_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, Reference, Tag,
+    Digest, Manifest, MediaType, Namespace, OCI_INDEX_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE,
+    Reference, Tag,
     constants::{DOCKER_MANIFEST_LIST_MEDIA_TYPE, DOCKER_MANIFEST_MEDIA_TYPE},
 };
 use angos_tx_engine::store::Store;
@@ -24,7 +25,6 @@ use angos_tx_engine::store::Store;
 use crate::{
     metrics_provider,
     registry::{
-        ParsedManifestDigests,
         blob_store::BlobStore,
         metadata_store::{BlobIndexOperation, LinkKind, LinkOperation, MetadataStore},
         test_utils::{FsTestStack, downstream_client, fs_test_stack, media_type, put_blob_direct},
@@ -32,8 +32,8 @@ use crate::{
     registry_client::{
         REPLICATION_SUPERSEDED_CODE, RegistryClient, UploadSession, X_ANGOS_SOURCE_TIMESTAMP,
     },
-    replication::ReplicationDownstream,
-    replication::pipeline::{PushContext, PushOutcome, delete_manifest, push_manifest},
+    replication::pipeline::{PushContext, PushOutcome, delete_manifest, push_blobs, push_manifest},
+    replication::{Error, ReplicationDownstream},
     test_fixtures::mocks::mount_blob_upload_accepted,
 };
 
@@ -158,7 +158,7 @@ async fn push_referrers_fallback_when_downstream_is_oci_1_0() {
     mount_manifest_put(&mock_server, NAMESPACE, "v1", &manifest_digest).await;
 
     // The pipeline GETs the existing fallback index first (404 => start fresh).
-    let fallback_tag = Tag::referrers_fallback(&subject);
+    let fallback_tag = subject.referrers_fallback_tag();
     Mock::given(method("GET"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
         .respond_with(ResponseTemplate::new(404))
@@ -193,15 +193,84 @@ async fn push_referrers_fallback_when_downstream_is_oci_1_0() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type("application/vnd.oci.image.manifest.v1+json")),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await
-    .unwrap();
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
+        .await
+        .unwrap();
+
+    drop(mock_server);
+}
+
+/// The fallback index is the same document the Referrers API serves, so a
+/// descriptor in it carries the referrer's annotations and, for an image
+/// manifest declaring no `artifactType`, its config `mediaType`. Dropping
+/// either hides the artifact from a downstream client filtering or discovering
+/// by them.
+#[tokio::test]
+async fn referrers_fallback_descriptor_carries_annotations_and_artifact_type() {
+    metrics_provider::init_for_tests();
+    let mock_server = MockServer::start().await;
+    let (blob_store, metadata_store, store, _dir) = test_blob_store();
+
+    let subject = put_blob_direct(&store, b"subject-bytes").await;
+    let config = put_blob_direct(&store, br#"{"c":1}"#).await;
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+        // No top-level `artifactType`, so the config's type stands in for it.
+        "config": {
+            "mediaType": "application/vnd.example.sbom.v1+json",
+            "digest": config.to_string(),
+            "size": 7,
+        },
+        "layers": [],
+        "annotations": { "org.opencontainers.image.created": "2026-01-01T00:00:00Z" },
+        "subject": {
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "digest": subject.to_string(),
+            "size": 13,
+        },
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    let manifest_digest = put_blob_direct(&store, &manifest_bytes).await;
+
+    mount_blob_upload_accepted(&mock_server, NAMESPACE, &[&config]).await;
+    mount_manifest_put(&mock_server, NAMESPACE, "v1", &manifest_digest).await;
+
+    let fallback_tag = subject.referrers_fallback_tag();
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&mock_server)
+        .await;
+
+    let referrer_digest = Digest::sha256_of_bytes(&manifest_bytes);
+    Mock::given(method("PUT"))
+        .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
+        .respond_with(move |request: &Request| {
+            let index: Value = serde_json::from_slice(&request.body).unwrap();
+            let descriptor = &index["manifests"][0];
+            assert_eq!(
+                descriptor["artifactType"], "application/vnd.example.sbom.v1+json",
+                "artifactType must fall back to the config mediaType"
+            );
+            assert_eq!(
+                descriptor["annotations"]["org.opencontainers.image.created"],
+                "2026-01-01T00:00:00Z",
+                "the referrer's annotations must survive into the fallback index"
+            );
+            ResponseTemplate::new(201)
+                .insert_header(DOCKER_CONTENT_DIGEST, referrer_digest.to_string().as_str())
+        })
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let downstream = test_downstream(downstream_client(&mock_server.uri()));
+    let namespace = Namespace::new(NAMESPACE).unwrap();
+    let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
+        .await
+        .unwrap();
 
     drop(mock_server);
 }
@@ -245,7 +314,7 @@ async fn referrers_fallback_put_is_timestamp_less() {
         .await;
 
     // The fallback-index PUT must not carry the source-timestamp header.
-    let fallback_tag = Tag::referrers_fallback(&subject);
+    let fallback_tag = subject.referrers_fallback_tag();
     Mock::given(method("GET"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
         .respond_with(ResponseTemplate::new(404))
@@ -273,7 +342,7 @@ async fn referrers_fallback_put_is_timestamp_less() {
         source_ts: Some(instant(SOURCE_TS)),
         ..push_context(&downstream, &blob_store, &metadata_store, &namespace)
     };
-    push_manifest(&ctx, &manifest_digest, None, Some("v1"), manifest_bytes)
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
         .await
         .expect("subject push with a stamped primary and timestamp-less fallback");
     drop(mock_server);
@@ -313,7 +382,7 @@ async fn referrers_fallback_propagates_transient_get_error_without_clobbering() 
     mount_manifest_put(&mock_server, NAMESPACE, "v1", &manifest_digest).await;
 
     // The fallback index GET fails with 500; the merge PUT must not run.
-    let fallback_tag = Tag::referrers_fallback(&subject);
+    let fallback_tag = subject.referrers_fallback_tag();
     Mock::given(method("GET"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
         .respond_with(ResponseTemplate::new(500))
@@ -329,14 +398,7 @@ async fn referrers_fallback_propagates_transient_get_error_without_clobbering() 
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    let result = push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type("application/vnd.oci.image.manifest.v1+json")),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await;
+    let result = push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes).await;
 
     assert!(
         result.is_err(),
@@ -374,7 +436,7 @@ async fn referrers_fallback_errors_on_unparseable_index_without_clobbering() {
 
     // The fallback GET returns a 200 whose JSON body has no `manifests`
     // array; the merge PUT must not run.
-    let fallback_tag = Tag::referrers_fallback(&subject);
+    let fallback_tag = subject.referrers_fallback_tag();
     Mock::given(method("GET"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
         .respond_with(
@@ -397,7 +459,7 @@ async fn referrers_fallback_errors_on_unparseable_index_without_clobbering() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    let result = push_manifest(&ctx, &manifest_digest, None, Some("v1"), manifest_bytes).await;
+    let result = push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes).await;
 
     assert!(
         result.is_err(),
@@ -441,7 +503,7 @@ async fn concurrent_same_subject_referrers_merge_without_lost_update() {
 
     // A stateful fallback endpoint: GET serves what the last PUT stored, so
     // the second merge sees the first descriptor only if the merges serialized.
-    let fallback_tag = Tag::referrers_fallback(&subject);
+    let fallback_tag = subject.referrers_fallback_tag();
     let stored: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let get_stored = stored.clone();
     let get_digest = subject.to_string();
@@ -480,8 +542,8 @@ async fn concurrent_same_subject_referrers_merge_without_lost_update() {
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
     let (a, b) = tokio::join!(
-        push_manifest(&ctx, &digest_a, None, Some("v1"), bytes_a),
-        push_manifest(&ctx, &digest_b, None, Some("v2"), bytes_b),
+        push_manifest(&ctx, &digest_a, Some("v1"), bytes_a),
+        push_manifest(&ctx, &digest_b, Some("v2"), bytes_b),
     );
     a.unwrap();
     b.unwrap();
@@ -538,15 +600,9 @@ async fn no_referrers_fallback_when_downstream_indexes_subject() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type("application/vnd.oci.image.manifest.v1+json")),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await
-    .unwrap();
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
+        .await
+        .unwrap();
 
     drop(mock_server);
 }
@@ -610,15 +666,9 @@ async fn index_lands_after_its_child_manifest() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(
-        &ctx,
-        &index_digest,
-        Some(media_type("application/vnd.oci.image.index.v1+json")),
-        Some("v1"),
-        index_bytes,
-    )
-    .await
-    .unwrap();
+    push_manifest(&ctx, &index_digest, Some("v1"), index_bytes)
+        .await
+        .unwrap();
 
     assert!(
         child_at.load(Ordering::SeqCst) < index_at.load(Ordering::SeqCst),
@@ -677,15 +727,9 @@ async fn index_lands_after_all_children_when_fanned_out() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(
-        &ctx,
-        &index_digest,
-        Some(media_type("application/vnd.oci.image.index.v1+json")),
-        Some("v1"),
-        index_bytes,
-    )
-    .await
-    .unwrap();
+    push_manifest(&ctx, &index_digest, Some("v1"), index_bytes)
+        .await
+        .unwrap();
 
     // The manifest PUTs, in arrival order: the index must come last.
     let puts: Vec<String> = mock_server
@@ -776,15 +820,9 @@ async fn push_blob_mounts_cross_repo_when_sibling_namespace_holds_it() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type("application/vnd.oci.image.manifest.v1+json")),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await
-    .expect("both blobs must mount cross-repo and the manifest must push");
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
+        .await
+        .expect("both blobs must mount cross-repo and the manifest must push");
 
     drop(mock_server);
 }
@@ -861,15 +899,9 @@ async fn push_blob_falls_back_to_upload_when_mount_is_rejected() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type("application/vnd.oci.image.manifest.v1+json")),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await
-    .expect("a rejected mount must fall back to a normal upload");
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
+        .await
+        .expect("a rejected mount must fall back to a normal upload");
 
     drop(mock_server);
 }
@@ -919,15 +951,9 @@ async fn push_manifest_stamps_source_timestamp_header() {
         source_ts: Some(instant(SOURCE_TS)),
         ..push_context(&downstream, &blob_store, &metadata_store, &namespace)
     };
-    push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type("application/vnd.oci.image.manifest.v1+json")),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await
-    .unwrap();
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
+        .await
+        .unwrap();
 
     drop(mock_server);
 }
@@ -955,15 +981,9 @@ async fn push_manifest_skips_put_when_downstream_already_converged() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    let outcome = push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type("application/vnd.oci.image.manifest.v1+json")),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await
-    .expect("a converged downstream must skip the PUT and succeed");
+    let outcome = push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
+        .await
+        .expect("a converged downstream must skip the PUT and succeed");
     assert_eq!(
         outcome,
         PushOutcome::Converged,
@@ -999,7 +1019,7 @@ async fn repeated_layer_digest_uploads_the_blob_once() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(&ctx, &manifest_digest, None, Some("v1"), manifest_bytes)
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
         .await
         .expect("a manifest repeating a layer digest must push it once");
 
@@ -1049,15 +1069,9 @@ async fn converged_skip_head_sends_standard_accept_headers() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    let outcome = push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type("application/vnd.oci.image.manifest.v1+json")),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await
-    .expect("the Accept-stamped HEAD must still drive the converged skip");
+    let outcome = push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
+        .await
+        .expect("the Accept-stamped HEAD must still drive the converged skip");
     assert_eq!(outcome, PushOutcome::Converged);
     drop(mock_server);
 }
@@ -1133,15 +1147,9 @@ async fn converged_manifest_with_blobs_sends_exactly_one_head() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    let outcome = push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type(OCI_MANIFEST_MEDIA_TYPE)),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await
-    .expect("a converged manifest must skip the blob sweep and the PUT");
+    let outcome = push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
+        .await
+        .expect("a converged manifest must skip the blob sweep and the PUT");
     assert_eq!(
         outcome,
         PushOutcome::Converged,
@@ -1205,15 +1213,9 @@ async fn converged_child_skips_its_own_put_inside_index_recursion() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    let outcome = push_manifest(
-        &ctx,
-        &index_digest,
-        Some(media_type(OCI_INDEX_MEDIA_TYPE)),
-        Some("v1"),
-        index_bytes,
-    )
-    .await
-    .expect("a converged child must skip its PUT while the index still lands");
+    let outcome = push_manifest(&ctx, &index_digest, Some("v1"), index_bytes)
+        .await
+        .expect("a converged child must skip its PUT while the index still lands");
     assert_eq!(outcome, PushOutcome::Pushed);
     drop(mock_server);
 }
@@ -1262,14 +1264,7 @@ async fn blob_head_503_fails_the_push_without_upload_attempt() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    let result = push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type(OCI_MANIFEST_MEDIA_TYPE)),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await;
+    let result = push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes).await;
 
     assert!(
         result.is_err(),
@@ -1337,14 +1332,7 @@ async fn failed_patch_cancels_the_upload_session() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    let result = push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type(OCI_MANIFEST_MEDIA_TYPE)),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await;
+    let result = push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes).await;
 
     assert!(
         result.is_err(),
@@ -1392,7 +1380,7 @@ async fn converged_subject_manifest_still_pushes_referrers_fallback() {
     // The re-issued primary PUT returns no `OCI-Subject` (OCI-1.0 downstream).
     mount_manifest_put(&mock_server, NAMESPACE, "v1", &manifest_digest).await;
 
-    let fallback_tag = Tag::referrers_fallback(&subject);
+    let fallback_tag = subject.referrers_fallback_tag();
     Mock::given(method("GET"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/{fallback_tag}")))
         .respond_with(ResponseTemplate::new(404))
@@ -1408,7 +1396,7 @@ async fn converged_subject_manifest_still_pushes_referrers_fallback() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(&ctx, &manifest_digest, None, Some("v1"), manifest_bytes)
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
         .await
         .expect("a converged subject-bearing manifest must re-push the referrers fallback");
 
@@ -1438,15 +1426,9 @@ async fn push_manifest_puts_when_downstream_holds_a_different_digest() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type("application/vnd.oci.image.manifest.v1+json")),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await
-    .expect("a divergent downstream digest must still PUT");
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
+        .await
+        .expect("a divergent downstream digest must still PUT");
 
     drop(mock_server);
 }
@@ -1465,24 +1447,17 @@ async fn push_manifest_puts_when_downstream_head_returns_404() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type("application/vnd.oci.image.manifest.v1+json")),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await
-    .expect("a 404 HEAD must fall through to the PUT");
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
+        .await
+        .expect("a 404 HEAD must fall through to the PUT");
 
     drop(mock_server);
 }
 
 #[tokio::test]
 async fn push_manifest_recovers_content_type_from_the_link_for_a_typeless_body() {
-    // Production passes `None` as the override and a body may omit
-    // `mediaType`; without the link recovery the PUT would carry no
-    // `Content-Type` and the receiver rejects it 400.
+    // A body may omit `mediaType`; without the link recovery the PUT would
+    // carry no `Content-Type` and the receiver rejects it 400.
     metrics_provider::init_for_tests();
     let mock_server = MockServer::start().await;
     let (blob_store, metadata_store, store, _dir) = test_blob_store();
@@ -1520,7 +1495,7 @@ async fn push_manifest_recovers_content_type_from_the_link_for_a_typeless_body()
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(&ctx, &manifest_digest, None, Some("v1"), manifest_bytes)
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
         .await
         .expect("a typeless body must recover its Content-Type from the revision link");
 
@@ -1587,7 +1562,7 @@ async fn push_index_recovers_typeless_child_content_type_from_link() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(&ctx, &index_digest, None, Some("v1"), index_bytes)
+    push_manifest(&ctx, &index_digest, Some("v1"), index_bytes)
         .await
         .expect("a typeless child must recover its Content-Type and the index must land");
 
@@ -1616,15 +1591,9 @@ async fn push_manifest_treats_lww_superseded_409_as_success() {
         source_ts: Some(instant(SOURCE_TS)),
         ..push_context(&downstream, &blob_store, &metadata_store, &namespace)
     };
-    push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type("application/vnd.oci.image.manifest.v1+json")),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await
-    .expect("an LWW-superseded 409 must be treated as success");
+    push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
+        .await
+        .expect("an LWW-superseded 409 must be treated as success");
 
     drop(mock_server);
 }
@@ -1647,20 +1616,36 @@ async fn push_manifest_propagates_immutable_409_as_error() {
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    let result = push_manifest(
-        &ctx,
-        &manifest_digest,
-        Some(media_type("application/vnd.oci.image.manifest.v1+json")),
-        Some("v1"),
-        manifest_bytes,
-    )
-    .await;
+    let result = push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes).await;
     assert!(
         result.is_err(),
         "a non-superseded 409 (immutable conflict) must propagate as an error"
     );
 
     drop(mock_server);
+}
+
+/// A body that can never parse is terminal: reporting it as `Internal` would
+/// have the queue retry the same bytes until the budget dies.
+#[tokio::test]
+async fn push_manifest_rejects_invalid_content_as_terminal() {
+    metrics_provider::init_for_tests();
+    let (blob_store, metadata_store, store, _dir) = test_blob_store();
+    // The rejection precedes every HTTP call, so the downstream is unroutable
+    // on purpose: a dialled request surfaces as `Client`, failing the assert.
+    let downstream = test_downstream(downstream_client("http://127.0.0.1:1"));
+    let namespace = Namespace::new(NAMESPACE).unwrap();
+    let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
+
+    let unparseable = b"not json".to_vec();
+    let stored = put_blob_direct(&store, &unparseable).await;
+    let error = push_manifest(&ctx, &stored, Some("v1"), unparseable)
+        .await
+        .expect_err("an unparseable body must fail the push");
+    assert!(
+        matches!(error, Error::InvalidManifest(_)),
+        "an unparseable body must be terminal, got: {error:?}"
+    );
 }
 
 #[tokio::test]
@@ -1840,7 +1825,7 @@ async fn deleting_last_referrer_removes_the_fallback_tag() {
 
     let subject = Digest::sha256_of_bytes(b"the-subject");
     let (referrer_body, referrer) = referrer_manifest(&subject);
-    let fallback_tag = Tag::referrers_fallback(&subject);
+    let fallback_tag = subject.referrers_fallback_tag();
 
     // The downstream still holds the referrer, so the delete can read its
     // subject before removing it.
@@ -1909,7 +1894,7 @@ async fn deleting_a_referrer_keeps_its_siblings_in_the_fallback_index() {
     let subject = Digest::sha256_of_bytes(b"shared-subject");
     let (referrer_body, referrer) = referrer_manifest(&subject);
     let sibling = Digest::sha256_of_bytes(b"sibling-referrer");
-    let fallback_tag = Tag::referrers_fallback(&subject);
+    let fallback_tag = subject.referrers_fallback_tag();
 
     Mock::given(method("GET"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/{referrer}")))
@@ -2000,7 +1985,7 @@ async fn a_retried_delete_prunes_the_fallback_index_from_the_carried_subject() {
 
     let subject = Digest::sha256_of_bytes(b"retried-subject");
     let (_, referrer) = referrer_manifest(&subject);
-    let fallback_tag = Tag::referrers_fallback(&subject);
+    let fallback_tag = subject.referrers_fallback_tag();
 
     // Carrying the subject spares this round-trip, which could only ever 404.
     Mock::given(method("GET"))
@@ -2101,19 +2086,19 @@ async fn a_failing_blob_lets_its_siblings_finish_their_upload() {
         .mount(&mock_server)
         .await;
 
-    let parsed = ParsedManifestDigests {
-        media_type: None,
-        artifact_type: None,
-        subject: None,
-        config: Some(failing),
-        layers: vec![sibling],
-        manifests: vec![],
-    };
+    let body = json!({
+        "schemaVersion": 2,
+        "config": { "mediaType": OCI_MANIFEST_MEDIA_TYPE, "digest": failing.to_string(), "size": 5 },
+        "layers": [
+            { "mediaType": OCI_MANIFEST_MEDIA_TYPE, "digest": sibling.to_string(), "size": 9 },
+        ],
+    });
+    let manifest = Manifest::from_slice(body.to_string().as_bytes()).unwrap();
     let downstream = test_downstream(downstream_client(&mock_server.uri()));
     let namespace = Namespace::new(NAMESPACE).unwrap();
     let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
 
-    super::push_blobs(&ctx, &parsed)
+    push_blobs(&ctx, &manifest)
         .await
         .expect_err("a failing blob must fail the sweep");
 

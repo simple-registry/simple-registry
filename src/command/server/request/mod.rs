@@ -77,7 +77,7 @@ impl<'a> RequestHeaders<'a> {
             .to_str()
             .map_err(|error| Error::BadRequest(format!("Invalid Content-Type header: {error}")))?;
 
-        MediaType::new(content_type)
+        MediaType::from_content_type(content_type)
             .map(Some)
             .map_err(|error| Error::BadRequest(error.to_string()))
     }
@@ -104,15 +104,20 @@ impl<'a> RequestHeaders<'a> {
         Some(parsed.min(Utc::now()))
     }
 
-    /// The window carried by `header`, which chunked-upload clients send both
-    /// bare and `bytes=`-prefixed.
+    /// The window carried by `header`, spelled `<start>-<end>` as end-5 has a
+    /// chunk declare it.
     pub fn chunk_range(&self, header: HeaderName) -> Result<Option<ByteWindow>, Error> {
         let Some(range_header) = self.header_string(header)? else {
             return Ok(None);
         };
 
-        RequestRange::parse_chunk(&range_header)
-            .map(Some)
+        ByteWindow::chunk_bounds(&range_header)
+            .map(|(start, end)| {
+                Some(ByteWindow {
+                    start,
+                    end: Some(end),
+                })
+            })
             .map_err(|error| not_satisfiable(&error))
     }
 

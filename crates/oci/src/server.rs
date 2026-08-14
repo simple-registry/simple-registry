@@ -2,7 +2,7 @@
 //! rendering the header vocabulary of the answer. The request itself is
 //! [`crate::request`], which both ends share.
 
-use std::cmp::Ordering;
+use std::cmp::Reverse;
 
 use hyper::{
     HeaderMap,
@@ -12,7 +12,7 @@ use hyper::{
     },
 };
 
-use crate::client::blob_path;
+use crate::client::{blob_path, manifest_path, uploads_start_path};
 use crate::header::{
     APPLICATION_JSON, DOCKER_CONTENT_DIGEST, DOCKER_DISTRIBUTION_API_VERSION,
     DOCKER_DISTRIBUTION_API_VERSION_V2, DOCKER_UPLOAD_UUID, LINK_REL_NEXT, OCI_FILTERS_APPLIED,
@@ -24,63 +24,54 @@ use crate::types::{Digest, MediaRange, MediaType, Namespace, Reference, Tag, Upl
 
 static QUALITY_PARAM: &str = "q";
 
-/// One `Accept` member: its media range, the quality it was offered at, and
-/// where it appeared, which breaks ties between equal qualities.
+/// One `Accept` member: its media range and the quality it was offered at.
 struct AcceptMediaRange {
     quality: u16,
     value: MediaRange,
-    order: usize,
+}
+
+impl AcceptMediaRange {
+    /// Reads one comma-separated member of an `Accept` header. `None` when it
+    /// is not a media range, which is dropped rather than forwarded: angos
+    /// re-sends these upstream and must not relay a malformed `Accept`.
+    fn new(member: &str) -> Option<Self> {
+        let value = MediaRange::new(member.trim()).ok()?;
+        // A member names its weight in a `q` parameter. Without one it is
+        // offered at full weight; one angos cannot read is not a weight it may
+        // invent, so the member sorts last instead.
+        let quality = value
+            .as_str()
+            .split(';')
+            .skip(1)
+            .filter_map(|parameter| parameter.trim().split_once('='))
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case(QUALITY_PARAM))
+            .map_or(1000, |(_, quality)| {
+                parse_quality(quality.trim()).unwrap_or(0)
+            });
+
+        Some(Self { quality, value })
+    }
 }
 
 /// The media ranges an `Accept` header offers, most preferred first.
 #[must_use]
 pub fn accepted_content_types(headers: &HeaderMap) -> Vec<MediaRange> {
-    let mut media_ranges = Vec::new();
+    let mut media_ranges: Vec<AcceptMediaRange> = headers
+        .get_all(ACCEPT)
+        .iter()
+        .filter_map(|header| header.to_str().ok())
+        .flat_map(|header| header.split(','))
+        .filter_map(AcceptMediaRange::new)
+        .collect();
 
-    for header in headers.get_all(ACCEPT) {
-        let Ok(header) = header.to_str() else {
-            continue;
-        };
-
-        for media_range in header.split(',') {
-            // A member that is not a media range is dropped rather than
-            // forwarded: angos re-sends these upstream and must not relay a
-            // malformed `Accept`.
-            let Ok(value) = MediaRange::new(media_range.trim()) else {
-                continue;
-            };
-
-            media_ranges.push(AcceptMediaRange {
-                quality: quality_for_media_range(value.as_str()),
-                value,
-                order: media_ranges.len(),
-            });
-        }
-    }
-
-    media_ranges.sort_by(|left, right| match right.quality.cmp(&left.quality) {
-        Ordering::Equal => left.order.cmp(&right.order),
-        ordering => ordering,
-    });
+    // A stable sort, so members offered at the same quality keep the order the
+    // client sent them in.
+    media_ranges.sort_by_key(|media_range| Reverse(media_range.quality));
 
     media_ranges
         .into_iter()
         .map(|media_range| media_range.value)
         .collect()
-}
-
-fn quality_for_media_range(media_range: &str) -> u16 {
-    for parameter in media_range.split(';').skip(1) {
-        let Some((name, value)) = parameter.trim().split_once('=') else {
-            continue;
-        };
-
-        if name.trim().eq_ignore_ascii_case(QUALITY_PARAM) {
-            return parse_quality(value.trim()).unwrap_or(0);
-        }
-    }
-
-    1000
 }
 
 fn parse_quality(value: &str) -> Option<u16> {
@@ -280,11 +271,11 @@ pub fn session_location_headers(
     namespace: &Namespace,
     session_id: &UploadSessionId,
 ) -> Result<HeaderMap, InvalidHeaderValue> {
+    // The session continues under the endpoint that opened it, rooted at the
+    // registry, which is the same grammar the requesting side builds.
+    let location = format!("{}{session_id}", uploads_start_path("", namespace));
     let mut headers = HeaderMap::new();
-    headers.insert(
-        LOCATION,
-        HeaderValue::try_from(format!("/v2/{namespace}/blobs/uploads/{session_id}"))?,
-    );
+    headers.insert(LOCATION, HeaderValue::try_from(location)?);
     headers.insert(
         DOCKER_UPLOAD_UUID,
         HeaderValue::try_from(session_id.to_string())?,
@@ -387,7 +378,7 @@ pub fn put_manifest_headers(
     let mut headers = HeaderMap::new();
     headers.insert(
         LOCATION,
-        HeaderValue::try_from(format!("/v2/{namespace}/manifests/{reference}"))?,
+        HeaderValue::try_from(manifest_path("", namespace, reference))?,
     );
     headers.insert(DOCKER_CONTENT_DIGEST, HeaderValue::try_from(digest)?);
     if let Some(subject) = subject {
@@ -457,20 +448,22 @@ mod tests {
         );
     }
 
+    fn quality_of(member: &str) -> u16 {
+        AcceptMediaRange::new(member)
+            .expect("the fixture must be a media range")
+            .quality
+    }
+
     // A `q` angos cannot read is not a preference it may invent: the member
     // sorts last rather than being promoted to full weight.
     #[test]
     fn an_unreadable_quality_sorts_last() {
         for value in ["q=2", "q=0.1234", "q=abc", "q="] {
-            assert_eq!(
-                quality_for_media_range(&format!("a/b;{value}")),
-                0,
-                "{value}"
-            );
+            assert_eq!(quality_of(&format!("a/b;{value}")), 0, "{value}");
         }
-        assert_eq!(quality_for_media_range("a/b"), 1000);
-        assert_eq!(quality_for_media_range("a/b;q=1.0"), 1000);
-        assert_eq!(quality_for_media_range("a/b;q=0.75"), 750);
+        assert_eq!(quality_of("a/b"), 1000);
+        assert_eq!(quality_of("a/b;q=1.0"), 1000);
+        assert_eq!(quality_of("a/b;q=0.75"), 750);
     }
 
     const SAMPLE_SESSION: &str = "067e6162-3b6f-4ae2-a171-2470b63dff00";
@@ -544,11 +537,17 @@ mod tests {
         assert_eq!(headers[&DOCKER_UPLOAD_UUID], SAMPLE_SESSION);
     }
 
+    /// `Range` reports the bytes committed so far. A `PATCH` answers with an
+    /// empty body and declares `Content-Length: 0`; a `GET` declares none.
     #[test]
     fn upload_progress_headers_report_current_range() {
         let headers = upload_progress_headers(&namespace(), &session_id(), 42, None).unwrap();
         assert_eq!(headers[&RANGE], "0-41");
         assert!(!headers.contains_key(CONTENT_LENGTH));
+
+        let headers = upload_progress_headers(&namespace(), &session_id(), 42, Some(0)).unwrap();
+        assert_eq!(headers[&RANGE], "0-41");
+        assert_eq!(headers[&CONTENT_LENGTH], "0");
     }
 
     #[test]

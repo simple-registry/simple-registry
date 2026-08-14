@@ -142,7 +142,6 @@ fn test_action_serialization_cel_compatibility() {
                 namespace: ns(),
                 digest: digest(),
                 artifact_type: None,
-                n: None,
                 last: None,
             },
         ),

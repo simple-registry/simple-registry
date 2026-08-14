@@ -76,11 +76,11 @@ session, or `201 Created` when the blob is already available or was uploaded by 
 
 Query parameters:
 - `digest` - Return the existing blob (returns `201 Created`) when the requested namespace already
-  owns it. Otherwise, a request carrying the blob as its body with a `Content-Length` completes the
-  upload here and returns `201 Created`, and a request with no body starts a new upload session. A
-  body of undeclared length (chunked, no `Content-Length`) also starts a session, which the client
-  then closes with a `PUT`. A body that does not hash to `digest` is rejected with `DIGEST_INVALID`
-  and stores nothing.
+  owns it. Otherwise, a request declaring a `Content-Length` carries the blob as its body and
+  completes the upload here, returning `201 Created`; a declared `0` is the empty blob, not an
+  absent body. A request declaring no length at all (a chunked body) starts an upload session the
+  client then closes with a `PUT`. A body that does not hash to `digest` is rejected with
+  `DIGEST_INVALID` and stores nothing.
 - `digest-algorithm` - The algorithm (`sha256` or `sha512`) the upload will be closed with. The
   session then hashes each chunk under that one alone instead of every supported algorithm, which is
   what a session must do when it cannot know the algorithm before the closing `PUT`. Completing a
@@ -120,7 +120,7 @@ Get upload status.
 PATCH /v2/{namespace}/blobs/uploads/{uuid}
 ```
 
-Upload a chunk. Use `Content-Range` for the chunk range and `Content-Length` for the exact chunk size. A `Content-Range` must resume at the committed offset and, when it names a last byte, the body must carry exactly that many bytes; either mismatch returns `416 Range Not Satisfiable`. A missing `Content-Length` is accepted as a chunked upload streamed to EOF; an invalid `Content-Length` returns `400 Bad Request`. An upload whose cumulative size exceeds `global.max_blob_size` is rejected with `BLOB_UPLOAD_INVALID` (HTTP 413).
+Upload a chunk. Use `Content-Range` for the chunk range, spelled `<start>-<end>` as the specification defines it, and `Content-Length` for the exact chunk size. The `bytes=` unit belongs to the `Range` header and is rejected here. A `Content-Range` must resume at the committed offset and, when it names a last byte, must agree with the `Content-Length` sent with it; either mismatch returns `416 Range Not Satisfiable` before a byte is committed. A missing `Content-Length` is accepted as a chunked upload streamed to EOF, and a chunked body that does not fill the window it announced returns `416` and cancels the session; an invalid `Content-Length` returns `400 Bad Request`. A body shorter than the `Content-Length` it declared commits what arrived and answers `202` with the bytes actually committed in `Range`, leaving the closing `PUT` to refuse the digest. An upload whose cumulative size exceeds `global.max_blob_size` is rejected with `BLOB_UPLOAD_INVALID` (HTTP 413).
 
 ```
 PUT /v2/{namespace}/blobs/uploads/{uuid}?digest={digest}
@@ -251,16 +251,17 @@ List manifests that reference a subject digest.
 
 Query parameters:
 - `artifactType` - Filter by artifact type
-- `n` - Maximum number of results (default 100)
-- `last` - Pagination marker
+- `last` - Pagination marker. The specification paginates this endpoint through the `Link` header alone, so this is the cursor Angos puts in the `Link` it advertises rather than one a client composes; it takes no page-size parameter, and Angos sizes the page at 100
 
-A digest that is not valid syntax, or an `artifactType` that is not a media type, is rejected with `DIGEST_INVALID` (HTTP 400) rather than served as an unfiltered or empty listing.
+A malformed request is rejected with `DIGEST_INVALID` (HTTP 400): a digest that is not valid syntax, or an `artifactType` that is not a media type. A registry serving this endpoint must never answer `404` to it, so an unreadable request is a bad one rather than an unserved path, unlike the other listings.
 
 Referrers a client recorded under the fallback tag (`<algorithm>-<hex>`, an index of referring descriptors) before this registry served the API are folded into the listing, as the spec's "Enabling the Referrers API" procedure requires, so a repository imported from such a registry keeps them.
 
 On a pull-through repository the listing merges the upstream's referrers with the cached ones, since nothing fills a referrer index on its own and an uncached subject would otherwise report none. An upstream that cannot be reached is left out rather than failing the request, so the cached referrers are still served. The `artifactType` filter is applied to both.
 
-A subject with more referrers than the page size is served one page at a time, with the next page advertised in a `Link` header carrying `rel="next"`; the link repeats the `artifactType` filter so following it keeps the listing filtered. A filtered page holds at most `n` entries and may hold fewer, since the filter is applied after the page is cut.
+A subject with more referrers than the page size is served one page at a time, with the next page advertised in a `Link` header carrying `rel="next"`; the link repeats the `artifactType` filter so following it keeps the listing filtered, percent-encoding it so a `+json` suffix survives the round trip. A filtered page may hold fewer than 100 entries, since the filter is applied after the page is cut.
+
+Merging a pull-through listing needs both sides whole, so each page re-reads the upstream's referrers in full: paginating a widely referenced subject on a mirror costs one upstream enumeration per page.
 
 ---
 
@@ -270,7 +271,7 @@ Base path: `/v2/_angos/` for the registry, `/v2/<name>/_angos/` for one namespac
 
 These sit in the extension namespace the distribution spec reserves, whose shape is `_<extension>/<component>/<module>`; `angos` is the extension name. See the spec's [extensions document](https://github.com/opencontainers/distribution-spec/blob/main/extensions/README.md).
 
-> **Migration note:** these endpoints were served under the top-level `/_ext/` prefix before 1.5.0. Clients must update `/_ext/...` paths to their `/v2/_angos/...` equivalents; the table below lists each one.
+> **Migration note:** these endpoints were served under the top-level `/_ext/` prefix before 1.5.0. Clients must update `/_ext/...` paths to their `/v2/_angos/...` equivalents; [Upgrade Angos](../how-to/upgrade.md#extension-api-moved-into-the-reserved-namespace-breaking-change) maps each one.
 
 ### List Repositories
 

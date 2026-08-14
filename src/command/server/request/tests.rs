@@ -15,24 +15,20 @@ use crate::{
     registry_client::X_ANGOS_SOURCE_TIMESTAMP,
 };
 
+/// end-5 spells a chunk's window `<start>-<end>`. The `bytes=` unit is the
+/// `Range` header's, so a chunk carrying one is malformed rather than tolerated.
 #[test]
-fn test_range_with_bytes_prefix() {
+fn test_chunk_range_refuses_the_range_unit() {
     let request = Request::builder()
         .header(RANGE, "bytes=0-499")
         .body(())
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let range = RequestHeaders::new(&parts.headers)
-        .chunk_range(RANGE)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        range,
-        ByteWindow {
-            start: 0,
-            end: Some(499),
-        }
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
+    assert!(
+        matches!(result, Err(Error::RangeNotSatisfiable(_))),
+        "a bytes=-prefixed chunk window must be refused, got: {result:?}"
     );
 }
 
@@ -144,24 +140,17 @@ fn test_content_range_without_bytes_prefix() {
     );
 }
 
+/// end-5 pins a chunk's window to `^[0-9]+-[0-9]+$`, so a value naming no last
+/// byte is refused rather than read as an open-ended one.
 #[test]
-fn test_range_no_end() {
-    let request = Request::builder()
-        .header(RANGE, "bytes=0-")
-        .body(())
-        .unwrap();
+fn test_chunk_range_refuses_an_open_ended_window() {
+    let request = Request::builder().header(RANGE, "0-").body(()).unwrap();
     let (parts, ()) = request.into_parts();
 
-    let range = RequestHeaders::new(&parts.headers)
-        .chunk_range(RANGE)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        range,
-        ByteWindow {
-            start: 0,
-            end: None,
-        }
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
+    assert!(
+        matches!(result, Err(Error::RangeNotSatisfiable(_))),
+        "an open-ended chunk window must be refused, got: {result:?}"
     );
 }
 
@@ -198,7 +187,7 @@ fn test_blob_range_zero_suffix_range() {
 #[test]
 fn test_range_large_numbers() {
     let request = Request::builder()
-        .header(RANGE, "bytes=1000000000-2000000000")
+        .header(RANGE, "1000000000-2000000000")
         .body(())
         .unwrap();
     let (parts, ()) = request.into_parts();
@@ -231,7 +220,7 @@ fn test_range_missing_header() {
 fn test_range_custom_header_name() {
     let custom_header = HeaderName::from_static("x-custom-range");
     let request = Request::builder()
-        .header(&custom_header, "bytes=50-100")
+        .header(&custom_header, "50-100")
         .body(())
         .unwrap();
     let (parts, ()) = request.into_parts();
@@ -252,7 +241,7 @@ fn test_range_custom_header_name() {
 #[test]
 fn test_range_start_greater_than_end() {
     let request = Request::builder()
-        .header(RANGE, "bytes=500-499")
+        .header(RANGE, "500-499")
         .body(())
         .unwrap();
     let (parts, ()) = request.into_parts();

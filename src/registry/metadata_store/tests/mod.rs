@@ -12,6 +12,7 @@ use bytes::Bytes;
 use chrono::{Duration, Utc};
 use futures_util::TryStreamExt;
 
+use angos_oci::request::GetReferrersRequest;
 use angos_oci::{Algorithm, Descriptor, Digest, MediaType, Namespace, Tag};
 use angos_s3_client::Backend as S3HttpBackend;
 use angos_storage::Page;
@@ -24,11 +25,12 @@ use crate::{
     metrics_provider,
     registry::{
         Error, Registry,
-        content_discovery::DEFAULT_PAGE_SIZE,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation, MetadataStore},
         path_builder,
         s3_connection::S3ConnectionConfig,
-        test_utils::{for_each_backend, media_type, put_blob_direct, s3_test_connection},
+        test_utils::{
+            for_each_backend, media_type, put_blob_direct, referrers_request, s3_test_connection,
+        },
     },
 };
 
@@ -366,7 +368,7 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
     create_link(&m, namespace, &referrers_link, &referrer_digest).await;
 
     let referrers = registry
-        .list_referrers(None, namespace, &base_digest, None, DEFAULT_PAGE_SIZE, None)
+        .list_referrers(None, &referrers_request(namespace, &base_digest))
         .await;
 
     let expected = vec![Descriptor {
@@ -383,11 +385,10 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
     let filtered_referrers = registry
         .list_referrers(
             None,
-            namespace,
-            &base_digest,
-            Some(media_type("application/vnd.example.test-artifact")),
-            DEFAULT_PAGE_SIZE,
-            None,
+            &GetReferrersRequest {
+                artifact_type: Some(media_type("application/vnd.example.test-artifact")),
+                ..referrers_request(namespace, &base_digest)
+            },
         )
         .await
         .unwrap();
@@ -397,11 +398,10 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
     let non_matching_referrers = registry
         .list_referrers(
             None,
-            namespace,
-            &base_digest,
-            Some(media_type("application/vnd.non-existent")),
-            DEFAULT_PAGE_SIZE,
-            None,
+            &GetReferrersRequest {
+                artifact_type: Some(media_type("application/vnd.non-existent")),
+                ..referrers_request(namespace, &base_digest)
+            },
         )
         .await
         .unwrap();
@@ -953,14 +953,7 @@ pub async fn test_datastore_list_referrers_parallel_correctness(registry: &Regis
     }
 
     let descriptors = registry
-        .list_referrers(
-            None,
-            namespace,
-            &subject_digest,
-            None,
-            DEFAULT_PAGE_SIZE,
-            None,
-        )
+        .list_referrers(None, &referrers_request(namespace, &subject_digest))
         .await
         .unwrap();
 
@@ -1055,11 +1048,10 @@ pub async fn test_datastore_list_referrers_with_artifact_type_filter(registry: &
     let descriptors = registry
         .list_referrers(
             None,
-            namespace,
-            &subject_digest,
-            Some(media_type("application/vnd.example.sbom")),
-            DEFAULT_PAGE_SIZE,
-            None,
+            &GetReferrersRequest {
+                artifact_type: Some(media_type("application/vnd.example.sbom")),
+                ..referrers_request(namespace, &subject_digest)
+            },
         )
         .await
         .unwrap();
@@ -1120,36 +1112,15 @@ pub async fn test_datastore_list_referrers_deterministic_order(registry: &Regist
     }
 
     let result1 = registry
-        .list_referrers(
-            None,
-            namespace,
-            &subject_digest,
-            None,
-            DEFAULT_PAGE_SIZE,
-            None,
-        )
+        .list_referrers(None, &referrers_request(namespace, &subject_digest))
         .await
         .unwrap();
     let result2 = registry
-        .list_referrers(
-            None,
-            namespace,
-            &subject_digest,
-            None,
-            DEFAULT_PAGE_SIZE,
-            None,
-        )
+        .list_referrers(None, &referrers_request(namespace, &subject_digest))
         .await
         .unwrap();
     let result3 = registry
-        .list_referrers(
-            None,
-            namespace,
-            &subject_digest,
-            None,
-            DEFAULT_PAGE_SIZE,
-            None,
-        )
+        .list_referrers(None, &referrers_request(namespace, &subject_digest))
         .await
         .unwrap();
 
@@ -2104,7 +2075,7 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
 
     // list_referrers should return the stored descriptor without reading a blob
     let referrers = registry
-        .list_referrers(None, namespace, &base_digest, None, DEFAULT_PAGE_SIZE, None)
+        .list_referrers(None, &referrers_request(namespace, &base_digest))
         .await
         .unwrap();
 
@@ -2114,11 +2085,10 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
     let filtered = registry
         .list_referrers(
             None,
-            namespace,
-            &base_digest,
-            Some(media_type("application/vnd.example.test-artifact")),
-            DEFAULT_PAGE_SIZE,
-            None,
+            &GetReferrersRequest {
+                artifact_type: Some(media_type("application/vnd.example.test-artifact")),
+                ..referrers_request(namespace, &base_digest)
+            },
         )
         .await
         .unwrap();
@@ -2128,11 +2098,10 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
     let non_matching = registry
         .list_referrers(
             None,
-            namespace,
-            &base_digest,
-            Some(media_type("application/vnd.non-existent")),
-            DEFAULT_PAGE_SIZE,
-            None,
+            &GetReferrersRequest {
+                artifact_type: Some(media_type("application/vnd.non-existent")),
+                ..referrers_request(namespace, &base_digest)
+            },
         )
         .await
         .unwrap();

@@ -4,11 +4,6 @@ use hyper::{Method, Uri};
 use serde::{Deserialize, de::DeserializeOwned};
 
 use angos_oci::path::API_PREFIX;
-
-/// Angos's extension name and the two forms it is reached under. The spec fixes
-/// the `_<extension>` shape; the name itself is ours.
-const EXTENSION: &str = "_angos/";
-const REPOSITORY_EXTENSION: &str = "/_angos/";
 use angos_oci::server;
 use angos_oci::{Algorithm, Digest, MediaType, Namespace, Reference, Tag, UploadSessionId};
 
@@ -16,6 +11,11 @@ use crate::{
     identity::{Action, ManifestPutTarget},
     jobs::{JobState, Queue},
 };
+
+/// Angos's extension name and the two forms it is reached under. The spec fixes
+/// the `_<extension>` shape; the name itself is ours.
+const EXTENSION: &str = "_angos/";
+const REPOSITORY_EXTENSION: &str = "/_angos/";
 
 /// Deserializes a query string, returning `None` when a value fails to
 /// deserialize so the caller can reject the route or fall back with
@@ -138,6 +138,13 @@ struct PaginationQuery {
     last: Option<String>,
 }
 
+/// The cursor alone, for the referrers listing: the spec pages it through the
+/// `Link` header and defines no page size, so `?n=` is not part of it.
+#[derive(Deserialize)]
+struct CursorQuery {
+    last: Option<String>,
+}
+
 /// Strict parse: a malformed `?n=` or `?last=` is a bad cursor, not an absent
 /// one, so it must not degrade into an unpaginated listing.
 fn parse_pagination(params: Option<&str>) -> Option<PaginationQuery> {
@@ -231,7 +238,7 @@ fn registry_extension(method: &Method, path: &str, params: Option<&str>) -> Opti
             let JobsQuery { queue, key, .. } = parse_jobs_query(params)?;
             Some(Action::RetryJob {
                 queue,
-                storage_key: job_key(key)?,
+                storage_key: key.filter(|key| is_job_key(key))?,
             })
         }
         Method::DELETE => {
@@ -244,7 +251,7 @@ fn registry_extension(method: &Method, path: &str, params: Option<&str>) -> Opti
             Some(Action::DeleteJob {
                 queue,
                 state,
-                storage_key: job_key(key)?,
+                storage_key: key.filter(|key| is_job_key(key))?,
             })
         }
         _ => None,
@@ -265,13 +272,8 @@ fn repository_extension(method: &Method, namespace: Namespace, path: &str) -> Op
     }
 }
 
-/// A job storage key is a single non-empty path segment.
 /// The job a mutation addresses. A storage key is one path-free token
 /// (`<hex-millis>-<uuid>`), so one holding a `/` is refused.
-fn job_key(key: Option<String>) -> Option<String> {
-    key.filter(|key| is_job_key(key))
-}
-
 fn is_job_key(key: &str) -> bool {
     !key.is_empty() && !key.contains('/')
 }
@@ -400,23 +402,20 @@ fn try_find_manifests(method: &Method, path: &str, params: Option<&str>) -> Opti
     None
 }
 
-/// Whether a request [`parse`] refused was a referrers read, which owes a `400`
-/// for the digest or filter that failed. An invalid namespace is not one, so it
-/// keeps the `404` it gets on every route.
+/// Whether a request [`parse`] refused was a referrers read owing a `400`: a
+/// registry serving the API must answer an invalid one that way and never with
+/// a `404`. Reaching here means [`try_find_referrers`] declined a `GET` on this
+/// path, and on a parsable namespace it declines only over the digest or the
+/// `?artifactType=` filter, so the namespace is the whole test: one that does
+/// not parse addresses no repository and keeps the `404` every route gives.
+/// REF: <https://github.com/opencontainers/distribution-spec/blob/v1.1.0/spec.md#listing-referrers>
 pub fn is_invalid_referrers_request(method: &Method, uri: &Uri) -> bool {
-    if *method != Method::GET {
-        return false;
-    }
-
-    let Some((namespace, _)) = uri
-        .path()
-        .strip_prefix(API_PREFIX)
-        .and_then(server::split_referrers_path)
-    else {
-        return false;
-    };
-
-    Namespace::new(namespace).is_ok()
+    *method == Method::GET
+        && uri
+            .path()
+            .strip_prefix(API_PREFIX)
+            .and_then(server::split_referrers_path)
+            .is_some_and(|(namespace, _)| Namespace::new(namespace).is_ok())
 }
 
 fn try_find_referrers(method: &Method, path: &str, params: Option<&str>) -> Option<Action> {
@@ -432,12 +431,16 @@ fn try_find_referrers(method: &Method, path: &str, params: Option<&str>) -> Opti
         };
 
         if *method == Method::GET {
-            let PaginationQuery { n, last } = parse_pagination(params)?;
+            // The spec defines no page size here, so only the cursor the
+            // registry minted in its own `Link` is read back.
+            let last = match params {
+                Some(params) => parse_query::<CursorQuery>(params)?.last,
+                None => None,
+            };
             return Some(Action::GetReferrer {
                 namespace,
                 digest,
                 artifact_type,
-                n,
                 last,
             });
         }

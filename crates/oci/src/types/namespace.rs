@@ -228,52 +228,6 @@ mod tests {
     use crate::types::namespace::*;
 
     #[test]
-    fn test_valid_simple_namespace() {
-        let ns = Namespace::new("library").unwrap();
-        assert_eq!(ns.as_ref(), "library");
-    }
-
-    #[test]
-    fn test_valid_nested_namespace() {
-        let ns = Namespace::new("myrepo/app").unwrap();
-        assert_eq!(ns.as_ref(), "myrepo/app");
-    }
-
-    #[test]
-    fn test_valid_deeply_nested_namespace() {
-        let ns = Namespace::new("org/team/project/app").unwrap();
-        assert_eq!(ns.as_ref(), "org/team/project/app");
-    }
-
-    #[test]
-    fn test_valid_with_special_chars() {
-        let ns = Namespace::new("my-repo_v2.0").unwrap();
-        assert_eq!(ns.as_ref(), "my-repo_v2.0");
-    }
-
-    #[test]
-    fn test_invalid_uppercase() {
-        assert!(Namespace::new("MyRepo").is_err());
-    }
-
-    #[test]
-    fn test_invalid_empty() {
-        assert!(Namespace::new("").is_err());
-    }
-
-    #[test]
-    fn test_invalid_special_char_at_start() {
-        assert!(Namespace::new("-repo").is_err());
-        assert!(Namespace::new("_repo").is_err());
-        assert!(Namespace::new(".repo").is_err());
-    }
-
-    #[test]
-    fn test_invalid_double_slash() {
-        assert!(Namespace::new("repo//app").is_err());
-    }
-
-    #[test]
     fn test_from_str() {
         let ns = Namespace::from_str("test-repo").unwrap();
         assert_eq!(ns.as_ref(), "test-repo");
@@ -323,66 +277,9 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_single_char_letter() {
-        let ns = Namespace::new("a").unwrap();
-        assert_eq!(ns.as_ref(), "a");
-    }
-
-    #[test]
-    fn test_valid_single_char_digit() {
-        let ns = Namespace::new("0").unwrap();
-        assert_eq!(ns.as_ref(), "0");
-    }
-
-    #[test]
-    fn test_invalid_single_char_uppercase() {
-        assert!(Namespace::new("A").is_err());
-    }
-
-    #[test]
     fn test_namespace_length_cap() {
         assert!(Namespace::new(&"a".repeat(MAX_NAMESPACE_LENGTH)).is_ok());
         assert!(Namespace::new(&"a".repeat(MAX_NAMESPACE_LENGTH + 1)).is_err());
-    }
-
-    #[test]
-    fn test_invalid_space() {
-        assert!(Namespace::new("hello world").is_err());
-    }
-
-    #[test]
-    fn test_invalid_at_symbol() {
-        assert!(Namespace::new("user@host").is_err());
-    }
-
-    #[test]
-    fn test_invalid_hash_symbol() {
-        assert!(Namespace::new("repo#1").is_err());
-    }
-
-    #[test]
-    fn test_invalid_leading_slash() {
-        assert!(Namespace::new("/repo").is_err());
-    }
-
-    #[test]
-    fn test_invalid_trailing_slash() {
-        assert!(Namespace::new("repo/").is_err());
-    }
-
-    #[test]
-    fn test_invalid_triple_slash() {
-        assert!(Namespace::new("a///b").is_err());
-    }
-
-    #[test]
-    fn test_invalid_unicode_accented() {
-        assert!(Namespace::new("café").is_err());
-    }
-
-    #[test]
-    fn test_invalid_unicode_cjk() {
-        assert!(Namespace::new("日本").is_err());
     }
 
     #[test]
@@ -397,19 +294,6 @@ mod tests {
         let ns = Namespace::try_from("valid-repo".to_string()).unwrap();
         assert_eq!(ns.as_ref(), "valid-repo");
         assert!(Namespace::try_from("INVALID".to_string()).is_err());
-    }
-
-    #[test]
-    fn test_invalid_trailing_separator() {
-        assert!(Namespace::new("repo-").is_err());
-        assert!(Namespace::new("app.").is_err());
-    }
-
-    #[test]
-    fn test_invalid_segment_starts_with_separator() {
-        assert!(Namespace::new("a/-b").is_err());
-        assert!(Namespace::new("a/_b").is_err());
-        assert!(Namespace::new("a/.b").is_err());
     }
 
     #[test]
@@ -598,20 +482,28 @@ mod tests {
         assert!(!namespace_belongs_to("myrepo", "myrepo2"));
     }
 
-    /// The distribution-spec separator is `.`, `_`, `__`, or a run of dashes,
-    /// so a double underscore and repeated dashes are legal in a path
-    /// component.
+    /// The distribution-spec name grammar: lowercase alphanumeric components
+    /// joined by `/`, each component's runs separated by `.`, `_`, `__`, or a
+    /// run of dashes.
     #[test]
-    fn accepts_the_spec_separators() {
+    fn accepts_the_spec_name_grammar() {
         for name in [
+            // Components, from one character to a deep path.
+            "a",
+            "0",
+            "library",
+            "myrepo/app",
+            "org/team/project/app",
+            // Every separator the grammar lists, single and doubled.
+            "a.b",
+            "a_b",
+            "a-b",
             "a__b",
             "a--b",
             "a---b",
             "ubuntu--test",
             "my__repo/sub--component",
-            "a.b",
-            "a_b",
-            "a-b",
+            "my-repo_v2.0",
         ] {
             assert!(
                 Namespace::new(name).is_ok(),
@@ -620,13 +512,31 @@ mod tests {
         }
     }
 
-    /// A separator must sit between alphanumerics and must be one of the four
-    /// the grammar lists, so three underscores and a mixed run stay invalid.
+    /// A component is lowercase ASCII alphanumeric, and a separator must be one
+    /// of the four the grammar lists sitting between two alphanumerics.
     #[test]
-    fn rejects_separators_the_spec_does_not_allow() {
-        for name in [
-            "a___b", "a._b", "a..b", "a-_b", "-ab", "ab-", "_ab", "ab_", "a//b", "A--B",
-        ] {
+    fn rejects_what_the_spec_name_grammar_forbids() {
+        // Empty, uppercase, and non-ASCII.
+        let outside_the_alphabet = ["", "MyRepo", "A", "café", "日本"];
+        // Characters the grammar does not list at all.
+        let foreign_characters = ["hello world", "user@host", "repo#1"];
+        // A separator with nothing on one side of it.
+        let dangling_separators = [
+            "-repo", "_repo", ".repo", "repo-", "app.", "a/-b", "a/_b", "a/.b", "-ab", "ab-",
+            "_ab", "ab_",
+        ];
+        // Separator runs the grammar does not admit.
+        let unlisted_separators = ["a___b", "a._b", "a..b", "a-_b"];
+        // Component boundaries.
+        let empty_components = ["/repo", "repo/", "repo//app", "a///b", "a//b"];
+
+        for name in outside_the_alphabet
+            .into_iter()
+            .chain(foreign_characters)
+            .chain(dangling_separators)
+            .chain(unlisted_separators)
+            .chain(empty_components)
+        {
             assert!(
                 Namespace::new(name).is_err(),
                 "{name} is not legal under the distribution-spec name grammar"

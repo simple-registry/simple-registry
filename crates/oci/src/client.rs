@@ -2,7 +2,6 @@
 //! carries it, and reading the header vocabulary of the answer back. The
 //! request itself is [`crate::request`], which both ends share.
 
-use crate::header::LINK_REL_NEXT;
 use crate::path::{API_PREFIX, BLOBS, MANIFESTS, REFERRERS, TAGS_LIST, UPLOADS};
 use crate::request::{GetReferrersRequest, ListTagsRequest};
 use crate::types::{Digest, Namespace, Reference};
@@ -37,16 +36,35 @@ pub fn tags_list_path(base: &str, request: &ListTagsRequest) -> String {
 }
 
 /// URL of a referrers listing, carrying the `artifactType` filter and the
-/// pagination the request names.
+/// cursor the request resumes from.
 #[must_use]
 pub fn referrers_path(base: &str, request: &GetReferrersRequest) -> String {
     let (namespace, digest) = (&request.namespace, &request.digest);
     let mut location = format!("{base}{API_PREFIX}{namespace}{REFERRERS}{digest}");
     if let Some(artifact_type) = &request.artifact_type {
-        location = append_query(&location, &format!("artifactType={artifact_type}"));
+        let filter = encode_query_value(artifact_type);
+        location = append_query(&location, &format!("artifactType={filter}"));
     }
 
-    append_pagination(location, request.n, request.last.as_deref())
+    append_pagination(location, None, request.last.as_deref())
+}
+
+/// Percent-encodes the characters a media type may hold that a query string
+/// reads as syntax instead: `+` decodes back as a space wherever the reader
+/// applies form decoding, `&` opens another parameter, and `#` opens a
+/// fragment. A media type carries nothing else needing an escape.
+fn encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '+' => encoded.push_str("%2B"),
+            '&' => encoded.push_str("%26"),
+            '#' => encoded.push_str("%23"),
+            _ => encoded.push(character),
+        }
+    }
+
+    encoded
 }
 
 /// Appends a query string to a URL, choosing '?' or '&' for the separator.
@@ -80,12 +98,22 @@ fn append_pagination(base: String, n: Option<u16>, last: Option<&str>) -> String
 pub fn next_page_target(header: &str) -> Option<&str> {
     header
         .split(',')
-        .filter(|entry| entry.contains(LINK_REL_NEXT) || entry.contains("rel=next"))
+        .filter(|entry| has_rel_next(entry))
         .find_map(|entry| {
             let start = entry.find('<')?;
             let end = entry[start + 1..].find('>')? + start + 1;
             Some(&entry[start + 1..end])
         })
+}
+
+/// Whether a `Link` entry carries a `rel` param whose value is exactly `next`,
+/// so a relation such as `nextpage` is not mistaken for one.
+fn has_rel_next(entry: &str) -> bool {
+    entry.split(';').any(|param| {
+        param.split_once('=').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("rel") && value.trim().trim_matches('"') == "next"
+        })
+    })
 }
 
 #[cfg(test)]
@@ -149,9 +177,12 @@ mod tests {
     }
 
     /// A listing that dropped `artifactType` would return entries the caller
-    /// asked to filter out.
+    /// asked to filter out. The `+` of a structured-syntax suffix is escaped:
+    /// left raw, a reader applying form decoding reads it back as a space and
+    /// the media type no longer parses. No page size rides along: the spec
+    /// defines none for this endpoint.
     #[test]
-    fn a_referrers_listing_carries_the_filter_and_pagination() {
+    fn a_referrers_listing_carries_the_filter_and_cursor() {
         let digest = Digest::sha256_of_bytes(b"subject");
         let path = referrers_path(
             BASE,
@@ -161,16 +192,25 @@ mod tests {
                 artifact_type: Some(
                     MediaType::new("application/vnd.example.sbom.v1+json").unwrap(),
                 ),
-                n: Some(10),
-                last: None,
+                last: Some("sha256:beef".to_string()),
             },
         );
         assert_eq!(
             path,
             format!(
-                "https://example.com/v2/repo/referrers/{digest}?artifactType={filter}&n=10",
-                filter = "application/vnd.example.sbom.v1+json"
+                "https://example.com/v2/repo/referrers/{digest}?artifactType={filter}&last=sha256:beef",
+                filter = "application/vnd.example.sbom.v1%2Bjson"
             )
+        );
+    }
+
+    /// The other two characters a media type may hold that a query string would
+    /// read as syntax: another parameter, and a fragment.
+    #[test]
+    fn a_filter_escapes_the_query_delimiters_it_may_carry() {
+        assert_eq!(
+            encode_query_value("application/vnd.a+b&c#d"),
+            "application/vnd.a%2Bb%26c%23d"
         );
     }
 
@@ -196,6 +236,11 @@ mod tests {
     fn only_the_next_entry_is_followed() {
         let header = "</first>; rel=\"prev\", </second>; rel=\"next\"";
         assert_eq!(next_page_target(header), Some("/second"));
+    }
+
+    #[test]
+    fn a_rel_value_that_only_starts_with_next_is_not_followed() {
+        assert_eq!(next_page_target("</first>; rel=nextpage"), None);
     }
 
     #[test]

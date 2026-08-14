@@ -356,7 +356,6 @@ async fn get_manifest_without_content_digest_still_returns_the_body() {
             namespace: Namespace::new("test").unwrap(),
             reference: Reference::Tag(Tag::new("latest").unwrap()),
             accepted_types: Vec::new(),
-            allow_redirect: true,
         })
         .await
         .expect("a manifest GET without Docker-Content-Digest must still succeed");
@@ -392,7 +391,6 @@ async fn test_get_manifest_success() {
             namespace: Namespace::new("test").unwrap(),
             reference: Reference::Tag(Tag::new("latest").unwrap()),
             accepted_types: Vec::new(),
-            allow_redirect: true,
         })
         .await;
 
@@ -436,7 +434,6 @@ async fn test_get_manifest_rejects_oversized_body() {
             namespace: Namespace::new("test").unwrap(),
             reference: Reference::Tag(Tag::new("latest").unwrap()),
             accepted_types: Vec::new(),
-            allow_redirect: true,
         })
         .await;
 
@@ -497,7 +494,6 @@ async fn test_bearer_authentication() {
             namespace: Namespace::new("test").unwrap(),
             reference: Reference::Tag(Tag::new("latest").unwrap()),
             accepted_types: Vec::new(),
-            allow_redirect: true,
         })
         .await;
 
@@ -560,7 +556,6 @@ async fn a_scope_cache_hit_indexes_the_url_it_served() {
             digest: Digest::try_from(SCOPE_CACHE_DIGEST).unwrap(),
             accepted_types: Vec::new(),
             range: None,
-            allow_redirect: true,
         })
         .await
         .expect("blob fetch");
@@ -625,7 +620,6 @@ async fn test_cached_bearer_token_is_used() {
             namespace: Namespace::new("test").unwrap(),
             reference: Reference::Tag(Tag::new("latest").unwrap()),
             accepted_types: Vec::new(),
-            allow_redirect: true,
         })
         .await;
 
@@ -730,7 +724,6 @@ async fn test_bearer_tokens_are_cached_per_scope() {
                 namespace: namespace.clone(),
                 reference: latest.clone(),
                 accepted_types: Vec::new(),
-                allow_redirect: true,
             })
             .await
     };
@@ -828,7 +821,6 @@ async fn test_expired_bearer_token_is_refetched() {
             namespace: Namespace::new("test").unwrap(),
             reference: Reference::Tag(Tag::new("latest").unwrap()),
             accepted_types: Vec::new(),
-            allow_redirect: true,
         })
         .await;
 
@@ -890,7 +882,6 @@ async fn test_concurrent_bearer_refresh_uses_single_token_exchange() {
             namespace: namespace.clone(),
             reference: reference.clone(),
             accepted_types: Vec::new(),
-            allow_redirect: true,
         })
     }))
     .await;
@@ -942,7 +933,6 @@ async fn test_basic_authentication() {
             namespace: Namespace::new("test").unwrap(),
             reference: Reference::Tag(Tag::new("latest").unwrap()),
             accepted_types: Vec::new(),
-            allow_redirect: true,
         })
         .await;
 
@@ -984,7 +974,6 @@ async fn a_forbidden_response_after_a_token_refresh_is_denied() {
             namespace: Namespace::new("test").unwrap(),
             reference: Reference::Tag(Tag::new("latest").unwrap()),
             accepted_types: Vec::new(),
-            allow_redirect: true,
         })
         .await
         .expect_err("a 403 must not read as a successful fetch");
@@ -1022,7 +1011,6 @@ async fn a_persistent_unauthorized_after_a_refresh_is_terminal() {
             namespace: Namespace::new("test").unwrap(),
             reference: Reference::Tag(Tag::new("latest").unwrap()),
             accepted_types: Vec::new(),
-            allow_redirect: true,
         })
         .await
         .expect_err("a persistent 401 must not read as a successful fetch");
@@ -1050,7 +1038,6 @@ async fn test_forbidden_access() {
             namespace: Namespace::new("test").unwrap(),
             reference: Reference::Tag(Tag::new("latest").unwrap()),
             accepted_types: Vec::new(),
-            allow_redirect: true,
         })
         .await;
 
@@ -1078,7 +1065,6 @@ async fn test_get_blob_success() {
             digest: Digest::try_from(test_digest).unwrap(),
             accepted_types: Vec::new(),
             range: None,
-            allow_redirect: true,
         })
         .await;
 
@@ -1111,7 +1097,6 @@ async fn get_blob_reports_an_upstream_outage_as_transient_not_missing() {
             digest: Digest::try_from(test_digest).unwrap(),
             accepted_types: Vec::new(),
             range: None,
-            allow_redirect: true,
         })
         .await
         .err()
@@ -1142,7 +1127,6 @@ async fn test_get_blob_not_found() {
             digest: Digest::try_from(test_digest).unwrap(),
             accepted_types: Vec::new(),
             range: None,
-            allow_redirect: true,
         })
         .await;
 

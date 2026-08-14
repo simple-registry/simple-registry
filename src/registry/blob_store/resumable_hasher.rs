@@ -82,8 +82,9 @@ impl Hasher {
         }
     }
 
-    /// Hash under a single known algorithm, for verify-only paths where the
-    /// target algorithm is already known and no checkpoint is persisted.
+    /// Hash under a single known algorithm: a verify-only read, and a session
+    /// whose client named the algorithm it will close the upload with, whose
+    /// checkpoints then carry that one hash instead of every supported one.
     pub fn for_algorithm(algorithm: Algorithm) -> Self {
         Self {
             hashers: vec![AlgorithmHasher::new(algorithm)],

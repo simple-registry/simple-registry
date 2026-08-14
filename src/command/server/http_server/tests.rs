@@ -300,14 +300,16 @@ fn unknown_route_status_follows_the_method() {
     }
 }
 
-/// The spec is explicit that the referrers endpoint answers an invalid digest
-/// with `400`, so it must not take the `404` an unserved read path gets.
+/// A registry serving the referrers API must answer an invalid request with
+/// `400` and never with the `404` an unserved read path gets, whichever part of
+/// the request is malformed.
 #[test]
 fn unknown_referrers_route_is_a_bad_request() {
     let digest = format!("sha256:{}", "a".repeat(64));
     for uri in [
         "/v2/conformance/test/referrers/not-a-digest".to_string(),
         format!("/v2/conformance/test/referrers/{digest}?artifactType=not-a-media-type"),
+        format!("/v2/conformance/test/referrers/{digest}?n=abc"),
     ] {
         let request = Request::builder()
             .method(Method::GET)

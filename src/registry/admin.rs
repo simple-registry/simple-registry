@@ -10,6 +10,7 @@ use serde::Serialize;
 use tokio::try_join;
 use tracing::instrument;
 
+use angos_oci::request::GetReferrersRequest;
 use angos_oci::{
     Content, DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
     MediaType, Namespace, Platform as OciPlatform, Tag, UploadSessionId, namespace_belongs_to,
@@ -20,7 +21,7 @@ use crate::{
     http_response::{ResponseBody, build_response, json_response},
     jobs::store as job_store,
     jobs::{JobState, Queue},
-    registry::{Error, Registry, content_discovery::DEFAULT_PAGE_SIZE, metadata_store::LinkKind},
+    registry::{Error, Registry, metadata_store::LinkKind},
 };
 
 #[derive(Debug)]
@@ -753,13 +754,20 @@ impl Registry {
             .map(|(digest, tags, parents, mut referrers)| async move {
                 // One page per manifest, and what this registry holds alone: a
                 // listing that queried the upstream would do so once per
-                // manifest. The rest is browsed through the OCI referrers
-                // endpoint, from the cursor handed back here.
+                // manifest. The fallback-tag lookup stays, a link read that
+                // usually misses: the cursor handed back here is followed
+                // through the OCI referrers endpoint, which merges that index,
+                // so dropping it would hand the client a cursor cut over a
+                // different candidate set. These reads fan out at
+                // `ADMIN_READ_CONCURRENCY` alongside the revision's own.
+                let listing = GetReferrersRequest {
+                    namespace: namespace.clone(),
+                    digest: digest.clone(),
+                    artifact_type: None,
+                    last: None,
+                };
                 let mut referrers_next = None;
-                if let Ok(page) = self
-                    .list_referrers(None, namespace, &digest, None, DEFAULT_PAGE_SIZE, None)
-                    .await
-                {
+                if let Ok(page) = self.list_referrers(None, &listing).await {
                     referrers.extend(page.items.into_iter().map(ReferrerInfo::from));
                     referrers_next = page.next_token;
                 }

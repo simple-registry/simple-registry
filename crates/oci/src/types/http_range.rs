@@ -3,7 +3,11 @@
 //! both live here so the registry, the request layer, and the upstream client
 //! read and write one grammar.
 
-use std::{fmt::Display, str::FromStr};
+use std::{
+    fmt,
+    fmt::{Display, Formatter},
+    str::FromStr,
+};
 
 use hyper::header::{HeaderValue, InvalidHeaderValue};
 
@@ -36,37 +40,12 @@ fn parse_number(value: &str, part: &str) -> Result<u64, Error> {
     })
 }
 
-/// Parses a `start-end` value where `end` is optional (`100-200`, `0-`).
-fn parse_start_end(value: &str) -> Result<ByteWindow, Error> {
-    let (start, end) = value
-        .split_once('-')
-        .filter(|(start, end)| is_digits(start) && (end.is_empty() || is_digits(end)))
-        .ok_or_else(|| malformed(value))?;
-
-    let start = parse_number(start, "start")?;
-    if end.is_empty() {
-        return Ok(ByteWindow { start, end: None });
-    }
-
-    let end = parse_number(end, "end")?;
-    if start > end {
-        return Err(Error::Malformed(format!(
-            "Invalid Range header: start ({start}) > end ({end})"
-        )));
-    }
-
-    Ok(ByteWindow {
-        start,
-        end: Some(end),
-    })
-}
-
+/// Splits the `bytes=` unit off a `Range` value. Checked rather than
+/// positional: the prefix length can land inside a multi-byte character, which
+/// `split_at` panics on.
 fn strip_bytes_prefix(value: &str) -> Option<&str> {
-    if value.len() < BYTES_RANGE_PREFIX.len() {
-        return None;
-    }
+    let (prefix, range_value) = value.split_at_checked(BYTES_RANGE_PREFIX.len())?;
 
-    let (prefix, range_value) = value.split_at(BYTES_RANGE_PREFIX.len());
     prefix
         .eq_ignore_ascii_case(BYTES_RANGE_PREFIX)
         .then_some(range_value)
@@ -82,12 +61,70 @@ pub struct ByteWindow {
 }
 
 impl ByteWindow {
-    /// Whether `received` bytes is what this window declared. A window naming no
-    /// end declares nothing to disagree with.
+    /// The inclusive bounds of the window a chunk declares, which end-5 spells
+    /// `<start>-<end>` and pins to `^[0-9]+-[0-9]+$`. Both ends are required,
+    /// so the open-ended form only a `Range` may use is malformed here, as is
+    /// the `bytes=` unit that belongs to `Range` alone.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`] for a value that is not that form, with a
+    /// non-numeric bound, without an end, or with an end before its start.
+    pub fn chunk_bounds(value: &str) -> Result<(u64, u64), Error> {
+        match Self::parse(value)? {
+            ByteWindow {
+                start,
+                end: Some(end),
+            } => Ok((start, end)),
+            ByteWindow { end: None, .. } => Err(malformed(value)),
+        }
+    }
+
+    /// Parses a `start-end` value where `end` is optional (`100-200`, `0-`),
+    /// which is the explicit form of a `Range`. A `Content-Range` requires both
+    /// ends and goes through [`Self::chunk_bounds`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`] for a value that is not that form, with a
+    /// non-numeric bound, or with an end before its start.
+    pub fn parse(value: &str) -> Result<Self, Error> {
+        let (start, end) = value
+            .split_once('-')
+            .filter(|(start, end)| is_digits(start) && (end.is_empty() || is_digits(end)))
+            .ok_or_else(|| malformed(value))?;
+
+        let start = parse_number(start, "start")?;
+        if end.is_empty() {
+            return Ok(ByteWindow { start, end: None });
+        }
+
+        let end = parse_number(end, "end")?;
+        if start > end {
+            return Err(Error::Malformed(format!(
+                "Invalid Range header: start ({start}) > end ({end})"
+            )));
+        }
+
+        Ok(ByteWindow {
+            start,
+            end: Some(end),
+        })
+    }
+
+    /// Whether `received` bytes is what this window declared. Only a `Range`
+    /// window names no end, and it declares nothing to disagree with.
     #[must_use]
     pub fn covers(self, received: u64) -> bool {
         self.end
             .is_none_or(|end| received == end.saturating_sub(self.start) + 1)
+    }
+
+    /// Whether this window resumes at `committed`: a gap or a rewind is an
+    /// out-of-order chunk, not a digest mismatch.
+    #[must_use]
+    pub fn starts_at(self, committed: u64) -> bool {
+        self.start == committed
     }
 }
 
@@ -125,21 +162,9 @@ impl RequestRange {
             return Ok(Some(RequestRange::Suffix(parse_number(suffix, "suffix")?)));
         }
 
-        parse_start_end(range_value)
+        ByteWindow::parse(range_value)
             .map(RequestRange::FromTo)
             .map(Some)
-    }
-
-    /// Parses the window a chunk declares in `Content-Range`, where the `bytes=`
-    /// unit is optional: chunked upload clients send the offset both bare and
-    /// prefixed. Only the explicit `start-end` form is accepted, a suffix being
-    /// meaningless for an offset.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Malformed`] for a non-numeric bound or an end before its start.
-    pub fn parse_chunk(value: &str) -> Result<ByteWindow, Error> {
-        parse_start_end(strip_bytes_prefix(value).unwrap_or(value))
     }
 
     /// Resolves the requested window against a known body length, clamping an
@@ -188,7 +213,7 @@ impl RequestRange {
 }
 
 impl Display for RequestRange {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             RequestRange::FromTo(ByteWindow {
                 start,
@@ -241,24 +266,19 @@ impl FromStr for ResponseRange {
             Some(parse_number(total_length, "complete length")?)
         };
 
-        match parse_start_end(window)? {
-            ByteWindow {
-                start,
-                end: Some(end),
-            } => Ok(ResponseRange {
-                start,
-                end,
-                total_length,
-            }),
-            // `parse_start_end` accepts the open-ended form a request may use;
-            // a served window always names its last byte.
-            ByteWindow { end: None, .. } => Err(malformed(value)),
-        }
+        // A served window always names its last byte, like a chunk's.
+        let (start, end) = ByteWindow::chunk_bounds(window)?;
+
+        Ok(ResponseRange {
+            start,
+            end,
+            total_length,
+        })
     }
 }
 
 impl Display for ResponseRange {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
             "{BYTES_CONTENT_PREFIX}{}-{}/",
@@ -319,18 +339,44 @@ mod tests {
         ));
     }
 
-    /// The chunk form is what chunked-upload clients send, bare or prefixed.
+    /// The unit is stripped by byte offset, which lands inside a multi-byte
+    /// character here. A header value never carries one, but this is a `pub`
+    /// parser, and refusing beats panicking.
     #[test]
-    fn parse_chunk_accepts_the_unit_as_optional() {
-        let expected = ByteWindow {
-            start: 0,
-            end: Some(41),
-        };
-        assert_eq!(RequestRange::parse_chunk("0-41").unwrap(), expected);
-        assert_eq!(RequestRange::parse_chunk("bytes=0-41").unwrap(), expected);
+    fn parse_refuses_a_value_that_is_not_ascii() {
+        for value in ["bytes€", "byte€=0-5", "€"] {
+            assert!(
+                matches!(RequestRange::parse(value), Err(Error::Malformed(_))),
+                "'{value}' must be refused, not panicked on"
+            );
+        }
     }
 
-    /// A chunk that names its last byte declares how many bytes it carries.
+    /// end-5 pins a chunk's `Content-Range` to `^[0-9]+-[0-9]+$`: both ends are
+    /// required, the `bytes=` unit is the `Range` header's, and neither the
+    /// open-ended form nor a prefixed one is that grammar. `parse` stays
+    /// permissive because a `Range` may spell `5-`.
+    #[test]
+    fn chunk_bounds_pin_the_grammar_end_5_defines() {
+        assert_eq!(ByteWindow::chunk_bounds("0-41").unwrap(), (0, 41));
+        for value in ["bytes=0-41", "0-", "41"] {
+            assert!(
+                matches!(ByteWindow::chunk_bounds(value), Err(Error::Malformed(_))),
+                "'{value}' is not the chunk grammar"
+            );
+        }
+
+        assert_eq!(
+            ByteWindow::parse("0-").unwrap(),
+            ByteWindow {
+                start: 0,
+                end: None,
+            }
+        );
+    }
+
+    /// A chunk that names its last byte declares how many bytes it carries. The
+    /// open-ended window only a `Range` can produce declares nothing.
     #[test]
     fn chunk_range_covers_only_the_length_it_declared() {
         let window = ByteWindow {
@@ -349,10 +395,21 @@ mod tests {
         assert!(open.covers(4096));
     }
 
+    /// A chunk resumes a session only at the offset the session stands at.
     #[test]
-    fn parse_chunk_rejects_an_inverted_window() {
-        let error =
-            RequestRange::parse_chunk("500-499").expect_err("inverted window must be refused");
+    fn chunk_range_starts_only_where_the_session_stands() {
+        let window = ByteWindow {
+            start: 10,
+            end: Some(19),
+        };
+        assert!(window.starts_at(10));
+        assert!(!window.starts_at(9));
+        assert!(!window.starts_at(11));
+    }
+
+    #[test]
+    fn parse_rejects_an_inverted_window() {
+        let error = ByteWindow::parse("500-499").expect_err("inverted window must be refused");
         assert!(
             error.to_string().contains("start (500) > end (499)"),
             "the error must name both bounds, got: {error}"

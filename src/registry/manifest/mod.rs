@@ -1,5 +1,4 @@
 pub mod link_plan;
-mod parse;
 mod response;
 
 use std::slice;
@@ -30,8 +29,6 @@ use crate::{
     },
     replication::{ReplicationDownstream, ReplicationJob, ReplicationTarget, build_envelope},
 };
-use parse::parse_pushed_manifest;
-pub use parse::{ParsedManifestDigests, parse_manifest_digests, recover_media_type};
 use response::{GetManifestResponse, ManifestBody, ManifestMeta, PutManifestResponse};
 
 pub const DEFAULT_MAX_MANIFEST_SIZE_BYTES: usize = 5 * 1024 * 1024;
@@ -393,7 +390,8 @@ impl Registry {
             reference_policy,
             created_at,
         } = *write;
-        let mut manifest = parse_pushed_manifest(body, content_type)?;
+        let mut manifest =
+            Manifest::from_pushed(body, content_type).map_err(|e| Error::manifest_invalid(&e))?;
         // A digest reference fixes the algorithm to verify against; a tag push has
         // no client-chosen algorithm, so the manifest lands under its canonical
         // sha256 digest.
@@ -599,7 +597,11 @@ impl Registry {
             return None;
         }
         let body = self.blob_store.read(digest).await.ok()?;
-        parse_manifest_digests(&body, None).ok()?.subject
+        Manifest::from_slice(&body)
+            .map_err(|e| Error::manifest_invalid(&e))
+            .ok()?
+            .subject
+            .map(|subject| subject.digest)
     }
 
     /// Whether the reference counted as present before the delete, gating the
@@ -744,8 +746,9 @@ impl Registry {
 
     /// Resolves a manifest GET request to a presigned redirect URL or the
     /// manifest body, then emits a `manifest.pull` event for the served
-    /// digest. The redirect fast-path is taken only when the cached target
-    /// is authoritative (not a pull-through cache, a digest reference, or an
+    /// digest. The redirect fast-path is taken only when the caller allows it (a
+    /// client opts out with `X-Angos-No-Redirect`) and the cached target is
+    /// authoritative (not a pull-through cache, a digest reference, or an
     /// immutable tag); mutable tags on a pull-through cache fall through to
     /// `get_manifest` to refresh if upstream has moved.
     #[instrument(skip(self, request))]
@@ -753,6 +756,7 @@ impl Registry {
         &self,
         actor: Option<EventActor>,
         request: GetManifestRequest,
+        allow_redirect: bool,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.get_repository_for_namespace(&request.namespace).ok();
         let is_tag_immutable = self.is_reference_immutable(repository, &request.reference);
@@ -766,7 +770,7 @@ impl Registry {
                 request.reference,
                 &request.accepted_types,
                 is_tag_immutable,
-                request.allow_redirect,
+                allow_redirect,
             )
             .await?;
 

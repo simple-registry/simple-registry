@@ -10,7 +10,6 @@ pedantic = { level = "warn", priority = -1 }
 test-util = []
 
 [dependencies]
-bytes = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
 hyper = { workspace = true }
