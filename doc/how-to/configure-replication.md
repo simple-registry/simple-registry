@@ -205,7 +205,7 @@ The push and staleness metrics are scrapeable on the server's `/metrics` only wh
 
 **A tag does not overwrite on the downstream:**
 - The downstream copy may be newer (last-writer-wins): a `409 REPLICATION_SUPERSEDED` is convergence, not failure.
-- The downstream tag may be immutable: a `409 CONFLICT` surfaces and the job retries; relax immutability or pick a different tag.
+- The downstream tag may be immutable: a `409 DENIED` surfaces and the job retries; relax immutability or pick a different tag.
 
 **Reconciliation reports nothing to do but instances differ:**
 - Confirm the downstream's `mode` includes reconciliation (`event+reconcile` or `reconcile-only`).

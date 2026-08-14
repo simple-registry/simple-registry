@@ -25,6 +25,7 @@ name = "angos"
 version = "1.5.0"
 dependencies = [
  "angos-backoff",
+ "angos-oci",
  "angos-s3-client",
  "angos-storage",
  "angos-tx-engine",
@@ -89,6 +90,22 @@ dependencies = [
 [[package]]
 name = "angos-backoff"
 version = "0.1.0"
+
+[[package]]
+name = "angos-oci"
+version = "0.1.0"
+dependencies = [
+ "angos-oci",
+ "chrono",
+ "hex",
+ "hyper",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "uuid",
+]
 
 [[package]]
 name = "angos-s3-client"

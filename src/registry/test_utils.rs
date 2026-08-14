@@ -2,22 +2,38 @@ use std::{collections::HashMap, io::Cursor, sync::Arc};
 
 use bytes::Bytes;
 use bytesize::ByteSize;
+use http_body_util::BodyExt;
+use hyper::{
+    Response,
+    header::{HeaderName, HeaderValue},
+};
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+use angos_oci::header::{DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID};
+use angos_oci::http_range::RequestRange;
+use angos_oci::request::{CompleteUploadRequest, GetReferrersRequest};
+use angos_oci::{Digest, MediaRange, MediaType, Namespace, Tag, UploadSessionId};
+use angos_s3_client::Backend as S3HttpBackend;
+use angos_s3_client::test_util::{
+    TEST_ACCESS_KEY, TEST_BUCKET, TEST_REGION, TEST_SECRET_KEY, test_endpoint,
+};
+use angos_storage::{
+    ObjectStore, fs::Backend as StorageFsBackend, s3::Backend as StorageS3Backend,
+};
+use angos_tx_engine::{lock::LockStrategy, store::Store};
+
+use crate::http_response::ResponseBody;
 use crate::{
     cache,
     configuration::{GlobalConfig, RegexPattern},
     jobs::Queue,
     jobs::store::JobStore,
     metrics_provider,
-    oci::{Digest, MediaRange, MediaType, Namespace, Tag, UploadSessionId},
     policy::{RetentionPolicy, RetentionPolicyConfig, SystemClock},
     registry::{
-        CompleteUploadRequest, Error, Registry, RegistryConfig, Repository,
-        blob::BlobRange,
-        blob_store,
+        Error, Registry, RegistryConfig, Repository, blob_store,
         blob_store::{BlobStore, BlobStoreConfig},
         manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
         metadata_store::{LinkKind, LinkOperation, MetadataStore},
@@ -28,24 +44,6 @@ use crate::{
     registry_client::RegistryClient,
     replication::{ReplicationDownstream, ReplicationJob, ReplicationMode},
     secret::Secret,
-};
-use angos_s3_client::Backend as S3HttpBackend;
-use angos_s3_client::test_util::{
-    TEST_ACCESS_KEY, TEST_BUCKET, TEST_REGION, TEST_SECRET_KEY, test_endpoint,
-};
-use angos_storage::{
-    ObjectStore, fs::Backend as StorageFsBackend, s3::Backend as StorageS3Backend,
-};
-use angos_tx_engine::{lock::LockStrategy, store::Store};
-use http_body_util::BodyExt;
-use hyper::{
-    Response,
-    header::{HeaderName, HeaderValue},
-};
-
-use crate::{
-    http_response::ResponseBody,
-    registry::{DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID},
 };
 
 /// Canonical connection to the live S3 test backend (rustfs, in CI and
@@ -210,13 +208,24 @@ pub fn media_type(value: &str) -> MediaType {
     MediaType::new(value).unwrap()
 }
 
+/// An unfiltered referrers listing of `subject`, at the default page size.
+/// Tests needing a filter or a cursor spread their own fields over it.
+pub fn referrers_request(namespace: &Namespace, subject: &Digest) -> GetReferrersRequest {
+    GetReferrersRequest {
+        namespace: namespace.clone(),
+        digest: subject.clone(),
+        artifact_type: None,
+        last: None,
+    }
+}
+
 /// Upload `content` through the full registry upload state machine (session
 /// create plus monolithic complete), returning its SHA-256 digest.
 pub async fn upload_blob(registry: &Registry, namespace: &Namespace, content: &[u8]) -> Digest {
     let session_id = UploadSessionId::generate();
     registry
         .blob_store
-        .create_upload(namespace, &session_id)
+        .create_upload(namespace, &session_id, None)
         .await
         .unwrap();
 
@@ -226,10 +235,10 @@ pub async fn upload_blob(registry: &Registry, namespace: &Namespace, content: &[
         .complete_upload(
             None,
             CompleteUploadRequest {
-                namespace,
-                session_id: &session_id,
-                digest: &digest,
-                start_offset: None,
+                namespace: namespace.clone(),
+                session_id: session_id.clone(),
+                digest: digest.clone(),
+                content_range: None,
                 content_length: Some(body.len() as u64),
             },
             Cursor::new(body),
@@ -277,7 +286,7 @@ pub async fn get_blob(
     accepted_types: &[MediaRange],
     namespace: &Namespace,
     digest: &Digest,
-    range: Option<BlobRange>,
+    range: Option<RequestRange>,
 ) -> Result<Response<ResponseBody>, Error> {
     let has_access = registry
         .blob_ownership()
@@ -560,6 +569,7 @@ pub fn repository_with_replication(
 ) -> Repository {
     Repository {
         name: Namespace::new(name).unwrap(),
+        namespace: None,
         upstreams: Vec::new(),
         replication,
         retention_policy: RetentionPolicy::new(

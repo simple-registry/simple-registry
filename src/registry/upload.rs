@@ -1,16 +1,19 @@
-use hyper::{
-    HeaderMap, Response, StatusCode,
-    header::{CONTENT_LENGTH, HeaderValue, LOCATION, RANGE},
-};
+use hyper::{HeaderMap, Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt, copy, sink};
 use tracing::{instrument, warn};
+
+use angos_oci::request::{
+    BlobMount, CompleteUploadRequest, DeleteUploadRequest, GetUploadRequest, MountBlobRequest,
+    PatchUploadRequest, StartUploadRequest,
+};
+use angos_oci::server;
+use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
 
 use crate::{
     event_webhook::event::{Event, EventActor},
     http_response::{ResponseBody, build_response},
-    oci::{Digest, Namespace, UploadSessionId},
     registry::{
-        DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID, Error, Registry,
+        Error, Registry,
         blob_ownership::promote_and_grant,
         blob_store::{hashing_reader::HashingReader, resumable_hasher::Hasher},
     },
@@ -24,126 +27,6 @@ const MAX_FROM_LESS_MOUNT_CANDIDATES: usize = 32;
 /// Default cap on a blob's cumulative uploaded size, mirroring
 /// [`manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES`](crate::registry::manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES).
 pub const DEFAULT_MAX_BLOB_SIZE_BYTES: u64 = 100 * 1024 * 1024 * 1024;
-
-/// Headers for a completed blob: `StartUpload` when the digest already exists,
-/// and `CompleteUpload` when the upload finishes.
-fn blob_location_headers(namespace: &Namespace, digest: &Digest) -> Result<HeaderMap, Error> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        LOCATION,
-        HeaderValue::try_from(format!("/v2/{namespace}/blobs/{digest}"))?,
-    );
-    headers.insert(DOCKER_CONTENT_DIGEST, HeaderValue::try_from(digest)?);
-
-    Ok(headers)
-}
-
-fn upload_session_headers(
-    namespace: &Namespace,
-    session_id: &UploadSessionId,
-) -> Result<HeaderMap, Error> {
-    let mut headers = session_location_headers(namespace, session_id)?;
-    headers.insert(RANGE, HeaderValue::from_static("0-0"));
-
-    Ok(headers)
-}
-
-fn session_location_headers(
-    namespace: &Namespace,
-    session_id: &UploadSessionId,
-) -> Result<HeaderMap, Error> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        LOCATION,
-        HeaderValue::try_from(format!("/v2/{namespace}/blobs/uploads/{session_id}"))?,
-    );
-    headers.insert(
-        DOCKER_UPLOAD_UUID,
-        HeaderValue::try_from(session_id.to_string())?,
-    );
-
-    Ok(headers)
-}
-
-/// `Range` reports the bytes committed so far, so a resuming client knows where
-/// to continue. A `PATCH` also sends `Content-Length: 0`, a `GET` sends none.
-fn upload_progress_headers(
-    namespace: &Namespace,
-    session_id: &UploadSessionId,
-    size: u64,
-    content_length: Option<u64>,
-) -> Result<HeaderMap, Error> {
-    let mut headers = session_location_headers(namespace, session_id)?;
-    headers.insert(
-        RANGE,
-        HeaderValue::try_from(format!("0-{}", size.saturating_sub(1)))?,
-    );
-    if let Some(length) = content_length {
-        headers.insert(CONTENT_LENGTH, length.into());
-    }
-
-    Ok(headers)
-}
-
-/// An OCI cross-repository blob mount request
-/// (`POST /v2/<ns>/blobs/uploads/?mount=<digest>[&from=<repo>]`).
-/// An unsatisfiable mount falls back to a normal upload session rather than
-/// failing, per the distribution spec.
-#[derive(Debug)]
-pub struct BlobMount {
-    pub digest: Digest,
-    pub from: Option<Namespace>,
-}
-
-#[derive(Debug)]
-pub struct StartUploadRequest {
-    pub namespace: Namespace,
-    pub digest: Option<Digest>,
-}
-
-#[derive(Debug)]
-pub struct DeleteUploadRequest {
-    pub namespace: Namespace,
-    pub session_id: UploadSessionId,
-}
-
-/// A cross-repository mount, with the source namespace the caller is allowed
-/// to read the blob from. `None` means the mount is unsatisfiable and degrades
-/// to an ordinary upload session.
-pub struct MountBlobRequest {
-    pub namespace: Namespace,
-    pub mount: BlobMount,
-    pub source: Option<Namespace>,
-}
-
-#[derive(Debug)]
-pub struct GetUploadRequest {
-    pub namespace: Namespace,
-    pub session_id: UploadSessionId,
-}
-
-/// The non-body inputs to [`Registry::patch_upload`]; the chunk is passed
-/// separately as the stream. A missing `content_length` is a chunked
-/// (`Transfer-Encoding: chunked`) upload, which docker push sends; the body is
-/// then streamed to EOF.
-#[derive(Debug)]
-pub struct PatchUploadRequest {
-    pub namespace: Namespace,
-    pub session_id: UploadSessionId,
-    pub start_offset: Option<u64>,
-    pub content_length: Option<u64>,
-}
-
-/// The non-body inputs to [`Registry::complete_upload`]: the target session and
-/// digest, plus the optional resume offset and declared length. The blob body
-/// is passed separately as the stream.
-pub struct CompleteUploadRequest<'a> {
-    pub namespace: &'a Namespace,
-    pub session_id: &'a UploadSessionId,
-    pub digest: &'a Digest,
-    pub start_offset: Option<u64>,
-    pub content_length: Option<u64>,
-}
 
 impl Registry {
     async fn complete_existing_upload<S>(
@@ -213,7 +96,7 @@ impl Registry {
 
         Ok(build_response(
             StatusCode::CREATED,
-            blob_location_headers(namespace, digest)?,
+            server::blob_location_headers(namespace, digest)?,
             ResponseBody::empty(),
         )?)
     }
@@ -279,31 +162,46 @@ impl Registry {
     }
 
     /// Opens a fresh resumable upload session and returns its `202` headers.
+    /// `digest_algorithm` is the client's `?digest-algorithm=` hint, which fixes
+    /// what each chunk is hashed under.
     async fn open_upload_session(
         &self,
         namespace: &Namespace,
+        digest_algorithm: Option<Algorithm>,
     ) -> Result<Response<ResponseBody>, Error> {
         let session_id = UploadSessionId::generate();
         self.blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, digest_algorithm)
             .await?;
 
         Ok(build_response(
             StatusCode::ACCEPTED,
-            upload_session_headers(namespace, &session_id)?,
+            server::upload_session_headers(namespace, &session_id)?,
             ResponseBody::empty(),
         )?)
     }
 
-    /// Starts a blob upload: `ExistingBlob` (201) when the namespace already
-    /// owns `digest`, otherwise a new session (202).
-    #[instrument]
-    pub async fn start_upload(
+    /// Starts a blob upload: `201` when the namespace already owns `digest` or
+    /// when a `?digest=` POST carries the whole blob, otherwise a new session
+    /// (`202`).
+    #[instrument(skip(request, stream), fields(namespace = %request.namespace))]
+    pub async fn start_upload<S>(
         &self,
+        actor: Option<EventActor>,
         request: StartUploadRequest,
-    ) -> Result<Response<ResponseBody>, Error> {
-        if let Some(digest) = request.digest
-            && self.blob_store.size(&digest).await.is_ok()
+        stream: S,
+    ) -> Result<Response<ResponseBody>, Error>
+    where
+        S: AsyncRead + Unpin + Send + Sync + 'static,
+    {
+        let Some(target) = request.target else {
+            return self
+                .open_upload_session(&request.namespace, request.digest_algorithm)
+                .await;
+        };
+        let digest = target.digest;
+
+        if self.blob_store.size(&digest).await.is_ok()
             && self
                 .blob_ownership()
                 .can_read(&request.namespace, &digest)
@@ -311,25 +209,54 @@ impl Registry {
         {
             return Ok(build_response(
                 StatusCode::CREATED,
-                blob_location_headers(&request.namespace, &digest)?,
+                server::blob_location_headers(&request.namespace, &digest)?,
                 ResponseBody::empty(),
             )?);
         }
 
-        self.open_upload_session(&request.namespace).await
+        // A `?digest=` POST carrying the blob is the single-request upload, a
+        // declared zero being the empty blob. Only an undeclared length falls
+        // back to a session, which hashes the target's algorithm alone.
+        let Some(content_length) = target.content_length else {
+            return self
+                .open_upload_session(&request.namespace, Some(digest.algorithm()))
+                .await;
+        };
+
+        let session_id = UploadSessionId::generate();
+        self.blob_store
+            .create_upload(&request.namespace, &session_id, Some(digest.algorithm()))
+            .await?;
+
+        self.complete_upload(
+            actor,
+            CompleteUploadRequest {
+                namespace: request.namespace.clone(),
+                session_id: session_id.clone(),
+                digest: digest.clone(),
+                content_range: None,
+                content_length: Some(content_length),
+            },
+            stream,
+        )
+        .await
     }
 
-    /// Starts a cross-repository blob mount from the authorized `source`,
-    /// falling back to an ordinary upload session when the mount cannot be
-    /// satisfied. The `blob.push` intent event fires before the mount attempt,
-    /// so a mounted blob is as visible to webhook consumers as an uploaded
-    /// one; the session fallback leaves a false-positive event behind and its
-    /// eventual upload completion emits one of its own.
+    /// Starts a cross-repository blob mount from `source`, the namespace the
+    /// caller was authorized to read the blob from, which is resolved by the
+    /// serving side rather than named on the wire. A mount that cannot be
+    /// satisfied falls back to an ordinary upload session.
+    ///
+    /// The `blob.push` intent event fires before the mount attempt, so a mounted
+    /// blob is as visible to webhook consumers as an uploaded one; the session
+    /// fallback leaves a false-positive event behind and its eventual upload
+    /// completion emits one of its own.
     #[instrument(skip(request))]
     pub async fn mount_blob(
         &self,
         actor: Option<EventActor>,
         request: MountBlobRequest,
+        source: Option<Namespace>,
     ) -> Result<Response<ResponseBody>, Error> {
         let repository = self.repository_name_for(&request.namespace);
         let event = Event::push_blob(
@@ -342,8 +269,8 @@ impl Registry {
 
         // An unsatisfiable mount degrades to an ordinary upload session, so the
         // caller is never told whether the blob exists.
-        let Some(source) = &request.source else {
-            return self.open_upload_session(&request.namespace).await;
+        let Some(source) = &source else {
+            return self.open_upload_session(&request.namespace, None).await;
         };
 
         if let Some(digest) = self
@@ -352,12 +279,12 @@ impl Registry {
         {
             return Ok(build_response(
                 StatusCode::CREATED,
-                blob_location_headers(&request.namespace, &digest)?,
+                server::blob_location_headers(&request.namespace, &digest)?,
                 ResponseBody::empty(),
             )?);
         }
 
-        self.open_upload_session(&request.namespace).await
+        self.open_upload_session(&request.namespace, None).await
     }
 
     /// Early-reject a known-length body whose declared length would push the
@@ -448,8 +375,14 @@ impl Registry {
             .upload_summary(&request.namespace, &request.session_id)
             .await?;
 
-        if let Some(offset) = request.start_offset
-            && offset != summary.size
+        // Refused before a byte is committed: a chunk must resume where the
+        // session stands, and a declared length must match the window it
+        // announced.
+        if let Some(range) = request.content_range
+            && (!range.starts_at(summary.size)
+                || request
+                    .content_length
+                    .is_some_and(|length| !range.covers(length)))
         {
             return Err(Error::RangeNotSatisfiable);
         }
@@ -479,9 +412,26 @@ impl Registry {
         self.reject_if_oversized(&request.namespace, &request.session_id, size)
             .await?;
 
+        // A chunked body's length is only known once read, so its window can
+        // only be checked here. The session now holds bytes the client will
+        // never account for and the 416 cannot say so, hence the abort.
+        if request.content_length.is_none()
+            && let Some(range) = request.content_range
+            && !range.covers(size.saturating_sub(summary.size))
+        {
+            self.abort_upload_quietly(&request.namespace, &request.session_id)
+                .await;
+            return Err(Error::RangeNotSatisfiable);
+        }
+
         Ok(build_response(
             StatusCode::ACCEPTED,
-            upload_progress_headers(&request.namespace, &request.session_id, size, Some(0))?,
+            server::upload_progress_headers(
+                &request.namespace,
+                &request.session_id,
+                size,
+                Some(0),
+            )?,
             ResponseBody::empty(),
         )?)
     }
@@ -497,7 +447,7 @@ impl Registry {
     pub async fn complete_upload<S>(
         &self,
         actor: Option<EventActor>,
-        request: CompleteUploadRequest<'_>,
+        request: CompleteUploadRequest,
         stream: S,
     ) -> Result<Response<ResponseBody>, Error>
     where
@@ -507,9 +457,10 @@ impl Registry {
             namespace,
             session_id,
             digest,
-            start_offset,
+            content_range,
             content_length,
         } = request;
+        let (namespace, session_id, digest) = (&namespace, &session_id, &digest);
 
         // Intent-first emission: the event fires before the finalize, so a
         // completed blob can never go unnotified; a completion that fails
@@ -529,10 +480,12 @@ impl Registry {
         let has_prior_writes = committed > 0;
 
         // A final-chunk PUT carrying a Content-Range must resume from the
-        // committed offset; a gap or rewind is an out-of-order chunk (416), not
-        // a digest mismatch.
-        if let Some(offset) = start_offset
-            && offset != committed
+        // committed offset and, when it declares a length, carry the window it
+        // announced: both are out-of-order chunks (416), not digest mismatches,
+        // and both are refused before a byte is committed.
+        if let Some(range) = content_range
+            && (!range.starts_at(committed)
+                || content_length.is_some_and(|length| !range.covers(length)))
         {
             return Err(Error::RangeNotSatisfiable);
         }
@@ -585,6 +538,17 @@ impl Registry {
         self.reject_if_oversized(namespace, session_id, new_total)
             .await?;
 
+        // A chunked body's length is only known once read, so its window can
+        // only be checked here. The session now holds bytes the client will
+        // never account for and the 416 cannot say so, hence the abort.
+        if content_length.is_none()
+            && let Some(range) = content_range
+            && !range.covers(new_total.saturating_sub(committed))
+        {
+            self.abort_upload_quietly(namespace, session_id).await;
+            return Err(Error::RangeNotSatisfiable);
+        }
+
         if &upload_digest != digest {
             warn!("Expected digest '{digest}', got '{upload_digest}'");
             // The session can never complete now: its bytes hash to something
@@ -636,7 +600,12 @@ impl Registry {
 
         Ok(build_response(
             StatusCode::NO_CONTENT,
-            upload_progress_headers(&request.namespace, &request.session_id, summary.size, None)?,
+            server::upload_progress_headers(
+                &request.namespace,
+                &request.session_id,
+                summary.size,
+                None,
+            )?,
             ResponseBody::empty(),
         )?)
     }
@@ -646,32 +615,34 @@ impl Registry {
 mod tests {
     use std::{io::Cursor, str::FromStr, sync::Arc};
 
+    use async_trait::async_trait;
     use hyper::{
         StatusCode,
         header::{LOCATION, RANGE},
     };
 
-    use async_trait::async_trait;
-
-    use crate::{
-        oci::{Algorithm, Digest, Namespace, UploadSessionId},
-        registry::{
-            BlobMount, CompleteUploadRequest, Error, GetUploadRequest, MountBlobRequest,
-            PatchUploadRequest, Registry, RegistryConfig, StartUploadRequest,
-            blob_store::BlobStore,
-            metadata_store::LinkKind,
-            path_builder,
-            repository_resolver::RepositoryResolver,
-            test_utils::{
-                FSRegistryTestCase, RegistryTestCase, create_test_registry,
-                create_test_repositories, for_each_backend, put_blob_direct, response_digest,
-                response_header, response_session_id,
-            },
-        },
+    use angos_oci::http_range::ByteWindow;
+    use angos_oci::request::{
+        BlobMount, CompleteUploadRequest, DeleteUploadRequest, GetUploadRequest, MountBlobRequest,
+        PatchUploadRequest, StartUploadRequest, StartUploadTarget,
     };
+    use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
     use angos_storage::{
         Error as StorageError,
         test_util::{HookedStore, StoreHook, StoreOp},
+    };
+
+    use crate::registry::{
+        Error, Registry, RegistryConfig,
+        blob_store::BlobStore,
+        metadata_store::LinkKind,
+        path_builder,
+        repository_resolver::RepositoryResolver,
+        test_utils::{
+            FSRegistryTestCase, RegistryTestCase, create_test_registry, create_test_repositories,
+            for_each_backend, put_blob_direct, response_digest, response_header,
+            response_session_id,
+        },
     };
 
     /// Which storage operation the failing hook turns into a hard error.
@@ -719,10 +690,15 @@ mod tests {
             let content = b"test upload content";
 
             let response = registry
-                .start_upload(StartUploadRequest {
-                    namespace: namespace.clone(),
-                    digest: None,
-                })
+                .start_upload(
+                    None,
+                    StartUploadRequest {
+                        namespace: namespace.clone(),
+                        digest_algorithm: None,
+                        target: None,
+                    },
+                    Cursor::new(Vec::new()),
+                )
                 .await
                 .unwrap();
             // A fresh session answers `202` with its location.
@@ -737,10 +713,18 @@ mod tests {
 
             let digest = put_blob_direct(registry.metadata_store.store(), content).await;
             let response = registry
-                .start_upload(StartUploadRequest {
-                    namespace: namespace.clone(),
-                    digest: Some(digest.clone()),
-                })
+                .start_upload(
+                    None,
+                    StartUploadRequest {
+                        namespace: namespace.clone(),
+                        digest_algorithm: None,
+                        target: Some(StartUploadTarget {
+                            digest: digest.clone(),
+                            content_length: None,
+                        }),
+                    },
+                    Cursor::new(Vec::new()),
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -756,10 +740,18 @@ mod tests {
                 .unwrap();
 
             let response = registry
-                .start_upload(StartUploadRequest {
-                    namespace: namespace.clone(),
-                    digest: Some(digest.clone()),
-                })
+                .start_upload(
+                    None,
+                    StartUploadRequest {
+                        namespace: namespace.clone(),
+                        digest_algorithm: None,
+                        target: Some(StartUploadTarget {
+                            digest: digest.clone(),
+                            content_length: None,
+                        }),
+                    },
+                    Cursor::new(Vec::new()),
+                )
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::CREATED);
@@ -797,8 +789,8 @@ mod tests {
                     MountBlobRequest {
                         namespace: target.clone(),
                         mount,
-                        source: Some(source.clone()),
                     },
+                    Some(source.clone()),
                 )
                 .await
                 .unwrap();
@@ -847,8 +839,8 @@ mod tests {
                     MountBlobRequest {
                         namespace: target.clone(),
                         mount,
-                        source: Some(source.clone()),
                     },
+                    Some(source.clone()),
                 )
                 .await
                 .unwrap();
@@ -900,8 +892,8 @@ mod tests {
                     MountBlobRequest {
                         namespace: target.clone(),
                         mount,
-                        source: Some(source.clone()),
                     },
+                    Some(source.clone()),
                 )
                 .await
                 .unwrap();
@@ -940,8 +932,8 @@ mod tests {
                     MountBlobRequest {
                         namespace: target.clone(),
                         mount,
-                        source: Some(owner.clone()),
                     },
+                    Some(owner.clone()),
                 )
                 .await
                 .unwrap();
@@ -984,8 +976,8 @@ mod tests {
                     MountBlobRequest {
                         namespace: target.clone(),
                         mount,
-                        source: Some(source.clone()),
                     },
+                    Some(source.clone()),
                 )
                 .await
                 .unwrap();
@@ -1027,8 +1019,8 @@ mod tests {
                     MountBlobRequest {
                         namespace: target.clone(),
                         mount,
-                        source: Some(authorized.clone()),
                     },
+                    Some(authorized.clone()),
                 )
                 .await
                 .unwrap();
@@ -1118,7 +1110,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1128,7 +1120,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(content.len() as u64),
                     },
                     stream,
@@ -1147,7 +1139,10 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: Some(content.len() as u64),
+                        content_range: Some(ByteWindow {
+                            start: content.len() as u64,
+                            end: None,
+                        }),
                         content_length: Some(additional_content.len() as u64),
                     },
                     stream,
@@ -1186,7 +1181,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1195,7 +1190,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: None,
                     },
                     Cursor::new(content),
@@ -1208,10 +1203,10 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &expected_digest,
-                        start_offset: None,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: expected_digest.clone(),
+                        content_range: None,
                         content_length: None,
                     },
                     Cursor::new(Vec::new()),
@@ -1237,7 +1232,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1247,7 +1242,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(content.len() as u64),
                     },
                     stream,
@@ -1262,10 +1257,10 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &expected_digest,
-                        start_offset: None,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: expected_digest.clone(),
+                        content_range: None,
                         content_length: Some(0),
                     },
                     empty_stream,
@@ -1303,7 +1298,7 @@ mod tests {
 
                 registry
                     .blob_store
-                    .create_upload(namespace, &session_id)
+                    .create_upload(namespace, &session_id, None)
                     .await
                     .unwrap();
 
@@ -1312,10 +1307,10 @@ mod tests {
                     .complete_upload(
                         None,
                         CompleteUploadRequest {
-                            namespace,
-                            session_id: &session_id,
-                            digest: &expected_digest,
-                            start_offset: None,
+                            namespace: namespace.clone(),
+                            session_id: session_id.clone(),
+                            digest: expected_digest.clone(),
+                            content_range: None,
                             content_length: Some(content.len() as u64),
                         },
                         Cursor::new(content.to_vec()),
@@ -1347,10 +1342,10 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace,
-                    session_id: &UploadSessionId::generate(),
-                    digest: &digest,
-                    start_offset: None,
+                    namespace: namespace.clone(),
+                    session_id: UploadSessionId::generate(),
+                    digest: digest.clone(),
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 Cursor::new(content.to_vec()),
@@ -1378,10 +1373,10 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace,
-                    session_id: &UploadSessionId::generate(),
-                    digest: &digest,
-                    start_offset: None,
+                    namespace: namespace.clone(),
+                    session_id: UploadSessionId::generate(),
+                    digest: digest.clone(),
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 Cursor::new(content.to_vec()),
@@ -1403,7 +1398,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1412,7 +1407,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(first_chunk.len() as u64),
                     },
                     Cursor::new(first_chunk.to_vec()),
@@ -1424,7 +1419,10 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: Some(first_chunk.len() as u64),
+                        content_range: Some(ByteWindow {
+                            start: first_chunk.len() as u64,
+                            end: None,
+                        }),
                         content_length: Some(second_chunk.len() as u64),
                     },
                     Cursor::new(second_chunk.to_vec()),
@@ -1437,10 +1435,10 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &expected_digest,
-                        start_offset: None,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: expected_digest.clone(),
+                        content_range: None,
                         content_length: Some(0),
                     },
                     Cursor::new(Vec::new()),
@@ -1458,6 +1456,354 @@ mod tests {
         .await;
     }
 
+    /// A chunk declaring its last byte must carry exactly that many: a body
+    /// shorter or longer than the window it announced is refused rather than
+    /// committed as whatever arrived.
+    #[tokio::test]
+    async fn a_chunk_shorter_than_its_content_range_is_refused() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"ten bytes!";
+            let session_id = UploadSessionId::generate();
+
+            registry
+                .blob_store
+                .create_upload(namespace, &session_id, None)
+                .await
+                .unwrap();
+
+            let result = registry
+                .patch_upload(
+                    PatchUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        // Declares 0-99 while carrying ten bytes.
+                        content_range: Some(ByteWindow {
+                            start: 0,
+                            end: Some(99),
+                        }),
+                        content_length: None,
+                    },
+                    Cursor::new(content.to_vec()),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(Error::RangeNotSatisfiable)),
+                "a chunk that undershoots its window must be refused, got {result:?}"
+            );
+            assert!(
+                registry
+                    .blob_store
+                    .upload_summary(namespace, &session_id)
+                    .await
+                    .is_err(),
+                "a chunked chunk refused after its write must reclaim the session"
+            );
+        })
+        .await;
+    }
+
+    /// A declared length disagreeing with the window is refused before anything
+    /// is written, so the session keeps standing where it stood.
+    #[tokio::test]
+    async fn a_known_length_contradicting_its_content_range_keeps_the_session() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let committed = b"first chunk";
+            let session_id = UploadSessionId::generate();
+
+            registry
+                .blob_store
+                .create_upload(namespace, &session_id, None)
+                .await
+                .unwrap();
+            registry
+                .patch_upload(
+                    PatchUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        content_range: None,
+                        content_length: Some(committed.len() as u64),
+                    },
+                    Cursor::new(committed.to_vec()),
+                )
+                .await
+                .unwrap();
+
+            let offset = committed.len() as u64;
+            let result = registry
+                .patch_upload(
+                    PatchUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        // Declares a hundred bytes while announcing ten.
+                        content_range: Some(ByteWindow {
+                            start: offset,
+                            end: Some(offset + 99),
+                        }),
+                        content_length: Some(10),
+                    },
+                    Cursor::new(b"ten bytes!".to_vec()),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(Error::RangeNotSatisfiable)),
+                "a declared length outside its window must be refused, got {result:?}"
+            );
+            let summary = registry
+                .blob_store
+                .upload_summary(namespace, &session_id)
+                .await
+                .expect("a chunk refused before its write must leave the session open");
+            assert_eq!(
+                summary.size, offset,
+                "the refused chunk must not have been committed"
+            );
+        })
+        .await;
+    }
+
+    /// The declared window and the bytes agreeing is the ordinary case, and
+    /// still commits.
+    #[tokio::test]
+    async fn a_chunk_matching_its_content_range_is_committed() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"ten bytes!";
+            let session_id = UploadSessionId::generate();
+
+            registry
+                .blob_store
+                .create_upload(namespace, &session_id, None)
+                .await
+                .unwrap();
+
+            let response = registry
+                .patch_upload(
+                    PatchUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        content_range: Some(ByteWindow {
+                            start: 0,
+                            end: Some(content.len() as u64 - 1),
+                        }),
+                        content_length: Some(content.len() as u64),
+                    },
+                    Cursor::new(content.to_vec()),
+                )
+                .await
+                .expect("a chunk matching its window must commit");
+
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+        })
+        .await;
+    }
+
+    /// The empty blob is pushed in one request like any other: a declared zero
+    /// is the whole body, not an absent one.
+    #[tokio::test]
+    async fn single_post_upload_stores_the_empty_blob() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let digest = Digest::sha256_of_bytes(b"");
+
+            let response = registry
+                .start_upload(
+                    None,
+                    StartUploadRequest {
+                        namespace: namespace.clone(),
+                        digest_algorithm: None,
+                        target: Some(StartUploadTarget {
+                            digest: digest.clone(),
+                            content_length: Some(0),
+                        }),
+                    },
+                    Cursor::new(Vec::new()),
+                )
+                .await
+                .expect("an empty single-POST body must close the upload");
+
+            assert_eq!(response.status(), StatusCode::CREATED);
+            assert!(registry.blob_store.read(&digest).await.unwrap().is_empty());
+        })
+        .await;
+    }
+
+    /// A `?digest=` POST carrying the blob completes in that one request, so the
+    /// client never sends the bytes twice.
+    #[tokio::test]
+    async fn single_post_upload_completes_in_one_request() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"blob pushed in a single POST";
+            let digest = Digest::sha256_of_bytes(content);
+
+            let response = registry
+                .start_upload(
+                    None,
+                    StartUploadRequest {
+                        namespace: namespace.clone(),
+                        digest_algorithm: None,
+                        target: Some(StartUploadTarget {
+                            digest: digest.clone(),
+                            content_length: Some(content.len() as u64),
+                        }),
+                    },
+                    Cursor::new(content.to_vec()),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::CREATED);
+            assert_eq!(
+                *response_header(&response, &LOCATION),
+                format!("/v2/{namespace}/blobs/{digest}")
+            );
+            assert_eq!(registry.blob_store.read(&digest).await.unwrap(), content);
+        })
+        .await;
+    }
+
+    /// A single-POST body that does not hash to the digest it claims is refused,
+    /// like the same body closing a session.
+    #[tokio::test]
+    async fn single_post_upload_rejects_a_mismatched_digest() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"body that will not match";
+            let claimed = Digest::sha256_of_bytes(b"something else entirely");
+
+            let result = registry
+                .start_upload(
+                    None,
+                    StartUploadRequest {
+                        namespace: namespace.clone(),
+                        digest_algorithm: None,
+                        target: Some(StartUploadTarget {
+                            digest: claimed.clone(),
+                            content_length: Some(content.len() as u64),
+                        }),
+                    },
+                    Cursor::new(content.to_vec()),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(Error::DigestInvalid)),
+                "a body that hashes to something else must be refused, got {result:?}"
+            );
+            assert!(registry.blob_store.read(&claimed).await.is_err());
+        })
+        .await;
+    }
+
+    /// The `?digest-algorithm=` hint makes a chunked session hash under that one
+    /// algorithm alone, which the closing PUT must still be able to finalize.
+    #[tokio::test]
+    async fn hinted_algorithm_completes_a_chunked_upload() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"chunked upload hinted as sha512";
+            let session_id = UploadSessionId::generate();
+
+            registry
+                .blob_store
+                .create_upload(namespace, &session_id, Some(Algorithm::Sha512))
+                .await
+                .unwrap();
+            registry
+                .patch_upload(
+                    PatchUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        content_range: None,
+                        content_length: Some(content.len() as u64),
+                    },
+                    Cursor::new(content.to_vec()),
+                )
+                .await
+                .unwrap();
+
+            let expected_digest = Digest::from_bytes(Algorithm::Sha512, content);
+            let response = registry
+                .complete_upload(
+                    None,
+                    CompleteUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: expected_digest.clone(),
+                        content_range: None,
+                        content_length: Some(0),
+                    },
+                    Cursor::new(Vec::new()),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response_digest(&response), expected_digest);
+        })
+        .await;
+    }
+
+    /// Closing a hinted session under a different algorithm is refused: the
+    /// session never hashed the one the client finally asked for.
+    #[tokio::test]
+    async fn a_digest_outside_the_hinted_algorithm_is_refused() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"chunked upload hinted as sha512";
+            let session_id = UploadSessionId::generate();
+
+            registry
+                .blob_store
+                .create_upload(namespace, &session_id, Some(Algorithm::Sha512))
+                .await
+                .unwrap();
+            registry
+                .patch_upload(
+                    PatchUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        content_range: None,
+                        content_length: Some(content.len() as u64),
+                    },
+                    Cursor::new(content.to_vec()),
+                )
+                .await
+                .unwrap();
+
+            let result = registry
+                .complete_upload(
+                    None,
+                    CompleteUploadRequest {
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: Digest::sha256_of_bytes(content),
+                        content_range: None,
+                        content_length: Some(0),
+                    },
+                    Cursor::new(Vec::new()),
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(Error::DigestInvalid)),
+                "a digest the session never hashed must be refused, got {result:?}"
+            );
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn test_sha512_complete_upload_wrong_digest_rejected() {
         for_each_backend(async |test_case| {
@@ -1468,7 +1814,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1477,7 +1823,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(full_content.len() as u64),
                     },
                     Cursor::new(full_content.to_vec()),
@@ -1490,10 +1836,10 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &wrong_digest,
-                        start_offset: None,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: wrong_digest.clone(),
+                        content_range: None,
                         content_length: Some(0),
                     },
                     Cursor::new(Vec::new()),
@@ -1521,7 +1867,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -1530,7 +1876,7 @@ mod tests {
                 PatchUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 Cursor::new(content),
@@ -1543,10 +1889,10 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace,
-                    session_id: &session_id,
-                    digest: &expected_digest,
-                    start_offset: None,
+                    namespace: namespace.clone(),
+                    session_id: session_id.clone(),
+                    digest: expected_digest.clone(),
+                    content_range: None,
                     content_length: Some(0),
                 },
                 Cursor::new(Vec::new()),
@@ -1585,7 +1931,7 @@ mod tests {
         let session_id = UploadSessionId::generate();
         registry
             .blob_store
-            .create_upload(second_namespace, &session_id)
+            .create_upload(second_namespace, &session_id, None)
             .await
             .unwrap();
         registry
@@ -1593,7 +1939,7 @@ mod tests {
                 PatchUploadRequest {
                     namespace: second_namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 Cursor::new(content),
@@ -1605,10 +1951,10 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace: second_namespace,
-                    session_id: &session_id,
-                    digest: &digest,
-                    start_offset: None,
+                    namespace: second_namespace.clone(),
+                    session_id: session_id.clone(),
+                    digest: digest.clone(),
+                    content_range: None,
                     content_length: Some(0),
                 },
                 Cursor::new(Vec::new()),
@@ -1659,7 +2005,7 @@ mod tests {
         let session_id = UploadSessionId::generate();
         registry
             .blob_store
-            .create_upload(second_namespace, &session_id)
+            .create_upload(second_namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -1667,10 +2013,10 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace: second_namespace,
-                    session_id: &session_id,
-                    digest: &digest,
-                    start_offset: None,
+                    namespace: second_namespace.clone(),
+                    session_id: session_id.clone(),
+                    digest: digest.clone(),
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 Cursor::new(content),
@@ -1705,7 +2051,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1718,7 +2064,7 @@ mod tests {
             );
 
             registry
-                .delete_upload(super::DeleteUploadRequest {
+                .delete_upload(DeleteUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
                 })
@@ -1746,7 +2092,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1765,7 +2111,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(content.len() as u64),
                     },
                     stream,
@@ -1797,7 +2143,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1807,7 +2153,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(9),
                     },
                     stream,
@@ -1821,7 +2167,10 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: Some(0),
+                        content_range: Some(ByteWindow {
+                            start: 0,
+                            end: None,
+                        }),
                         content_length: Some(9),
                     },
                     stream,
@@ -1842,7 +2191,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1852,7 +2201,7 @@ mod tests {
                     PatchUploadRequest {
                         namespace: namespace.clone(),
                         session_id: session_id.clone(),
-                        start_offset: None,
+                        content_range: None,
                         content_length: Some(12),
                     },
                     stream,
@@ -1870,10 +2219,10 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &wrong_digest,
-                        start_offset: None,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: wrong_digest.clone(),
+                        content_range: None,
                         content_length: Some(0),
                     },
                     empty_stream,
@@ -1906,7 +2255,7 @@ mod tests {
             let session_id = UploadSessionId::generate();
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1915,10 +2264,10 @@ mod tests {
                 .complete_upload(
                     None,
                     CompleteUploadRequest {
-                        namespace,
-                        session_id: &session_id,
-                        digest: &digest,
-                        start_offset: None,
+                        namespace: namespace.clone(),
+                        session_id: session_id.clone(),
+                        digest: digest.clone(),
+                        content_range: None,
                         content_length: Some(10),
                     },
                     Cursor::new(content),
@@ -1940,7 +2289,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -1982,7 +2331,7 @@ mod tests {
 
             registry
                 .blob_store
-                .create_upload(namespace, &session_id)
+                .create_upload(namespace, &session_id, None)
                 .await
                 .unwrap();
 
@@ -2027,7 +2376,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -2037,7 +2386,7 @@ mod tests {
                 PatchUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 stream,
@@ -2074,10 +2423,10 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace,
-                    session_id: &session_id,
-                    digest: &Digest::sha256_of_bytes(content),
-                    start_offset: None,
+                    namespace: namespace.clone(),
+                    session_id: session_id.clone(),
+                    digest: Digest::sha256_of_bytes(content),
+                    content_range: None,
                     content_length: Some(0),
                 },
                 empty_stream,
@@ -2134,7 +2483,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -2144,7 +2493,7 @@ mod tests {
                 PatchUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(content.len() as u64),
                 },
                 Cursor::new(content.to_vec()),
@@ -2174,7 +2523,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -2186,7 +2535,7 @@ mod tests {
                 PatchUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: None,
+                    content_range: None,
                     content_length: None,
                 },
                 Cursor::new(content.to_vec()),
@@ -2216,7 +2565,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -2227,10 +2576,10 @@ mod tests {
             .complete_upload(
                 None,
                 CompleteUploadRequest {
-                    namespace,
-                    session_id: &session_id,
-                    digest: &digest,
-                    start_offset: None,
+                    namespace: namespace.clone(),
+                    session_id: session_id.clone(),
+                    digest: digest.clone(),
+                    content_range: None,
                     content_length: None,
                 },
                 Cursor::new(content.to_vec()),
@@ -2260,7 +2609,7 @@ mod tests {
 
         registry
             .blob_store
-            .create_upload(namespace, &session_id)
+            .create_upload(namespace, &session_id, None)
             .await
             .unwrap();
 
@@ -2270,7 +2619,7 @@ mod tests {
                 PatchUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: None,
+                    content_range: None,
                     content_length: Some(4),
                 },
                 Cursor::new(b"abcd".to_vec()),
@@ -2282,7 +2631,10 @@ mod tests {
                 PatchUploadRequest {
                     namespace: namespace.clone(),
                     session_id: session_id.clone(),
-                    start_offset: Some(4),
+                    content_range: Some(ByteWindow {
+                        start: 4,
+                        end: None,
+                    }),
                     content_length: None,
                 },
                 Cursor::new(b"efgh".to_vec()),
@@ -2299,79 +2651,5 @@ mod tests {
             summary.size, 8,
             "cumulative size must reach the cap exactly"
         );
-    }
-}
-
-#[cfg(test)]
-mod header_tests {
-    use hyper::header::{CONTENT_LENGTH, LOCATION, RANGE};
-
-    use super::{
-        Digest, Namespace, UploadSessionId, blob_location_headers, upload_progress_headers,
-        upload_session_headers,
-    };
-    use crate::registry::{DOCKER_CONTENT_DIGEST, DOCKER_UPLOAD_UUID};
-
-    const SAMPLE_SESSION: &str = "067e6162-3b6f-4ae2-a171-2470b63dff00";
-
-    fn sample_namespace() -> Namespace {
-        Namespace::new("test-repo").unwrap()
-    }
-
-    fn sample_session_id() -> UploadSessionId {
-        UploadSessionId::new(SAMPLE_SESSION).unwrap()
-    }
-
-    fn sample_digest() -> Digest {
-        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-            .parse()
-            .unwrap()
-    }
-
-    #[test]
-    fn blob_location_headers_carry_location_and_digest() {
-        let namespace = sample_namespace();
-        let digest = sample_digest();
-        let headers = blob_location_headers(&namespace, &digest).unwrap();
-        assert_eq!(
-            headers[&LOCATION],
-            format!("/v2/{namespace}/blobs/{digest}")
-        );
-        assert_eq!(headers[&DOCKER_CONTENT_DIGEST], digest.to_string());
-    }
-
-    #[test]
-    fn upload_session_headers_start_at_zero_range() {
-        let namespace = sample_namespace();
-        let headers = upload_session_headers(&namespace, &sample_session_id()).unwrap();
-        assert_eq!(
-            headers[&LOCATION],
-            format!("/v2/{namespace}/blobs/uploads/{SAMPLE_SESSION}")
-        );
-        assert_eq!(headers[&RANGE], "0-0");
-        assert_eq!(headers[&DOCKER_UPLOAD_UUID], SAMPLE_SESSION);
-    }
-
-    #[test]
-    fn upload_progress_headers_report_current_range() {
-        let namespace = sample_namespace();
-        let headers = upload_progress_headers(&namespace, &sample_session_id(), 42, None).unwrap();
-        assert_eq!(
-            headers[&LOCATION],
-            format!("/v2/{namespace}/blobs/uploads/{SAMPLE_SESSION}")
-        );
-        assert_eq!(headers[&RANGE], "0-41");
-        assert_eq!(headers[&DOCKER_UPLOAD_UUID], SAMPLE_SESSION);
-        assert!(!headers.contains_key(CONTENT_LENGTH));
-    }
-
-    /// A PATCH answers with an empty body, so it declares `Content-Length: 0`.
-    #[test]
-    fn upload_progress_headers_carry_a_declared_content_length() {
-        let headers =
-            upload_progress_headers(&sample_namespace(), &sample_session_id(), 42, Some(0))
-                .unwrap();
-        assert_eq!(headers[&RANGE], "0-41");
-        assert_eq!(headers[&CONTENT_LENGTH], "0");
     }
 }

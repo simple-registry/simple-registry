@@ -9,7 +9,9 @@
 
 use std::{collections::HashMap, fmt, sync::Arc};
 
-use crate::{oci::namespace_belongs_to, registry::Repository};
+use angos_oci::namespace_belongs_to;
+
+use crate::registry::Repository;
 
 /// A repository map that rejects overlapping repository prefixes at
 /// construction and provides deterministic namespace resolution.
@@ -29,12 +31,17 @@ impl fmt::Debug for RepositoryResolver {
     }
 }
 
-/// Error returned when overlapping repository prefixes are detected.
+/// Error returned when two repositories cannot be told apart: their prefixes
+/// overlap, or they claim the same `ns`.
 ///
-/// The error names both offending prefixes so the operator can disambiguate.
+/// The error names both offenders so the operator can disambiguate.
 #[derive(Debug, thiserror::Error)]
-#[error("repository prefixes overlap: '{0}' and '{1}'")]
-pub struct OverlapError(String, String);
+pub enum OverlapError {
+    #[error("repository prefixes overlap: '{0}' and '{1}'")]
+    Prefix(String, String),
+    #[error("repositories '{0}' and '{1}' both mirror the namespace '{2}'")]
+    Namespace(String, String, String),
+}
 
 impl RepositoryResolver {
     /// Constructs a resolver from the given map.
@@ -44,18 +51,46 @@ impl RepositoryResolver {
     /// Returns [`OverlapError`] if any two keys are namespace-prefixes of each
     /// other. The error names the first pair of overlapping prefixes found.
     pub fn new(repositories: Arc<HashMap<String, Repository>>) -> Result<Self, OverlapError> {
-        let keys: Vec<&str> = repositories.keys().map(String::as_str).collect();
-        for i in 0..keys.len() {
-            for j in (i + 1)..keys.len() {
-                let a = keys[i];
-                let b = keys[j];
+        // Each key paired with the `ns` it mirrors, so the checks below need no
+        // lookup back into the map.
+        let entries: Vec<(&str, Option<&str>)> = repositories
+            .iter()
+            .map(|(key, repository)| (key.as_str(), repository.namespace.as_deref()))
+            .collect();
+        for i in 0..entries.len() {
+            for j in (i + 1)..entries.len() {
+                let (a, a_mirrors) = entries[i];
+                let (b, b_mirrors) = entries[j];
                 if namespace_belongs_to(a, b) || namespace_belongs_to(b, a) {
-                    return Err(OverlapError(a.to_string(), b.to_string()));
+                    return Err(OverlapError::Prefix(a.to_string(), b.to_string()));
+                }
+                // A `?ns=` value must resolve to one repository, so two
+                // claiming the same one is a misconfiguration, not a race.
+                if let (Some(left), Some(right)) = (a_mirrors, b_mirrors)
+                    && left == right
+                {
+                    return Err(OverlapError::Namespace(
+                        a.to_string(),
+                        b.to_string(),
+                        left.to_string(),
+                    ));
                 }
             }
         }
         Ok(Self {
             inner: repositories,
+        })
+    }
+
+    /// Resolves the repository mirroring `ns`, the value of a request's proxy
+    /// `?ns=` parameter. `None` when no repository claims it, which leaves the
+    /// parameter without effect. Matched case-insensitively, `ns` being a host.
+    pub fn resolve_ns(&self, ns: &str) -> Option<&Repository> {
+        self.inner.values().find(|repository| {
+            repository
+                .namespace
+                .as_deref()
+                .is_some_and(|declared| declared.eq_ignore_ascii_case(ns))
         })
     }
 
@@ -91,11 +126,12 @@ impl RepositoryResolver {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
 
-    use super::*;
+    use angos_oci::Namespace;
+
+    use crate::registry::repository_resolver::*;
     use crate::{
-        oci::Namespace,
         policy::{RetentionPolicy, RetentionPolicyConfig, SystemClock},
         registry::Repository,
     };
@@ -103,6 +139,7 @@ mod tests {
     fn repo(name: &str) -> Repository {
         Repository {
             name: Namespace::new(name).unwrap(),
+            namespace: None,
             upstreams: Vec::new(),
             replication: Vec::new(),
             retention_policy: RetentionPolicy::new(
@@ -145,6 +182,51 @@ mod tests {
             result.is_err(),
             "org/team and org/team/sub must be rejected"
         );
+    }
+
+    /// A `?ns=` must name one repository, so two claiming the same registry
+    /// namespace fail at startup rather than resolving by map order.
+    #[test]
+    fn repositories_mirroring_the_same_namespace_rejected() {
+        let mut mirror = repo("docker-hub");
+        mirror.namespace = Some("docker.io".to_string());
+        let mut second = repo("hub-mirror");
+        second.namespace = Some("docker.io".to_string());
+
+        let repositories = Arc::new(HashMap::from([
+            ("docker-hub".to_string(), mirror),
+            ("hub-mirror".to_string(), second),
+        ]));
+        let error = RepositoryResolver::new(repositories)
+            .expect_err("two repositories mirroring docker.io must be refused");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("docker.io"),
+            "the error must name the namespace both claim: {message}"
+        );
+    }
+
+    /// `ns` names a host, which is case-insensitive, so a client spelling it
+    /// differently still reaches the mirror.
+    #[test]
+    fn resolve_ns_finds_the_mirroring_repository() {
+        let mut mirror = repo("docker-hub");
+        mirror.namespace = Some("docker.io".to_string());
+        let repositories = Arc::new(HashMap::from([
+            ("docker-hub".to_string(), mirror),
+            ("internal".to_string(), repo("internal")),
+        ]));
+        let resolver = RepositoryResolver::new(repositories).unwrap();
+
+        for ns in ["docker.io", "Docker.IO", "DOCKER.IO"] {
+            assert_eq!(
+                resolver.resolve_ns(ns).map(|r| r.name.to_string()),
+                Some("docker-hub".to_string()),
+                "'{ns}' names the same host"
+            );
+        }
+        assert!(resolver.resolve_ns("quay.io").is_none());
     }
 
     #[test]

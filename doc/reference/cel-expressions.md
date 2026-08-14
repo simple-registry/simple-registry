@@ -83,6 +83,7 @@ Information about the current request. Fields are present based on the action ty
 | `request.n`             | int?    | Pagination limit                           |
 | `request.last`          | string? | Pagination marker                          |
 | `request.artifact_type` | string? | Referrer artifact type filter              |
+| `request.digest_algorithm` | string? | Digest algorithm a `start-upload` will close with (`?digest-algorithm=`) |
 | `request.queue`         | string? | Durable queue for `_jobs` admin actions (`cache` or `replication`) |
 
 Optional `request` fields are **omitted** when unset (only `request.action` is always present), so test their presence with the `has()` macro rather than a null comparison: `has(request.from)` is safe, whereas `request.from != null` raises a "no such key" error (evaluated fail-closed) when the field is absent. Optional `identity` fields, by contrast, are present as `null`, so `identity.username != null` is correct there.
@@ -163,7 +164,7 @@ It is false for a namespace no `[repository]` declares and for a repository decl
 | `top_pushed(n)` | True if among n most recently pushed tags |
 | `top_pulled(n)` | True if among n most recently pulled tags |
 
-Rankings are per namespace and contain tag names only: an untagged image has `image.tag == null` and never matches `top_pushed` or `top_pulled`.
+Rankings are per namespace and contain tag names only: an untagged image has `image.tag == null` and never matches `top_pushed` or `top_pulled`. A ranking lists the tags carrying the time it orders by, so a tag nobody ever pulled never matches `top_pulled(n)` however few tags the namespace holds, and a tag whose push time is unknown never matches `top_pushed(n)`.
 
 `top_pulled` and `image.last_pulled_at` require `update_pull_time = true`; `angos prune` refuses to start otherwise, since pull times would never be recorded.
 

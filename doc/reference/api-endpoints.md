@@ -16,6 +16,8 @@ Base path: `/v2/`
 
 Comma-separated `Accept` header values are parsed and ordered by quality (`q`) before Angos uses them for upstream pull-through requests.
 
+The optional `ns` query parameter ([Registry Proxying](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#registry-proxying)) names the registry namespace a mirroring client believes it is addressing. On a pull, a request naming one a `[repository]` declares (`namespace = "docker.io"`) is served from that repository whatever path it asks for, and the response echoes `OCI-Namespace`. A namespace no repository declares is ignored, as is `ns` on a write, and no header is sent. See [Upstream Selection and the `ns` Parameter](../explanation/pull-through-caching.md#upstream-selection-and-the-ns-parameter).
+
 ### API Version Check
 
 ```
@@ -43,10 +45,11 @@ a digest that exists in storage but is not linked to the requested namespace ret
 - If `<end>` is beyond the blob length, Angos clamps it to the final byte.
 - If `<suffix-length>` is longer than the blob, Angos returns the full blob as `206 Partial Content`.
 - Multiple ranges are not supported; Angos ignores them and returns the normal full `200 OK` response.
-- A range whose start is at or beyond the blob length, or a zero-length suffix range, returns `416 Range Not Satisfiable`.
+- A `Range` Angos cannot read is ignored the same way, returning `200 OK`: an unknown unit (`items=0-5`), a missing one (`100-200`), a non-numeric bound, or an inverted window (`bytes=500-499`).
+- A range that reads correctly but cannot be met returns `416 Range Not Satisfiable`: a start at or beyond the blob length, or a zero-length suffix range.
 - For an empty blob, Angos ignores a syntactically valid range and returns the normal `200 OK` empty body.
 
-Range requests for pull-through repositories are supported only after the blob is available locally. A range request for an uncached pull-through blob returns `416`; request the full blob first to populate the cache.
+On a pull-through repository, a range over a blob that is not cached yet is forwarded to the upstream: its `206` is passed through with the upstream's `Content-Range`, and an upstream that ignores the range answers the full `200 OK` body. The blob is still queued for caching, so later ranges are served locally.
 
 When blob redirects are enabled (`global.enable_blob_redirect`, default `true`) and the blob store supports presigned URLs, `GET` may answer with a `307` redirect. Sending an `X-Angos-No-Redirect` header with any non-empty value other than `0` or `false` forces an inline body instead. The web UI sends it because a browser `fetch` cannot follow the cross-origin presigned redirect; OCI clients never send it.
 
@@ -55,7 +58,9 @@ DELETE /v2/{namespace}/blobs/{digest}
 ```
 
 Delete a blob owned by the namespace. If the digest is still referenced by manifest metadata in
-that namespace, Angos returns `DENIED` and leaves the blob unchanged. After those references are
+that namespace, Angos returns `DENIED` (HTTP 405, the status the spec lists for a refused blob
+delete) and leaves the blob unchanged; the message names the reason, which the client resolves by
+deleting the manifest first. After those references are
 removed, deleting the blob removes that namespace's ownership; the underlying blob data is removed
 only when no namespace references the digest.
 
@@ -66,11 +71,21 @@ POST /v2/{namespace}/blobs/uploads/
 ```
 
 Start a new blob upload. Returns `202 Accepted` with a `Location` header pointing at the upload
-session, or `201 Created` when the blob is already available (see `digest` / `mount` below).
+session, or `201 Created` when the blob is already available or was uploaded by this request
+(see `digest` / `mount` below).
 
 Query parameters:
-- `digest` - Return the existing blob (returns `201 Created`) only when the requested namespace
-  already owns it; otherwise start a new upload session.
+- `digest` - Return the existing blob (returns `201 Created`) when the requested namespace already
+  owns it. Otherwise, a request declaring a `Content-Length` carries the blob as its body and
+  completes the upload here, returning `201 Created`; a declared `0` is the empty blob, not an
+  absent body. A request declaring no length at all (a chunked body) starts an upload session the
+  client then closes with a `PUT`. A body that does not hash to `digest` is rejected with
+  `DIGEST_INVALID` and stores nothing.
+- `digest-algorithm` - The algorithm (`sha256` or `sha512`) the upload will be closed with. The
+  session then hashes each chunk under that one alone instead of every supported algorithm, which is
+  what a session must do when it cannot know the algorithm before the closing `PUT`. Completing a
+  hinted session with a digest of another algorithm returns `DIGEST_INVALID`, and an unsupported
+  value returns `400 Bad Request`.
 - `mount` (with optional `from`) - Cross-repository blob mount. `?mount={digest}` requests that an
   existing blob be referenced by the target namespace with no body transfer:
   - With `from`: the mount succeeds when the blob exists, is held by `{repository}`, and the caller is
@@ -105,7 +120,7 @@ Get upload status.
 PATCH /v2/{namespace}/blobs/uploads/{uuid}
 ```
 
-Upload a chunk. Use `Content-Range` for the chunk range and `Content-Length` for the exact chunk size. A missing `Content-Length` is accepted as a chunked upload streamed to EOF; an invalid `Content-Length` returns `400 Bad Request`. An upload whose cumulative size exceeds `global.max_blob_size` is rejected with `BLOB_UPLOAD_INVALID` (HTTP 413).
+Upload a chunk. Use `Content-Range` for the chunk range, spelled `<start>-<end>` as the specification defines it, and `Content-Length` for the exact chunk size. The `bytes=` unit belongs to the `Range` header and is rejected here. A `Content-Range` must resume at the committed offset and, when it names a last byte, must agree with the `Content-Length` sent with it; either mismatch returns `416 Range Not Satisfiable` before a byte is committed. A missing `Content-Length` is accepted as a chunked upload streamed to EOF, and a chunked body that does not fill the window it announced returns `416` and cancels the session; an invalid `Content-Length` returns `400 Bad Request`. A body shorter than the `Content-Length` it declared commits what arrived and answers `202` with the bytes actually committed in `Range`, leaving the closing `PUT` to refuse the digest. An upload whose cumulative size exceeds `global.max_blob_size` is rejected with `BLOB_UPLOAD_INVALID` (HTTP 413).
 
 ```
 PUT /v2/{namespace}/blobs/uploads/{uuid}?digest={digest}
@@ -135,13 +150,17 @@ PUT /v2/{namespace}/manifests/{reference}
 ```
 
 Push a manifest. Manifest bodies larger than `global.max_manifest_size` are rejected with
-`MANIFEST_INVALID`. When `global.allow_missing_manifest_references = false`, config, layer, and
+`MANIFEST_INVALID` (HTTP 413). When `global.allow_missing_manifest_references = false`, config, layer, and
 child manifest digests referenced by the manifest must already exist and be readable in the
 namespace, and missing references are rejected with `MANIFEST_BLOB_UNKNOWN`. By default
 (`allow_missing_manifest_references = true`) the push is accepted, but a referenced digest the
 namespace does not already own is not made readable: it resolves as unknown on a later pull
 (`BLOB_UNKNOWN` for a blob, `MANIFEST_UNKNOWN` for a child manifest) until its content is pushed.
 Subject digests used for referrers are not required to exist in either mode.
+
+A `Content-Type` that disagrees with the body's own `mediaType` is rejected with `MANIFEST_INVALID`.
+Parameters on the header (`; charset=utf-8`) take no part in that comparison and are not stored, so a
+pull serves the bare media type whatever the push sent.
 
 When pushing by digest, one or more `?tag=` query parameters create the listed tags pointing at the
 pushed manifest, for example `PUT /v2/{namespace}/manifests/{digest}?tag=1.2.3&tag=latest`. Each
@@ -189,7 +208,7 @@ replicated repository as trust over `created_at`, and restrict it via the CEL `a
 [Restrict replication writes](../how-to/set-up-access-control.md#restrict-replication-writes)).
 
 A `409 REPLICATION_SUPERSEDED` is convergence, not failure: the sender treats it as success and
-completes the replication job. It is distinct on the wire from the immutable-tag `409 CONFLICT`, which
+completes the replication job. It is distinct on the wire from the immutable-tag `409 DENIED`, which
 surfaces so the job retries or dead-letters.
 
 ### Tags
@@ -204,13 +223,17 @@ Query parameters:
 - `n` - Maximum number of results
 - `last` - Pagination marker
 
+A namespace holding no manifest content at all returns `NAME_UNKNOWN` (HTTP 404), so a client can probe existence here. A namespace whose tags were all deleted still holds its revisions and returns `200` with an empty list, until those are deleted too.
+
+On a pull-through repository the listing reports the tags this registry has cached, not the upstream's catalogue: enumerating the upstream would walk its whole tag list on every request. Pull a tag to cache it, or list tags against the upstream directly.
+
 ### Catalog
 
 ```
 GET /v2/_catalog
 ```
 
-List repositories.
+List repositories. A Docker Registry V2 endpoint the OCI distribution specification does not define; angos serves it at its long-standing path.
 
 Query parameters:
 - `n` - Maximum number of results
@@ -228,19 +251,32 @@ List manifests that reference a subject digest.
 
 Query parameters:
 - `artifactType` - Filter by artifact type
+- `last` - Pagination marker. The specification paginates this endpoint through the `Link` header alone, so this is the cursor Angos puts in the `Link` it advertises rather than one a client composes; it takes no page-size parameter, and Angos sizes the page at 100
+
+A malformed request is rejected with `DIGEST_INVALID` (HTTP 400): a digest that is not valid syntax, or an `artifactType` that is not a media type. A registry serving this endpoint must never answer `404` to it, so an unreadable request is a bad one rather than an unserved path, unlike the other listings.
+
+Referrers a client recorded under the fallback tag (`<algorithm>-<hex>`, an index of referring descriptors) before this registry served the API are folded into the listing, as the spec's "Enabling the Referrers API" procedure requires, so a repository imported from such a registry keeps them.
+
+On a pull-through repository the listing merges the upstream's referrers with the cached ones, since nothing fills a referrer index on its own and an uncached subject would otherwise report none. An upstream that cannot be reached is left out rather than failing the request, so the cached referrers are still served. The `artifactType` filter is applied to both.
+
+A subject with more referrers than the page size is served one page at a time, with the next page advertised in a `Link` header carrying `rel="next"`; the link repeats the `artifactType` filter so following it keeps the listing filtered, percent-encoding it so a `+json` suffix survives the round trip. A filtered page may hold fewer than 100 entries, since the filter is applied after the page is cut.
+
+Merging a pull-through listing needs both sides whole, so each page re-reads the upstream's referrers in full: paginating a widely referenced subject on a mirror costs one upstream enumeration per page.
 
 ---
 
 ## Extension API (not part of the OCI specification)
 
-Base path: `/_ext/`
+Base path: `/v2/_angos/` for the registry, `/v2/<name>/_angos/` for one namespace (`<name>` being the OCI repository name).
 
-> **Migration note:** These endpoints moved from `/v2/_ext/` to the top-level `/_ext/` prefix in 1.2.0, so `/v2` is reserved for the OCI Distribution API. Clients written against v1.1.1 must update any `/v2/_ext/...` paths to `/_ext/...`.
+These sit in the extension namespace the distribution spec reserves, whose shape is `_<extension>/<component>/<module>`; `angos` is the extension name. See the spec's [extensions document](https://github.com/opencontainers/distribution-spec/blob/main/extensions/README.md).
+
+> **Migration note:** these endpoints were served under the top-level `/_ext/` prefix before 1.5.0. Clients must update `/_ext/...` paths to their `/v2/_angos/...` equivalents; [Upgrade Angos](../how-to/upgrade.md#extension-api-moved-into-the-reserved-namespace-breaking-change) maps each one.
 
 ### List Repositories
 
 ```
-GET /_ext/_repositories
+GET /v2/_angos/repositories/list
 ```
 
 List all configured repositories with their namespace counts.
@@ -262,7 +298,7 @@ List all configured repositories with their namespace counts.
 ### List Namespaces
 
 ```
-GET /_ext/{repository}/_namespaces
+GET /v2/_angos/namespaces/list?repository={repository}
 ```
 
 List namespaces within a repository, with the repository's effective configuration.
@@ -288,7 +324,7 @@ List namespaces within a repository, with the repository's effective configurati
 ### List Revisions
 
 ```
-GET /_ext/{namespace}/_revisions
+GET /v2/{namespace}/_angos/revisions/list
 ```
 
 List all manifest revisions with tags, parent relationships, and referrers.
@@ -326,7 +362,7 @@ List all manifest revisions with tags, parent relationships, and referrers.
 ### List Uploads
 
 ```
-GET /_ext/{namespace}/_uploads
+GET /v2/{namespace}/_angos/uploads/list
 ```
 
 List blob uploads in progress.
@@ -348,7 +384,7 @@ List blob uploads in progress.
 ### List Jobs
 
 ```
-GET /_ext/_jobs
+GET /v2/_angos/jobs/list
 ```
 
 List pending and in-flight jobs on a durable job queue (see
@@ -393,11 +429,11 @@ time prefix. `next` is present only when another page follows; pass it back as `
 ### List Failed Jobs
 
 ```
-GET /_ext/_jobs/failed
+GET /v2/_angos/jobs/failed
 ```
 
 List dead-lettered jobs, i.e. jobs that exhausted their retry budget. Same query parameters and
-rejection rules as `GET /_ext/_jobs`.
+rejection rules as `GET /v2/_angos/jobs/list`.
 
 **Response:**
 ```json
@@ -422,7 +458,7 @@ rejection rules as `GET /_ext/_jobs`.
 ### Retry Failed Job
 
 ```
-POST /_ext/_jobs/failed/{key}/retry
+POST /v2/_angos/jobs/failed?key={key}
 ```
 
 Requeue a dead-lettered job with its attempt counter reset to zero. `{key}` is the job's
@@ -432,8 +468,8 @@ Requeue a dead-lettered job with its attempt counter reset to zero. `{key}` is t
 ### Delete Job
 
 ```
-DELETE /_ext/_jobs/failed/{key}
-DELETE /_ext/_jobs/pending/{key}
+DELETE /v2/_angos/jobs/failed?key={key}
+DELETE /v2/_angos/jobs/pending?key={key}
 ```
 
 Delete a dead-lettered or pending job by `storage_key`. Accepts `?queue=` like the listings.
@@ -498,7 +534,7 @@ When the UI is enabled, non-API paths serve the web interface.
 ### UI Configuration
 
 ```
-GET /_ui/config
+GET /v2/_angos/ui/config
 ```
 
 Returns UI configuration.
@@ -608,13 +644,14 @@ Errors follow OCI Distribution error format:
 | `BLOB_UPLOAD_UNKNOWN` | 404          | Upload session not found  |
 | `DIGEST_INVALID`      | 400          | Invalid digest format     |
 | `MANIFEST_BLOB_UNKNOWN` | 404        | Manifest reference is missing |
-| `MANIFEST_INVALID`    | 400          | Invalid manifest content  |
+| `MANIFEST_INVALID`    | 400, or 413 when the body exceeds `global.max_manifest_size` | Invalid manifest content  |
 | `MANIFEST_UNKNOWN`    | 404          | Manifest does not exist   |
 | `NAME_INVALID`        | 400          | Invalid repository name   |
 | `NAME_UNKNOWN`        | 404          | Repository not found      |
 | `SIZE_INVALID`        | 416          | Requested range not satisfiable |
-| `CONFLICT`            | 409          | Write rejected, for example, an immutable tag cannot be overwritten |
-| `REPLICATION_SUPERSEDED` | 409       | Replication write rejected by last-writer-wins (the local copy is strictly newer) |
 | `UNAUTHORIZED`        | 401          | Authentication required   |
-| `DENIED`              | 403 or 405   | Access denied by policy, or blob is still referenced |
-| `UNSUPPORTED`         | 400          | Unsupported operation     |
+| `DENIED`              | 403, 405, or 409 | Access denied by policy, a still-referenced blob (405), or a write rejected such as an immutable tag that cannot be overwritten (409) |
+| `UNSUPPORTED`         | 400          | Unsupported operation, and the code carried by any other malformed request |
+| `REPLICATION_SUPERSEDED` | 409       | Replication write rejected by last-writer-wins (the local copy is strictly newer) |
+
+The spec fixes the `code` of a 4XX body to the identifiers above; `REPLICATION_SUPERSEDED` is the one exception, and only ever answers a replication write (a manifest `PUT` or `DELETE` carrying `X-Angos-Source-Timestamp`). A 5XX body carries `INTERNAL_ERROR` or `PROVIDER_UNAVAILABLE`, which the rule does not cover.

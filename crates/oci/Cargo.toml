@@ -1,0 +1,25 @@
+[package]
+name = "angos-oci"
+version = "0.1.0"
+edition = "2024"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[features]
+test-util = []
+
+[dependencies]
+chrono = { workspace = true }
+hex = { workspace = true }
+hyper = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+# Self-reference so the crate's own tests see the feature-gated fixtures.
+angos-oci = { workspace = true, features = ["test-util"] }

@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::oci::{Digest, Error, Tag};
+use crate::types::{Digest, Error, Tag};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "String")]
@@ -29,6 +29,7 @@ impl Serialize for Reference {
 
 impl Reference {
     /// The tag when this is a tag reference, `None` for a digest reference.
+    #[must_use]
     pub fn as_tag(&self) -> Option<&Tag> {
         match self {
             Reference::Tag(tag) => Some(tag),
@@ -76,7 +77,7 @@ impl Display for Reference {
 mod tests {
     use serde_json::json;
 
-    use super::*;
+    use crate::types::reference::*;
 
     const VALID_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 

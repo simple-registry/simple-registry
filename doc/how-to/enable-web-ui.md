@@ -165,7 +165,7 @@ Expand annotations with the `[+]` button. Well-known keys are displayed with fri
 ### Check UI is Enabled
 
 ```bash
-curl http://localhost:8000/_ui/config
+curl http://localhost:8000/v2/_angos/ui/config
 ```
 
 Returns:

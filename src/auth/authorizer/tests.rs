@@ -4,7 +4,10 @@ use serde_json::json;
 use tracing::Level;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
-use super::*;
+use angos_oci::request::BlobMount;
+use angos_oci::{Digest, Namespace, Reference, Tag};
+
+use crate::auth::authorizer::*;
 use crate::{
     auth::Error as AuthError,
     cache,
@@ -12,9 +15,8 @@ use crate::{
     configuration::Configuration,
     configuration::RegexPattern,
     identity::{AuthMethod, ClientCertificate, ManifestPutTarget, OidcClaims},
-    oci::{Digest, Namespace, Reference, Tag},
     registry::{
-        BlobMount, RegistryConfig, Repository,
+        RegistryConfig, Repository,
         metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
         test_utils::{for_each_backend, put_blob_direct},
@@ -354,6 +356,7 @@ async fn test_pull_through_repo_blocks_push_operations() {
     let start_upload_route = Action::StartUpload {
         namespace,
         digest: None,
+        digest_algorithm: None,
     };
     let result = authorizer
         .authorize_request(&start_upload_route, &identity, &parts, &registry)
@@ -400,6 +403,7 @@ async fn pull_through_push_rejected_before_calling_webhook() {
     let push = Action::StartUpload {
         namespace: Namespace::new("docker-io/library/nginx").unwrap(),
         digest: None,
+        digest_algorithm: None,
     };
 
     let result = authorizer

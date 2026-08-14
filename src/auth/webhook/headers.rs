@@ -160,11 +160,10 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{build_cache_key, build_headers};
-    use crate::{
-        identity::{Action, ClientIdentity, OidcClaims},
-        oci::{Namespace, Reference, Tag},
-    };
+    use angos_oci::{Namespace, Reference, Tag};
+
+    use crate::auth::webhook::headers::{build_cache_key, build_headers};
+    use crate::identity::{Action, ClientIdentity, OidcClaims};
 
     fn anonymous() -> ClientIdentity {
         ClientIdentity::new(None)

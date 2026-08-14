@@ -4,20 +4,18 @@ use chrono::{Duration, Utc};
 use futures_util::TryStreamExt;
 use tokio::io::AsyncReadExt;
 
+use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
 use angos_storage::test_util::frame;
 
-use super::*;
-use crate::{
-    oci::{Algorithm, Digest, Namespace, UploadSessionId},
-    registry::Error,
-};
+use crate::registry::Error;
+use crate::registry::blob_store::*;
 
 pub async fn test_datastore_stream_uploads(store: &BlobStore) {
     let namespace = &Namespace::new("test-repo").unwrap();
 
     let upload_ids: Vec<UploadSessionId> = (0..3).map(|_| UploadSessionId::generate()).collect();
     for id in &upload_ids {
-        store.create_upload(namespace, id).await.unwrap();
+        store.create_upload(namespace, id, None).await.unwrap();
 
         let content = format!("Content for upload {id}").into_bytes();
         let len = content.len() as u64;
@@ -65,7 +63,10 @@ pub async fn test_datastore_stream_uploads(store: &BlobStore) {
 async fn seed_blob_with(store: &BlobStore, content: &[u8], algorithm: Algorithm) -> Digest {
     let namespace = Namespace::new("test/setup").unwrap();
     let session_id = UploadSessionId::generate();
-    store.create_upload(&namespace, &session_id).await.unwrap();
+    store
+        .create_upload(&namespace, &session_id, None)
+        .await
+        .unwrap();
     let len = content.len() as u64;
     store
         .write_upload(
@@ -170,7 +171,10 @@ pub async fn test_datastore_upload_operations(store: &BlobStore) {
     let namespace = &Namespace::new("test-namespace").unwrap();
     let session_id = UploadSessionId::generate();
 
-    store.create_upload(namespace, &session_id).await.unwrap();
+    store
+        .create_upload(namespace, &session_id, None)
+        .await
+        .unwrap();
 
     let test_content = b"Test upload content";
 
@@ -243,7 +247,10 @@ pub async fn test_complete_upload_fails_on_rerun(store: &BlobStore) {
     let namespace = Namespace::new("test/rerun").unwrap();
     let session_id = UploadSessionId::generate();
     let content = b"one-shot completion";
-    store.create_upload(&namespace, &session_id).await.unwrap();
+    store
+        .create_upload(&namespace, &session_id, None)
+        .await
+        .unwrap();
     store
         .write_upload(
             &namespace,
@@ -279,7 +286,10 @@ pub async fn test_complete_upload_fails_on_rerun(store: &BlobStore) {
 pub async fn test_datastore_stream_uploads_skips_a_non_session_name(store: &BlobStore) {
     let namespace = &Namespace::new("test-raw-upload").unwrap();
     let session = UploadSessionId::generate();
-    store.create_upload(namespace, &session).await.unwrap();
+    store
+        .create_upload(namespace, &session, None)
+        .await
+        .unwrap();
 
     let stray = "v2/repositories/test-raw-upload/_uploads/not-a-session/startedat";
     store
@@ -407,7 +417,10 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
     let namespace = Namespace::new("test/divergence").unwrap();
     let session_id = UploadSessionId::generate();
     let content = b"hashed prefix";
-    store.create_upload(&namespace, &session_id).await.unwrap();
+    store
+        .create_upload(&namespace, &session_id, None)
+        .await
+        .unwrap();
     store
         .write_upload(
             &namespace,
@@ -448,7 +461,10 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
 pub async fn test_checkpoints_supersede_rather_than_accumulate(store: &BlobStore) {
     let namespace = &Namespace::new("checkpoint-supersede").unwrap();
     let session_id = &UploadSessionId::generate();
-    store.create_upload(namespace, session_id).await.unwrap();
+    store
+        .create_upload(namespace, session_id, None)
+        .await
+        .unwrap();
 
     for chunk in ["one", "two", "three", "four"] {
         store

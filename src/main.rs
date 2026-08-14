@@ -30,7 +30,6 @@ mod http_response;
 mod identity;
 mod jobs;
 mod metrics_provider;
-mod oci;
 mod policy;
 mod registry;
 pub mod registry_client;

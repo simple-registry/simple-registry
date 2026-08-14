@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use angos_oci::{Digest, Namespace};
 use angos_tx_engine::transaction::Transaction;
 
 use crate::{
@@ -18,7 +19,6 @@ use crate::{
     },
     jobs::Queue,
     jobs::store::{Error, JobEnvelope, JobHandler},
-    oci::{Digest, Namespace},
     registry::{
         Error as RegistryError, blob::cache_blob, blob_ownership::BlobOwnership,
         blob_store::BlobStore, metadata_store::MetadataStore,
@@ -27,11 +27,11 @@ use crate::{
 };
 
 /// Maps a registry error to a job error, preserving an upstream authorization
-/// denial as the terminal [`Error::Denied`] so the worker dead-letters it
-/// instead of retrying against an unchangeable outcome.
+/// denial as [`Error::Terminal`] so the worker dead-letters it instead of
+/// retrying against an unchangeable outcome.
 fn job_error(error: RegistryError) -> Error {
     match error {
-        RegistryError::Denied(msg) => Error::Denied(msg),
+        RegistryError::Denied(msg) => Error::Terminal(msg),
         other => Error::Execution(other.to_string()),
     }
 }
@@ -163,14 +163,14 @@ impl CacheFillJobHandler {
                 ));
             }
 
-            let (content_length, stream) = repository.get_blob(&[], namespace, digest).await?;
+            let fetched = repository.get_blob(&[], namespace, digest, None).await?;
             cache_blob(
                 &self.blob_store,
                 &self.metadata_store,
                 namespace,
                 digest,
-                stream,
-                content_length,
+                fetched.reader,
+                fetched.length,
             )
             .await?;
         }

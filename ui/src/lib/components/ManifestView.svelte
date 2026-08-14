@@ -27,6 +27,9 @@
 		tags: string[];
 		referencedBy: ParentRef[];
 		childReferrers: Map<string, ReferrerInfo[]>;
+		childReferrersNext: Map<string, string>;
+		loadingReferrers: string | null;
+		onloadmorereferrers: (childDigest: string) => void;
 		deleteConfirm: string | null;
 		deleting: boolean;
 		ondeletetag: (tag: string) => void;
@@ -42,6 +45,9 @@
 		tags,
 		referencedBy,
 		childReferrers,
+		childReferrersNext,
+		loadingReferrers,
+		onloadmorereferrers,
 		deleteConfirm,
 		deleting,
 		ondeletetag,
@@ -302,8 +308,9 @@
 							</td>
 						</tr>
 					{/if}
+					{@const moreRefs = childReferrersNext.has(m.digest)}
 					{#each refs as ref, ridx}
-						{@const isLastRef = ridx === refs.length - 1}
+						{@const isLastRef = ridx === refs.length - 1 && !moreRefs}
 						<tr class="child-row clickable" onclick={(e) => handleRowClick(e, ref.digest)}>
 							<td class="tree-branch" class:has-next={!isLastRef}>
 								<span class="tree-toggle leaf"></span>
@@ -317,6 +324,23 @@
 							<td></td>
 						</tr>
 					{/each}
+					{#if moreRefs}
+						<tr class="child-row">
+							<td class="tree-branch">
+								<span class="tree-toggle leaf"></span>
+								<button
+									class="secondary"
+									onclick={() => onloadmorereferrers(m.digest)}
+									disabled={loadingReferrers === m.digest}
+								>
+									Load more referrers
+								</button>
+							</td>
+							<td></td>
+							<td></td>
+							<td></td>
+						</tr>
+					{/if}
 				{/each}
 			</tbody>
 		</table>

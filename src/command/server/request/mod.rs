@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, io};
+use std::io;
 
 use chrono::{DateTime, Utc};
 use futures_util::TryStreamExt;
@@ -6,34 +6,22 @@ use http_body_util::BodyExt;
 use hyper::{
     HeaderMap,
     body::Incoming,
-    header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue, RANGE},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue, RANGE},
 };
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
 
-use crate::{
-    command::server::error::Error,
-    oci::{MediaRange, MediaType},
-    registry::BlobRange,
-    registry_client::X_ANGOS_SOURCE_TIMESTAMP,
-};
+use angos_oci::http_range::{ByteWindow, Error as RangeError, RequestRange};
+use angos_oci::server;
+use angos_oci::{MediaRange, MediaType};
 
-static BYTES_RANGE_PREFIX: &str = "bytes=";
-static QUALITY_PARAM: &str = "q";
+use crate::{command::server::error::Error, registry_client::X_ANGOS_SOURCE_TIMESTAMP};
 
 /// Set by the web UI to force an inline body instead of a presigned S3
 /// redirect: a browser `fetch` cannot follow the cross-origin redirect (the
 /// presigned URL carries no CORS headers) and loses `Docker-Content-Digest`.
 /// OCI clients never send it, so their redirect fast path is unaffected.
 pub const X_ANGOS_NO_REDIRECT: &str = "X-Angos-No-Redirect";
-
-/// A `start-end` byte range parsed from a `Range` or `Content-Range` header;
-/// `end` is absent for an open-ended one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ByteRange {
-    pub start: u64,
-    pub end: Option<u64>,
-}
 
 #[derive(Clone, Debug)]
 pub struct RequestHeaders<'a> {
@@ -46,38 +34,7 @@ impl<'a> RequestHeaders<'a> {
     }
 
     pub fn accepted_content_types(&self) -> Vec<MediaRange> {
-        let mut media_ranges = Vec::new();
-
-        for header in self.headers.get_all(ACCEPT) {
-            let Ok(header) = header.to_str() else {
-                continue;
-            };
-
-            for media_range in header.split(',') {
-                // A member that is not a media range is dropped rather than
-                // forwarded: angos re-sends these upstream and must not relay a
-                // malformed `Accept`.
-                let Ok(value) = MediaRange::new(media_range.trim()) else {
-                    continue;
-                };
-
-                media_ranges.push(AcceptMediaRange {
-                    quality: quality_for_media_range(value.as_str()),
-                    value,
-                    order: media_ranges.len(),
-                });
-            }
-        }
-
-        media_ranges.sort_by(|left, right| match right.quality.cmp(&left.quality) {
-            Ordering::Equal => left.order.cmp(&right.order),
-            ordering => ordering,
-        });
-
-        media_ranges
-            .into_iter()
-            .map(|media_range| media_range.value)
-            .collect()
+        server::accepted_content_types(self.headers)
     }
 
     pub fn content_length(&self) -> Result<Option<u64>, Error> {
@@ -120,7 +77,7 @@ impl<'a> RequestHeaders<'a> {
             .to_str()
             .map_err(|error| Error::BadRequest(format!("Invalid Content-Type header: {error}")))?;
 
-        MediaType::new(content_type)
+        MediaType::from_content_type(content_type)
             .map(Some)
             .map_err(|error| Error::BadRequest(error.to_string()))
     }
@@ -147,44 +104,34 @@ impl<'a> RequestHeaders<'a> {
         Some(parsed.min(Utc::now()))
     }
 
-    pub fn range(&self, header: HeaderName) -> Result<Option<ByteRange>, Error> {
+    /// The window carried by `header`, spelled `<start>-<end>` as end-5 has a
+    /// chunk declare it.
+    pub fn chunk_range(&self, header: HeaderName) -> Result<Option<ByteWindow>, Error> {
         let Some(range_header) = self.header_string(header)? else {
             return Ok(None);
         };
 
-        // The prefix is optional here: ranged offsets arrive both bare and
-        // `bytes=`-prefixed in the wild.
-        let range_value = strip_bytes_prefix(&range_header).unwrap_or(&range_header);
-        parse_start_end_range(range_value).map(Some)
+        ByteWindow::chunk_bounds(&range_header)
+            .map(|(start, end)| {
+                Some(ByteWindow {
+                    start,
+                    end: Some(end),
+                })
+            })
+            .map_err(|error| not_satisfiable(&error))
     }
 
-    pub fn blob_range(&self) -> Result<Option<BlobRange>, Error> {
+    /// The window a blob `GET` asks for, `None` when it names none, names
+    /// several, or names one this server cannot read: RFC 9110 has a `Range`
+    /// whose unit is unknown or whose syntax does not parse ignored and the
+    /// whole representation served. A `416` is for a range that parses and
+    /// cannot be met.
+    pub fn blob_range(&self) -> Result<Option<RequestRange>, Error> {
         let Some(range_header) = self.header_string(RANGE)? else {
             return Ok(None);
         };
 
-        let Some(range_value) = strip_bytes_prefix(&range_header) else {
-            return Err(invalid_range_header(&range_header));
-        };
-
-        if range_value.contains(',') {
-            return Ok(None);
-        }
-
-        if let Some(suffix) = range_value.strip_prefix('-') {
-            if !is_digits(suffix) {
-                return Err(invalid_range_header(&range_header));
-            }
-            return Ok(Some(BlobRange::Suffix(parse_range_number(
-                suffix, "suffix",
-            )?)));
-        }
-
-        let range = parse_start_end_range(range_value)?;
-        Ok(Some(BlobRange::FromTo {
-            start: range.start,
-            end: range.end,
-        }))
+        Ok(RequestRange::parse(&range_header).ok().flatten())
     }
 
     fn header_string(&self, header: HeaderName) -> Result<Option<String>, Error> {
@@ -200,62 +147,8 @@ impl<'a> RequestHeaders<'a> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct AcceptMediaRange {
-    value: MediaRange,
-    quality: u16,
-    order: usize,
-}
-
-fn strip_bytes_prefix(range_header: &str) -> Option<&str> {
-    if range_header.len() < BYTES_RANGE_PREFIX.len() {
-        return None;
-    }
-
-    let (prefix, range_value) = range_header.split_at(BYTES_RANGE_PREFIX.len());
-    prefix
-        .eq_ignore_ascii_case(BYTES_RANGE_PREFIX)
-        .then_some(range_value)
-}
-
-fn invalid_range_header(range_header: &str) -> Error {
-    let msg = format!("Invalid Range header format: '{range_header}'");
-    Error::RangeNotSatisfiable(msg)
-}
-
-/// Parses a `start-end` range value where `end` is optional (`100-200`, `0-`).
-fn parse_start_end_range(range_value: &str) -> Result<ByteRange, Error> {
-    let (start, end) = range_value
-        .split_once('-')
-        .filter(|(start, end)| is_digits(start) && (end.is_empty() || is_digits(end)))
-        .ok_or_else(|| invalid_range_header(range_value))?;
-
-    let start = parse_range_number(start, "start")?;
-    if end.is_empty() {
-        return Ok(ByteRange { start, end: None });
-    }
-
-    let end = parse_range_number(end, "end")?;
-    if start > end {
-        let msg = format!("Invalid Range header: start ({start}) > end ({end})");
-        return Err(Error::RangeNotSatisfiable(msg));
-    }
-
-    Ok(ByteRange {
-        start,
-        end: Some(end),
-    })
-}
-
-fn is_digits(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn parse_range_number(value: &str, part: &str) -> Result<u64, Error> {
-    value.parse::<u64>().map_err(|error| {
-        let msg = format!("Error parsing '{part}' in Range header: {error}");
-        Error::RangeNotSatisfiable(msg)
-    })
+fn not_satisfiable(error: &RangeError) -> Error {
+    Error::RangeNotSatisfiable(error.to_string())
 }
 
 fn parse_content_length(value: &HeaderValue) -> Result<u64, Error> {
@@ -267,40 +160,6 @@ fn parse_content_length(value: &HeaderValue) -> Result<u64, Error> {
         .trim()
         .parse::<u64>()
         .map_err(|error| Error::BadRequest(format!("Invalid Content-Length header value: {error}")))
-}
-
-fn quality_for_media_range(media_range: &str) -> u16 {
-    for parameter in media_range.split(';').skip(1) {
-        let Some((name, value)) = parameter.trim().split_once('=') else {
-            continue;
-        };
-
-        if name.trim().eq_ignore_ascii_case(QUALITY_PARAM) {
-            return parse_quality(value.trim()).unwrap_or(0);
-        }
-    }
-
-    1000
-}
-
-fn parse_quality(value: &str) -> Option<u16> {
-    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
-
-    match whole {
-        "1" if fraction.chars().all(|digit| digit == '0') && fraction.len() <= 3 => Some(1000),
-        "0" if fraction.chars().all(|digit| digit.is_ascii_digit()) && fraction.len() <= 3 => {
-            let mut quality = 0;
-            for index in 0..3 {
-                quality *= 10;
-                if let Some(digit) = fraction.as_bytes().get(index) {
-                    quality += u16::from(*digit - b'0');
-                }
-            }
-
-            Some(quality)
-        }
-        _ => None,
-    }
 }
 
 pub fn incoming_into_async_read(incoming: Incoming) -> impl AsyncRead {

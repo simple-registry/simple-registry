@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-
 use serde_json::json;
 use tempfile::TempDir;
 use wiremock::{
@@ -9,8 +8,9 @@ use wiremock::{
     matchers::{header, method, path},
 };
 
+use angos_oci::header::DOCKER_CONTENT_DIGEST;
+use angos_oci::{Digest, Namespace, Tag};
 use angos_storage::{ObjectStore, fs::Backend as StorageFsBackend};
-
 use angos_tx_engine::store::Store;
 
 use crate::{
@@ -18,9 +18,8 @@ use crate::{
     jobs::Queue,
     jobs::store::{Error, JobEnvelope, JobHandler},
     metrics_provider,
-    oci::{Digest, Namespace, Tag},
     registry::{
-        DOCKER_CONTENT_DIGEST, Repository,
+        Repository,
         blob_store::BlobStore,
         metadata_store::{LinkKind, LinkOperation, MetadataStore},
         test_utils::{
@@ -30,10 +29,11 @@ use crate::{
     },
     registry_client::{REPLICATION_SUPERSEDED_CODE, RegistryClient, X_ANGOS_SOURCE_TIMESTAMP},
     replication::{
-        REPLICATION_DELETE_MANIFEST_KIND, REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream,
+        Error as ReplicationError, REPLICATION_DELETE_MANIFEST_KIND,
+        REPLICATION_PUSH_MANIFEST_KIND, ReplicationDownstream,
         handler::{
             ReplicationJob, ReplicationJobHandler, ReplicationTarget, build_envelope,
-            build_prune_delete_envelope, replication_lock_key,
+            build_prune_delete_envelope, job_error, replication_lock_key,
         },
     },
     test_fixtures::mocks::{mount_blob_upload_accepted, mount_blobs_present},
@@ -209,6 +209,24 @@ fn build_envelope_sets_queue_kind_and_lock_key() {
     assert_eq!(round_trip, payload);
 }
 
+#[test]
+fn job_error_dead_letters_invalid_manifest_content() {
+    // A body that will never parse must not spend the retry budget, while a
+    // replication-internal fault stays retryable.
+    assert!(matches!(
+        job_error(ReplicationError::InvalidManifest(
+            "manifest parse failed".to_string()
+        )),
+        Error::Terminal(_)
+    ));
+    assert!(matches!(
+        job_error(ReplicationError::Internal(
+            "namespace mapping failed".to_string()
+        )),
+        Error::Execution(_)
+    ));
+}
+
 fn repository_with_downstream(client: Arc<RegistryClient>) -> Repository {
     repository_with_named_downstream(DOWNSTREAM, client)
 }
@@ -339,10 +357,10 @@ async fn execute_pushes_manifest_with_head_before_put() {
 }
 
 /// A downstream `403` on the manifest push is a terminal denial: the handler
-/// surfaces `Error::Denied` (not a retryable `Storage`) so the worker
+/// surfaces `Error::Terminal` (not a retryable `Storage`) so the worker
 /// dead-letters it instead of retrying against revoked credentials.
 #[tokio::test]
-async fn execute_maps_downstream_403_to_denied() {
+async fn execute_maps_downstream_403_to_terminal() {
     metrics_provider::init_for_tests();
     let mock_server = MockServer::start().await;
 
@@ -372,8 +390,8 @@ async fn execute_maps_downstream_403_to_denied() {
     let envelope = build_envelope(&sample_payload()).unwrap();
     let result = handler.execute(&envelope).await;
     assert!(
-        matches!(result, Err(Error::Denied(_))),
-        "a downstream 403 must surface as a terminal Denied, got {result:?}"
+        matches!(result, Err(Error::Terminal(_))),
+        "a downstream 403 must surface as a terminal failure, got {result:?}"
     );
 }
 
@@ -750,9 +768,8 @@ async fn execute_push_surfaces_immutable_conflict_409_as_error() {
     Mock::given(method("PUT"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
         .respond_with(
-            ResponseTemplate::new(409).set_body_string(
-                r#"{"errors":[{"code":"CONFLICT","message":"tag is immutable"}]}"#,
-            ),
+            ResponseTemplate::new(409)
+                .set_body_string(r#"{"errors":[{"code":"DENIED","message":"tag is immutable"}]}"#),
         )
         .mount(&mock_server)
         .await;
@@ -980,9 +997,8 @@ async fn execute_push_records_failed_metric_on_error() {
     Mock::given(method("PUT"))
         .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
         .respond_with(
-            ResponseTemplate::new(409).set_body_string(
-                r#"{"errors":[{"code":"CONFLICT","message":"tag is immutable"}]}"#,
-            ),
+            ResponseTemplate::new(409)
+                .set_body_string(r#"{"errors":[{"code":"DENIED","message":"tag is immutable"}]}"#),
         )
         .mount(&mock_server)
         .await;

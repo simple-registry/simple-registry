@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 
-use crate::oci::{Digest, Reference, Tag};
+use angos_oci::{Digest, Reference, Tag};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(from = "StoredLinkKind", into = "StoredLinkKind")]
@@ -101,8 +101,9 @@ impl Display for LinkKind {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::oci::{Reference, Tag};
+    use angos_oci::{Reference, Tag};
+
+    use crate::registry::metadata_store::link::kind::*;
 
     // Valid 64-char lowercase-hex sha256 hashes (the only shape `Digest` accepts).
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

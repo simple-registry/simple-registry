@@ -20,11 +20,12 @@ use std::{
     time::Duration,
 };
 
-use angos_backoff::Backoff;
 use chrono::{DateTime, TimeDelta, Utc};
 use tokio::time::sleep;
 use tracing::warn;
 
+use angos_backoff::Backoff;
+use angos_oci::Digest;
 use angos_tx_engine::{INTENT_LOG_PREFIX, StorageError, intent::IntentRecord};
 
 use crate::{
@@ -35,7 +36,6 @@ use crate::{
         executor::ActionSink,
         walk::WalkStats,
     },
-    oci::Digest,
     registry::{Error as RegistryError, blob_store::BlobStore, metadata_store::MetadataStore},
 };
 

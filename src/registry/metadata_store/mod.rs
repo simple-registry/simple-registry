@@ -1,10 +1,10 @@
 use std::{future::Future, sync::Arc};
 
+use angos_oci::Digest;
 use angos_tx_engine::{lock::LockSession, store::Store};
 
 use crate::{
     cache::Cache,
-    oci::Digest,
     registry::{Error, pagination},
 };
 
@@ -16,10 +16,9 @@ mod link;
 #[cfg(test)]
 mod tests;
 
+use access_time::{AccessTimeWriter, FlushHandle};
 pub use blob_index::{BlobIndex, BlobIndexOperation, shard::decode_blob_index_shard_namespace};
 pub use link::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, LinksTx, ReferencePolicy};
-
-use access_time::{AccessTimeWriter, FlushHandle};
 
 // MetadataStore (concrete implementation)
 

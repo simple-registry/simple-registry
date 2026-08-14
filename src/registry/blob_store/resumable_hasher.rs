@@ -3,14 +3,13 @@ use std::collections::BTreeMap;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use sha2::{Digest, Sha256, Sha512, digest::common::hazmat::SerializableState};
 
-use crate::{
-    oci::{self, Algorithm},
-    registry::Error,
-};
+use angos_oci::{Algorithm, Digest as OciDigest};
+
+use crate::registry::Error;
 
 /// One supported algorithm's live hasher. The mid-stream state can be
 /// serialized and restored (for chunked-upload checkpoints), and a finalized
-/// hasher yields an [`oci::Digest`].
+/// hasher yields an [`OciDigest`].
 enum AlgorithmHasher {
     Sha256(Sha256),
     Sha512(Sha512),
@@ -57,10 +56,10 @@ impl AlgorithmHasher {
         }
     }
 
-    fn digest(&self) -> oci::Digest {
+    fn digest(&self) -> OciDigest {
         match self {
-            Self::Sha256(h) => oci::Digest::from_finalized(Algorithm::Sha256, h.clone().finalize()),
-            Self::Sha512(h) => oci::Digest::from_finalized(Algorithm::Sha512, h.clone().finalize()),
+            Self::Sha256(h) => OciDigest::from_finalized(Algorithm::Sha256, h.clone().finalize()),
+            Self::Sha512(h) => OciDigest::from_finalized(Algorithm::Sha512, h.clone().finalize()),
         }
     }
 }
@@ -83,8 +82,9 @@ impl Hasher {
         }
     }
 
-    /// Hash under a single known algorithm, for verify-only paths where the
-    /// target algorithm is already known and no checkpoint is persisted.
+    /// Hash under a single known algorithm: a verify-only read, and a session
+    /// whose client named the algorithm it will close the upload with, whose
+    /// checkpoints then carry that one hash instead of every supported one.
     pub fn for_algorithm(algorithm: Algorithm) -> Self {
         Self {
             hashers: vec![AlgorithmHasher::new(algorithm)],
@@ -110,7 +110,7 @@ impl Hasher {
 
     /// The digest for `algorithm`, or an error if this hasher carries no state
     /// for it (a checkpoint written before that algorithm was supported).
-    pub fn digest(&self, algorithm: Algorithm) -> Result<oci::Digest, Error> {
+    pub fn digest(&self, algorithm: Algorithm) -> Result<OciDigest, Error> {
         self.hashers
             .iter()
             .find(|h| h.algorithm() == algorithm)
@@ -182,7 +182,7 @@ impl HashState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::registry::blob_store::resumable_hasher::*;
 
     const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     const EMPTY_SHA512: &str = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e";
@@ -209,11 +209,11 @@ mod tests {
     fn digest_matches_known_empty() {
         assert_eq!(
             AlgorithmHasher::new(Algorithm::Sha256).digest(),
-            oci::Digest::sha256(EMPTY_SHA256).unwrap()
+            OciDigest::sha256(EMPTY_SHA256).unwrap()
         );
         assert_eq!(
             AlgorithmHasher::new(Algorithm::Sha512).digest(),
-            oci::Digest::sha512(EMPTY_SHA512).unwrap()
+            OciDigest::sha512(EMPTY_SHA512).unwrap()
         );
     }
 
@@ -223,11 +223,11 @@ mod tests {
         hasher.update(b"");
         assert_eq!(
             hasher.digest(Algorithm::Sha256).unwrap(),
-            oci::Digest::sha256(EMPTY_SHA256).unwrap()
+            OciDigest::sha256(EMPTY_SHA256).unwrap()
         );
         assert_eq!(
             hasher.digest(Algorithm::Sha512).unwrap(),
-            oci::Digest::sha512(EMPTY_SHA512).unwrap()
+            OciDigest::sha512(EMPTY_SHA512).unwrap()
         );
     }
 

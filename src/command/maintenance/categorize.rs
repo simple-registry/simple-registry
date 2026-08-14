@@ -11,20 +11,19 @@
 
 use std::str::FromStr;
 
+use angos_oci::{Algorithm, Digest, UploadSessionId};
 use angos_tx_engine::{
     INTENT_BODIES_PREFIX, INTENT_LOG_PREFIX, LOCK_OBJECTS_PREFIX, PROBE_KEY_PREFIX,
 };
 
+use crate::command::maintenance::action::LOST_AND_FOUND_PREFIX;
 use crate::{
     jobs::{JobState, Queue, store::JOBS_ROOT},
-    oci::{Algorithm, Digest, UploadSessionId},
     registry::{
         metadata_store::decode_blob_index_shard_namespace,
         path_builder::{BLOBS_ROOT, REPOS_ROOT},
     },
 };
-
-use super::action::LOST_AND_FOUND_PREFIX;
 
 /// Everything a key in either store can be.
 #[derive(Debug, PartialEq, Eq)]
@@ -320,10 +319,11 @@ fn parse_digest(algorithm: &str, hash: &str) -> Option<Digest> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use angos_oci::{Namespace, Tag};
+
+    use crate::command::maintenance::categorize::*;
     use crate::{
         jobs::store::{LockKey, job_failed_path, job_lock_key_index_path, job_pending_path},
-        oci::{Namespace, Tag},
         registry::{
             metadata_store::LinkKind,
             path_builder::{

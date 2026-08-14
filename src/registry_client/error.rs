@@ -18,6 +18,8 @@ pub enum Error {
     ManifestBodyTooLarge { limit: usize },
     #[error("the operation is unsupported by the remote registry")]
     Unsupported,
+    #[error("the remote registry cannot satisfy the requested range")]
+    RangeNotSatisfiable,
     #[error("{0}")]
     Internal(String),
 }

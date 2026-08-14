@@ -3,12 +3,12 @@ use std::{num::TryFromIntError, string::FromUtf8Error};
 use cel_interpreter::SerializationError;
 use hyper::{header::InvalidHeaderValue, http::uri::InvalidUri};
 use sha2::digest::common::hazmat::DeserializeStateError;
+use tracing::warn;
 
+use angos_oci::{Error as OciError, http_range};
 use angos_tx_engine::{StorageError, error::Error as TxError, lock};
 
-use crate::{
-    configuration, jobs::store as job_store, oci, policy, registry::cache, registry_client,
-};
+use crate::{configuration, jobs::store as job_store, policy, registry::cache, registry_client};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -192,15 +192,34 @@ impl From<registry_client::Error> for Error {
                 Error::ManifestBodyTooLarge { limit }
             }
             registry_client::Error::Unsupported => Error::Unsupported,
+            registry_client::Error::RangeNotSatisfiable => Error::RangeNotSatisfiable,
             registry_client::Error::Internal(msg) => Error::Internal(msg),
         }
     }
 }
 
-// `oci::Error` routes to `NameInvalid`: preserve that semantic.
-impl From<oci::Error> for Error {
-    fn from(_: oci::Error) -> Self {
+// A malformed range and an unservable one are both a 416 to the client.
+impl From<http_range::Error> for Error {
+    fn from(_: http_range::Error) -> Self {
+        Error::RangeNotSatisfiable
+    }
+}
+
+// `OciError` routes to `NameInvalid`: preserve that semantic.
+impl From<OciError> for Error {
+    fn from(_: OciError) -> Self {
         Error::NameInvalid
+    }
+}
+
+impl Error {
+    /// Maps a manifest parse or ingress-validation failure to the code the OCI
+    /// spec gives a malformed manifest. The blanket `From<OciError>` above
+    /// answers `NameInvalid` instead, so every manifest body goes through here
+    /// to keep one error shape.
+    pub fn manifest_invalid(error: &OciError) -> Self {
+        warn!("Rejecting manifest: {error}");
+        Error::ManifestInvalid(error.to_string())
     }
 }
 
@@ -219,7 +238,7 @@ mod tests {
     use chrono::DateTime;
     use x509_parser::error::X509Error;
 
-    use super::*;
+    use crate::registry::error::*;
 
     #[test]
     fn from_io_error_preserves_source() {
@@ -296,7 +315,7 @@ mod tests {
 
     #[test]
     fn from_oci_error_routes_to_name_invalid() {
-        let err: Error = oci::Error::InvalidDigest("bad digest".to_string()).into();
+        let err: Error = OciError::InvalidDigest("bad digest".to_string()).into();
         assert!(matches!(err, Error::NameInvalid));
     }
 

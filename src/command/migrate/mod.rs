@@ -23,6 +23,7 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use tracing::{debug, info, warn};
 
+use angos_oci::{Digest, Manifest, MediaType};
 use angos_tx_engine::{
     error::Error as TxError, executor::DEFAULT_RETRY_BUDGET, store::Store, transaction::Mutation,
 };
@@ -30,10 +31,7 @@ use angos_tx_engine::{
 use crate::{
     command::bootstrap,
     configuration::Configuration,
-    oci::{Digest, MediaType},
-    registry::{
-        self, blob_store::BlobStore, metadata_store::LinkMetadata, path_builder, recover_media_type,
-    },
+    registry::{self, blob_store::BlobStore, metadata_store::LinkMetadata, path_builder},
 };
 
 mod error;
@@ -113,14 +111,19 @@ fn serves_manifest(key: &str) -> bool {
 }
 
 /// The media type for a served-manifest link's target, recovered from its stored
-/// body. `None` for a non-manifest link (layer, config, referrer, index) or an
-/// unreadable body, in which case the serving path recovers it on each read.
+/// body: its own `mediaType`, else the one its shape implies, so a manifest GET
+/// never lacks the `Content-Type` the OCI spec requires. `None` for a
+/// non-manifest link (layer, config, referrer, index) or an unreadable body, in
+/// which case the serving path recovers it on each read.
 async fn link_media_type(blob_store: &BlobStore, key: &str, target: &Digest) -> Option<MediaType> {
     if !serves_manifest(key) {
         return None;
     }
     match blob_store.read(target).await {
-        Ok(body) => Some(recover_media_type(&body)),
+        Ok(body) => Some(Manifest::from_slice(&body).as_ref().map_or_else(
+            |_| MediaType::oci_manifest(),
+            Manifest::described_media_type,
+        )),
         Err(error) => {
             warn!(
                 "Cannot read manifest {target} for link {key} to recover its media type: {error}"
@@ -341,19 +344,17 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
+    use angos_oci::{Namespace, Tag};
     use angos_storage::{
         Error as StorageError, ObjectStore,
         test_util::{HookedStore, StoreHook, StoreOp},
     };
 
-    use super::*;
-    use crate::{
-        oci::{Namespace, Tag},
-        registry::{
-            metadata_store::LinkKind,
-            test_utils::{
-                FSRegistryTestCase, RegistryTestCase, metadata_store_over_cached, put_link_raw,
-            },
+    use crate::command::migrate::*;
+    use crate::registry::{
+        metadata_store::LinkKind,
+        test_utils::{
+            FSRegistryTestCase, RegistryTestCase, metadata_store_over_cached, put_link_raw,
         },
     };
 
@@ -460,6 +461,36 @@ mod tests {
             Some(MediaType::new(OCI_MANIFEST).unwrap()),
             "a migrated tag link must recover its media type from the body"
         );
+    }
+
+    /// A body that will not parse still gets a `Content-Type`: the OCI image
+    /// manifest type, rather than a link left typeless.
+    #[tokio::test]
+    async fn migrate_types_an_unparseable_manifest_body_as_an_image_manifest() {
+        let test_case = FSRegistryTestCase::new();
+        let metadata_store = test_case.metadata_store();
+        let blob_store = test_case.blob_store();
+        let namespace = Namespace::new("migrate-repo").unwrap();
+        let link = LinkKind::Tag(Tag::new("latest").unwrap());
+        let body = Bytes::from_static(b"not a manifest");
+        let target = Digest::sha256_of_bytes(&body);
+        blob_store.put_blob(&target, body).await.unwrap();
+
+        put_link_raw(
+            metadata_store.store(),
+            &namespace,
+            &link,
+            target.to_string().as_bytes(),
+        )
+        .await;
+
+        let report = migrate_links(metadata_store.store(), &blob_store, false)
+            .await
+            .unwrap();
+        assert_eq!(report.migrated, 1);
+
+        let migrated = metadata_store.read_link(&namespace, &link).await.unwrap();
+        assert_eq!(migrated.media_type, Some(MediaType::oci_manifest()));
     }
 
     #[tokio::test]

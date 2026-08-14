@@ -5,14 +5,20 @@ use serde::Deserialize;
 use tokio::task;
 use tracing::{instrument, warn};
 
+use angos_oci::http_range::RequestRange;
+use angos_oci::request::{
+    GetBlobRequest, GetManifestRequest, GetReferrersRequest, HeadBlobRequest, HeadManifestRequest,
+};
+use angos_oci::response::{ManifestHeadResponse, ManifestResponse};
+use angos_oci::{Descriptor, Digest, Error as OciError, MediaRange, Namespace, Reference};
+
 pub use crate::registry_client::RegistryClientConfig;
 use crate::{
     cache::Cache,
     configuration::RegexPattern,
-    oci::{Digest, Error as OciError, MediaRange, Namespace, Reference},
     policy::{AccessPolicyConfig, RetentionPolicy, RetentionPolicyConfig, SystemClock},
-    registry::{Error, blob_store::BoxedReader},
-    registry_client::{FetchedManifest, ManifestHead, RegistryClient},
+    registry::Error,
+    registry_client::{FetchedBlob, RegistryClient},
     replication::{ReplicationDownstream, ReplicationDownstreamConfig},
 };
 
@@ -196,6 +202,11 @@ async fn build_downstreams(
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Config {
+    /// The registry namespace this repository mirrors, as a client spells it in
+    /// the `?ns=` proxy parameter (`docker.io`). A pull naming it is served from
+    /// this repository whatever path it asks for; without it `?ns=` selects
+    /// nothing and the local prefix alone decides.
+    pub namespace: Option<String>,
     #[serde(default)]
     pub upstream: Vec<RegistryClientConfig>,
     #[serde(default)]
@@ -226,6 +237,9 @@ impl Config {
 
 pub struct Repository {
     pub name: Namespace,
+    /// The registry namespace this repository mirrors, which is the `?ns=`
+    /// value it answers to. Distinct from `name`, the local prefix it owns.
+    pub namespace: Option<String>,
     pub upstreams: Vec<Upstream>,
     pub replication: Vec<ReplicationDownstream>,
     pub retention_policy: RetentionPolicy,
@@ -277,6 +291,13 @@ impl Repository {
 
         Ok(Self {
             name,
+            // Lowercased once here: `ns` names a host, and a host is
+            // case-insensitive, so the resolver never has to care.
+            namespace: config
+                .namespace
+                .as_deref()
+                .filter(|namespace| !namespace.is_empty())
+                .map(str::to_ascii_lowercase),
             upstreams,
             replication,
             retention_policy,
@@ -315,28 +336,68 @@ impl Repository {
     ) -> Result<(Digest, u64), Error> {
         self.try_upstreams(namespace, Error::BlobUnknown, |upstream| {
             Box::pin(async move {
-                let location = upstream
+                let remote = upstream.remote(namespace)?;
+                Ok(upstream
                     .client
-                    .get_blob_path(upstream.remote(namespace)?.as_ref(), digest);
-                Ok(upstream.client.head_blob(accepted_types, &location).await?)
+                    .head_blob(HeadBlobRequest {
+                        namespace: remote,
+                        digest: digest.clone(),
+                        accepted_types: accepted_types.to_vec(),
+                    })
+                    .await?)
             })
         })
         .await
     }
 
+    /// Lists a subject's referrers on the first upstream that answers, so a
+    /// pull-through namespace can advertise what the upstream holds alongside
+    /// what it cached.
+    #[instrument(skip(self))]
+    pub async fn list_referrers(
+        &self,
+        namespace: &Namespace,
+        digest: &Digest,
+    ) -> Result<Vec<Descriptor>, Error> {
+        self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
+            Box::pin(async move {
+                let remote = upstream.remote(namespace)?;
+                Ok(upstream
+                    .client
+                    .list_referrers(GetReferrersRequest {
+                        namespace: remote,
+                        digest: digest.clone(),
+                        artifact_type: None,
+                        last: None,
+                    })
+                    .await?)
+            })
+        })
+        .await
+    }
+
+    /// Streams a blob from the first upstream that serves it, forwarding the
+    /// client's `Range` when there is one.
     #[instrument(skip(self))]
     pub async fn get_blob(
         &self,
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         digest: &Digest,
-    ) -> Result<(u64, BoxedReader), Error> {
+        range: Option<RequestRange>,
+    ) -> Result<FetchedBlob, Error> {
         self.try_upstreams(namespace, Error::BlobUnknown, |upstream| {
             Box::pin(async move {
-                let location = upstream
+                let remote = upstream.remote(namespace)?;
+                Ok(upstream
                     .client
-                    .get_blob_path(upstream.remote(namespace)?.as_ref(), digest);
-                Ok(upstream.client.get_blob(accepted_types, &location).await?)
+                    .get_blob(GetBlobRequest {
+                        namespace: remote,
+                        digest: digest.clone(),
+                        accepted_types: accepted_types.to_vec(),
+                        range,
+                    })
+                    .await?)
             })
         })
         .await
@@ -348,15 +409,17 @@ impl Repository {
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: &Reference,
-    ) -> Result<ManifestHead, Error> {
+    ) -> Result<ManifestHeadResponse, Error> {
         self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
             Box::pin(async move {
-                let location = upstream
-                    .client
-                    .get_manifest_path(upstream.remote(namespace)?.as_ref(), reference);
+                let remote = upstream.remote(namespace)?;
                 Ok(upstream
                     .client
-                    .head_manifest(accepted_types, &location)
+                    .head_manifest(HeadManifestRequest {
+                        namespace: remote,
+                        reference: reference.clone(),
+                        accepted_types: accepted_types.to_vec(),
+                    })
                     .await?)
             })
         })
@@ -369,15 +432,17 @@ impl Repository {
         accepted_types: &[MediaRange],
         namespace: &Namespace,
         reference: &Reference,
-    ) -> Result<FetchedManifest, Error> {
+    ) -> Result<ManifestResponse, Error> {
         self.try_upstreams(namespace, Error::ManifestUnknown, |upstream| {
             Box::pin(async move {
-                let location = upstream
-                    .client
-                    .get_manifest_path(upstream.remote(namespace)?.as_ref(), reference);
+                let remote = upstream.remote(namespace)?;
                 Ok(upstream
                     .client
-                    .get_manifest(accepted_types, &location)
+                    .get_manifest(GetManifestRequest {
+                        namespace: remote,
+                        reference: reference.clone(),
+                        accepted_types: accepted_types.to_vec(),
+                    })
                     .await?)
             })
         })
@@ -395,9 +460,10 @@ mod tests {
         matchers::{method, path},
     };
 
+    use angos_oci::{Digest, Namespace, Reference, Tag};
+
     use crate::{
         cache,
-        oci::{Digest, Namespace, Reference, Tag},
         registry::{
             Error,
             manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
@@ -747,11 +813,12 @@ mod tests {
             ResponseTemplate::new(200).set_body_bytes(blob_content),
         )
         .await;
-        let result = repo.get_blob(&[], &namespace, &digest).await;
+        let result = repo.get_blob(&[], &namespace, &digest, None).await;
         assert!(result.is_ok());
 
-        let (size, mut reader) = result.unwrap();
-        assert_eq!(size, blob_content.len() as u64);
+        let fetched = result.unwrap();
+        assert_eq!(fetched.length, blob_content.len() as u64);
+        let mut reader = fetched.reader;
 
         let mut buffer = Vec::new();
         AsyncReadExt::read_to_end(&mut reader, &mut buffer)
@@ -947,11 +1014,12 @@ mod tests {
         .unwrap();
         let namespace = Namespace::new("local/repo").unwrap();
 
-        let result = repo.get_blob(&[], &namespace, &digest).await;
+        let result = repo.get_blob(&[], &namespace, &digest, None).await;
         assert!(result.is_ok());
 
-        let (size, mut reader) = result.unwrap();
-        assert_eq!(size, blob_content.len() as u64);
+        let fetched = result.unwrap();
+        assert_eq!(fetched.length, blob_content.len() as u64);
+        let mut reader = fetched.reader;
 
         let mut buffer = Vec::new();
         AsyncReadExt::read_to_end(&mut reader, &mut buffer)
@@ -985,7 +1053,7 @@ mod tests {
         .unwrap();
         let namespace = Namespace::new("local/repo").unwrap();
 
-        let result = repo.get_blob(&[], &namespace, &digest).await;
+        let result = repo.get_blob(&[], &namespace, &digest, None).await;
         assert!(result.is_err());
         match result {
             Err(Error::BlobUnknown) => (),

@@ -173,6 +173,12 @@ password = "$argon2id$v=19$m=16,t=2,p=1$MTIzNDU2Nzg$lurg6dYCXXrJP3zaFwu35w" # te
 #repository_filter = ["^production$"]
 
 [repository."nginx"]
+# Registry namespace this repository mirrors, as a client names it in the `?ns=`
+# proxy parameter (OCI distribution spec, "Registry Proxying"). With it set,
+# `GET /v2/library/nginx/...?ns=docker.io` is served from here, so containerd and
+# friends need no path prefix. Unset, `?ns=` selects nothing and the local prefix
+# alone decides. Pulls only: a write naming it keeps the namespace it spelled out.
+#namespace = "docker.io"
 
 [repository."nginx".access_policy]
 default = "allow"

@@ -1,7 +1,7 @@
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use hyper::{
-    HeaderMap, Response, StatusCode,
+    Response, StatusCode,
     header::{HeaderName, HeaderValue},
 };
 use tokio::{select, time::sleep};
@@ -26,7 +26,9 @@ pub mod s3_connection;
 #[cfg(test)]
 pub mod test_utils;
 pub mod upload;
-pub mod version;
+
+use angos_oci::server;
+use angos_oci::{Namespace, Reference, Tag};
 
 use crate::{
     cache,
@@ -42,7 +44,6 @@ use crate::{
         runner::execute_one,
         store::{JobHandler, JobStore},
     },
-    oci::{Namespace, Reference, Tag},
     registry::{
         blob_store::BlobStore, metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
@@ -53,31 +54,12 @@ pub use admin::{
     DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
     ListUploadsRequest, RetryJobRequest,
 };
-pub use blob::{BlobRange, DeleteBlobRequest, GetBlobRequest, HeadBlobRequest};
 use blob_ownership::BlobOwnership;
-pub use content_discovery::{GetReferrersRequest, ListCatalogRequest, ListTagsRequest};
 pub use error::Error;
-pub use manifest::{
-    DeleteManifestRequest, GetManifestRequest, HeadManifestRequest, ParsedManifestDigests,
-    PutManifestRequest, parse_manifest_digests, recover_media_type,
-};
 pub use repository::Repository;
-pub use upload::{
-    BlobMount, CompleteUploadRequest, DeleteUploadRequest, GetUploadRequest, MountBlobRequest,
-    PatchUploadRequest, StartUploadRequest,
-};
 
-/// The OCI wire vocabulary: header names the registry emits on its responses,
-/// shared with the transport client that reads them back. `from_static` is a
-/// `const fn` requiring lowercase, so a malformed name fails the build rather
-/// than a request; HTTP header names are case-insensitive on the wire.
-pub const DOCKER_CONTENT_DIGEST: HeaderName = HeaderName::from_static("docker-content-digest");
-pub const DOCKER_UPLOAD_UUID: HeaderName = HeaderName::from_static("docker-upload-uuid");
-pub const OCI_SUBJECT: HeaderName = HeaderName::from_static("oci-subject");
-pub const OCI_TAG: HeaderName = HeaderName::from_static("oci-tag");
-pub const OCI_FILTERS_APPLIED: HeaderName = HeaderName::from_static("oci-filters-applied");
-pub const DOCKER_DISTRIBUTION_API_VERSION: HeaderName =
-    HeaderName::from_static("docker-distribution-api-version");
+/// Angos's own response header, alongside the distribution API's own names in
+/// [`angos_oci::header`].
 pub const X_POWERED_BY: HeaderName = HeaderName::from_static("x-powered-by");
 
 #[allow(clippy::struct_excessive_bools)]
@@ -167,11 +149,7 @@ impl fmt::Debug for Registry {
 /// The OCI API version this registry speaks, served on `/v2/`. The handshake
 /// reads no registry state, only the version the protocol pins.
 pub fn api_version() -> Result<Response<ResponseBody>, Error> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        DOCKER_DISTRIBUTION_API_VERSION,
-        HeaderValue::from_static("registry/2.0"),
-    );
+    let mut headers = server::api_version_headers();
     headers.insert(X_POWERED_BY, HeaderValue::from_static("Angos"));
 
     Ok(build_response(
@@ -326,6 +304,12 @@ impl Registry {
         Ok(())
     }
 
+    /// The repository mirroring `ns`, the registry namespace a proxying client
+    /// names in `?ns=`. `None` when no repository claims it.
+    pub fn repository_for_ns(&self, ns: &str) -> Option<&Repository> {
+        self.resolver.resolve_ns(ns)
+    }
+
     #[instrument]
     pub fn get_repository_for_namespace(
         &self,
@@ -473,8 +457,6 @@ impl Drop for Registry {
 
 #[cfg(test)]
 mod in_process_replication_tests {
-    use crate::metrics_provider::init_for_tests;
-    use crate::registry::manifest::DispatchTarget;
     use std::{sync::Arc, time::Duration};
 
     use tempfile::TempDir;
@@ -484,14 +466,18 @@ mod in_process_replication_tests {
         matchers::{method, path},
     };
 
+    use angos_oci::header::DOCKER_CONTENT_DIGEST;
+    use angos_oci::{Namespace, Tag};
+
+    use crate::metrics_provider::init_for_tests;
+    use crate::registry::manifest::DispatchTarget;
     use crate::{
         jobs::{
             Queue,
             store::{JobEnvelope, JobStore},
         },
-        oci::{Namespace, Tag},
         registry::{
-            DOCKER_CONTENT_DIGEST, Registry, RegistryConfig, Repository,
+            Registry, RegistryConfig, Repository,
             blob_store::BlobStore,
             metadata_store::MetadataStore,
             test_utils::{
@@ -714,12 +700,12 @@ mod in_process_replication_tests {
 mod immutable_tag_tests {
     use std::{collections::HashMap, sync::Arc};
 
+    use angos_oci::{Namespace, Reference, Tag};
     use angos_storage::{MemoryObjectStore, ObjectStore};
 
-    use super::{Registry, RegistryConfig};
+    use crate::registry::{Registry, RegistryConfig};
     use crate::{
         configuration::RegexPattern,
-        oci::{Namespace, Reference, Tag},
         registry::{
             blob_store::BlobStore,
             repository::Repository,
@@ -829,8 +815,10 @@ mod immutable_tag_tests {
 
 #[cfg(test)]
 mod api_version_tests {
-    use super::{DOCKER_DISTRIBUTION_API_VERSION, X_POWERED_BY, api_version};
+    use angos_oci::header::DOCKER_DISTRIBUTION_API_VERSION;
+
     use crate::registry::test_utils::response_header;
+    use crate::registry::{X_POWERED_BY, api_version};
 
     #[test]
     fn api_version_announces_the_v2_protocol() {

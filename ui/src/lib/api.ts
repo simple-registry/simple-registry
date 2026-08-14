@@ -8,6 +8,7 @@ export interface Descriptor {
 	mediaType: string;
 	digest: string;
 	size: number;
+	artifactType?: string;
 	platform?: Platform;
 	annotations?: Record<string, string>;
 }
@@ -39,8 +40,14 @@ export interface ManifestEntry {
 	tags: string[];
 	parents?: ParentRef[];
 	referrers?: ReferrerInfo[];
+	referrers_next?: string;
 	pushed_at?: string;
 	last_pulled_at?: string;
+}
+
+export interface ReferrersPage {
+	referrers: ReferrerInfo[];
+	next?: string;
 }
 
 export interface UploadEntry {
@@ -173,19 +180,21 @@ async function postAction(url: string): Promise<string | null> {
 }
 
 export async function fetchRepositories(): Promise<FetchResult<RepositoriesResponse>> {
-	return fetchJson<RepositoriesResponse>('/_ext/_repositories');
+	return fetchJson<RepositoriesResponse>('/v2/_angos/repositories/list');
 }
 
 export async function fetchNamespaces(repository: string): Promise<FetchResult<NamespacesResponse>> {
-	return fetchJson<NamespacesResponse>(`/_ext/${repository}/_namespaces`);
+	return fetchJson<NamespacesResponse>(
+		`/v2/_angos/namespaces/list?repository=${encodeURIComponent(repository)}`
+	);
 }
 
 export async function fetchRevisions(namespace: string): Promise<FetchResult<RevisionsResponse>> {
-	return fetchJson<RevisionsResponse>(`/_ext/${namespace}/_revisions`);
+	return fetchJson<RevisionsResponse>(`/v2/${namespace}/_angos/revisions/list`);
 }
 
 export async function fetchUploads(namespace: string): Promise<FetchResult<UploadsResponse>> {
-	return fetchJson<UploadsResponse>(`/_ext/${namespace}/_uploads`);
+	return fetchJson<UploadsResponse>(`/v2/${namespace}/_angos/uploads/list`);
 }
 
 function jobsQuery(queue: JobQueue, n: number, after?: string): string {
@@ -201,7 +210,7 @@ export async function fetchJobs(
 	n = 100,
 	after?: string
 ): Promise<FetchResult<JobsResponse>> {
-	return fetchJson<JobsResponse>(`/_ext/_jobs?${jobsQuery(queue, n, after)}`);
+	return fetchJson<JobsResponse>(`/v2/_angos/jobs/list?${jobsQuery(queue, n, after)}`);
 }
 
 export async function fetchFailedJobs(
@@ -209,11 +218,11 @@ export async function fetchFailedJobs(
 	n = 100,
 	after?: string
 ): Promise<FetchResult<FailedJobsResponse>> {
-	return fetchJson<FailedJobsResponse>(`/_ext/_jobs/failed?${jobsQuery(queue, n, after)}`);
+	return fetchJson<FailedJobsResponse>(`/v2/_angos/jobs/failed?${jobsQuery(queue, n, after)}`);
 }
 
 export async function retryJob(queue: JobQueue, storageKey: string): Promise<string | null> {
-	return postAction(`/_ext/_jobs/failed/${encodeURIComponent(storageKey)}/retry?queue=${queue}`);
+	return postAction(`/v2/_angos/jobs/failed?queue=${queue}&key=${encodeURIComponent(storageKey)}`);
 }
 
 export async function deleteJob(
@@ -221,7 +230,9 @@ export async function deleteJob(
 	state: JobState,
 	storageKey: string
 ): Promise<string | null> {
-	return deleteResource(`/_ext/_jobs/${state}/${encodeURIComponent(storageKey)}?queue=${queue}`);
+	return deleteResource(
+		`/v2/_angos/jobs/${state}?queue=${queue}&key=${encodeURIComponent(storageKey)}`
+	);
 }
 
 export interface ManifestResult {
@@ -243,6 +254,40 @@ export async function fetchManifest(namespace: string, reference: string): Promi
 		return { manifest, digest, error: null };
 	} catch (e) {
 		return { manifest: null, digest: null, error: e instanceof Error ? e.message : 'Request failed' };
+	}
+}
+
+// The `last` cursor of a `Link: <...>; rel="next"` header, absent when the
+// listing is exhausted and no such header is sent. The target is resolved
+// against the request's own URL, since the registry advertises it as a path.
+function nextCursor(response: Response): string | undefined {
+	const target = response.headers.get('Link')?.match(/<([^>]*)>/)?.[1];
+	if (!target) return undefined;
+	return new URL(target, response.url).searchParams.get('last') ?? undefined;
+}
+
+// One page of a subject's referrers, resuming from `last` when given. The
+// registry sizes the page; the endpoint takes no page-size parameter.
+export async function fetchReferrers(
+	namespace: string,
+	digest: string,
+	last?: string
+): Promise<FetchResult<ReferrersPage>> {
+	const params = new URLSearchParams(last ? { last } : {});
+	try {
+		const response = await fetch(`/v2/${namespace}/referrers/${digest}?${params}`);
+		if (!response.ok) {
+			return { data: null, error: `HTTP ${response.status}` };
+		}
+		const index: { manifests?: Descriptor[] } = await response.json();
+		const referrers = (index.manifests ?? []).map(descriptor => ({
+			digest: descriptor.digest,
+			artifactType: descriptor.artifactType,
+			annotations: descriptor.annotations
+		}));
+		return { data: { referrers, next: nextCursor(response) }, error: null };
+	} catch (e) {
+		return { data: null, error: e instanceof Error ? e.message : 'Request failed' };
 	}
 }
 

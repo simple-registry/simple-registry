@@ -1,10 +1,10 @@
 use std::{collections::HashSet, io::Cursor, sync::Arc, time::Duration};
 
-use angos_storage::{
-    Error as StorageError, ObjectStore,
-    test_util::{HookedStore, StoreHook, StoreOp},
-};
 use futures_util::future::join_all;
+use hyper::{
+    StatusCode,
+    header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION},
+};
 use serde_json::json;
 use tokio::time::sleep;
 use wiremock::{
@@ -12,18 +12,20 @@ use wiremock::{
     matchers::{method, path},
 };
 
-use super::*;
-use hyper::{
-    StatusCode,
-    header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION},
+use angos_oci::header::OCI_TAG;
+use angos_oci::request::{DeleteBlobRequest, PutManifestRequest};
+use angos_oci::{Algorithm, MediaType, Namespace, Tag};
+use angos_storage::{
+    Error as StorageError, ObjectStore,
+    test_util::{HookedStore, StoreHook, StoreOp},
 };
 
+use crate::registry::manifest::*;
 use crate::{
     cache,
     command::server::Error as ServerError,
-    oci::{Algorithm, MediaType, Namespace, Tag},
     registry::{
-        DeleteBlobRequest, Error, OCI_TAG, Registry,
+        Error, Registry,
         blob_ownership::BlobOwnership,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation},
         path_builder::{self, blob_path},
@@ -227,8 +229,8 @@ async fn an_unconfigured_namespace_round_trips() {
                     namespace: namespace.clone(),
                     reference: tag,
                     accepted_types: vec![MediaRange::from(media_type)],
-                    allow_redirect: false,
                 },
+                false,
             )
             .await
             .unwrap();
@@ -304,9 +306,9 @@ async fn accept_put_manifest_by_sha512_digest_with_tag_params_creates_tags() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Digest(digest.clone()),
-                mime_type: media_type.clone(),
+                content_type: Some(media_type.clone()),
                 tags: vec![Tag::new("1.2.3").unwrap(), Tag::new("latest").unwrap()],
                 source_ts: None,
             },
@@ -359,9 +361,9 @@ async fn accept_put_manifest_by_tag_ignores_tag_params() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("v1").unwrap()),
-                mime_type: media_type.clone(),
+                content_type: Some(media_type.clone()),
                 tags: vec![Tag::new("ignored").unwrap()],
                 source_ts: None,
             },
@@ -599,9 +601,9 @@ async fn accept_put_manifest_honors_reference_validation_flag() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
-                mime_type: media_type.clone(),
+                content_type: Some(media_type.clone()),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -618,9 +620,9 @@ async fn accept_put_manifest_honors_reference_validation_flag() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -665,9 +667,9 @@ async fn permissive_push_does_not_grant_read_of_unowned_referenced_blob() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &attacker,
+                namespace: attacker.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -725,9 +727,9 @@ async fn permissive_push_does_not_grant_read_of_unowned_child_manifest() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &attacker,
+                namespace: attacker.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -793,9 +795,9 @@ async fn permissive_push_of_owned_references_yields_a_pullable_manifest() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -1493,60 +1495,59 @@ async fn concurrent_same_digest_pushes_keep_upload_ownership() {
 }
 
 #[test]
-fn test_parse_manifest_digests() {
-    let (content, media_type) = create_raw_test_manifest();
-    let digests = parse_manifest_digests(&content, Some(&media_type)).unwrap();
+fn revision_links_cover_the_config_layers_and_subject_of_a_manifest() {
+    let revision = Digest::sha256_of_bytes(b"revision");
+    let subject =
+        Digest::sha256("9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba").unwrap();
+    let config =
+        Digest::sha256("1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef").unwrap();
+    let layer =
+        Digest::sha256("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890").unwrap();
 
+    let (content, _) = create_raw_test_manifest();
+    let manifest = Manifest::from_slice(&content).unwrap();
     assert_eq!(
-        digests.media_type.as_ref(),
-        Some(&media_type),
-        "the parse must surface the body's declared mediaType"
-    );
-    assert!(digests.subject.is_none());
-    assert_eq!(
-        digests.config.unwrap().to_string(),
-        "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-    );
-    assert_eq!(
-        digests.layers[0].to_string(),
-        "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
-    );
-
-    let (content, media_type) = create_raw_test_manifest_with_subject();
-    let digests = parse_manifest_digests(&content, Some(&media_type)).unwrap();
-
-    assert_eq!(
-        digests.subject.unwrap().to_string(),
-        "sha256:9876543210fedcba9876543210fedcba9876543210fedcba9876543210fedcba"
-    );
-    assert_eq!(
-        digests.config.unwrap().to_string(),
-        "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-    );
-    assert_eq!(
-        digests.layers[0].to_string(),
-        "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        link_plan::revision_links(&manifest, &revision),
+        vec![
+            (LinkKind::Config(config.clone()), config.clone()),
+            (LinkKind::Layer(layer.clone()), layer.clone()),
+        ]
     );
 
-    let wrong_media_type = MediaType::new("application/wrong.media.type").unwrap();
-    assert!(parse_manifest_digests(&content, Some(&wrong_media_type)).is_err());
+    let (content, _) = create_raw_test_manifest_with_subject();
+    let manifest = Manifest::from_slice(&content).unwrap();
+    assert_eq!(
+        link_plan::revision_links(&manifest, &revision),
+        vec![
+            (LinkKind::Config(config.clone()), config),
+            (LinkKind::Layer(layer.clone()), layer),
+            (
+                LinkKind::Referrer {
+                    subject,
+                    referrer: revision.clone(),
+                },
+                revision,
+            ),
+        ],
+        "a subject-bearing manifest also links the referrer back to its subject"
+    );
 }
 
 #[tokio::test]
 async fn test_malformed_json_yields_same_error_shape() {
     let malformed = b"not json";
 
-    let parse_err = parse_manifest_digests(malformed, None)
-        .err()
-        .expect("expected Err from parse_manifest_digests");
+    let parse_err = Manifest::from_slice(malformed)
+        .map_err(|e| Error::manifest_invalid(&e))
+        .expect_err("expected Err from a malformed body");
     match parse_err {
         crate::registry::Error::ManifestInvalid(s) => {
             assert!(
                 s.starts_with("invalid manifest JSON:"),
-                "parse_manifest_digests error should start with 'invalid manifest JSON:'; got: {s}"
+                "the parse error should start with 'invalid manifest JSON:'; got: {s}"
             );
         }
-        other => panic!("expected ManifestInvalid from parse_manifest_digests, got {other:?}"),
+        other => panic!("expected ManifestInvalid from the parse error mapper, got {other:?}"),
     }
 
     // Parse failure is detected before any blob/metadata store access, so a
@@ -1575,16 +1576,27 @@ async fn test_malformed_json_yields_same_error_shape() {
     }
 }
 
-#[test]
-fn parse_manifest_digests_media_type_mismatch_returns_manifest_invalid() {
+/// A body whose `mediaType` contradicts the `Content-Type` it was pushed under
+/// is refused before any store access, as a manifest the client got wrong.
+#[tokio::test]
+async fn put_manifest_media_type_mismatch_returns_manifest_invalid() {
     let (content, _) = create_raw_test_manifest();
     let wrong_type = MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap();
+    let test_case = FSRegistryTestCase::new();
 
-    let err = parse_manifest_digests(&content, Some(&wrong_type))
+    let err = test_case
+        .registry()
+        .put_manifest(
+            &Namespace::new("test-repo").unwrap(),
+            &Reference::Tag(Tag::new("latest").unwrap()),
+            Some(&wrong_type),
+            &content,
+        )
+        .await
         .err()
         .expect("expected error on media type mismatch");
     assert!(
-        matches!(err, crate::registry::Error::ManifestInvalid(_)),
+        matches!(err, Error::ManifestInvalid(_)),
         "expected ManifestInvalid for media type mismatch, got: {err:?}"
     );
 }
@@ -1600,9 +1612,11 @@ async fn accept_put_manifest_rejects_body_above_limit() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
-                mime_type: MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap(),
+                content_type: Some(
+                    MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap(),
+                ),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -1620,7 +1634,7 @@ async fn accept_put_manifest_rejects_body_above_limit() {
 }
 
 #[test]
-fn parse_manifest_digests_empty_layers_succeeds_with_empty_vec() {
+fn a_manifest_without_layers_links_only_its_config() {
     let body = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
@@ -1633,15 +1647,14 @@ fn parse_manifest_digests_empty_layers_succeeds_with_empty_vec() {
     }))
     .unwrap();
 
-    let digests =
-        parse_manifest_digests(&body, None).expect("empty layers must parse successfully");
-    assert!(digests.layers.is_empty(), "layers must be empty");
-    assert!(digests.config.is_some(), "config must be present");
+    let manifest = Manifest::from_slice(&body).expect("empty layers must parse successfully");
+    let links = link_plan::referenced_links(&manifest, &Digest::sha256_of_bytes(b"revision"));
+    assert_eq!(links.len(), 1, "only the config is referenced: {links:?}");
+    assert!(matches!(links[0].0, LinkKind::Config(_)));
 }
 
 #[test]
-fn parse_manifest_digests_only_subject_succeeds() {
-    // A manifest carrying only a subject (no config/layers) must parse successfully.
+fn a_subject_only_manifest_links_nothing_but_its_referrer_back_link() {
     let body = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
         "subject": {
@@ -1652,15 +1665,16 @@ fn parse_manifest_digests_only_subject_succeeds() {
     }))
     .unwrap();
 
-    let digests = parse_manifest_digests(&body, None).expect("subject-only manifest must parse");
-    assert!(digests.subject.is_some(), "subject must be populated");
-    assert!(digests.config.is_none());
-    assert!(digests.layers.is_empty());
-    assert!(digests.manifests.is_empty());
+    let revision = Digest::sha256_of_bytes(b"revision");
+    let manifest = Manifest::from_slice(&body).expect("subject-only manifest must parse");
+    assert!(link_plan::referenced_links(&manifest, &revision).is_empty());
+    let links = link_plan::revision_links(&manifest, &revision);
+    assert_eq!(links.len(), 1, "only the referrer back-link: {links:?}");
+    assert!(matches!(links[0].0, LinkKind::Referrer { .. }));
 }
 
 #[test]
-fn parse_manifest_digests_index_manifest_populates_manifests_vec() {
+fn an_index_links_each_of_its_children() {
     // An OCI image index carries a `manifests` array, no `layers`.
     let body = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
@@ -1682,14 +1696,14 @@ fn parse_manifest_digests_index_manifest_populates_manifests_vec() {
     }))
     .unwrap();
 
-    let digests = parse_manifest_digests(&body, None).expect("index manifest must parse");
-    assert_eq!(
-        digests.manifests.len(),
-        2,
-        "both child manifests must be collected"
-    );
-    assert!(digests.layers.is_empty());
-    assert!(digests.config.is_none());
+    let revision = Digest::sha256_of_bytes(b"revision");
+    let manifest = Manifest::from_slice(&body).expect("index manifest must parse");
+    let links = link_plan::referenced_links(&manifest, &revision);
+    assert_eq!(links.len(), 2, "both children must be linked: {links:?}");
+    assert!(links.iter().all(|(link, target)| matches!(
+        link,
+        LinkKind::Manifest { index, child } if index == &revision && child == target
+    )));
 }
 
 #[tokio::test]
@@ -1717,8 +1731,8 @@ async fn test_handle_get_manifest() {
                     namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new(tag).unwrap()),
                     accepted_types: Vec::new(),
-                    allow_redirect: true,
                 },
+                true,
             )
             .await
             .unwrap();
@@ -1750,9 +1764,9 @@ async fn test_handle_put_manifest() {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new(tag).unwrap()),
-                    mime_type: media_type.clone(),
+                    content_type: Some(media_type.clone()),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -2331,9 +2345,9 @@ async fn seed_tag(registry: &Registry, namespace: &Namespace, tag: &str) -> (Vec
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: media_type.clone(),
+                content_type: Some(media_type.clone()),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -2373,9 +2387,9 @@ async fn accept_put_manifest_stamps_created_at_from_source_ts() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: Some(source_ts),
             },
@@ -2404,9 +2418,9 @@ async fn accept_put_manifest_without_source_ts_stamps_local_clock() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -2436,9 +2450,9 @@ async fn accept_put_manifest_rejects_lww_older_source_ts() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: Some(older),
             },
@@ -2468,9 +2482,9 @@ async fn accept_put_manifest_accepts_lww_newer_source_ts() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: Some(newer),
             },
@@ -2496,9 +2510,9 @@ async fn accept_put_manifest_accepts_lww_equal_source_ts() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: Some(created_at),
             },
@@ -2552,9 +2566,9 @@ async fn accept_put_manifest_lww_equal_ts_tie_breaks_on_digest() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: larger_mt,
+                content_type: Some(larger_mt),
                 tags: Vec::new(),
                 source_ts: Some(ts),
             },
@@ -2567,9 +2581,9 @@ async fn accept_put_manifest_lww_equal_ts_tie_breaks_on_digest() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: smaller_mt,
+                content_type: Some(smaller_mt),
                 tags: Vec::new(),
                 source_ts: Some(ts),
             },
@@ -2599,9 +2613,9 @@ async fn accept_put_manifest_lww_equal_ts_accepts_larger_digest() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: smaller_mt,
+                content_type: Some(smaller_mt),
                 tags: Vec::new(),
                 source_ts: Some(ts),
             },
@@ -2614,9 +2628,9 @@ async fn accept_put_manifest_lww_equal_ts_accepts_larger_digest() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: larger_mt,
+                content_type: Some(larger_mt),
                 tags: Vec::new(),
                 source_ts: Some(ts),
             },
@@ -2678,9 +2692,9 @@ async fn accept_put_manifest_lww_reads_bypass_the_link_cache() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: Some(incoming),
             },
@@ -3056,9 +3070,9 @@ async fn accept_put_manifest_accepts_lww_when_local_absent() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: Some(very_old),
             },
@@ -3081,9 +3095,9 @@ async fn accept_put_manifest_without_source_ts_skips_lww() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -3107,9 +3121,9 @@ async fn accept_put_manifest_digest_reference_skips_lww() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Digest(digest),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: Some(very_old),
             },
@@ -3249,9 +3263,9 @@ async fn same_digest_re_push_preserves_created_at() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new(tag).unwrap()),
-                mime_type: media_type,
+                content_type: Some(media_type),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -3446,13 +3460,13 @@ async fn replication_superseded_maps_to_distinct_oci_code() {
     assert_eq!(superseded.status_code(), hyper::StatusCode::CONFLICT);
     assert_eq!(conflict.status_code(), hyper::StatusCode::CONFLICT);
 
-    let superseded_json = superseded.as_json(None);
-    let conflict_json = conflict.as_json(None);
+    let superseded_json = serde_json::to_value(superseded.error_body(None)).unwrap();
+    let conflict_json = serde_json::to_value(conflict.error_body(None)).unwrap();
     assert_eq!(
         superseded_json["errors"][0]["code"],
         REPLICATION_SUPERSEDED_CODE
     );
-    assert_eq!(conflict_json["errors"][0]["code"], "CONFLICT");
+    assert_eq!(conflict_json["errors"][0]["code"], "DENIED");
     assert_ne!(
         superseded_json["errors"][0]["code"],
         conflict_json["errors"][0]["code"]
@@ -3472,13 +3486,15 @@ mod noop_suppression_tests {
     use chrono::{Duration, Utc};
     use tempfile::TempDir;
 
+    use angos_oci::request::PutManifestRequest;
+    use angos_oci::{Digest, MediaType, Namespace, Reference, Tag};
     use angos_tx_engine::transaction::Transaction;
 
+    use crate::registry::manifest::tests::{create_test_manifest, manifest_with_references};
     use crate::{
         jobs::{Queue, store::JobStore},
-        oci::{Digest, MediaType, Namespace, Reference, Tag},
         registry::{
-            PutManifestRequest, Registry, RegistryConfig,
+            Registry, RegistryConfig,
             metadata_store::{LinkKind, LinkOperation},
             test_utils::{
                 FsTestStack, downstream_client, fs_test_stack, repository_with_downstream,
@@ -3487,8 +3503,6 @@ mod noop_suppression_tests {
         },
         replication::REPLICATION_DELETE_MANIFEST_KIND,
     };
-
-    use super::{create_test_manifest, manifest_with_references};
 
     const REPO: &str = "nginx";
     const NAMESPACE: &str = "nginx";
@@ -3572,9 +3586,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new(tag).unwrap()),
-                    mime_type: media_type.clone(),
+                    content_type: Some(media_type.clone()),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -3599,9 +3613,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new(tag).unwrap()),
-                    mime_type: media_type.clone(),
+                    content_type: Some(media_type.clone()),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -3620,9 +3634,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new(tag).unwrap()),
-                    mime_type: media_type_b,
+                    content_type: Some(media_type_b),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -3651,9 +3665,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Digest(digest.clone()),
-                    mime_type: media_type.clone(),
+                    content_type: Some(media_type.clone()),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -3677,9 +3691,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Digest(digest),
-                    mime_type: media_type,
+                    content_type: Some(media_type),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -3711,9 +3725,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Digest(digest.clone()),
-                    mime_type: media_type.clone(),
+                    content_type: Some(media_type.clone()),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -3738,9 +3752,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Digest(digest.clone()),
-                    mime_type: media_type.clone(),
+                    content_type: Some(media_type.clone()),
                     tags: vec![Tag::new(tag).unwrap()],
                     source_ts: None,
                 },
@@ -3765,9 +3779,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Digest(digest),
-                    mime_type: media_type,
+                    content_type: Some(media_type),
                     tags: vec![Tag::new(tag).unwrap()],
                     source_ts: None,
                 },
@@ -3793,9 +3807,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new(tag).unwrap()),
-                    mime_type: media_type,
+                    content_type: Some(media_type),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -3851,9 +3865,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new(tag).unwrap()),
-                    mime_type: media_type.clone(),
+                    content_type: Some(media_type.clone()),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -3884,9 +3898,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new(tag).unwrap()),
-                    mime_type: media_type,
+                    content_type: Some(media_type),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -3934,9 +3948,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new(tag).unwrap()),
-                    mime_type: media_type,
+                    content_type: Some(media_type),
                     tags: Vec::new(),
                     source_ts: Some(push_ts),
                 },
@@ -3980,9 +3994,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new("latest").unwrap()),
-                    mime_type: media_type,
+                    content_type: Some(media_type),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -4027,9 +4041,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new("latest").unwrap()),
-                    mime_type: media_type,
+                    content_type: Some(media_type),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -4077,9 +4091,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new(tag).unwrap()),
-                    mime_type: media_type.clone(),
+                    content_type: Some(media_type.clone()),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -4093,9 +4107,9 @@ mod noop_suppression_tests {
             .accept_put_manifest(
                 None,
                 PutManifestRequest {
-                    namespace: &namespace,
+                    namespace: namespace.clone(),
                     reference: Reference::Tag(Tag::new(tag).unwrap()),
-                    mime_type: media_type,
+                    content_type: Some(media_type),
                     tags: Vec::new(),
                     source_ts: None,
                 },
@@ -4116,17 +4130,18 @@ mod noop_suppression_tests {
 mod dispatch_replication_tests {
     use std::sync::Arc;
 
-    use crate::metrics_provider::init_for_tests;
-
-    use tempfile::TempDir;
-
     use chrono::{Duration, Utc};
     use regex::Regex;
+    use tempfile::TempDir;
 
-    use super::{DispatchTarget, MISSING_SUBJECT_DIGEST, create_test_manifest_with_subject};
+    use angos_oci::{Digest, Namespace, Reference, Tag};
+
+    use crate::metrics_provider::init_for_tests;
+    use crate::registry::manifest::tests::{
+        DispatchTarget, MISSING_SUBJECT_DIGEST, create_test_manifest_with_subject,
+    };
     use crate::{
         jobs::{Queue, store::JobStore},
-        oci::{Digest, Namespace, Reference, Tag},
         registry::{
             Registry, RegistryConfig, Repository,
             test_utils::{
@@ -4501,9 +4516,9 @@ async fn backdated_source_ts_loses_to_newer_local_tag() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: tag(),
-                mime_type: media_type.clone(),
+                content_type: Some(media_type.clone()),
                 tags: Vec::new(),
                 source_ts: Some(newer_ts),
             },
@@ -4517,9 +4532,9 @@ async fn backdated_source_ts_loses_to_newer_local_tag() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: tag(),
-                mime_type: media_type.clone(),
+                content_type: Some(media_type.clone()),
                 tags: Vec::new(),
                 source_ts: Some(newer_ts - chrono::Duration::seconds(60)),
             },
@@ -4561,9 +4576,9 @@ async fn a_by_tag_push_at_an_immutable_tag_is_refused() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("v1.0.0").unwrap()),
-                mime_type: MediaType::oci_manifest(),
+                content_type: Some(MediaType::oci_manifest()),
                 tags: Vec::new(),
                 source_ts: None,
             },
@@ -4593,9 +4608,9 @@ async fn a_by_digest_push_creating_an_immutable_tag_is_refused() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Digest(digest),
-                mime_type: MediaType::oci_manifest(),
+                content_type: Some(MediaType::oci_manifest()),
                 tags: vec![Tag::new("v1.0.0").unwrap()],
                 source_ts: None,
             },
@@ -4620,9 +4635,9 @@ async fn an_excluded_tag_remains_writable() {
         .accept_put_manifest(
             None,
             PutManifestRequest {
-                namespace: &namespace,
+                namespace: namespace.clone(),
                 reference: Reference::Tag(Tag::new("latest").unwrap()),
-                mime_type: MediaType::oci_manifest(),
+                content_type: Some(MediaType::oci_manifest()),
                 tags: Vec::new(),
                 source_ts: None,
             },

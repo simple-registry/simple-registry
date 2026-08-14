@@ -1,11 +1,10 @@
 use std::collections::VecDeque;
 use std::future::Future;
 
-use angos_storage::Page;
-
-use crate::oci::Namespace;
-
 use futures_util::stream::{FuturesUnordered, StreamExt};
+
+use angos_oci::Namespace;
+use angos_storage::Page;
 
 /// Fan-out for the concurrent namespace walk: up to this many directories are
 /// scanned at once, refilled from the backlog as scans complete, to hide
@@ -145,7 +144,7 @@ pub fn paginate_sorted<T: Clone + ToString + Ord>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::registry::pagination::*;
 
     #[test]
     fn test_paginate_sorted_empty() {

@@ -14,12 +14,10 @@ use chrono::{DateTime, Duration, Utc};
 use futures_util::stream::{self, StreamExt};
 use tracing::warn;
 
+use angos_oci::{Namespace, UploadSessionId};
 use angos_storage::Error as StorageError;
 
-use crate::{
-    oci::{Namespace, UploadSessionId},
-    registry::{Error, blob_store::BlobStore, path_builder},
-};
+use crate::registry::{Error, blob_store::BlobStore, path_builder};
 
 /// Fan-out for the per-upload session-marker probes: each aged upload needs
 /// one independent `head`, so a page's probes run concurrently.
@@ -161,13 +159,14 @@ impl MultipartCleanup for BlobStore {
 mod tests {
     use std::sync::Arc;
 
+    use bytes::Bytes;
+
     use angos_storage::{
         BoxedReader, ByteStream, ChildrenPage, MultipartUploadPage, ObjectMeta, ObjectStore, Page,
         PendingMultipartUpload,
     };
-    use bytes::Bytes;
 
-    use super::*;
+    use crate::registry::blob_store::multipart_cleanup::*;
 
     #[test]
     fn test_is_orphan_recent_upload_is_not_orphan() {

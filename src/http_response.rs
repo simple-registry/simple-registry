@@ -8,33 +8,20 @@ use std::{
     task::{Context, Poll},
 };
 
+use angos_oci::header::APPLICATION_JSON;
 use futures_util::{Stream, StreamExt};
 use http_body_util::{Full, StreamBody};
 use hyper::{
     HeaderMap, Response, StatusCode,
     body::{Bytes, Frame},
-    header::{CONTENT_TYPE, HeaderValue, InvalidHeaderValue},
+    header::CONTENT_TYPE,
     http,
 };
 use serde::Serialize;
 use tokio::io::AsyncRead;
-
-use crate::oci::Digest;
 use tokio_util::io::ReaderStream;
 
 type BytesFrameStream = Pin<Box<dyn Stream<Item = Result<Frame<Bytes>, io::Error>> + Send>>;
-
-pub const APPLICATION_JSON: HeaderValue = HeaderValue::from_static("application/json");
-
-/// A digest is its algorithm plus hex, so this only fails if one ever holds
-/// bytes no header may carry.
-impl TryFrom<&Digest> for HeaderValue {
-    type Error = InvalidHeaderValue;
-
-    fn try_from(digest: &Digest) -> Result<Self, Self::Error> {
-        HeaderValue::try_from(digest.to_string())
-    }
-}
 
 /// The headers of a plain JSON response, the shape most non-OCI endpoints
 /// serve.

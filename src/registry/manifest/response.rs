@@ -1,6 +1,6 @@
 use hyper::HeaderMap;
 
-use crate::oci::{Digest, MediaType};
+use angos_oci::{Digest, MediaType};
 
 pub struct ManifestMeta {
     pub media_type: Option<MediaType>,

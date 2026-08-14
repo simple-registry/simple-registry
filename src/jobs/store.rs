@@ -162,8 +162,10 @@ pub enum Error {
     InvalidLockKey(String),
     #[error("not found")]
     NotFound,
-    #[error("denied: {0}")]
-    Denied(String),
+    /// The job can never succeed; the runner dead-letters it on the spot
+    /// instead of burning its retry budget.
+    #[error("terminal failure: {0}")]
+    Terminal(String),
 }
 
 impl From<StorageError> for Error {

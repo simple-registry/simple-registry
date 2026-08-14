@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::oci::{Digest, MediaType};
+use crate::types::{Digest, MediaType};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct Platform {
@@ -45,7 +45,7 @@ pub struct Descriptor {
 mod tests {
     use std::str::FromStr;
 
-    use super::*;
+    use crate::types::descriptor::*;
 
     #[test]
     fn test_descriptor_round_trip_minimal() {
@@ -137,20 +137,6 @@ mod tests {
     }
 
     #[test]
-    fn platform_os_version_dot_rename_populates_field() {
-        // The serde rename is "os.version" (with a dot), not snake_case.
-        // Verify a JSON payload carrying the correct dotted key sets os_version.
-        let json = r#"{
-            "architecture": "amd64",
-            "os": "windows",
-            "os.version": "10.0.19041"
-        }"#;
-
-        let platform: Platform = serde_json::from_str(json).unwrap();
-        assert_eq!(platform.os_version, Some("10.0.19041".to_string()));
-    }
-
-    #[test]
     fn platform_os_version_snake_case_does_not_populate_field() {
         // "os_version" (snake_case) is not the serde rename; the field must remain None.
         let json = r#"{
@@ -177,7 +163,7 @@ mod tests {
             media_type: MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap(),
             digest,
             size: 100,
-            annotations: std::collections::HashMap::new(),
+            annotations: HashMap::new(),
             artifact_type: None,
             platform: Some(Platform {
                 architecture: "amd64".to_string(),

@@ -12,7 +12,6 @@ mod downstream;
 mod error;
 mod handler;
 mod pipeline;
-mod wire;
 
 pub use crate::replication::config::ReplicationDownstreamConfig;
 pub use crate::replication::downstream::{ReplicationDownstream, ReplicationMode};
@@ -21,4 +20,3 @@ pub use crate::replication::handler::{
     ReplicationJob, ReplicationJobHandler, ReplicationTarget, build_envelope,
     build_prune_delete_envelope, record_reconcile_outcome,
 };
-pub use crate::replication::wire::manifest_accept_types;

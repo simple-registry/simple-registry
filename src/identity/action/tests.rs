@@ -1,8 +1,9 @@
 use std::str::FromStr;
 
-use super::*;
+use angos_oci::{Digest, Namespace, Reference, Tag, UploadSessionId};
+
+use crate::identity::action::*;
 use crate::jobs::{JobState, Queue};
-use crate::oci::{Digest, Namespace, Reference, Tag, UploadSessionId};
 
 const SHA256_EMPTY: &str =
     "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -60,6 +61,7 @@ fn test_action_serialization_cel_compatibility() {
             Action::StartUpload {
                 namespace: ns(),
                 digest: None,
+                digest_algorithm: None,
             },
         ),
         (
@@ -140,6 +142,7 @@ fn test_action_serialization_cel_compatibility() {
                 namespace: ns(),
                 digest: digest(),
                 artifact_type: None,
+                last: None,
             },
         ),
         ("list-revisions", Action::ListRevisions { namespace: ns() }),
@@ -351,6 +354,7 @@ fn test_get_digest() {
         Action::StartUpload {
             namespace: ns(),
             digest: Some(d.clone()),
+            digest_algorithm: None,
         }
         .get_digest(),
         Some(&d)
@@ -359,6 +363,7 @@ fn test_get_digest() {
         Action::StartUpload {
             namespace: ns(),
             digest: None,
+            digest_algorithm: None,
         }
         .get_digest(),
         None
@@ -488,6 +493,7 @@ fn test_is_push() {
         Action::StartUpload {
             namespace: ns(),
             digest: None,
+            digest_algorithm: None,
         }
         .is_push()
     );

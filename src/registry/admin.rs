@@ -10,15 +10,17 @@ use serde::Serialize;
 use tokio::try_join;
 use tracing::instrument;
 
+use angos_oci::request::GetReferrersRequest;
+use angos_oci::{
+    Content, DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
+    MediaType, Namespace, Platform as OciPlatform, Tag, UploadSessionId, namespace_belongs_to,
+};
+
 use crate::{
     configuration::RegexPattern,
     http_response::{ResponseBody, build_response, json_response},
     jobs::store as job_store,
     jobs::{JobState, Queue},
-    oci::{
-        Content, DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
-        MediaType, Namespace, Platform as OciPlatform, Tag, UploadSessionId, namespace_belongs_to,
-    },
     registry::{Error, Registry, metadata_store::LinkKind},
 };
 
@@ -156,6 +158,10 @@ pub struct ManifestEntry {
     parents: Vec<ParentRef>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     referrers: Vec<ReferrerInfo>,
+    /// Where the OCI referrers listing continues, absent once it is exhausted.
+    /// The UI feeds it back to `/v2/{namespace}/referrers/{digest}?last=`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    referrers_next: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pushed_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -746,8 +752,24 @@ impl Registry {
 
         stream::iter(seeds)
             .map(|(digest, tags, parents, mut referrers)| async move {
-                if let Ok(oci_referrers) = self.list_referrers(namespace, &digest, None).await {
-                    referrers.extend(oci_referrers.into_iter().map(ReferrerInfo::from));
+                // One page per manifest, and what this registry holds alone: a
+                // listing that queried the upstream would do so once per
+                // manifest. The fallback-tag lookup stays, a link read that
+                // usually misses: the cursor handed back here is followed
+                // through the OCI referrers endpoint, which merges that index,
+                // so dropping it would hand the client a cursor cut over a
+                // different candidate set. These reads fan out at
+                // `ADMIN_READ_CONCURRENCY` alongside the revision's own.
+                let listing = GetReferrersRequest {
+                    namespace: namespace.clone(),
+                    digest: digest.clone(),
+                    artifact_type: None,
+                    last: None,
+                };
+                let mut referrers_next = None;
+                if let Ok(page) = self.list_referrers(None, &listing).await {
+                    referrers.extend(page.items.into_iter().map(ReferrerInfo::from));
+                    referrers_next = page.next_token;
                 }
 
                 let (pushed_at, last_pulled_at) = self
@@ -761,6 +783,7 @@ impl Registry {
                     tags,
                     parents,
                     referrers,
+                    referrers_next,
                     pushed_at,
                     last_pulled_at,
                 }
@@ -840,25 +863,25 @@ impl Registry {
 mod tests {
     use std::collections::HashMap;
 
-    use super::ListNamespacesRequest;
-    use super::{
+    use bytes::Bytes;
+
+    use angos_oci::{
+        DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest, Namespace,
+        Platform as OciPlatform, Tag, UploadSessionId,
+    };
+
+    use crate::registry::admin::ListNamespacesRequest;
+    use crate::registry::admin::{
         ExtPlatform, analyze_manifest, build_digest_to_tags_map_from_pairs,
         extract_docker_referrer, extract_in_toto_predicate, parent_refs_for,
     };
-    use crate::{
-        oci::{
-            DOCKER_REFERENCE_DIGEST, Descriptor, Digest, IN_TOTO_PREDICATE_TYPE, Manifest,
-            Namespace, Platform as OciPlatform, Tag, UploadSessionId,
-        },
-        registry::{
-            metadata_store::{LinkKind, LinkOperation},
-            test_utils::{
-                FSRegistryTestCase, RegistryTestCase, create_test_blob, for_each_backend,
-                media_type, response_json,
-            },
+    use crate::registry::{
+        metadata_store::{LinkKind, LinkOperation},
+        test_utils::{
+            FSRegistryTestCase, RegistryTestCase, create_test_blob, for_each_backend, media_type,
+            response_json,
         },
     };
-    use bytes::Bytes;
 
     fn digest(hex_suffix: &str) -> Digest {
         // Pad to 64 hex chars with the suffix at the end.
@@ -1230,7 +1253,7 @@ mod tests {
             let upload_only = Namespace::new("test-repo/upload-only").unwrap();
             registry
                 .blob_store
-                .create_upload(&upload_only, &UploadSessionId::generate())
+                .create_upload(&upload_only, &UploadSessionId::generate(), None)
                 .await
                 .unwrap();
 
@@ -1238,7 +1261,7 @@ mod tests {
             create_test_blob(registry, &mixed, b"mixed content").await;
             registry
                 .blob_store
-                .create_upload(&mixed, &UploadSessionId::generate())
+                .create_upload(&mixed, &UploadSessionId::generate(), None)
                 .await
                 .unwrap();
 
@@ -1341,7 +1364,7 @@ mod tests {
         let namespace = Namespace::new("test-repo/upload-only").unwrap();
         registry
             .blob_store
-            .create_upload(&namespace, &UploadSessionId::generate())
+            .create_upload(&namespace, &UploadSessionId::generate(), None)
             .await
             .unwrap();
 

@@ -290,7 +290,7 @@ aws s3 ls s3://my-bucket --summarize --recursive
 Count manifests per namespace of a repository (each entry carries a `manifest_count`):
 
 ```bash
-curl http://localhost:8000/_ext/<repository>/_namespaces | jq
+curl http://localhost:8000/v2/_angos/namespaces/list?repository=<repository> | jq
 ```
 
 ---

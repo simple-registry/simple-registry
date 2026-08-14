@@ -2,10 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{
-    identity::ClientIdentity,
-    oci::{Digest, Namespace, Reference, Tag},
-};
+use angos_oci::{Digest, Namespace, Reference, Tag};
+
+use crate::identity::ClientIdentity;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub enum EventKind {
@@ -334,10 +333,11 @@ impl Event {
 mod tests {
     use serde_json::json;
 
+    use angos_oci::{Digest, Namespace, Reference, Tag};
+
     use crate::{
         event_webhook::event::{Event, EventActor, EventKind, EventSubject},
         identity::ClientIdentity,
-        oci::{Digest, Namespace, Reference, Tag},
     };
 
     const FIXTURE_DIGEST: &str =

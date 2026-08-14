@@ -2,10 +2,9 @@ use std::slice;
 
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
-use crate::{
-    jobs::{JobState, Queue},
-    oci::{Digest, MediaType, Namespace, Reference, Tag, UploadSessionId},
-};
+use angos_oci::{Algorithm, Digest, MediaType, Namespace, Reference, Tag, UploadSessionId};
+
+use crate::jobs::{JobState, Queue};
 
 /// Action represents a parsed HTTP request: both the domain operation (for CEL policies)
 /// and the routing information (for handler dispatch).
@@ -42,6 +41,7 @@ use crate::{
 /// - `last`: Last result marker for pagination
 /// - `artifact_type`: Filter for referrer queries
 /// - `from`: Source repository of a cross-repo `mount-blob`; absent unless `?from=` is given
+/// - `digest_algorithm`: The `?digest-algorithm=` hint of a `start-upload`; absent unless given
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum Action {
@@ -79,6 +79,8 @@ pub enum Action {
         namespace: Namespace,
         #[serde(skip_serializing_if = "Option::is_none")]
         digest: Option<Digest>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        digest_algorithm: Option<Algorithm>,
     },
     /// Cross-repository blob mount (`POST .../blobs/uploads/?mount=<digest>`).
     /// A distinct CEL action from `start-upload` so policies can gate mounts
@@ -159,6 +161,8 @@ pub enum Action {
         digest: Digest,
         #[serde(skip_serializing_if = "Option::is_none")]
         artifact_type: Option<MediaType>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last: Option<String>,
     },
     #[serde(rename = "list-revisions")]
     ListRevisions {
@@ -282,6 +286,49 @@ impl ActionData<'_> {
 }
 
 impl Action {
+    /// The namespace a pull addresses, mutably, so the proxy `?ns=` parameter
+    /// can resolve it to the repository mirroring that registry before
+    /// authorization reads it.
+    ///
+    /// `None` for everything else: the spec defines the parameter on pull
+    /// operations, so a write naming one is left addressing the namespace it
+    /// spelled out.
+    pub fn pull_namespace_mut(&mut self) -> Option<&mut Namespace> {
+        match self {
+            Action::GetBlob { namespace, .. }
+            | Action::HeadBlob { namespace, .. }
+            | Action::GetManifest { namespace, .. }
+            | Action::HeadManifest { namespace, .. }
+            | Action::ListTags { namespace, .. }
+            | Action::GetReferrer { namespace, .. } => Some(namespace),
+            Action::UiAsset { .. }
+            | Action::UiConfig
+            | Action::Token
+            | Action::Healthz
+            | Action::Readyz
+            | Action::Metrics
+            | Action::ApiVersion
+            | Action::ListCatalog { .. }
+            | Action::StartUpload { .. }
+            | Action::MountBlob { .. }
+            | Action::GetUpload { .. }
+            | Action::PatchUpload { .. }
+            | Action::PutUpload { .. }
+            | Action::DeleteUpload { .. }
+            | Action::DeleteBlob { .. }
+            | Action::PutManifest { .. }
+            | Action::DeleteManifest { .. }
+            | Action::ListRevisions { .. }
+            | Action::ListUploads { .. }
+            | Action::ListRepositories
+            | Action::ListNamespaces { .. }
+            | Action::ListJobs { .. }
+            | Action::ListFailedJobs { .. }
+            | Action::RetryJob { .. }
+            | Action::DeleteJob { .. } => None,
+        }
+    }
+
     /// Returns the action name string as used in CEL policies and webhook headers.
     pub fn action_name(&self) -> &'static str {
         match self {
@@ -359,7 +406,9 @@ impl Action {
                 }
             }
 
-            Action::StartUpload { namespace, digest } => ActionData {
+            Action::StartUpload {
+                namespace, digest, ..
+            } => ActionData {
                 namespace: Some(namespace),
                 digest: digest.as_ref(),
                 is_push: true,

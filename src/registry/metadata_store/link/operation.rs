@@ -1,9 +1,8 @@
 //! Public link-mutation operation type.
 
-use crate::{
-    oci::{Descriptor, Digest, MediaType},
-    registry::metadata_store::LinkKind,
-};
+use angos_oci::{Descriptor, Digest, MediaType};
+
+use crate::registry::metadata_store::LinkKind;
 
 /// How a manifest push treats newly-referenced digests the target namespace
 /// does not already own. Enforced inside the link transaction, where the

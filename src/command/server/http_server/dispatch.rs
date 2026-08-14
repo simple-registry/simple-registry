@@ -5,23 +5,28 @@ use hyper::{
 };
 use tracing::instrument;
 
+use crate::registry::content_discovery::ListCatalogRequest;
+use angos_oci::request::{
+    BlobMount, CompleteUploadRequest, DeleteBlobRequest, DeleteManifestRequest,
+    DeleteUploadRequest, GetBlobRequest, GetManifestRequest, GetReferrersRequest, GetUploadRequest,
+    HeadBlobRequest, HeadManifestRequest, ListTagsRequest, MountBlobRequest, PatchUploadRequest,
+    PutManifestRequest, StartUploadRequest, StartUploadTarget,
+};
+
 use crate::{
     command::server::{
         ServerContext,
         error::Error,
         handlers,
         request::{RequestHeaders, incoming_into_async_read},
+        router,
     },
     event_webhook::event::EventActor,
     http_response::ResponseBody,
     identity::{Action, ClientIdentity},
     registry::{
-        self, BlobMount, CompleteUploadRequest, DeleteBlobRequest, DeleteJobRequest,
-        DeleteManifestRequest, DeleteUploadRequest, GetBlobRequest, GetManifestRequest,
-        GetReferrersRequest, GetUploadRequest, HeadBlobRequest, HeadManifestRequest,
-        ListCatalogRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
-        ListTagsRequest, ListUploadsRequest, MountBlobRequest, PatchUploadRequest,
-        PutManifestRequest, RetryJobRequest, StartUploadRequest,
+        self, DeleteJobRequest, ListJobsRequest, ListNamespacesRequest, ListRevisionsRequest,
+        ListUploadsRequest, RetryJobRequest,
     },
 };
 
@@ -80,9 +85,29 @@ async fn dispatch_route<'a>(
             handlers::handle_get_token(token_issuer, identity)
         }
         Action::ApiVersion => Ok(registry::api_version()?),
-        Action::StartUpload { namespace, digest } => Ok(registry
-            .start_upload(StartUploadRequest { namespace, digest })
-            .await?),
+        Action::StartUpload {
+            namespace,
+            digest,
+            digest_algorithm,
+        } => {
+            // A body with no `?digest=` has nothing to verify it against, so it
+            // opens a session and is not read.
+            let content_length = headers.content_length()?;
+            Ok(registry
+                .start_upload(
+                    actor,
+                    StartUploadRequest {
+                        namespace,
+                        digest_algorithm,
+                        target: digest.map(|digest| StartUploadTarget {
+                            digest,
+                            content_length,
+                        }),
+                    },
+                    incoming_into_async_read(incoming),
+                )
+                .await?)
+        }
         Action::MountBlob {
             namespace,
             digest,
@@ -97,14 +122,7 @@ async fn dispatch_route<'a>(
                 .await?;
 
             Ok(registry
-                .mount_blob(
-                    actor,
-                    MountBlobRequest {
-                        namespace,
-                        mount,
-                        source,
-                    },
-                )
+                .mount_blob(actor, MountBlobRequest { namespace, mount }, source)
                 .await?)
         }
         Action::GetUpload {
@@ -124,7 +142,7 @@ async fn dispatch_route<'a>(
                 PatchUploadRequest {
                     namespace,
                     session_id,
-                    start_offset: headers.range(CONTENT_RANGE)?.map(|range| range.start),
+                    content_range: headers.chunk_range(CONTENT_RANGE)?,
                     content_length: headers.content_length()?,
                 },
                 incoming_into_async_read(incoming),
@@ -138,10 +156,10 @@ async fn dispatch_route<'a>(
             .complete_upload(
                 actor,
                 CompleteUploadRequest {
-                    namespace: &namespace,
-                    session_id: &session_id,
-                    digest: &digest,
-                    start_offset: headers.range(CONTENT_RANGE)?.map(|range| range.start),
+                    namespace,
+                    session_id,
+                    digest,
+                    content_range: headers.chunk_range(CONTENT_RANGE)?,
                     content_length: headers.content_length()?,
                 },
                 incoming_into_async_read(incoming),
@@ -164,8 +182,8 @@ async fn dispatch_route<'a>(
                     digest,
                     accepted_types: headers.accepted_content_types(),
                     range: headers.blob_range()?,
-                    allow_redirect: !headers.redirect_suppressed(),
                 },
+                !headers.redirect_suppressed(),
             )
             .await?),
         Action::HeadBlob { namespace, digest } => Ok(registry
@@ -188,8 +206,8 @@ async fn dispatch_route<'a>(
                     namespace,
                     reference,
                     accepted_types: headers.accepted_content_types(),
-                    allow_redirect: !headers.redirect_suppressed(),
                 },
+                !headers.redirect_suppressed(),
             )
             .await?),
         Action::HeadManifest {
@@ -204,7 +222,7 @@ async fn dispatch_route<'a>(
             .await?),
         Action::PutManifest { namespace, target } => {
             let (reference, tags) = target.into_parts();
-            let mime_type = headers.content_type()?.ok_or(Error::BadRequest(
+            let content_type = headers.content_type()?.ok_or(Error::BadRequest(
                 "No Content-Type header provided".to_string(),
             ))?;
 
@@ -212,9 +230,9 @@ async fn dispatch_route<'a>(
                 .accept_put_manifest(
                     actor,
                     PutManifestRequest {
-                        namespace: &namespace,
+                        namespace,
                         reference,
-                        mime_type,
+                        content_type: Some(content_type),
                         tags,
                         source_ts: headers.source_timestamp(),
                     },
@@ -239,11 +257,13 @@ async fn dispatch_route<'a>(
             namespace,
             digest,
             artifact_type,
+            last,
         } => Ok(registry
             .get_referrers(GetReferrersRequest {
                 namespace,
                 digest,
                 artifact_type,
+                last,
             })
             .await?),
         Action::ListCatalog { n, last } => Ok(registry
@@ -294,6 +314,12 @@ async fn dispatch_route<'a>(
 /// conformance requires `400` from a manifest `PUT` whose reference parses as
 /// neither a tag nor a digest.
 pub fn handle_unknown_route(parts: &Parts) -> Result<Response<ResponseBody>, Error> {
+    // The referrers endpoint is the exception: the spec requires `400` from a
+    // read whose digest or filter is malformed, not the miss below.
+    if router::is_invalid_referrers_request(&parts.method, &parts.uri) {
+        return Err(registry::Error::DigestInvalid.into());
+    }
+
     if [Method::GET, Method::HEAD].contains(&parts.method) {
         let msg = format!("unknown route: {} {}", parts.method, parts.uri);
         Err(Error::NotFound(msg))

@@ -275,6 +275,49 @@ client_private_key = "/certs/client.key"
 
 ---
 
+## Upstream Selection and the `ns` Parameter
+
+Which upstream serves a request is decided by configuration. The leading segments of a namespace name
+the `[repository]` entry that owns it: `docker-hub/library/nginx` is served by
+`[repository."docker-hub"]`, that entry's `upstream` list is what gets consulted, and the prefix is
+stripped before the request is forwarded (`library/nginx` upstream). A namespace no entry matches has
+no upstream and is served from local content alone.
+
+A mirroring client such as containerd does not prefix its paths. It requests the upstream's own path
+and names the registry it believes it is addressing in the `ns` query parameter, which the
+distribution spec defines for exactly this in [Registry
+Proxying](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#registry-proxying):
+optional on pull operations, naming the host component of the repository name the client used.
+Declare that namespace on the repository mirroring it:
+
+```toml
+[repository."docker-hub"]
+namespace = "docker.io"
+
+[[repository."docker-hub".upstream]]
+url = "https://registry-1.docker.io"
+```
+
+`GET /v2/library/nginx/manifests/latest?ns=docker.io` is then served from `docker-hub`, exactly as
+`GET /v2/docker-hub/library/nginx/manifests/latest` is, and the response carries
+`OCI-Namespace: docker.io`. Content cached either way lands under `docker-hub/library/nginx`, so the
+two spellings share one cache, and an access policy sees that namespace whichever the client used.
+
+The parameter scopes pulls, which is what the spec defines it for: a manifest or blob `GET`/`HEAD`, a
+tag listing, a referrers listing. A write naming it is left addressing the namespace it spelled out,
+so `ns` cannot put client-pushed content into a mirror's cache.
+
+The parameter selects among configured repositories and nothing else. An `ns` no repository declares
+as its `namespace` is ignored: the request is served as it arrived and no `OCI-Namespace` is echoed. The spec permits
+that ("a registry MAY choose to ignore the `ns` query parameter") and pairs the header with use, so
+its absence is what tells the client the namespace it named had no effect. A client cannot make Angos fetch from a
+registry the configuration does not already name, and each upstream's content stays under its own
+prefix rather than colliding with another's.
+
+Two repositories declaring the same `namespace` is refused at startup: the parameter must resolve to one.
+
+---
+
 ## Token Caching
 
 Upstream authentication tokens are cached:

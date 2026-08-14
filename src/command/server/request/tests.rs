@@ -1,54 +1,59 @@
 use chrono::{TimeZone, Utc};
 use hyper::{
     Request,
-    header::{ACCEPT, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderName, HeaderValue, RANGE},
+    header::{ACCEPT, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderName, RANGE},
 };
+
+use angos_oci::http_range::{ByteWindow, RequestRange};
+use angos_oci::{MediaRange, MediaType};
 
 use crate::{
     command::server::{
         error::Error,
-        request::{ByteRange, RequestHeaders, X_ANGOS_NO_REDIRECT},
+        request::{RequestHeaders, X_ANGOS_NO_REDIRECT},
     },
-    http_response::ResponseBody,
-    oci::{MediaRange, MediaType},
-    registry::BlobRange,
     registry_client::X_ANGOS_SOURCE_TIMESTAMP,
 };
 
+/// end-5 spells a chunk's window `<start>-<end>`. The `bytes=` unit is the
+/// `Range` header's, so a chunk carrying one is malformed rather than tolerated.
 #[test]
-fn test_range_with_bytes_prefix() {
+fn test_chunk_range_refuses_the_range_unit() {
     let request = Request::builder()
         .header(RANGE, "bytes=0-499")
         .body(())
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let range = RequestHeaders::new(&parts.headers)
-        .range(RANGE)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        range,
-        ByteRange {
-            start: 0,
-            end: Some(499)
-        }
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
+    assert!(
+        matches!(result, Err(Error::RangeNotSatisfiable(_))),
+        "a bytes=-prefixed chunk window must be refused, got: {result:?}"
     );
 }
 
+/// RFC 9110 has a `Range` the server cannot parse, or whose unit it does not
+/// know, ignored: the whole blob is served, as for a multi-range request. Only
+/// a range that parses and cannot be met is a `416`.
 #[test]
-fn test_blob_range_double_bytes_prefix_rejected() {
-    let request = Request::builder()
-        .header(RANGE, "bytes=bytes=0-5")
-        .body(())
-        .unwrap();
-    let (parts, ()) = request.into_parts();
+fn test_unreadable_blob_range_is_ignored() {
+    for value in [
+        // A doubled unit, an absent one, an inverted window, and a
+        // non-numeric bound.
+        "bytes=bytes=0-5",
+        "100-200",
+        "bytes=500-499",
+        "bytes=abc-100",
+        "items=0-5",
+    ] {
+        let request = Request::builder().header(RANGE, value).body(()).unwrap();
+        let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).blob_range();
-    assert!(
-        result.is_err(),
-        "a doubled bytes= prefix must be rejected, got: {result:?}"
-    );
+        let range = RequestHeaders::new(&parts.headers)
+            .blob_range()
+            .expect("an unreadable range must not fail the request");
+        assert!(range.is_none(), "'{value}' must be ignored, got: {range:?}");
+    }
 }
 
 #[test]
@@ -65,10 +70,10 @@ fn test_blob_range_with_bytes_prefix() {
         .unwrap();
     assert_eq!(
         range,
-        BlobRange::FromTo {
+        RequestRange::FromTo(ByteWindow {
             start: 0,
-            end: Some(499)
-        }
+            end: Some(499),
+        })
     );
 }
 
@@ -86,10 +91,10 @@ fn test_blob_range_unit_is_case_insensitive() {
         .unwrap();
     assert_eq!(
         range,
-        BlobRange::FromTo {
+        RequestRange::FromTo(ByteWindow {
             start: 0,
-            end: Some(499)
-        }
+            end: Some(499),
+        })
     );
 }
 
@@ -102,14 +107,14 @@ fn test_range_without_bytes_prefix() {
     let (parts, ()) = request.into_parts();
 
     let range = RequestHeaders::new(&parts.headers)
-        .range(RANGE)
+        .chunk_range(RANGE)
         .unwrap()
         .unwrap();
     assert_eq!(
         range,
-        ByteRange {
+        ByteWindow {
             start: 100,
-            end: Some(200)
+            end: Some(200),
         }
     );
 }
@@ -123,48 +128,29 @@ fn test_content_range_without_bytes_prefix() {
     let (parts, ()) = request.into_parts();
 
     let range = RequestHeaders::new(&parts.headers)
-        .range(CONTENT_RANGE)
+        .chunk_range(CONTENT_RANGE)
         .unwrap()
         .unwrap();
     assert_eq!(
         range,
-        ByteRange {
+        ByteWindow {
             start: 100,
-            end: Some(200)
+            end: Some(200),
         }
     );
 }
 
+/// end-5 pins a chunk's window to `^[0-9]+-[0-9]+$`, so a value naming no last
+/// byte is refused rather than read as an open-ended one.
 #[test]
-fn test_blob_range_requires_bytes_prefix() {
-    let request = Request::builder()
-        .header(RANGE, "100-200")
-        .body(())
-        .unwrap();
+fn test_chunk_range_refuses_an_open_ended_window() {
+    let request = Request::builder().header(RANGE, "0-").body(()).unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).blob_range();
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_range_no_end() {
-    let request = Request::builder()
-        .header(RANGE, "bytes=0-")
-        .body(())
-        .unwrap();
-    let (parts, ()) = request.into_parts();
-
-    let range = RequestHeaders::new(&parts.headers)
-        .range(RANGE)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        range,
-        ByteRange {
-            start: 0,
-            end: None
-        }
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
+    assert!(
+        matches!(result, Err(Error::RangeNotSatisfiable(_))),
+        "an open-ended chunk window must be refused, got: {result:?}"
     );
 }
 
@@ -180,7 +166,7 @@ fn test_blob_range_suffix_range() {
         .blob_range()
         .unwrap()
         .unwrap();
-    assert_eq!(range, BlobRange::Suffix(499));
+    assert_eq!(range, RequestRange::Suffix(499));
 }
 
 #[test]
@@ -195,26 +181,26 @@ fn test_blob_range_zero_suffix_range() {
         .blob_range()
         .unwrap()
         .unwrap();
-    assert_eq!(range, BlobRange::Suffix(0));
+    assert_eq!(range, RequestRange::Suffix(0));
 }
 
 #[test]
 fn test_range_large_numbers() {
     let request = Request::builder()
-        .header(RANGE, "bytes=1000000000-2000000000")
+        .header(RANGE, "1000000000-2000000000")
         .body(())
         .unwrap();
     let (parts, ()) = request.into_parts();
 
     let range = RequestHeaders::new(&parts.headers)
-        .range(RANGE)
+        .chunk_range(RANGE)
         .unwrap()
         .unwrap();
     assert_eq!(
         range,
-        ByteRange {
+        ByteWindow {
             start: 1_000_000_000,
-            end: Some(2_000_000_000)
+            end: Some(2_000_000_000),
         }
     );
 }
@@ -224,7 +210,9 @@ fn test_range_missing_header() {
     let request = Request::builder().body(()).unwrap();
     let (parts, ()) = request.into_parts();
 
-    let range = RequestHeaders::new(&parts.headers).range(RANGE).unwrap();
+    let range = RequestHeaders::new(&parts.headers)
+        .chunk_range(RANGE)
+        .unwrap();
     assert_eq!(range, None);
 }
 
@@ -232,20 +220,20 @@ fn test_range_missing_header() {
 fn test_range_custom_header_name() {
     let custom_header = HeaderName::from_static("x-custom-range");
     let request = Request::builder()
-        .header(&custom_header, "bytes=50-100")
+        .header(&custom_header, "50-100")
         .body(())
         .unwrap();
     let (parts, ()) = request.into_parts();
 
     let range = RequestHeaders::new(&parts.headers)
-        .range(custom_header)
+        .chunk_range(custom_header)
         .unwrap()
         .unwrap();
     assert_eq!(
         range,
-        ByteRange {
+        ByteWindow {
             start: 50,
-            end: Some(100)
+            end: Some(100),
         }
     );
 }
@@ -253,12 +241,12 @@ fn test_range_custom_header_name() {
 #[test]
 fn test_range_start_greater_than_end() {
     let request = Request::builder()
-        .header(RANGE, "bytes=500-499")
+        .header(RANGE, "500-499")
         .body(())
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).range(RANGE);
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
     match result.unwrap_err() {
         Error::RangeNotSatisfiable(msg) => {
@@ -276,7 +264,7 @@ fn test_range_missing_start_is_invalid_for_start_end_parser() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).range(RANGE);
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
     match result.unwrap_err() {
         Error::RangeNotSatisfiable(msg) => {
@@ -294,7 +282,7 @@ fn test_range_invalid_format() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).range(RANGE);
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
     match result.unwrap_err() {
         Error::RangeNotSatisfiable(msg) => {
@@ -324,7 +312,7 @@ fn test_range_non_numeric_start() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).range(RANGE);
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
 }
 
@@ -336,7 +324,7 @@ fn test_range_non_numeric_end() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).range(RANGE);
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
     match result.unwrap_err() {
         Error::RangeNotSatisfiable(msg) => {
@@ -356,100 +344,8 @@ fn test_range_overflow() {
         .unwrap();
     let (parts, ()) = request.into_parts();
 
-    let result = RequestHeaders::new(&parts.headers).range(RANGE);
+    let result = RequestHeaders::new(&parts.headers).chunk_range(RANGE);
     assert!(result.is_err());
-}
-
-#[test]
-fn test_accepted_content_types_multiple() {
-    let request = Request::builder()
-        .header(ACCEPT, HeaderValue::from_static("application/json"))
-        .header(ACCEPT, HeaderValue::from_static("application/xml"))
-        .header(ACCEPT, HeaderValue::from_static("text/plain"));
-    let request = request.body(ResponseBody::empty()).unwrap();
-    let (parts, _) = request.into_parts();
-
-    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
-    assert_eq!(
-        result,
-        vec!["application/json", "application/xml", "text/plain"]
-    );
-}
-
-#[test]
-fn test_accepted_content_types_single() {
-    let request = Request::builder()
-        .header(ACCEPT, "application/json")
-        .body(())
-        .unwrap();
-    let (parts, ()) = request.into_parts();
-
-    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
-    assert_eq!(result, vec!["application/json"]);
-}
-
-#[test]
-fn test_accepted_content_types_empty() {
-    let request = Request::builder().body(()).unwrap();
-    let (parts, ()) = request.into_parts();
-
-    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
-    assert!(result.is_empty());
-}
-
-#[test]
-fn test_accepted_content_types_with_quality() {
-    let request = Request::builder()
-        .header(ACCEPT, "application/json;q=0.9")
-        .header(ACCEPT, "text/html;q=0.8")
-        .body(())
-        .unwrap();
-    let (parts, ()) = request.into_parts();
-
-    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
-    assert_eq!(result, vec!["application/json;q=0.9", "text/html;q=0.8"]);
-}
-
-#[test]
-fn test_accepted_content_types_splits_commas_and_orders_by_quality() {
-    let request = Request::builder()
-        .header(ACCEPT, "text/plain;q=0.2, application/json;q=0.9")
-        .header(ACCEPT, "application/xml")
-        .body(())
-        .unwrap();
-    let (parts, ()) = request.into_parts();
-
-    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
-    assert_eq!(
-        result,
-        vec![
-            "application/xml",
-            "application/json;q=0.9",
-            "text/plain;q=0.2"
-        ]
-    );
-}
-
-#[test]
-fn test_accepted_content_types_keeps_original_order_for_equal_quality() {
-    let request = Request::builder()
-        .header(ACCEPT, "application/json, application/xml;q=1.0")
-        .header(ACCEPT, "text/plain")
-        .body(())
-        .unwrap();
-    let (parts, ()) = request.into_parts();
-
-    let accepted = RequestHeaders::new(&parts.headers).accepted_content_types();
-    let result: Vec<&str> = accepted.iter().map(MediaRange::as_str).collect();
-    assert_eq!(
-        result,
-        vec!["application/json", "application/xml;q=1.0", "text/plain"]
-    );
 }
 
 #[test]

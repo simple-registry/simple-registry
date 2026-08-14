@@ -122,8 +122,9 @@ mod tests {
 
     use tokio::io::AsyncReadExt;
 
-    use super::*;
-    use crate::oci::Algorithm;
+    use angos_oci::Algorithm;
+
+    use crate::registry::blob_store::hashing_reader::*;
 
     const HELLO_SHA256: &str =
         "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";

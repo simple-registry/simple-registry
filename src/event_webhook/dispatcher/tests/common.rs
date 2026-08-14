@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use reqwest::Client;
 use url::Url;
 
+use angos_oci::{Digest, Namespace, Reference};
+
 use crate::{
     configuration::RegexPattern,
     event_webhook::{
@@ -11,7 +13,6 @@ use crate::{
         event::{Event, EventKind},
     },
     metrics_provider,
-    oci::{Digest, Namespace, Reference},
     secret::Secret,
 };
 

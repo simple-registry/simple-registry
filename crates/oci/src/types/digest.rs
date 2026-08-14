@@ -4,21 +4,24 @@ use std::{
     str::FromStr,
 };
 
+use hyper::header::{HeaderValue, InvalidHeaderValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256, Sha512};
 
-use crate::oci::Error;
+use crate::types::Error;
 
 /// OCI digest algorithm: `sha256` (canonical) and `sha512` (optional) are the
 /// only two the image-spec registers.
 /// REF: <https://github.com/opencontainers/image-spec/blob/v1.0.1/descriptor.md#digests>
-#[derive(Debug, Clone, Copy, Ord, Eq, Hash, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, Ord, Eq, Hash, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "&'static str")]
 pub enum Algorithm {
     Sha256,
     Sha512,
 }
 
 impl Algorithm {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Algorithm::Sha256 => "sha256",
@@ -28,6 +31,7 @@ impl Algorithm {
 
     /// Length of the lowercase-hex encoding of this algorithm's hash
     /// (64 for sha256, 128 for sha512).
+    #[must_use]
     pub fn hex_len(self) -> usize {
         match self {
             Algorithm::Sha256 => 64,
@@ -36,8 +40,23 @@ impl Algorithm {
     }
 
     /// Every algorithm angos supports, canonical (sha256) first.
+    #[must_use]
     pub fn supported_algorithms() -> &'static [Algorithm] {
         &[Algorithm::Sha256, Algorithm::Sha512]
+    }
+}
+
+impl From<Algorithm> for &'static str {
+    fn from(algorithm: Algorithm) -> Self {
+        algorithm.as_str()
+    }
+}
+
+impl TryFrom<String> for Algorithm {
+    type Error = Error;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
     }
 }
 
@@ -74,20 +93,28 @@ pub struct Digest {
 }
 
 impl Digest {
+    #[must_use]
     pub fn algorithm(&self) -> Algorithm {
         self.algorithm
     }
 
+    #[must_use]
     pub fn hash(&self) -> &str {
         &self.hash
     }
 
+    #[must_use]
     pub fn hash_prefix(&self) -> &str {
         &self.hash[0..2]
     }
 
     /// Build a digest from a bare hash (no `algorithm:` prefix), validating it
     /// is exactly `algorithm.hex_len()` lowercase hex characters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `hash` is not the algorithm's exact length in
+    /// lowercase hex.
     pub fn with_algorithm(algorithm: Algorithm, hash: impl Into<Box<str>>) -> Result<Self, Error> {
         let hash = hash.into();
         validate_hex(algorithm, &hash)?;
@@ -95,11 +122,19 @@ impl Digest {
     }
 
     /// Build a sha256 digest from a bare hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `hash` is not 64 lowercase hex characters.
     pub fn sha256(hash: impl Into<Box<str>>) -> Result<Self, Error> {
         Self::with_algorithm(Algorithm::Sha256, hash)
     }
 
     /// Build a sha512 digest from a bare hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `hash` is not 128 lowercase hex characters.
     pub fn sha512(hash: impl Into<Box<str>>) -> Result<Self, Error> {
         Self::with_algorithm(Algorithm::Sha512, hash)
     }
@@ -196,9 +231,19 @@ impl Serialize for Digest {
     }
 }
 
+/// A digest is its algorithm plus hex, so this only fails if one ever holds
+/// bytes no header may carry.
+impl TryFrom<&Digest> for HeaderValue {
+    type Error = InvalidHeaderValue;
+
+    fn try_from(digest: &Digest) -> Result<Self, Self::Error> {
+        HeaderValue::try_from(digest.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::types::digest::*;
 
     const VALID_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const VALID_HASH_512: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -226,51 +271,29 @@ mod tests {
         assert_eq!(Algorithm::Sha512.to_string(), "sha512");
     }
 
+    /// The image spec spells both the algorithm and the encoded hash in
+    /// lowercase, and fixes the hash length per algorithm.
     #[test]
-    fn test_parse_invalid() {
-        assert!(Digest::from_str("sha256:invalid").is_err());
-    }
-
-    #[test]
-    fn test_reject_uppercase_algorithm() {
-        assert!(Digest::from_str(&format!("SHA256:{VALID_HASH}")).is_err());
-    }
-
-    #[test]
-    fn test_reject_mixed_case_algorithm() {
-        assert!(Digest::from_str(&format!("Sha256:{VALID_HASH}")).is_err());
-    }
-
-    #[test]
-    fn test_reject_uppercase_hex() {
-        assert!(
-            Digest::from_str(
-                "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn test_reject_mixed_case_hex() {
-        assert!(
-            Digest::from_str(
-                "sha256:0123456789aBcDeF0123456789abcdef0123456789abcdef0123456789abcdef"
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn test_sha512_rejects_sha256_length() {
-        // 64 hex chars is a valid sha256 hash but too short for sha512.
-        assert!(Digest::from_str(&format!("sha512:{VALID_HASH}")).is_err());
-    }
-
-    #[test]
-    fn test_sha256_rejects_sha512_length() {
-        // 128 hex chars is a valid sha512 hash but too long for sha256.
-        assert!(Digest::from_str(&format!("sha256:{VALID_HASH_512}")).is_err());
+    fn rejects_what_the_digest_grammar_forbids() {
+        let upper_hex = "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mixed_hex = "sha256:0123456789aBcDeF0123456789abcdef0123456789abcdef0123456789abcdef";
+        for value in [
+            "sha256:invalid".to_string(),
+            // The algorithm is lowercase, and so is the encoded hash.
+            format!("SHA256:{VALID_HASH}"),
+            format!("Sha256:{VALID_HASH}"),
+            upper_hex.to_string(),
+            mixed_hex.to_string(),
+            // 64 hex chars is a valid sha256 hash but too short for sha512;
+            // 128 is a valid sha512 but too long for sha256.
+            format!("sha512:{VALID_HASH}"),
+            format!("sha256:{VALID_HASH_512}"),
+        ] {
+            assert!(
+                Digest::from_str(&value).is_err(),
+                "'{value}' is not a digest the image spec defines"
+            );
+        }
     }
 
     #[test]

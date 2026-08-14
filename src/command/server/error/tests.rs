@@ -1,140 +1,288 @@
+use std::io;
+
+use angos_oci::response::ErrorCode;
 use hyper::StatusCode;
 
-use crate::{command::server::Error, event_webhook, registry};
+use crate::{
+    command::server::Error, configuration, event_webhook, registry,
+    registry_client::REPLICATION_SUPERSEDED_CODE,
+};
 
-#[test]
-fn test_error_display() {
-    let error = Error::Initialization("Some init error".to_string());
-    assert_eq!(format!("{error}"), "Some init error");
-
-    let error = Error::Execution("Some init error".to_string());
-    assert_eq!(format!("{error}"), "Some init error");
-
-    let error = Error::Unauthorized("Invalid token".to_string());
-    assert_eq!(format!("{error}"), "Unauthorized: Invalid token");
-
-    let error = Error::BadRequest("Malformed request".to_string());
-    assert_eq!(format!("{error}"), "Bad Request: Malformed request");
-
-    let error = Error::RangeNotSatisfiable("Invalid range '-'".to_string());
-    assert_eq!(
-        format!("{error}"),
-        "Range Not Satisfiable: Invalid range '-'"
-    );
-
-    let error = Error::NotFound("Item not found".to_string());
-    assert_eq!(format!("{error}"), "Not Found: Item not found");
-
-    let error = Error::ProviderUnavailable("OIDC provider unavailable".to_string());
-    assert_eq!(
-        format!("{error}"),
-        "Provider unavailable: OIDC provider unavailable"
-    );
-
-    let error = Error::Internal("Unexpected error".to_string());
-    assert_eq!(
-        format!("{error}"),
-        "Internal Server Error: Unexpected error"
-    );
-
-    let error = Error::Custom {
-        status_code: StatusCode::BAD_GATEWAY,
-        code: "UPSTREAM_ERROR".to_string(),
-        msg: Some("Failed to connect".to_string()),
-    };
-    assert_eq!(
-        format!("{error}"),
-        "Error 502 Bad Gateway: UPSTREAM_ERROR - Failed to connect"
-    );
-
-    let error = Error::Custom {
-        status_code: StatusCode::SERVICE_UNAVAILABLE,
-        code: "SERVICE_UNAVAILABLE".to_string(),
-        msg: None,
-    };
-    assert_eq!(
-        format!("{error}"),
-        "Error 503 Service Unavailable: SERVICE_UNAVAILABLE"
-    );
+/// Whether this error's `code` must come from the set the spec fixes for a 4XX.
+/// Exhaustive on purpose: a variant added later does not compile until it is
+/// answered for here, which is what stops a new mapping from quietly inventing
+/// a code clients are not meant to see. The one `false` that is still a 4XX is
+/// the replication 409, pinned by [`the_replication_code_is_the_only_exception`].
+fn owes_a_spec_code(error: &registry::Error) -> bool {
+    match error {
+        registry::Error::BlobUnknown
+        | registry::Error::BlobReferenced
+        | registry::Error::BlobUploadUnknown
+        | registry::Error::DigestInvalid
+        | registry::Error::ManifestBlobUnknown
+        | registry::Error::ManifestBodyTooLarge { .. }
+        | registry::Error::BlobBodyTooLarge { .. }
+        | registry::Error::ManifestInvalid(_)
+        | registry::Error::ManifestUnknown
+        | registry::Error::NameInvalid
+        | registry::Error::NameUnknown
+        | registry::Error::NotFound
+        | registry::Error::Unauthorized(_)
+        | registry::Error::Denied(_)
+        | registry::Error::Unsupported
+        | registry::Error::RangeNotSatisfiable
+        | registry::Error::Conflict(_) => true,
+        registry::Error::ReplicationSuperseded(_)
+        | registry::Error::Initialization(_)
+        | registry::Error::EventDelivery(_)
+        | registry::Error::Internal(_)
+        | registry::Error::Corrupt(_)
+        | registry::Error::Configuration(_)
+        | registry::Error::Cache(_)
+        | registry::Error::Io(_)
+        | registry::Error::Http(_)
+        | registry::Error::Serde(_)
+        | registry::Error::PolicyExecution(_)
+        | registry::Error::InvalidHeader(_)
+        | registry::Error::InvalidUri(_)
+        | registry::Error::Serialization(_) => false,
+    }
 }
 
-#[test]
-fn test_as_json_with_request_id() {
-    let error = Error::BadRequest("Missing parameter".to_string());
-    let request_id = Some("req-12345".to_string());
-    let json = error.as_json(request_id.as_ref());
-
-    assert_eq!(json["errors"][0]["code"], "BAD_REQUEST");
-    assert_eq!(json["errors"][0]["message"], "Missing parameter");
-    assert_eq!(json["errors"][0]["detail"]["request_id"], "req-12345");
+/// One answer the server sends: the error, and the status, code and message it
+/// must map to. A `None` message is a body carrying none, which every 5XX does.
+struct Answer {
+    error: Error,
+    status: u16,
+    code: &'static str,
+    message: Option<&'static str>,
 }
 
-#[test]
-fn test_as_json_all_error_types() {
-    let errors = vec![
-        (
-            Error::Unauthorized("auth error".to_string()),
+fn answer(
+    error: impl Into<Error>,
+    status: u16,
+    code: &'static str,
+    message: Option<&'static str>,
+) -> Answer {
+    Answer {
+        error: error.into(),
+        status,
+        code,
+        message,
+    }
+}
+
+/// The answers the server raises itself.
+fn server_answers() -> Vec<Answer> {
+    vec![
+        answer(
+            Error::Unauthorized("auth".into()),
+            401,
             "UNAUTHORIZED",
-            "auth error",
+            Some("auth"),
         ),
-        (
-            Error::BadRequest("bad request".to_string()),
-            "BAD_REQUEST",
-            "bad request",
+        answer(
+            Error::BadRequest("bad".into()),
+            400,
+            "UNSUPPORTED",
+            Some("bad"),
         ),
-        (
-            Error::RangeNotSatisfiable("range".to_string()),
-            "RANGE_NOT_SATISFIABLE",
-            "range",
+        answer(
+            Error::RangeNotSatisfiable("r".into()),
+            416,
+            "SIZE_INVALID",
+            Some("r"),
         ),
-        (
-            Error::NotFound("not found".to_string()),
-            "NOT_FOUND",
-            "not found",
+        answer(
+            Error::NotFound("missing".into()),
+            404,
+            "NAME_UNKNOWN",
+            Some("missing"),
         ),
-        (
-            Error::ProviderUnavailable("provider unavailable".to_string()),
+        answer(
+            Error::ProviderUnavailable("down".into()),
+            503,
             "PROVIDER_UNAVAILABLE",
-            "provider unavailable",
+            None,
         ),
-        (
-            Error::Initialization("init".to_string()),
+        answer(
+            Error::Initialization("init".into()),
+            500,
             "INTERNAL_ERROR",
-            "init",
+            None,
         ),
-        (
-            Error::Execution("exec".to_string()),
+        answer(Error::Execution("exec".into()), 500, "INTERNAL_ERROR", None),
+        answer(
+            Error::Internal("internal".into()),
+            500,
             "INTERNAL_ERROR",
-            "exec",
+            None,
         ),
-        (
-            Error::Internal("internal".to_string()),
-            "INTERNAL_ERROR",
-            "internal",
+        // A custom answer passes its own status and code through.
+        answer(
+            Error::Custom {
+                status_code: StatusCode::TOO_MANY_REQUESTS,
+                code: "TOOMANYREQUESTS".to_string(),
+                msg: Some("slow down".to_string()),
+            },
+            429,
+            "TOOMANYREQUESTS",
+            Some("slow down"),
         ),
-    ];
+    ]
+}
 
-    for (error, expected_code, expected_message) in errors {
-        let json = error.as_json(None);
-        assert_eq!(json["errors"][0]["code"], expected_code);
-        // 5xx bodies suppress the internal message; 4xx surface it.
-        if error.status_code().is_server_error() {
+/// The answers converted from a `registry::Error`.
+fn registry_answers() -> Vec<Answer> {
+    vec![
+        // Every `registry::Error` [`owes_a_spec_code`] calls client-facing,
+        // through the `From` that maps it, plus one that it does not.
+        answer(registry::Error::BlobUnknown, 404, "BLOB_UNKNOWN", None),
+        // end-10 lists `404/400/405` as a blob delete's failures, so a
+        // still-referenced blob answers within that set and says why.
+        answer(
+            registry::Error::BlobReferenced,
+            405,
+            "DENIED",
+            Some("blob is still referenced"),
+        ),
+        answer(
+            registry::Error::BlobUploadUnknown,
+            404,
+            "BLOB_UPLOAD_UNKNOWN",
+            None,
+        ),
+        answer(registry::Error::DigestInvalid, 400, "DIGEST_INVALID", None),
+        answer(
+            registry::Error::ManifestBlobUnknown,
+            404,
+            "MANIFEST_BLOB_UNKNOWN",
+            None,
+        ),
+        // A body over either cap is too large, not malformed: both answer `413`
+        // under the code naming which body was refused.
+        answer(
+            registry::Error::ManifestBodyTooLarge { limit: 42 },
+            413,
+            "MANIFEST_INVALID",
+            Some("manifest body exceeds supported size limit of 42 bytes"),
+        ),
+        answer(
+            registry::Error::BlobBodyTooLarge { limit: 42 },
+            413,
+            "BLOB_UPLOAD_INVALID",
+            Some("blob body exceeds supported size limit of 42 bytes"),
+        ),
+        answer(
+            registry::Error::ManifestInvalid("bad".into()),
+            400,
+            "MANIFEST_INVALID",
+            Some("bad"),
+        ),
+        answer(
+            registry::Error::ManifestUnknown,
+            404,
+            "MANIFEST_UNKNOWN",
+            None,
+        ),
+        answer(registry::Error::NameInvalid, 400, "NAME_INVALID", None),
+        answer(registry::Error::NameUnknown, 404, "NAME_UNKNOWN", None),
+        answer(registry::Error::NotFound, 404, "NAME_UNKNOWN", None),
+        answer(
+            registry::Error::Unauthorized("tok".into()),
+            401,
+            "UNAUTHORIZED",
+            Some("tok"),
+        ),
+        answer(
+            registry::Error::Denied("no".into()),
+            403,
+            "DENIED",
+            Some("no"),
+        ),
+        answer(registry::Error::Unsupported, 400, "UNSUPPORTED", None),
+        answer(
+            registry::Error::RangeNotSatisfiable,
+            416,
+            "SIZE_INVALID",
+            None,
+        ),
+        answer(
+            registry::Error::Conflict("locked".into()),
+            409,
+            "DENIED",
+            Some("locked"),
+        ),
+        // A typed variant carries no word of its own: it routes to a generic
+        // 500 and its detail stays in the log.
+        answer(
+            registry::Error::Io(io::Error::other("disk full")),
+            500,
+            "INTERNAL_ERROR",
+            None,
+        ),
+    ]
+}
+
+/// The status, code and message of every answer, and the rule over them: a 4XX
+/// names a code the spec defines, so a new mapping cannot invent one.
+#[test]
+fn every_answer_maps_to_its_status_code_and_message() {
+    for Answer {
+        error,
+        status,
+        code,
+        message,
+    } in server_answers().into_iter().chain(registry_answers())
+    {
+        let answered = error.status_code();
+        assert_eq!(answered.as_u16(), status, "{error:?} answers a status");
+        let body = serde_json::to_value(error.error_body(None)).unwrap();
+
+        assert_eq!(body["errors"][0]["code"], code, "{error:?} names a code");
+        match message {
+            Some(message) => assert_eq!(body["errors"][0]["message"], message),
+            None => assert!(
+                body["errors"][0]["message"].is_null(),
+                "{error:?} must carry no message"
+            ),
+        }
+
+        if answered.is_client_error() {
             assert!(
-                json["errors"][0]["message"].is_null(),
-                "5xx must not leak {expected_message:?}"
+                ErrorCode::ALL
+                    .iter()
+                    .any(|known| body["errors"][0]["code"] == known.as_str()),
+                "{error:?} answers with {code}, which the spec does not define"
             );
-        } else {
-            assert_eq!(json["errors"][0]["message"], expected_message);
         }
     }
 }
 
-/// Security regression guard: a 5xx body must never carry the internal
-/// error string. The detail is logged server-side (via the response extension),
-/// not surfaced to the client, which keeps the request id to quote to an
-/// operator.
+/// The one code outside the spec's set. It answers a replication write only,
+/// and its sender reads it to tell convergence from a refused write.
 #[test]
-fn test_5xx_body_omits_internal_error_string() {
+fn the_replication_code_is_the_only_exception() {
+    let error = registry::Error::ReplicationSuperseded("superseded".to_string());
+    assert!(!owes_a_spec_code(&error));
+
+    let error = Error::from(error);
+    assert_eq!(error.status_code(), StatusCode::CONFLICT);
+    let body = serde_json::to_value(error.error_body(None)).unwrap();
+    assert_eq!(body["errors"][0]["code"], REPLICATION_SUPERSEDED_CODE);
+    assert!(
+        !ErrorCode::ALL
+            .iter()
+            .any(|known| known.as_str() == REPLICATION_SUPERSEDED_CODE),
+        "the replication code must stay outside the spec's set"
+    );
+}
+
+/// Security regression guard: a 5xx body must never carry the internal error
+/// string. The detail is logged server-side, not surfaced, which leaves the
+/// client the request id to quote to an operator.
+#[test]
+fn a_5xx_body_omits_the_internal_error_string() {
     let secret = "connection failed to postgres://user:pw@internal-host/db";
     let errors = [
         Error::Internal(secret.to_string()),
@@ -148,9 +296,12 @@ fn test_5xx_body_omits_internal_error_string() {
         },
     ];
     let request_id = "req-abc".to_string();
+
     for error in errors {
         assert!(error.status_code().is_server_error());
-        let body = error.as_json(Some(&request_id)).to_string();
+        let body = serde_json::to_value(error.error_body(Some(&request_id)))
+            .unwrap()
+            .to_string();
         assert!(
             !body.contains(secret),
             "5xx body leaked internal detail: {body}"
@@ -162,240 +313,74 @@ fn test_5xx_body_omits_internal_error_string() {
     }
 }
 
+/// The body is one `errors` entry carrying the request id a client quotes back.
 #[test]
-fn test_as_json_custom_error() {
-    // A non-5xx custom error surfaces its message (5xx suppression is covered
-    // by `test_5xx_body_omits_internal_error_string`).
-    let error = Error::Custom {
-        status_code: StatusCode::TOO_MANY_REQUESTS,
-        code: "TOOMANYREQUESTS".to_string(),
-        msg: Some("Rate limit exceeded".to_string()),
-    };
-    let json = error.as_json(None);
+fn a_body_carries_one_error_and_the_request_id() {
+    let request_id = "abc-123".to_string();
+    let body = serde_json::to_value(
+        Error::NotFound("Resource missing".to_string()).error_body(Some(&request_id)),
+    )
+    .unwrap();
 
-    assert_eq!(json["errors"][0]["code"], "TOOMANYREQUESTS");
-    assert_eq!(json["errors"][0]["message"], "Rate limit exceeded");
+    assert_eq!(body["errors"].as_array().map(Vec::len), Some(1));
+    let entry = &body["errors"][0];
+    assert_eq!(entry["code"], "NAME_UNKNOWN");
+    assert_eq!(entry["message"], "Resource missing");
+    assert_eq!(entry["detail"]["request_id"], request_id);
 }
 
 #[test]
-fn test_as_json_custom_error_without_message() {
-    let error = Error::Custom {
-        status_code: StatusCode::NOT_IMPLEMENTED,
-        code: "NOT_IMPLEMENTED".to_string(),
-        msg: None,
-    };
-    let json = error.as_json(None);
-
-    assert_eq!(json["errors"][0]["code"], "NOT_IMPLEMENTED");
-    assert!(json["errors"][0]["message"].is_null());
-}
-
-#[test]
-fn test_registry_error_to_server_error_mapping() {
-    // (registry_error, expected_status, expected_code, expected_message)
-    let cases: Vec<(registry::Error, StatusCode, &str, Option<&str>)> = vec![
+fn errors_display_their_kind_and_detail() {
+    for (error, rendered) in [
+        (Error::Initialization("boom".to_string()), "boom"),
+        (Error::Execution("boom".to_string()), "boom"),
         (
-            registry::Error::BlobUnknown,
-            StatusCode::NOT_FOUND,
-            "BLOB_UNKNOWN",
-            None,
+            Error::Unauthorized("Invalid token".to_string()),
+            "Unauthorized: Invalid token",
         ),
         (
-            registry::Error::BlobUploadUnknown,
-            StatusCode::NOT_FOUND,
-            "BLOB_UPLOAD_UNKNOWN",
-            None,
+            Error::BadRequest("Malformed request".to_string()),
+            "Bad Request: Malformed request",
         ),
         (
-            registry::Error::DigestInvalid,
-            StatusCode::BAD_REQUEST,
-            "DIGEST_INVALID",
-            None,
+            Error::RangeNotSatisfiable("Invalid range '-'".to_string()),
+            "Range Not Satisfiable: Invalid range '-'",
         ),
         (
-            registry::Error::ManifestBlobUnknown,
-            StatusCode::NOT_FOUND,
-            "MANIFEST_BLOB_UNKNOWN",
-            None,
+            Error::NotFound("Item not found".to_string()),
+            "Not Found: Item not found",
         ),
         (
-            registry::Error::ManifestInvalid("Invalid JSON".to_string()),
-            StatusCode::BAD_REQUEST,
-            "MANIFEST_INVALID",
-            Some("Invalid JSON"),
+            Error::ProviderUnavailable("OIDC provider unavailable".to_string()),
+            "Provider unavailable: OIDC provider unavailable",
         ),
         (
-            registry::Error::ManifestUnknown,
-            StatusCode::NOT_FOUND,
-            "MANIFEST_UNKNOWN",
-            None,
+            Error::Internal("Unexpected error".to_string()),
+            "Internal Server Error: Unexpected error",
         ),
         (
-            registry::Error::NameInvalid,
-            StatusCode::BAD_REQUEST,
-            "NAME_INVALID",
-            None,
+            Error::Custom {
+                status_code: StatusCode::BAD_GATEWAY,
+                code: "UPSTREAM_ERROR".to_string(),
+                msg: Some("Failed to connect".to_string()),
+            },
+            "Error 502 Bad Gateway: UPSTREAM_ERROR - Failed to connect",
         ),
         (
-            registry::Error::NameUnknown,
-            StatusCode::NOT_FOUND,
-            "NAME_UNKNOWN",
-            None,
+            Error::Custom {
+                status_code: StatusCode::SERVICE_UNAVAILABLE,
+                code: "SERVICE_UNAVAILABLE".to_string(),
+                msg: None,
+            },
+            "Error 503 Service Unavailable: SERVICE_UNAVAILABLE",
         ),
-        (
-            registry::Error::Unauthorized("Invalid token".to_string()),
-            StatusCode::UNAUTHORIZED,
-            "UNAUTHORIZED",
-            Some("Invalid token"),
-        ),
-        (
-            registry::Error::Denied("Access forbidden".to_string()),
-            StatusCode::FORBIDDEN,
-            "DENIED",
-            Some("Access forbidden"),
-        ),
-        (
-            registry::Error::Unsupported,
-            StatusCode::BAD_REQUEST,
-            "UNSUPPORTED",
-            None,
-        ),
-        (
-            registry::Error::RangeNotSatisfiable,
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            "SIZE_INVALID",
-            None,
-        ),
-        // 500s carry no client message: the internal detail is logged, not leaked.
-        (
-            registry::Error::Internal("Database error".to_string()),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            None,
-        ),
-        (
-            registry::Error::Initialization("Config error".to_string()),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            None,
-        ),
-    ];
-
-    for (registry_error, expected_status, expected_code, expected_message) in cases {
-        let error: Error = registry_error.into();
-        assert_eq!(error.status_code(), expected_status);
-        let json = error.as_json(None);
-        assert_eq!(json["errors"][0]["code"], expected_code);
-        match expected_message {
-            Some(msg) => assert_eq!(json["errors"][0]["message"], msg),
-            None => assert!(json["errors"][0]["message"].is_null()),
-        }
-    }
-}
-
-#[test]
-fn test_blob_referenced_registry_error_mapping() {
-    let error: Error = registry::Error::BlobReferenced.into();
-    assert_eq!(error.status_code(), StatusCode::METHOD_NOT_ALLOWED);
-
-    let json = error.as_json(None);
-    assert_eq!(json["errors"][0]["code"], "DENIED");
-    assert_eq!(json["errors"][0]["message"], "blob is still referenced");
-}
-
-/// Variants outside the OCI-spec set are matched by name and route to a
-/// generic 500 `INTERNAL_ERROR`. The rendered Display text stays server-side
-/// (logs); the client body carries no message. Pins both the routing and the
-/// no-leak contract.
-#[test]
-fn test_typed_registry_variants_route_to_internal_server_error() {
-    let cases: Vec<(registry::Error, &str)> = vec![
-        (
-            registry::Error::Io(std::io::Error::other("disk full")),
-            "I/O error during operations",
-        ),
-        (
-            registry::Error::Serde(serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err()),
-            "(de)serialization error during operations",
-        ),
-    ];
-
-    for (registry_error, expected_display_prefix) in cases {
-        // Display text is retained for server-side logging.
-        assert!(
-            registry_error
-                .to_string()
-                .starts_with(expected_display_prefix),
-            "expected Display to start with {expected_display_prefix:?}"
-        );
-        let server_error: Error = registry_error.into();
-        assert_eq!(
-            server_error.status_code(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-        let json = server_error.as_json(None);
-        assert_eq!(json["errors"][0]["code"], "INTERNAL_ERROR");
-        assert!(
-            json["errors"][0]["message"].is_null(),
-            "a 5xx body must not leak the internal Display text"
-        );
-    }
-}
-
-#[test]
-fn test_json_structure_completeness() {
-    let error = Error::NotFound("Resource missing".to_string());
-    let request_id = Some("abc-123".to_string());
-    let json = error.as_json(request_id.as_ref());
-
-    assert!(json.get("errors").is_some());
-    assert!(json["errors"].is_array());
-    assert_eq!(json["errors"].as_array().unwrap().len(), 1);
-
-    let error_obj = &json["errors"][0];
-    assert!(error_obj.get("code").is_some());
-    assert!(error_obj.get("message").is_some());
-    assert!(error_obj.get("detail").is_some());
-    assert_eq!(error_obj["detail"]["request_id"], "abc-123");
-}
-
-#[test]
-fn test_status_code_coverage() {
-    let test_cases = vec![
-        (StatusCode::UNAUTHORIZED, Error::Unauthorized(String::new())),
-        (StatusCode::BAD_REQUEST, Error::BadRequest(String::new())),
-        (
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            Error::RangeNotSatisfiable(String::new()),
-        ),
-        (StatusCode::NOT_FOUND, Error::NotFound(String::new())),
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Error::ProviderUnavailable(String::new()),
-        ),
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Error::Initialization(String::new()),
-        ),
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Error::Execution(String::new()),
-        ),
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Error::Internal(String::new()),
-        ),
-    ];
-
-    for (expected_status, error) in test_cases {
-        assert_eq!(error.status_code(), expected_status);
+    ] {
+        assert_eq!(error.to_string(), rendered);
     }
 }
 
 #[test]
 fn test_from_configuration_error_initialization() {
-    use crate::configuration;
-
     let config_error = configuration::Error::Initialization("webhook failed".to_string());
     let error: Error = config_error.into();
 

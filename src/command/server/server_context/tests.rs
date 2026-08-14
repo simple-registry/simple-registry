@@ -8,12 +8,13 @@ use argon2::{
 };
 use base64::Engine;
 use hyper::{
-    Request,
+    Request, StatusCode, Uri,
     header::{HOST, HeaderMap, HeaderValue},
 };
 use uuid::Uuid;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
+use angos_oci::{Digest, Namespace, Reference, Tag};
 use angos_s3_client::Backend as S3HttpBackend;
 use angos_storage::{ObjectStore, s3::Backend as StorageS3Backend};
 
@@ -24,7 +25,6 @@ use crate::{
     event_webhook::{config::EventWebhookConfig, dispatcher::EventDispatcher, event::Event},
     identity::{Action, ClientIdentity, RequestScheme},
     metrics_provider,
-    oci::{Digest, Namespace, Reference, Tag},
     policy::AccessPolicyConfig,
     registry::{
         Error as RegistryError, Registry, RegistryConfig, Repository,
@@ -318,6 +318,195 @@ async fn test_authorize_request_with_global_policy() {
     let result = context.authorize_request(&route, &identity, &parts).await;
 
     assert!(result.is_ok());
+}
+
+/// A pull naming a mirrored registry in `?ns=` is served from the repository
+/// that mirrors it, so a client addressing the upstream's own paths reaches the
+/// cache without prefixing them.
+#[tokio::test]
+async fn proxy_namespace_resolves_to_the_mirroring_repository() {
+    let config = load_config(
+        r#"
+        [repository."docker-hub"]
+        namespace = "docker.io"
+
+        [[repository."docker-hub".upstream]]
+        url = "https://registry-1.docker.io"
+    "#,
+    );
+    let context = create_test_server_context_from_config(&config).await;
+
+    let uri: Uri = "/v2/library/nginx/manifests/latest?ns=docker.io"
+        .parse()
+        .unwrap();
+    let mut action = Action::GetManifest {
+        namespace: Namespace::new("library/nginx").unwrap(),
+        reference: Reference::Tag(Tag::new("latest").unwrap()),
+    };
+
+    let served = context
+        .apply_proxy_namespace(Some(&mut action), &uri)
+        .expect("a mapped namespace must apply");
+
+    assert_eq!(served.as_deref(), Some("docker.io"));
+    assert_eq!(
+        action
+            .pull_namespace_mut()
+            .map(|namespace| namespace.to_string()),
+        Some("docker-hub/library/nginx".to_string()),
+        "the request must be served from the repository mirroring docker.io"
+    );
+}
+
+/// A request already addressing the repository keeps the namespace it named:
+/// prefixing it again would look for `docker-hub/docker-hub/...`.
+#[tokio::test]
+async fn proxy_namespace_leaves_an_already_prefixed_request() {
+    let config = load_config(
+        r#"
+        [repository."docker-hub"]
+        namespace = "docker.io"
+
+        [[repository."docker-hub".upstream]]
+        url = "https://registry-1.docker.io"
+    "#,
+    );
+    let context = create_test_server_context_from_config(&config).await;
+
+    let uri: Uri = "/v2/docker-hub/library/nginx/tags/list?ns=docker.io"
+        .parse()
+        .unwrap();
+    let mut action = Action::ListTags {
+        namespace: Namespace::new("docker-hub/library/nginx").unwrap(),
+        n: None,
+        last: None,
+    };
+
+    let served = context
+        .apply_proxy_namespace(Some(&mut action), &uri)
+        .expect("a mapped namespace must apply");
+
+    assert_eq!(served.as_deref(), Some("docker.io"));
+    assert_eq!(
+        action
+            .pull_namespace_mut()
+            .map(|namespace| namespace.to_string()),
+        Some("docker-hub/library/nginx".to_string())
+    );
+}
+
+/// An `ns` no repository claims selects nothing: the request is served as it
+/// arrived, and no `OCI-Namespace` is echoed to claim otherwise.
+#[tokio::test]
+async fn an_unclaimed_proxy_namespace_is_ignored() {
+    let config = load_config(
+        r#"
+        [repository."docker-hub"]
+        namespace = "docker.io"
+
+        [[repository."docker-hub".upstream]]
+        url = "https://registry-1.docker.io"
+    "#,
+    );
+    let context = create_test_server_context_from_config(&config).await;
+
+    let uri: Uri = "/v2/library/nginx/tags/list?ns=quay.io".parse().unwrap();
+    let mut action = Action::ListTags {
+        namespace: Namespace::new("library/nginx").unwrap(),
+        n: None,
+        last: None,
+    };
+
+    assert!(
+        context
+            .apply_proxy_namespace(Some(&mut action), &uri)
+            .expect("an ignored ns is not a failure")
+            .is_none()
+    );
+    assert_eq!(
+        action
+            .pull_namespace_mut()
+            .map(|namespace| namespace.to_string()),
+        Some("library/nginx".to_string())
+    );
+}
+
+/// The spec defines `ns` on pull operations, so a write naming it keeps the
+/// namespace it spelled out rather than landing in the mirror's cache.
+#[tokio::test]
+async fn proxy_namespace_leaves_a_write_alone() {
+    let config = load_config(
+        r#"
+        [repository."docker-hub"]
+        namespace = "docker.io"
+
+        [[repository."docker-hub".upstream]]
+        url = "https://registry-1.docker.io"
+    "#,
+    );
+    let context = create_test_server_context_from_config(&config).await;
+
+    let uri: Uri = "/v2/library/nginx/manifests/latest?ns=docker.io"
+        .parse()
+        .unwrap();
+    let mut action = Action::DeleteManifest {
+        namespace: Namespace::new("library/nginx").unwrap(),
+        reference: Reference::Tag(Tag::new("latest").unwrap()),
+    };
+
+    assert!(
+        context
+            .apply_proxy_namespace(Some(&mut action), &uri)
+            .expect("an ignored ns is not a failure")
+            .is_none(),
+        "a write must not be scoped by ns, so nothing is echoed"
+    );
+    let Action::DeleteManifest { namespace, .. } = &action else {
+        panic!("the action must be untouched");
+    };
+    assert_eq!(namespace.as_ref(), "library/nginx");
+}
+
+/// Nesting under the mirror can breach the namespace length cap. Falling
+/// through would serve the unprefixed namespace, which is different content
+/// than the client asked for, so the request is refused instead.
+#[tokio::test]
+async fn proxy_namespace_refuses_a_name_it_cannot_map() {
+    let config = load_config(
+        r#"
+        [repository."docker-hub"]
+        namespace = "docker.io"
+
+        [[repository."docker-hub".upstream]]
+        url = "https://registry-1.docker.io"
+    "#,
+    );
+    let context = create_test_server_context_from_config(&config).await;
+
+    // One character short of the cap, so any prefix overflows it.
+    let long = "a".repeat(255);
+    let uri: Uri = format!("/v2/{long}/tags/list?ns=docker.io")
+        .parse()
+        .unwrap();
+    let mut action = Action::ListTags {
+        namespace: Namespace::new(&long).unwrap(),
+        n: None,
+        last: None,
+    };
+
+    let error = context
+        .apply_proxy_namespace(Some(&mut action), &uri)
+        .expect_err("a namespace that cannot be mapped must fail the request");
+
+    assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+    let Action::ListTags { namespace, .. } = &action else {
+        panic!("the action must keep its shape");
+    };
+    assert_eq!(
+        namespace.as_ref(),
+        long,
+        "a refused mapping must not leave a half-applied namespace"
+    );
 }
 
 #[tokio::test]

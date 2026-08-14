@@ -7,11 +7,10 @@ use wiremock::{
     matchers::{method, path},
 };
 
-use crate::{
-    oci::Digest,
-    registry::DOCKER_CONTENT_DIGEST,
-    test_fixtures::oidc::{KID, jwk_x, jwk_y},
-};
+use angos_oci::Digest;
+use angos_oci::header::DOCKER_CONTENT_DIGEST;
+
+use crate::test_fixtures::oidc::{KID, jwk_x, jwk_y};
 
 /// The JWKS document advertising the `test_fixtures::oidc` primary key.
 pub fn static_jwks_response() -> Value {

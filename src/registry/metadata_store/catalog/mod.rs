@@ -4,15 +4,13 @@
 use futures_util::stream::{self, Stream, StreamExt, TryStreamExt};
 use tracing::{debug, instrument};
 
+use angos_oci::{Algorithm, Digest, Namespace, Tag};
 use angos_storage::{Page, paginated};
 
-use crate::{
-    oci::{Algorithm, Digest, Namespace, Tag},
-    registry::{
-        Error,
-        metadata_store::{LinkKind, MetadataStore},
-        pagination, path_builder,
-    },
+use crate::registry::{
+    Error,
+    metadata_store::{LinkKind, MetadataStore},
+    pagination, path_builder,
 };
 
 /// Fan-out for the tag link reads behind [`MetadataStore::find_tags_pointing_at`].
@@ -199,6 +197,27 @@ impl MetadataStore {
                 Ok((digest_entries, page.next_token))
             }
         })
+    }
+
+    /// Whether `namespace` holds any manifest content, by the rule the catalog
+    /// listing names a repository with: at least one revision or tag. Probes one
+    /// entry of each, so a namespace that was never written costs the listings
+    /// that find nothing.
+    pub async fn has_manifest_content(&self, namespace: &Namespace) -> Result<bool, Error> {
+        let revisions = self.stream_revisions(namespace);
+        tokio::pin!(revisions);
+        if revisions.next().await.transpose()?.is_some() {
+            return Ok(true);
+        }
+
+        let tags_dir = path_builder::manifest_tags_dir(namespace);
+        let page = self
+            .store()
+            .object_store()
+            .list_children(&tags_dir, 1, None, None)
+            .await?;
+
+        Ok(!page.sub_prefixes.is_empty())
     }
 
     pub async fn has_referrers(

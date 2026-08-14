@@ -300,6 +300,55 @@ fn unknown_route_status_follows_the_method() {
     }
 }
 
+/// A registry serving the referrers API must answer an invalid request with
+/// `400` and never with the `404` an unserved read path gets, whichever part of
+/// the request is malformed.
+#[test]
+fn unknown_referrers_route_is_a_bad_request() {
+    let digest = format!("sha256:{}", "a".repeat(64));
+    for uri in [
+        "/v2/conformance/test/referrers/not-a-digest".to_string(),
+        format!("/v2/conformance/test/referrers/{digest}?artifactType=not-a-media-type"),
+        format!("/v2/conformance/test/referrers/{digest}?n=abc"),
+    ] {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(&uri)
+            .body(())
+            .unwrap();
+        let (parts, ()) = request.into_parts();
+
+        let Err(error) = handle_unknown_route(&parts) else {
+            panic!("{uri} must be rejected, not served");
+        };
+        assert_eq!(
+            error.status_code(),
+            StatusCode::BAD_REQUEST,
+            "{uri} must be a bad request, got {error:?}"
+        );
+    }
+}
+
+/// A namespace that does not parse is a miss on every route, referrers
+/// included: only the digest and the filter carry the `400`.
+#[test]
+fn unknown_referrers_route_with_a_bad_namespace_stays_a_miss() {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v2/BAD-NAMESPACE/referrers/not-a-digest")
+        .body(())
+        .unwrap();
+    let (parts, ()) = request.into_parts();
+
+    let Err(error) = handle_unknown_route(&parts) else {
+        panic!("an unmatched path must be rejected, not served");
+    };
+    assert!(
+        matches!(error, Error::NotFound(_)),
+        "an invalid namespace must stay a miss, got {error:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_authenticate_and_authorize_returns_client_identity() {
     let context = create_test_context_with_allow_policy().await;

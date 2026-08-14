@@ -3,7 +3,10 @@ use std::{
     time::Instant,
 };
 
-use hyper::{Request, Response, body::Incoming, server::conn::http1, service::service_fn};
+use hyper::{
+    Request, Response, body::Incoming, header::HeaderValue, server::conn::http1,
+    service::service_fn,
+};
 use hyper_util::rt::TokioIo;
 use opentelemetry::trace::TraceContextExt;
 use tokio::{
@@ -13,6 +16,8 @@ use tokio::{
 };
 use tracing::{Span, debug, error, info, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+use angos_oci::header::OCI_NAMESPACE;
 
 use crate::{
     auth::PeerCertificate,
@@ -102,7 +107,11 @@ async fn handle_request(
     let start_time = Instant::now();
     let method = request.method().to_owned();
     let path = request.uri().path().to_owned();
-    let action = router::parse(request.method(), request.uri());
+    let mut action = router::parse(request.method(), request.uri());
+    // A mirroring client names the registry it believes it is addressing in
+    // `?ns=`; serving it from the repository mirroring that namespace is what
+    // lets such a client use angos without prefixing the paths it requests.
+    let proxy_namespace = context.apply_proxy_namespace(action.as_mut(), request.uri());
     let route_action = action.as_ref().map_or("unknown", Action::action_name);
 
     let trace_id = current_trace_id(&Span::current());
@@ -114,16 +123,33 @@ async fn handle_request(
         .then(|| context.challenge_origin(&request))
         .flatten();
 
-    let dispatch: DispatchFuture =
-        Box::pin(dispatch_request(Arc::clone(&context), request, action));
-    let response = match dispatch.await {
-        Ok(response) => response,
+    // A `?ns=` that cannot be applied fails the request instead of dispatching
+    // it against the namespace the client spelled out.
+    let dispatched = match proxy_namespace {
+        Ok(served) => {
+            let dispatch: DispatchFuture =
+                Box::pin(dispatch_request(Arc::clone(&context), request, action));
+            dispatch.await.map(|response| (response, served))
+        }
+        Err(error) => Err(error),
+    };
+    let (mut response, served_namespace) = match dispatched {
+        Ok(served) => served,
         Err(error) => {
             let challenge =
                 challenge_origin.and_then(|(scheme, host)| context.bearer_challenge(scheme, &host));
-            error_to_response(&error, trace_id.as_ref(), challenge)
+            (
+                error_to_response(&error, trace_id.as_ref(), challenge),
+                None,
+            )
         }
     };
+
+    // Echoed only when the parameter selected a repository, so its absence
+    // tells a client the namespace it named had no effect.
+    if let Some(value) = served_namespace.and_then(|ns| HeaderValue::try_from(ns).ok()) {
+        response.headers_mut().insert(OCI_NAMESPACE, value);
+    }
 
     let elapsed = elapsed_ms(start_time);
     let status = response.status();

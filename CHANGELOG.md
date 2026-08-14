@@ -15,17 +15,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `auth.oidc.<name>.client_certificate_bundle` and `client_private_key` present a client certificate on those fetches, so a cluster that keeps discovery closed to unauthenticated users can still back image pulls with projected service-account tokens.
 - EXPERIMENTAL: `contrib/kubelet-credential-provider` hands the kubelet the pulling pod's service-account token as its registry credential, so an image pull authenticates as the workload instead of a shared `imagePullSecret`. It ships as a released Linux binary, with a DaemonSet that installs it on every node and restarts the kubelet only when the binary changes.
 - The `has_repository_policy()` access-policy function lets a global rule admit only what a `[repository]` declaring its own `access_policy` will decide, instead of restating every repository rule globally.
+- A `[repository]` declaring `namespace = "docker.io"` serves pulls naming it in the proxy `?ns=` parameter and echoes `OCI-Namespace`, so a mirroring client such as containerd needs no path prefix; an `ns` no repository declares, and `ns` on a write, are ignored.
+- A blob upload `POST` carrying `?digest=` and the blob as its body now completes in that one request, returning `201 Created`, instead of answering `202` and making the client send every byte again.
+- A blob upload started with `?digest-algorithm=` hashes each chunk under that algorithm alone rather than every supported one, and the hint reaches access policies as `request.digest_algorithm`.
 
 ### Changed
 
+- **Breaking:** the angos extension endpoints moved from `/_ext/...` to `/v2/_angos/...`, the extension namespace the distribution spec reserves, and `/_ui/config` to `/v2/_angos/ui/config`; the web UI still serves from `/`, and [Upgrade Angos](doc/how-to/upgrade.md) maps every path.
+- **Breaking:** the version check answers `GET /v2/` only, the endpoint the spec defines (end-1); the same path without its trailing slash now answers `404`.
+- **Breaking:** the catalog and tag listings reject a `?n=` they cannot read (`n=abc`, a value above 65535) with `404` instead of silently serving an unpaginated page; an empty `?n=` still reads as absent.
+- **Breaking:** a blob upload starts at `POST /v2/<name>/blobs/uploads/` only, the endpoint the spec defines; the same path without its trailing slash now answers `404`.
+- **Breaking:** a chunk's `Content-Range` is read as `<start>-<end>` only, the grammar the spec pins to `^[0-9]+-[0-9]+$`; a `bytes=`-prefixed value and one naming no last byte (`0-`) now answer `416`.
+- **Breaking:** `mediaType`, `artifactType` and the `?artifactType=` filter reject a parameter section (`; charset=utf-8`) instead of silently dropping it, only `Content-Type` still carrying one. See [Upgrade Angos](doc/how-to/upgrade.md).
+- **Breaking:** an upload session is addressed by the canonical hyphenated UUID the registry issued; the braced, URN and unhyphenated spellings now answer `404`.
 - **Breaking:** CEL access policies read an upload session as `request.session_id`; the field was named `request.uuid`.
 - **Breaking:** OIDC providers are no longer typed. `provider = "github"` and `provider = "generic"` are gone; a provider is now an issuer plus how its tokens are validated, so every entry takes the same options. A GitHub Actions entry spells out the issuer it used to get for free; see [Upgrade Angos](doc/how-to/upgrade.md).
 - **Breaking:** `identity.oidc.provider_type` is removed from access policies and the denial audit log. It only ever distinguished the two built-in provider types; `identity.oidc.provider_name`, the entry's own name, tells providers apart.
 - Cached JWKS and discovery documents are keyed by issuer alone rather than by issuer and provider type, so two entries trusting one issuer share a fetch. Existing entries are refetched once on upgrade.
+- **Breaking:** 4XX error bodies carry only the OCI codes the spec defines, so a client matching on the previous ones must update: `BAD_REQUEST` becomes `UNSUPPORTED`, `NOT_FOUND` becomes `NAME_UNKNOWN`, `RANGE_NOT_SATISFIABLE` becomes `SIZE_INVALID`, and the immutable-tag or concurrent-write `CONFLICT` becomes `DENIED`, each keeping its message and HTTP status. `REPLICATION_SUPERSEDED` is unchanged and answers replication writes only.
 - Response header names are emitted lowercase (`docker-content-digest`, `oci-subject`). HTTP header names are case-insensitive, so OCI clients are unaffected; a script matching the previous mixed-case spelling is not.
+- A dead-lettered job that can never succeed records its `last_error` as `terminal failure: ...`, where an authorization denial used to read `denied: ...`; the same jobs dead-letter as before.
+- The referrers endpoint pages at 100 entries and advertises the next page in a `Link` header, so a widely referenced subject is no longer resolved and served in one response; the web UI reaches the later pages through a "Load more referrers" control.
 
 ### Fixed
 
+- Replicating a sha512 subject to an OCI-1.0 downstream no longer fails: the referrers fallback tag is truncated to the schema the registry itself serves, instead of a name too long to be a tag.
+- A replication push whose manifest body cannot parse dead-letters at once instead of spending its whole retry budget on bytes that will never change.
+- A referrer replicated to an OCI-1.0 downstream keeps its annotations and, lacking its own `artifactType`, its config media type, so the fallback tag index lists what the referrers endpoint would.
 - A client that connects and then stalls no longer holds up every other connection on that listener: handshakes run per connection instead of inline in the accept loop, and each is bound by `handshake_timeout`.
 - A listener survives a transient accept failure such as an exhausted descriptor table, backing off and retrying instead of terminating the server.
 - Content pushed to a namespace no `[repository]` entry matches can now be pulled back: retrieval required a configured repository while every other route did not, so such a namespace was writable, listable, and unreadable.
@@ -34,6 +50,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A basic-auth username matching an OIDC provider name is refused at startup instead of locking that user out, since a Basic credential naming a provider is read as that provider's token.
 - An authorization webhook now receives the caller's OIDC provider and subject, so it can decide per user and its decision cache no longer serves one answer to every OIDC caller performing the same action.
 - An upstream token response that omits `expires_in` is now cached for the 60 seconds the spec defines as its default rather than an hour, so angos stops sending a token long after its issuer stopped honouring it.
+- A referrers request whose digest or `artifactType` is malformed is answered with `400 DIGEST_INVALID` as the spec requires, instead of the `404` an unserved path gets.
+- A blob `GET` carrying a `Range` angos cannot read (an unknown unit, or syntax that does not parse) serves the whole blob as RFC 9110 requires, instead of `416`, which now answers only a range that reads correctly and cannot be met.
+- A manifest pushed with parameters on its `Content-Type` (`; charset=utf-8`) is accepted rather than refused as a media-type mismatch, and the parameters are dropped instead of stored and echoed on pull.
+- Listing the tags of a namespace that holds nothing answers `404 NAME_UNKNOWN` instead of `200` with an empty list, so a client can tell an absent repository from one whose tags were all deleted, which still answers `200`.
+- A referrers listing on a pull-through repository merges the upstream's referrers with the cached ones, an unreachable upstream being left out rather than failing the request; the tag listing still reports cached tags only, see [API Endpoints](doc/reference/api-endpoints.md).
+- A referrer whose manifest carries no `mediaType` is listed under the type its shape implies rather than dropped from the listing.
+- The referrers listing folds in the entries a client recorded under the fallback tag before the API existed, so a repository imported from such a registry keeps them.
+- A chunk upload whose `Content-Range` disagrees with its own `Content-Length` is refused with `416` before a byte is committed, and a chunked body that does not fill the window it announced is refused too, cancelling the session.
+- A blob `HEAD` carries `Accept-Ranges`, which only `GET` sent, so a client learns a blob is rangeable without fetching it.
+- A manifest larger than `global.max_manifest_size` is refused with `413`, matching the blob size limit, instead of `400`.
+- A ranged blob pull on a pull-through repository forwards the range to the upstream instead of returning `416` until the blob is cached, so one URL no longer answers `206` or `416` depending on cache state.
+- `top_pushed(n)` and `top_pulled(n)` rank only the tags carrying the time they order by, so a namespace holding n tags or fewer no longer keeps every tag forever whatever its push and pull history.
 
 ## 1.4.5
 
