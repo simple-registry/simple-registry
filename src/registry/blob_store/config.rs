@@ -96,12 +96,6 @@ pub enum BlobStoreConfig {
     S3(S3BackendConfig),
 }
 
-impl Default for BlobStoreConfig {
-    fn default() -> Self {
-        BlobStoreConfig::FS(FsBackendConfig::default())
-    }
-}
-
 impl BlobStoreConfig {
     /// Build the unified [`BlobStore`].
     ///

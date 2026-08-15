@@ -82,7 +82,8 @@ struct ConfigurationFields {
     ui: UiConfig,
     #[serde(default)]
     cache: cache::Config,
-    #[serde(default)]
+    /// Required: a registry with no configured storage would otherwise default
+    /// to the filesystem backend rooted at the process working directory.
     blob_store: blob_store::BlobStoreConfig,
     #[serde(default, rename = "metadata_store")]
     registry_storage: RegistryStorageConfig,
@@ -191,6 +192,7 @@ impl Configuration {
 
     fn validate(self) -> Result<Self, Error> {
         validate_global(&self.global, &self.auth.webhook, &self.event_webhook)?;
+        validate_blob_store(&self.blob_store)?;
         validate_repositories(&self.repository, &self.auth.webhook, &self.event_webhook)?;
         validate_durable_queue_lock(&self)?;
         Ok(self)
@@ -210,6 +212,22 @@ fn annotate_sources<P: AsRef<Path>>(error: Error, paths: &[P]) -> Error {
         .collect::<Vec<_>>()
         .join(", ");
     Error::InvalidFormat(format!("{}\nmerged from {sources}", message.trim_end()))
+}
+
+/// An FS blob store rooted at the empty path resolves every object relative to
+/// the process working directory, which in a container is the ephemeral layer
+/// rather than the mounted volume. The metadata store inherits this root by
+/// default, so one check covers both.
+fn validate_blob_store(blob_store: &blob_store::BlobStoreConfig) -> Result<(), Error> {
+    let blob_store::BlobStoreConfig::FS(fs) = blob_store else {
+        return Ok(());
+    };
+    if fs.root_dir.as_os_str().is_empty() {
+        return Err(Error::InvalidFormat(
+            "blob_store.fs.root_dir must not be empty".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_global(
@@ -477,6 +495,9 @@ mod metadata_resolver_tests {
     #[test]
     fn test_inherit_is_default_for_registry_storage_field() {
         let config_str = r#"
+        [blob_store.fs]
+        root_dir = "/tmp/test"
+
         [server]
         bind_address = "0.0.0.0"
         "#;

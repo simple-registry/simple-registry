@@ -405,6 +405,27 @@ Run it once after upgrading. The command is idempotent and leaves links that alr
 
 ## 1.4.5 → 1.5.0
 
+### `[blob_store]` Is Required (Breaking Change)
+
+#### What Changed
+
+A configuration must name a blob store, and an `fs` backend whose `root_dir` is empty is refused. Both now fail startup with an error naming the section.
+
+**Who is affected:** any deployment whose configuration omits `[blob_store]` entirely, or sets `root_dir = ""`.
+
+Angos used to fall back to the filesystem backend rooted at the empty path, which resolves every object against the process working directory. In a container that is the ephemeral layer rather than the mounted volume, so the registry looked healthy and lost every pushed image when the pod restarted.
+
+#### Migration
+
+Name the storage explicitly. If you were relying on the old default, your data is under the directory the process was started from; move it to the path you configure here.
+
+```toml
+[blob_store.fs]
+root_dir = "/var/lib/angos"
+```
+
+The metadata store still inherits this root unless `[metadata_store]` overrides it.
+
 ### OIDC Providers Are No Longer Typed (Breaking Change)
 
 #### What Changed
