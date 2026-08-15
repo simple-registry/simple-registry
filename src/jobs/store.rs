@@ -162,6 +162,12 @@ pub enum Error {
     InvalidLockKey(String),
     #[error("not found")]
     NotFound,
+    /// A stored record's body will not deserialize. Distinct from
+    /// [`Self::Storage`] so one poison object is skipped rather than aborting
+    /// the scan that reached it: the body will not fix itself, where a
+    /// transient backend fault must still stop the caller.
+    #[error("corrupt record: {0}")]
+    Corrupt(String),
     /// The job can never succeed; the runner dead-letters it on the spot
     /// instead of burning its retry budget.
     #[error("terminal failure: {0}")]
@@ -688,7 +694,7 @@ impl JobStore {
         let key = job_pending_path(queue.as_str(), storage_key);
         let data = self.store.object_store().get(&key).await?;
         serde_json::from_slice(&data)
-            .map_err(|e| Error::Storage(format!("failed to parse envelope: {e}")))
+            .map_err(|e| Error::Corrupt(format!("failed to parse envelope: {e}")))
     }
 
     /// Read a dead-letter record by `storage_key`. Returns [`Error::NotFound`]
@@ -701,7 +707,7 @@ impl JobStore {
         let key = job_failed_path(queue.as_str(), storage_key);
         let data = self.store.object_store().get(&key).await?;
         serde_json::from_slice(&data)
-            .map_err(|e| Error::Storage(format!("failed to parse dead-letter: {e}")))
+            .map_err(|e| Error::Corrupt(format!("failed to parse dead-letter: {e}")))
     }
 
     /// One keyset page of pending storage keys in ascending (time) order. Pass
@@ -1126,6 +1132,27 @@ impl JobStore {
     /// On a successful claim the job's dedup index is retired (see
     /// [`Self::retire_claimed_index`]) so a same-`lock_key` enqueue arriving
     /// while the job runs is not coalesced into the already-resolved job.
+    /// Drop a pending record whose body will not parse. The scan walks keys in
+    /// ascending time order, so leaving it would strand every job queued after
+    /// it; keeping it would only re-warn on every scan, since the body cannot
+    /// name the work it stood for. Both queues converge without it: a cache
+    /// fill re-enqueues on the next pull-through, and a replication push on the
+    /// next write or `angos replicate` sweep. Its dedup index entry is left to
+    /// `prune`'s orphan-job sweep.
+    async fn discard_poison_pending(&self, queue: Queue, storage_key: &str, reason: &str) {
+        let path = job_pending_path(queue.as_str(), storage_key);
+        match self.store.object_store().delete(&path).await {
+            Ok(()) => {
+                warn!("job queue: discarded unreadable pending job '{storage_key}': {reason}")
+            }
+            Err(e) => {
+                warn!(
+                    "job queue: unreadable pending job '{storage_key}' ({reason}) not deleted: {e}"
+                );
+            }
+        }
+    }
+
     async fn try_claim_one(&self, queue: Queue) -> Result<ClaimOutcome, Error> {
         let now = Utc::now();
         let mut next_ready: Option<DateTime<Utc>> = None;
@@ -1142,6 +1169,10 @@ impl JobStore {
             let envelope = match self.read_pending(queue, &storage_key).await {
                 Ok(e) => e,
                 Err(Error::NotFound) => continue,
+                Err(Error::Corrupt(e)) => {
+                    self.discard_poison_pending(queue, &storage_key, &e).await;
+                    continue;
+                }
                 Err(e) => return Err(e),
             };
             if let Some(session) = self
@@ -1157,6 +1188,11 @@ impl JobStore {
                 let envelope = match self.read_pending(queue, &storage_key).await {
                     Ok(envelope) => envelope,
                     Err(Error::NotFound) => {
+                        session.release().await;
+                        continue;
+                    }
+                    Err(Error::Corrupt(e)) => {
+                        self.discard_poison_pending(queue, &storage_key, &e).await;
                         session.release().await;
                         continue;
                     }
@@ -1553,8 +1589,18 @@ impl JobStore {
     async fn delete_pending(&self, queue: Queue, storage_key: &str) -> Result<(), Error> {
         let pending_path = job_pending_path(queue.as_str(), storage_key);
         // Read the envelope (for its `lock_key`) and HEAD for the fence; a
-        // missing pending file surfaces as `NotFound` for a 404.
-        let envelope = self.read_pending(queue, storage_key).await?;
+        // missing pending file surfaces as `NotFound` for a 404. Only the
+        // `lock_key` needs the body, so a record that will not parse is still
+        // deletable: the operator retiring it is the one recovery path, and
+        // its index entry is reclaimed by the orphan-job sweep.
+        let lock_key = match self.read_pending(queue, storage_key).await {
+            Ok(envelope) => Some(envelope.lock_key),
+            Err(Error::Corrupt(e)) => {
+                warn!("job queue: deleting unreadable pending job '{storage_key}': {e}");
+                None
+            }
+            Err(e) => return Err(e),
+        };
         let expected = self.store.object_store().head(&pending_path).await?.etag;
 
         let mut tx = Transaction::builder()
@@ -1567,8 +1613,10 @@ impl JobStore {
         // Fold a conditional index delete: only when the index still points at
         // this storage key. The read fingerprint turns a concurrent index
         // refresh into a no-op conflict rather than clobbering a fresh index.
-        self.fold_index_cleanup(&mut tx, queue, &envelope.lock_key, storage_key)
-            .await?;
+        if let Some(lock_key) = lock_key {
+            self.fold_index_cleanup(&mut tx, queue, &lock_key, storage_key)
+                .await?;
+        }
 
         self.store
             .execute(tx)

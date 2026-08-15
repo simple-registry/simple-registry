@@ -68,6 +68,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A manifest delete whose body cannot be read is refused rather than committing a cascade that names no config, layer or child links, which used to strand those links holding their blobs with no body left to replan the cascade from.
 - `scrub` no longer reclaims a blob's bytes when its shard walk read references the per-blob index read did not, so a backend that drops a key from a listing can no longer make a referenced blob look unreferenced.
 - An S3 listing that reports itself truncated but names nowhere to resume from is refused as a protocol error, where it used to be served as a complete listing (and, for multipart parts, re-request the first page forever while the collected parts grew unbounded).
+- A job record whose body will not parse is discarded by the claim scan, deletable through the admin API, and left out of a listing rather than failing it; one truncated record used to make every job queued after it unreachable, with hand-deleting the object the only way back. A discarded cache fill re-enqueues on the next pull-through and a replication push on the next write or `angos replicate` sweep.
 
 ## 1.4.5
 
