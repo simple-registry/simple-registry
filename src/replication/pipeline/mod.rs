@@ -10,6 +10,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt};
+use tokio::io::AsyncReadExt;
 use tracing::{debug, info, instrument, warn};
 
 use angos_oci::manifest_accept_types;
@@ -24,12 +25,19 @@ use crate::{
     registry::{
         blob_ownership::BlobOwnership,
         blob_store::BlobStore,
+        manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
         metadata_store::{LinkKind, MetadataStore},
     },
     registry_client::{RegistryClient, UploadSession},
     replication::Error,
     replication::ReplicationDownstream,
 };
+
+/// Deepest index nesting a replication push follows. The image spec nests an
+/// index inside an index but never deeply, and each level holds its manifest
+/// body while the children below it push, so a chain of indexes each naming the
+/// next is memory an authenticated pusher controls.
+const MAX_INDEX_DEPTH: usize = 8;
 
 mod referrers_fallback;
 
@@ -71,6 +79,9 @@ pub struct PushContext<'a> {
     /// handler via [`ReplicationDownstream::remote`].
     pub downstream_namespace: &'a Namespace,
     pub source_ts: Option<DateTime<Utc>>,
+    /// How many indexes this push already descended through, bounding the
+    /// recursion below. A caller starts at zero.
+    pub index_depth: usize,
 }
 
 /// Pushes the manifest at `digest` (and everything it references) to
@@ -134,7 +145,7 @@ pub async fn push_manifest(
         return Ok(PushOutcome::Converged);
     }
 
-    push_child_manifests(ctx, &manifest).await?;
+    push_child_manifests(ctx, &manifest, digest).await?;
 
     push_blobs(ctx, &manifest).await?;
 
@@ -221,18 +232,47 @@ pub async fn push_manifest(
 /// to `max_concurrent_pushes` so a wide multi-arch index is not serialized one
 /// child at a time. The caller awaits this before it pushes the parent, so the
 /// parent index never lands before its children.
-async fn push_child_manifests(ctx: &PushContext<'_>, manifest: &Manifest) -> Result<(), Error> {
+async fn push_child_manifests(
+    ctx: &PushContext<'_>,
+    manifest: &Manifest,
+    digest: &Digest,
+) -> Result<(), Error> {
     let Content::Index { manifests } = &manifest.content else {
         return Ok(());
     };
+    // Terminal: the nesting is a property of the stored bytes, so a replay
+    // reaches the same depth.
+    if ctx.index_depth >= MAX_INDEX_DEPTH {
+        return Err(Error::InvalidManifest(format!(
+            "index '{digest}' nests deeper than {MAX_INDEX_DEPTH} levels"
+        )));
+    }
     let children: Vec<Digest> = manifests.iter().map(|child| child.digest.clone()).collect();
+    let child_ctx = &PushContext {
+        index_depth: ctx.index_depth + 1,
+        ..*ctx
+    };
 
     let results = stream::iter(children)
         .map(|child| async move {
-            let child_body = ctx.blob_store.read(&child).await.map_err(|e| {
+            // A manifest PUT only checks that a child's bytes exist, never that
+            // they parse as a manifest, so a child may name a layer of any
+            // size. The stream carries the total, so the oversized case is
+            // refused on the same round trip that would have fetched it.
+            let (mut reader, size) = ctx.blob_store.reader(&child, None).await.map_err(|e| {
+                Error::Internal(format!("failed to open local manifest blob '{child}': {e}"))
+            })?;
+            if size > DEFAULT_MAX_MANIFEST_SIZE_BYTES as u64 {
+                return Err(Error::InvalidManifest(format!(
+                    "index child '{child}' is {size} bytes, over the \
+                     {DEFAULT_MAX_MANIFEST_SIZE_BYTES}-byte manifest limit"
+                )));
+            }
+            let mut child_body = Vec::new();
+            reader.read_to_end(&mut child_body).await.map_err(|e| {
                 Error::Internal(format!("failed to read local manifest blob '{child}': {e}"))
             })?;
-            Box::pin(push_manifest(ctx, &child, None, child_body))
+            Box::pin(push_manifest(child_ctx, &child, None, child_body))
                 .await
                 .map(|_| ())
         })
