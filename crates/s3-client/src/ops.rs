@@ -396,11 +396,10 @@ impl Backend {
                 .list_objects_v2_raw(&full_prefix, 1000, continuation_token, None, None)
                 .await?;
             self.delete_batch(res.contents).await?;
-            if res.is_truncated {
-                continuation_token = res.next_continuation_token;
-            } else {
+            if res.next_continuation_token.is_none() {
                 break Ok(());
             }
+            continuation_token = res.next_continuation_token;
         }
     }
 
@@ -519,7 +518,7 @@ impl Backend {
             .into_iter()
             .filter_map(|key| key.strip_prefix(&full_prefix).map(str::to_string))
             .collect();
-        let next_token = res.next_continuation_token.filter(|_| res.is_truncated);
+        let next_token = res.next_continuation_token;
         Ok((prefixes, objects, next_token))
     }
 
@@ -558,7 +557,7 @@ impl Backend {
                     .to_string()
             })
             .collect();
-        let next_token = res.next_continuation_token.filter(|_| res.is_truncated);
+        let next_token = res.next_continuation_token;
         Ok((objects, next_token))
     }
 }
@@ -765,12 +764,11 @@ impl Backend {
             })
             .collect();
 
-        let (next_key, next_upload) = if parsed.is_truncated {
-            (parsed.next_key_marker, parsed.next_upload_id_marker)
-        } else {
-            (None, None)
-        };
-        Ok((uploads, next_key, next_upload))
+        Ok((
+            uploads,
+            parsed.next_key_marker,
+            parsed.next_upload_id_marker,
+        ))
     }
 
     /// # Errors
@@ -800,11 +798,10 @@ impl Backend {
                 )
                 .await?;
             parts.extend(parsed.parts);
-            if parsed.is_truncated {
-                part_number_marker = parsed.next_part_number_marker;
-            } else {
+            if parsed.next_part_number_marker.is_none() {
                 return Ok(parts);
             }
+            part_number_marker = parsed.next_part_number_marker;
         }
     }
 }
