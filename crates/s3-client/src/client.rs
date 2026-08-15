@@ -16,13 +16,13 @@ use std::{
 };
 
 use angos_backoff::Backoff;
+use arc_swap::ArcSwapOption;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Utc};
 use futures_util::{Stream, StreamExt};
 use hmac::{Hmac, KeyInit, Mac};
 use md5::{Digest as Md5Digest, Md5};
-use parking_lot::Mutex;
 use reqwest::{
     Body, Client, Method, Response, StatusCode,
     header::{
@@ -30,7 +30,6 @@ use reqwest::{
     },
 };
 use sha2::Sha256;
-use smallvec::SmallVec;
 use tokio::time::{sleep, timeout};
 use url::Url;
 
@@ -223,7 +222,7 @@ pub struct S3Client {
     operation_attempt_timeout: Duration,
     max_attempts: u32,
     retry_backoff: Backoff,
-    signing_key_cache: Arc<Mutex<Option<CachedSigningKey>>>,
+    signing_key_cache: Arc<ArcSwapOption<CachedSigningKey>>,
     user_agent: String,
 }
 
@@ -304,7 +303,7 @@ impl S3Client {
             max_attempts: config.max_attempts.max(1),
             retry_backoff: Backoff::exponential(Duration::from_millis(50), Duration::from_secs(1))
                 .with_jitter(),
-            signing_key_cache: Arc::new(Mutex::new(None)),
+            signing_key_cache: Arc::new(ArcSwapOption::empty()),
             user_agent: config
                 .user_agent
                 .clone()
@@ -651,7 +650,7 @@ impl S3Client {
     }
 
     fn signing_key(&self, date: &str) -> Result<[u8; 32], S3Error> {
-        if let Some(cached) = self.signing_key_cache.lock().as_ref()
+        if let Some(cached) = self.signing_key_cache.load().as_ref()
             && cached.date == date
         {
             return Ok(cached.key);
@@ -663,10 +662,11 @@ impl S3Client {
         let date_region_key = hmac_sha256(&date_key, self.region.as_bytes())?;
         let date_region_service_key = hmac_sha256(&date_region_key, SERVICE.as_bytes())?;
         let key = hmac_sha256(&date_region_service_key, b"aws4_request")?;
-        *self.signing_key_cache.lock() = Some(CachedSigningKey {
-            date: date.to_string(),
-            key,
-        });
+        self.signing_key_cache
+            .store(Some(Arc::new(CachedSigningKey {
+                date: date.to_string(),
+                key,
+            })));
         Ok(key)
     }
 
@@ -814,7 +814,7 @@ fn normalize_header_value(value: &str) -> String {
     normalized
 }
 
-fn encode_query(query: &[QueryParam]) -> SmallVec<[EncodedQueryParam; 8]> {
+fn encode_query(query: &[QueryParam]) -> Vec<EncodedQueryParam> {
     query
         .iter()
         .map(|param| EncodedQueryParam {
@@ -830,7 +830,7 @@ fn encode_query(query: &[QueryParam]) -> SmallVec<[EncodedQueryParam; 8]> {
 }
 
 fn canonical_query(query: &[EncodedQueryParam]) -> String {
-    let mut params = query.iter().collect::<SmallVec<[&EncodedQueryParam; 8]>>();
+    let mut params = query.iter().collect::<Vec<_>>();
     params.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.value.cmp(&b.value)));
     let mut encoded = String::new();
     for (index, param) in params.into_iter().enumerate() {

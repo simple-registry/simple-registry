@@ -31,7 +31,6 @@ use crate::{
     http_response::ResponseBody,
     identity::{Action, RequestScheme},
     metrics_provider::{InFlightGuard, metrics_provider},
-    timing::elapsed_ms,
 };
 
 /// Boxed, type-erased dispatch future. The erasure is load-bearing, not an
@@ -151,7 +150,9 @@ async fn handle_request(
         response.headers_mut().insert(OCI_NAMESPACE, value);
     }
 
-    let elapsed = elapsed_ms(start_time);
+    // `as_secs_f64()` rather than `as_millis() as f64`: the latter trips the
+    // precision-loss lint, and the conversion is lossless at request scale.
+    let elapsed = start_time.elapsed().as_secs_f64() * 1000.0;
     let status = response.status();
 
     metrics_provider()
