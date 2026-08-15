@@ -66,6 +66,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `prune` collects an orphan manifest and everything under it in a single run, where it used to free one nesting level per run and let digest order decide what a run reclaimed.
 - A manifest delete whose body cannot be read is refused rather than committing a cascade that names no config, layer or child links, which used to strand those links holding their blobs with no body left to replan the cascade from.
 - `scrub` no longer reclaims a blob's bytes when its shard walk read references the per-blob index read did not, so a backend that drops a key from a listing can no longer make a referenced blob look unreferenced.
+- An S3 listing that reports itself truncated but names nowhere to resume from is refused as a protocol error, where it used to be served as a complete listing (and, for multipart parts, re-request the first page forever while the collected parts grew unbounded).
 
 ## 1.4.5
 

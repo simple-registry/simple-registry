@@ -19,7 +19,9 @@ pub struct S3ErrorBody {
 pub struct ListObjectsV2Output {
     pub contents: Vec<String>,
     pub common_prefixes: Vec<String>,
-    pub is_truncated: bool,
+    /// Where the next page starts, `Some` exactly when the listing is
+    /// truncated. A caller that stops on `None` therefore cannot mistake a
+    /// truncated page for a complete one.
     pub next_continuation_token: Option<String>,
 }
 
@@ -43,7 +45,9 @@ pub struct MultipartUploadOutput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListMultipartUploadsOutput {
     pub uploads: Vec<MultipartUploadOutput>,
-    pub is_truncated: bool,
+    /// Where the next page starts, `Some` exactly when the listing is
+    /// truncated. `next_upload_id_marker` only refines it, so it is `None`
+    /// whenever this is.
     pub next_key_marker: Option<String>,
     pub next_upload_id_marker: Option<String>,
 }
@@ -51,7 +55,9 @@ pub struct ListMultipartUploadsOutput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListPartsOutput {
     pub parts: Vec<UploadedPart>,
-    pub is_truncated: bool,
+    /// Where the next page starts, `Some` exactly when the listing is
+    /// truncated, so the paging loop terminates on `None` rather than
+    /// re-requesting the first page forever.
     pub next_part_number_marker: Option<u32>,
 }
 
@@ -247,9 +253,9 @@ pub fn parse_list_objects_v2(body: &[u8]) -> Result<ListObjectsV2Output, String>
     let mut output = ListObjectsV2Output {
         contents: Vec::new(),
         common_prefixes: Vec::new(),
-        is_truncated: false,
         next_continuation_token: None,
     };
+    let mut is_truncated = false;
     let mut current_key: Option<String> = None;
     let mut current_prefix: Option<String> = None;
 
@@ -263,7 +269,7 @@ pub fn parse_list_objects_v2(body: &[u8]) -> Result<ListObjectsV2Output, String>
             XmlEvent::Text(kind, text) => match kind {
                 TextKind::ListObjectKey => current_key = Some(text),
                 TextKind::ListCommonPrefix => current_prefix = Some(text),
-                TextKind::IsTruncated => output.is_truncated = text == "true",
+                TextKind::IsTruncated => is_truncated = text == "true",
                 TextKind::NextContinuationToken => output.next_continuation_token = Some(text),
                 _ => {}
             },
@@ -284,6 +290,12 @@ pub fn parse_list_objects_v2(body: &[u8]) -> Result<ListObjectsV2Output, String>
         Ok(())
     })?;
 
+    if is_truncated && output.next_continuation_token.is_none() {
+        return Err("truncated listing carries no continuation token".to_string());
+    }
+    if !is_truncated {
+        output.next_continuation_token = None;
+    }
     Ok(output)
 }
 
@@ -335,10 +347,10 @@ pub fn parse_upload_part_copy(body: &[u8]) -> Result<String, String> {
 pub fn parse_list_multipart_uploads(body: &[u8]) -> Result<ListMultipartUploadsOutput, String> {
     let mut output = ListMultipartUploadsOutput {
         uploads: Vec::new(),
-        is_truncated: false,
         next_key_marker: None,
         next_upload_id_marker: None,
     };
+    let mut is_truncated = false;
     let mut key: Option<String> = None;
     let mut upload_id: Option<String> = None;
     let mut initiated: Option<DateTime<Utc>> = None;
@@ -358,7 +370,7 @@ pub fn parse_list_multipart_uploads(body: &[u8]) -> Result<ListMultipartUploadsO
                         .ok()
                         .map(|dt| dt.with_timezone(&Utc));
                 }
-                TextKind::IsTruncated => output.is_truncated = text == "true",
+                TextKind::IsTruncated => is_truncated = text == "true",
                 TextKind::NextKeyMarker => output.next_key_marker = Some(text),
                 TextKind::NextUploadIdMarker => output.next_upload_id_marker = Some(text),
                 _ => {}
@@ -379,15 +391,22 @@ pub fn parse_list_multipart_uploads(body: &[u8]) -> Result<ListMultipartUploadsO
         Ok(())
     })?;
 
+    if is_truncated && output.next_key_marker.is_none() {
+        return Err("truncated multipart listing carries no key marker".to_string());
+    }
+    if !is_truncated {
+        output.next_key_marker = None;
+        output.next_upload_id_marker = None;
+    }
     Ok(output)
 }
 
 pub fn parse_list_parts(body: &[u8]) -> Result<ListPartsOutput, String> {
     let mut output = ListPartsOutput {
         parts: Vec::new(),
-        is_truncated: false,
         next_part_number_marker: None,
     };
+    let mut is_truncated = false;
     let mut part_number: Option<u32> = None;
     let mut e_tag: Option<String> = None;
     let mut size: Option<u64> = None;
@@ -403,9 +422,14 @@ pub fn parse_list_parts(body: &[u8]) -> Result<ListPartsOutput, String> {
                 TextKind::PartNumber => part_number = text.parse::<u32>().ok(),
                 TextKind::PartETag => e_tag = Some(text),
                 TextKind::PartSize => size = text.parse::<u64>().ok(),
-                TextKind::IsTruncated => output.is_truncated = text == "true",
+                TextKind::IsTruncated => is_truncated = text == "true",
                 TextKind::NextPartNumberMarker => {
-                    output.next_part_number_marker = text.parse::<u32>().ok();
+                    // Silently dropping an unreadable marker would leave the
+                    // page truncated with nowhere to resume from.
+                    let marker = text
+                        .parse::<u32>()
+                        .map_err(|e| format!("part number marker '{text}' is not a number: {e}"))?;
+                    output.next_part_number_marker = Some(marker);
                 }
                 _ => {}
             },
@@ -425,6 +449,12 @@ pub fn parse_list_parts(body: &[u8]) -> Result<ListPartsOutput, String> {
         Ok(())
     })?;
 
+    if is_truncated && output.next_part_number_marker.is_none() {
+        return Err("truncated part listing carries no part number marker".to_string());
+    }
+    if !is_truncated {
+        output.next_part_number_marker = None;
+    }
     Ok(output)
 }
 
@@ -483,10 +513,66 @@ mod tests {
         </ListBucketResult>";
 
         let parsed = parse_list_objects_v2(xml).unwrap();
-        assert!(parsed.is_truncated);
         assert_eq!(parsed.next_continuation_token.as_deref(), Some("next"));
         assert_eq!(parsed.contents, vec!["prefix/a"]);
         assert_eq!(parsed.common_prefixes, vec!["prefix/b/"]);
+    }
+
+    /// A page that says it is truncated but names nowhere to resume from is
+    /// unusable: believing it would hand a caller a partial listing as a
+    /// complete one, and anything deriving a delete from "not in the listing"
+    /// would then delete live data.
+    #[test]
+    fn a_truncated_listing_without_a_marker_is_rejected() {
+        let objects = parse_list_objects_v2(
+            b"<ListBucketResult>
+                <IsTruncated>true</IsTruncated>
+                <Contents><Key>a</Key></Contents>
+            </ListBucketResult>",
+        );
+        assert!(objects.is_err(), "got: {objects:?}");
+
+        let uploads = parse_list_multipart_uploads(
+            b"<ListMultipartUploadsResult>
+                <IsTruncated>true</IsTruncated>
+            </ListMultipartUploadsResult>",
+        );
+        assert!(uploads.is_err(), "got: {uploads:?}");
+
+        let parts = parse_list_parts(
+            b"<ListPartsResult>
+                <IsTruncated>true</IsTruncated>
+            </ListPartsResult>",
+        );
+        assert!(parts.is_err(), "got: {parts:?}");
+    }
+
+    /// The paging loop resumes from this marker, so a value it cannot read must
+    /// not degrade to "no marker": that reads as a complete listing, and for
+    /// parts it re-requests the first page forever.
+    #[test]
+    fn an_unreadable_part_number_marker_is_rejected() {
+        let parsed = parse_list_parts(
+            b"<ListPartsResult>
+                <IsTruncated>true</IsTruncated>
+                <NextPartNumberMarker>not-a-number</NextPartNumberMarker>
+            </ListPartsResult>",
+        );
+        assert!(parsed.is_err(), "got: {parsed:?}");
+    }
+
+    /// A marker on a complete page is dropped rather than believed, so a caller
+    /// stopping on `None` cannot be sent round again.
+    #[test]
+    fn a_complete_listing_carries_no_marker() {
+        let parsed = parse_list_objects_v2(
+            b"<ListBucketResult>
+                <IsTruncated>false</IsTruncated>
+                <NextContinuationToken>stale</NextContinuationToken>
+            </ListBucketResult>",
+        )
+        .unwrap();
+        assert_eq!(parsed.next_continuation_token, None);
     }
 
     #[test]
