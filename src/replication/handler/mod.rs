@@ -436,6 +436,7 @@ impl ReplicationJobHandler {
             namespace,
             downstream_namespace,
             source_ts,
+            index_depth: 0,
         };
         let outcome = pipeline::push_manifest(&ctx, &digest, target.tag.as_deref(), body)
             .await

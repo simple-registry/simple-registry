@@ -26,13 +26,16 @@ use crate::{
     metrics_provider,
     registry::{
         blob_store::BlobStore,
+        manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
         metadata_store::{BlobIndexOperation, LinkKind, LinkOperation, MetadataStore},
         test_utils::{FsTestStack, downstream_client, fs_test_stack, media_type, put_blob_direct},
     },
     registry_client::{
         REPLICATION_SUPERSEDED_CODE, RegistryClient, UploadSession, X_ANGOS_SOURCE_TIMESTAMP,
     },
-    replication::pipeline::{PushContext, PushOutcome, delete_manifest, push_blobs, push_manifest},
+    replication::pipeline::{
+        MAX_INDEX_DEPTH, PushContext, PushOutcome, delete_manifest, push_blobs, push_manifest,
+    },
     replication::{Error, ReplicationDownstream},
     test_fixtures::mocks::mount_blob_upload_accepted,
 };
@@ -80,6 +83,7 @@ fn push_context<'a>(
         namespace,
         downstream_namespace: namespace,
         source_ts: None,
+        index_depth: 0,
     }
 }
 
@@ -2104,4 +2108,89 @@ async fn a_failing_blob_lets_its_siblings_finish_their_upload() {
 
     // .expect(1) on the PUT verifies the sibling finished instead of being dropped.
     drop(mock_server);
+}
+
+/// A manifest PUT only checks that an index child's bytes exist, never that
+/// they parse as a manifest, so a child may name a layer of any size. Reading
+/// it whole to discover that is the memory exhaustion: the size is the cheap
+/// question, asked first.
+#[tokio::test]
+async fn an_index_child_over_the_manifest_limit_is_refused_before_it_is_read() {
+    metrics_provider::init_for_tests();
+    let mock_server = MockServer::start().await;
+    let (blob_store, metadata_store, store, _dir) = test_blob_store();
+
+    let oversized = vec![b'x'; DEFAULT_MAX_MANIFEST_SIZE_BYTES + 1];
+    let child_digest = put_blob_direct(&store, &oversized).await;
+
+    let index = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [{
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": child_digest.to_string(),
+            "size": oversized.len(),
+        }],
+    });
+    let index_bytes = serde_json::to_vec(&index).unwrap();
+    let index_digest = put_blob_direct(&store, &index_bytes).await;
+
+    let downstream = test_downstream(downstream_client(&mock_server.uri()));
+    let namespace = Namespace::new(NAMESPACE).unwrap();
+    let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
+
+    let error = push_manifest(&ctx, &index_digest, Some("v1"), index_bytes)
+        .await
+        .expect_err("an oversized index child must not be buffered");
+    assert!(
+        matches!(&error, Error::InvalidManifest(msg) if msg.contains("over the")),
+        "the child must be refused as an invalid manifest, got: {error:?}"
+    );
+}
+
+/// Each nesting level holds its manifest body while the level below pushes, so
+/// a chain of indexes each naming the next is memory an authenticated pusher
+/// controls. Content addressing makes a true cycle unconstructible; depth is
+/// the axis that is reachable.
+#[tokio::test]
+async fn an_index_chain_deeper_than_the_cap_is_refused() {
+    metrics_provider::init_for_tests();
+    let mock_server = MockServer::start().await;
+    let (blob_store, metadata_store, store, _dir) = test_blob_store();
+
+    // Innermost is a plain manifest; wrap it in one index per level.
+    let leaf = json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "layers": [],
+    });
+    let leaf_bytes = serde_json::to_vec(&leaf).unwrap();
+    let mut digest = put_blob_direct(&store, &leaf_bytes).await;
+    let mut bytes = leaf_bytes;
+
+    for _ in 0..=MAX_INDEX_DEPTH {
+        let index = json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [{
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": digest.to_string(),
+                "size": bytes.len(),
+            }],
+        });
+        bytes = serde_json::to_vec(&index).unwrap();
+        digest = put_blob_direct(&store, &bytes).await;
+    }
+
+    let downstream = test_downstream(downstream_client(&mock_server.uri()));
+    let namespace = Namespace::new(NAMESPACE).unwrap();
+    let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
+
+    let error = push_manifest(&ctx, &digest, Some("v1"), bytes)
+        .await
+        .expect_err("a chain past the cap must not be followed");
+    assert!(
+        matches!(&error, Error::InvalidManifest(msg) if msg.contains("nests deeper")),
+        "the chain must be refused as an invalid manifest, got: {error:?}"
+    );
 }
