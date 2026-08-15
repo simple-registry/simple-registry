@@ -201,7 +201,10 @@ Token and key cache configuration. Defaults to in-memory (not suitable for multi
 
 ## Blob Storage (`blob_store`)
 
-Choose one: `blob_store.fs` or `blob_store.s3`.
+Required. Choose one: `blob_store.fs` or `blob_store.s3`. A configuration
+naming neither fails to load, and so does an `fs` backend whose `root_dir` is
+empty, which would otherwise resolve every object against the process working
+directory.
 
 ### Filesystem (`blob_store.fs`)
 

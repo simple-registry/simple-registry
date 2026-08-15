@@ -175,6 +175,9 @@ fn a_semantic_error_names_the_key_path_and_the_sources() {
 #[test]
 fn a_single_file_error_still_reports_line_and_column() {
     let invalid = r#"
+        [blob_store.fs]
+        root_dir = "/tmp/test"
+
         [server]
         bind_address = "0.0.0.0"
         port = "not-a-number"

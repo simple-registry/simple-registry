@@ -253,6 +253,9 @@ async fn test_regular_config_change() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let new_config = r#"
+[blob_store.fs]
+root_dir = "/tmp/test"
+
 [server]
 bind_address = "127.0.0.1"
 "#;
@@ -285,6 +288,9 @@ async fn test_kubernetes_config_mount() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let new_config = r#"
+[blob_store.fs]
+root_dir = "/tmp/test"
+
 [server]
 bind_address = "192.168.1.1"
 "#;
@@ -408,6 +414,9 @@ async fn test_invalid_config_recovery() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let valid_config = r#"
+[blob_store.fs]
+root_dir = "/tmp/test"
+
 [server]
 bind_address = "10.0.0.1"
 "#;
@@ -679,8 +688,10 @@ fn ensure_config_cached_returns_none_when_cache_empty_and_disk_invalid() {
 fn ensure_config_cached_returns_cached_without_reading_disk() {
     let temp_dir = TempDir::new().unwrap();
     // Cache is preloaded with a non-TLS config.
-    let cached_cfg: Configuration =
-        Configuration::load_from_str("[server]\nbind_address = \"127.0.0.1\"").unwrap();
+    let cached_cfg: Configuration = Configuration::load_from_str(
+        "[blob_store.fs]\nroot_dir = \"/tmp/test\"\n\n[server]\nbind_address = \"127.0.0.1\"",
+    )
+    .unwrap();
     let mut cached: Option<Configuration> = Some(cached_cfg);
 
     // Point at a non-existent path; must not be touched.
@@ -747,8 +758,10 @@ async fn reload_tls_does_not_notify_when_cache_empty_and_disk_invalid() {
 async fn reload_tls_does_not_notify_when_server_is_not_tls() {
     let temp_dir = TempDir::new().unwrap();
     // Insecure server config, no TLS section.
-    let cached_cfg: Configuration =
-        Configuration::load_from_str("[server]\nbind_address = \"127.0.0.1\"").unwrap();
+    let cached_cfg: Configuration = Configuration::load_from_str(
+        "[blob_store.fs]\nroot_dir = \"/tmp/test\"\n\n[server]\nbind_address = \"127.0.0.1\"",
+    )
+    .unwrap();
 
     let notifier = TestNotifier::new();
     let mut cached: Option<Configuration> = Some(cached_cfg);
@@ -857,7 +870,9 @@ async fn burst_config_writes_produce_bounded_reloads() {
 
     // Write a valid config 10 times as fast as the OS allows.
     for i in 0_u8..10 {
-        let content = format!("[server]\nbind_address = \"10.0.0.{i}\"\n");
+        let content = format!(
+            "[blob_store.fs]\nroot_dir = \"/tmp/test\"\n\n[server]\nbind_address = \"10.0.0.{i}\"\n"
+        );
         let mut file = fs::File::create(&config_path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file.sync_all().unwrap();
@@ -914,7 +929,8 @@ async fn missing_tls_dir_does_not_prevent_config_reload() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Write a fresh valid config; watcher must still detect it.
-    let updated = "[server]\nbind_address = \"192.0.2.1\"\n";
+    let updated =
+        "[blob_store.fs]\nroot_dir = \"/tmp/test\"\n\n[server]\nbind_address = \"192.0.2.1\"\n";
     let mut file = fs::File::create(&config_path).unwrap();
     file.write_all(updated.as_bytes()).unwrap();
     file.sync_all().unwrap();

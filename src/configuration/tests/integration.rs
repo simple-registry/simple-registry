@@ -18,6 +18,9 @@ fn test_load_minimal_config() {
     let config = r#"
     [server]
     bind_address = "0.0.0.0"
+
+    [blob_store.fs]
+    root_dir = "/var/lib/registry"
     "#;
 
     let config = Configuration::load_from_str(config).unwrap();
@@ -36,16 +39,63 @@ fn test_load_minimal_config() {
     assert_eq!(server_config.base.query_timeout_grace_period.get(), 60);
 
     assert_eq!(config.cache, cache::Config::Memory);
-    assert_eq!(config.blob_store, blob_store::BlobStoreConfig::default());
+    assert_eq!(
+        config.blob_store,
+        blob_store::BlobStoreConfig::FS(blob_store::FsBackendConfig {
+            root_dir: PathBuf::from("/var/lib/registry"),
+            sync_to_disk: false,
+        })
+    );
 
     assert!(config.auth.identity.is_empty());
     assert!(config.repository.is_empty());
     assert!(config.observability.is_none());
 }
 
+/// Without a `[blob_store]` the filesystem backend used to default to the empty
+/// path, so a registry started from a container's working directory wrote every
+/// blob to the ephemeral layer and lost them on restart.
+#[test]
+fn a_configuration_without_a_blob_store_is_refused() {
+    let error = Configuration::load_from_str(
+        r#"
+    [server]
+    bind_address = "0.0.0.0"
+    "#,
+    )
+    .expect_err("a configuration naming no storage must not load");
+
+    assert!(
+        format!("{error}").contains("blob_store"),
+        "the error must name the missing section, got: {error}"
+    );
+}
+
+#[test]
+fn an_empty_blob_store_root_is_refused() {
+    let error = Configuration::load_from_str(
+        r#"
+    [server]
+    bind_address = "0.0.0.0"
+
+    [blob_store.fs]
+    root_dir = ""
+    "#,
+    )
+    .expect_err("an empty root_dir must not load");
+
+    assert!(
+        format!("{error}").contains("root_dir"),
+        "the error must name the offending key, got: {error}"
+    );
+}
+
 #[test]
 fn test_tls_config_detection() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
     port = 8000
@@ -106,6 +156,9 @@ fn test_metadata_store_explicit_config_not_overridden() {
 #[test]
 fn test_auth_section() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -128,6 +181,9 @@ fn test_auth_section() {
 #[test]
 fn test_repository_config() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -190,6 +246,9 @@ fn test_repository_downstream_config() {
     // Downstream tables must parse through the full Configuration, including
     // the repository map visitor and the flattened RegistryClientConfig.
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -233,6 +292,9 @@ fn test_repository_downstream_rejects_partial_mtls() {
     // The mTLS-pairing validation must fire through the full Configuration
     // parse too.
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -252,6 +314,9 @@ fn test_repository_downstream_rejects_partial_mtls() {
 #[test]
 fn test_cache_config_redis() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -272,6 +337,9 @@ fn test_cache_config_redis() {
 #[test]
 fn test_invalid_toml_format() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server
     bind_address = "0.0.0.0"
     "#;
@@ -287,6 +355,9 @@ fn test_invalid_toml_format() {
 #[test]
 fn test_tls_config_with_client_ca() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
     port = 8443
@@ -322,6 +393,9 @@ fn test_tls_config_with_client_ca() {
 #[test]
 fn test_insecure_config_with_custom_port() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "127.0.0.1"
     port = 9000
@@ -344,6 +418,9 @@ fn test_insecure_config_with_custom_port() {
 #[test]
 fn test_multiple_repositories() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -414,6 +491,9 @@ fn test_metadata_store_s3_with_redis() {
 #[test]
 fn test_metadata_store_fs_with_redis() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -448,6 +528,9 @@ fn test_metadata_store_fs_with_redis() {
 #[test]
 fn test_ipv6_bind_address() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "::1"
     "#;
@@ -464,6 +547,9 @@ fn test_ipv6_bind_address() {
 #[test]
 fn test_access_policy_in_global_config() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -479,6 +565,9 @@ fn test_access_policy_in_global_config() {
 #[test]
 fn test_retention_policy_in_global_config() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -493,6 +582,9 @@ fn test_retention_policy_in_global_config() {
 #[test]
 fn test_multiple_webhooks() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -573,6 +665,9 @@ fn test_load_from_file_with_tls_config() {
     use tempfile::NamedTempFile;
 
     let config_content = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
     port = 8443
@@ -612,6 +707,9 @@ fn test_load_from_file_with_validation_error() {
     use tempfile::NamedTempFile;
 
     let config_content = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -637,6 +735,9 @@ fn test_load_from_file_with_validation_error() {
 #[test]
 fn test_event_webhook_config_parses() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -664,6 +765,9 @@ fn test_event_webhook_config_parses() {
 #[test]
 fn test_event_webhook_backward_compatible() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
     "#;
@@ -675,6 +779,9 @@ fn test_event_webhook_backward_compatible() {
 #[test]
 fn test_event_webhook_invalid_config_fails_deserialization() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -1023,6 +1130,9 @@ fn test_metadata_store_s3_both_redis_and_lock_strategy_fails() {
 #[test]
 fn test_metadata_store_fs_lock_strategy_s3_fails() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -1047,6 +1157,9 @@ fn test_metadata_store_fs_lock_strategy_s3_fails() {
 #[test]
 fn event_webhook_valid_global_reference_loads() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -1066,6 +1179,9 @@ fn event_webhook_valid_global_reference_loads() {
 #[test]
 fn event_webhook_valid_repo_reference_loads() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -1086,6 +1202,9 @@ fn event_webhook_valid_repo_reference_loads() {
 #[test]
 fn event_webhook_empty_events_list_fails_load() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -1109,6 +1228,9 @@ fn event_webhook_empty_events_list_fails_load() {
 #[test]
 fn incomplete_tls_section_is_rejected_rather_than_downgraded() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -1129,6 +1251,9 @@ fn incomplete_tls_section_is_rejected_rather_than_downgraded() {
 #[test]
 fn required_client_auth_without_a_ca_bundle_is_rejected() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
 
@@ -1153,6 +1278,9 @@ fn required_client_auth_without_a_ca_bundle_is_rejected() {
 #[test]
 fn a_server_section_without_tls_stays_insecure() {
     let config = r#"
+    [blob_store.fs]
+    root_dir = "/tmp/test"
+
     [server]
     bind_address = "0.0.0.0"
     port = 8000
