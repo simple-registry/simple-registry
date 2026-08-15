@@ -944,18 +944,77 @@ async fn pull_through_recomputes_under_the_requested_digest_algorithm() {
     );
 }
 
-/// Fails every read of the link object, standing in for a metadata-store
-/// outage rather than a genuinely absent manifest.
-struct FailLinkReads {
+/// A delete cascades the manifest's config, layer and child links, which it can
+/// only name by reading the body. A backend fault must abort the delete: if it
+/// read as "no children", the revision and its bytes would go while those links
+/// survived, pinning their blobs with no body left to replan the cascade from.
+#[tokio::test]
+async fn a_blob_fault_aborts_a_digest_delete_instead_of_half_committing() {
+    let case = FSRegistryTestCase::new();
+    let namespace = &Namespace::new("test-repo/delete-fault").unwrap();
+    let tag = Tag::new("latest").unwrap();
+
+    let (content, media_type) = create_test_manifest(case.registry(), namespace).await;
+    let response = case
+        .registry()
+        .put_manifest(
+            namespace,
+            &Reference::Tag(tag.clone()),
+            Some(&media_type),
+            &content,
+        )
+        .await
+        .unwrap();
+
+    let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+        case.blob_store().object_store().clone(),
+        FailReadsOf {
+            key: path_builder::blob_path(&response.digest),
+        },
+    ));
+    let registry = create_test_registry(
+        Arc::new(BlobStore::new(hooked, None)),
+        case.metadata_store(),
+    );
+
+    registry
+        .delete_manifest(
+            None,
+            None,
+            namespace,
+            &Reference::Digest(response.digest.clone()),
+        )
+        .await
+        .expect_err("a blob-store fault must abort the delete, not commit a partial cascade");
+
+    let repository = case
+        .registry()
+        .get_repository_for_namespace(namespace)
+        .unwrap();
+    case.registry()
+        .get_manifest(
+            Some(repository),
+            &[MediaRange::from(media_type)],
+            namespace,
+            Reference::Tag(tag),
+            false,
+        )
+        .await
+        .expect("the aborted delete must leave the tag resolvable");
+}
+
+/// Fails every read of one object, standing in for a backend outage rather than
+/// genuinely absent content.
+struct FailReadsOf {
     key: String,
 }
 
 #[async_trait::async_trait]
-impl StoreHook for FailLinkReads {
+impl StoreHook for FailReadsOf {
     async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
         match op {
             StoreOp::Get { key } if key == self.key => {
-                Err(StorageError::Backend("metadata store is down".to_string()))
+                Err(StorageError::Backend("store is down".to_string()))
             }
             _ => Ok(()),
         }
@@ -974,7 +1033,7 @@ async fn a_backend_fault_is_not_reported_as_a_missing_manifest() {
     let inner: Arc<dyn ObjectStore> = case.metadata_store().store().object_store().clone();
     let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
         inner,
-        FailLinkReads {
+        FailReadsOf {
             key: path_builder::link_path(&link, &namespace),
         },
     ));

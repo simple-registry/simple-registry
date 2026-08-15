@@ -531,7 +531,7 @@ impl RetentionChecker {
             Fate::Skip | Fate::Retain => Ok(Vec::new()),
             Fate::Delete => {
                 // Read before the delete reclaims the body naming them.
-                let unpinned = match read_manifest(&self.blob_store, digest).await {
+                let unpinned = match read_manifest(&self.blob_store, digest).await? {
                     Some(manifest) => link_plan::unpinned_by_delete(&manifest),
                     None => Vec::new(),
                 };

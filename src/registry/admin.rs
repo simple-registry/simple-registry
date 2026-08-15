@@ -681,7 +681,12 @@ impl Registry {
         // order so the merged map values stay deterministic.
         let analyses: Vec<_> = stream::iter(all_revisions.iter().cloned())
             .map(|digest| async move {
-                let manifest = read_manifest(&self.blob_store, &digest).await?;
+                // Read-only listing: a body that will not read drops its row
+                // rather than failing the page.
+                let manifest = read_manifest(&self.blob_store, &digest)
+                    .await
+                    .ok()
+                    .flatten()?;
                 let analysis = analyze_manifest(&manifest);
                 let mut referrers = Vec::with_capacity(analysis.referrer_candidates.len());
                 for referrer in analysis.referrer_candidates {
@@ -721,7 +726,7 @@ impl Registry {
         mut info: ReferrerInfo,
         child_digest: &Digest,
     ) -> ReferrerInfo {
-        if let Some(child_manifest) = read_manifest(&self.blob_store, child_digest).await
+        if let Ok(Some(child_manifest)) = read_manifest(&self.blob_store, child_digest).await
             && let Some(predicate) = extract_in_toto_predicate(&child_manifest)
         {
             info.annotations
