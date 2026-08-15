@@ -1,4 +1,4 @@
-use std::{cmp::Reverse, pin::pin, sync::Arc};
+use std::{cmp::Reverse, collections::VecDeque, pin::pin, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::Duration;
@@ -14,6 +14,7 @@ use crate::{
     registry::{
         Error as RegistryError, Repository,
         blob_store::BlobStore,
+        manifest::{link_plan, read_manifest},
         metadata_store::{BlobIndex, LinkKind, LinkMetadata, MetadataStore},
         repository_resolver::RepositoryResolver,
     },
@@ -31,6 +32,7 @@ struct TagWithMetadata {
 }
 
 pub struct RetentionChecker {
+    blob_store: Arc<BlobStore>,
     metadata_store: Arc<MetadataStore>,
     resolver: Arc<RepositoryResolver>,
     global_retention_policy: Option<Arc<RetentionPolicy>>,
@@ -255,11 +257,13 @@ async fn sweep_grants_for_blob(ctx: &GrantSweep<'_>, blob: &Digest) -> Result<()
 
 impl RetentionChecker {
     pub fn new(
+        blob_store: Arc<BlobStore>,
         metadata_store: Arc<MetadataStore>,
         resolver: Arc<RepositoryResolver>,
         global_retention_policy: Option<Arc<RetentionPolicy>>,
     ) -> Self {
         Self {
+            blob_store,
             metadata_store,
             resolver,
             global_retention_policy,
@@ -421,6 +425,9 @@ impl RetentionChecker {
         Ok(retain)
     }
 
+    /// Collects orphan revisions, requeueing what each delete unpins so one
+    /// skipped while still pinned is revisited in the same run. Requeues cannot
+    /// loop: a digest names its children and subject by content hash.
     async fn emit_delete_orphan_manifests(
         &self,
         namespace: &Namespace,
@@ -428,14 +435,35 @@ impl RetentionChecker {
         last_pulled: &[String],
         sink: &dyn ActionSink,
     ) -> Result<(), Error> {
+        // Requeues first: the queue then spans one subtree, not the listing.
+        let mut requeued: VecDeque<Digest> = VecDeque::new();
+
         let mut revisions = pin!(self.metadata_store.stream_revisions(namespace));
-        while let Some(digest) = revisions.next().await {
-            let digest = digest?;
-            if let Err(e) = self
+        loop {
+            let digest = match requeued.pop_front() {
+                Some(digest) => digest,
+                None => match revisions.next().await {
+                    Some(digest) => digest?,
+                    None => break,
+                },
+            };
+
+            match self
                 .process_orphan_revision(namespace, &digest, last_pushed, last_pulled, sink)
                 .await
             {
-                error!("Failed to check revision from '{namespace}' (revision '{digest}'): {e}");
+                Ok(unpinned) => {
+                    for candidate in unpinned {
+                        if !requeued.contains(&candidate) {
+                            requeued.push_back(candidate);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to check revision from '{namespace}' (revision '{digest}'): {e}"
+                    );
+                }
             }
         }
 
@@ -449,7 +477,7 @@ impl RetentionChecker {
         last_pushed: &[String],
         last_pulled: &[String],
         sink: &dyn ActionSink,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<Digest>, Error> {
         // A missing blob index means "no links"; any other read failure must
         // propagate rather than pass for "unprotected" on a delete path.
         let blob_index = match self.metadata_store.read_blob_index(digest).await {
@@ -498,15 +526,21 @@ impl RetentionChecker {
         digest: &Digest,
         fate: Fate,
         sink: &dyn ActionSink,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<Digest>, Error> {
         match fate {
-            Fate::Skip | Fate::Retain => Ok(()),
+            Fate::Skip | Fate::Retain => Ok(Vec::new()),
             Fate::Delete => {
+                // Read before the delete reclaims the body naming them.
+                let unpinned = match read_manifest(&self.blob_store, digest).await {
+                    Some(manifest) => link_plan::unpinned_by_delete(&manifest),
+                    None => Vec::new(),
+                };
                 sink.apply(Action::DeleteOrphanManifest {
                     namespace: namespace.clone(),
                     digest: digest.clone(),
                 })
-                .await
+                .await?;
+                Ok(unpinned)
             }
         }
     }
@@ -797,8 +831,12 @@ mod tests {
                 RepositoryResolver::new(test_utils::create_test_repositories())
                     .expect("test repositories must not have overlapping prefixes"),
             );
-            let scrubber =
-                RetentionChecker::new(metadata_store.clone(), resolver, Some(retention_policy));
+            let scrubber = RetentionChecker::new(
+                test_case.blob_store(),
+                metadata_store.clone(),
+                resolver,
+                Some(retention_policy),
+            );
 
             let executor = make_executor(test_case.blob_store(), test_case.metadata_store());
             scrubber.check(namespace, &executor).await.unwrap();
@@ -837,7 +875,12 @@ mod tests {
                 RepositoryResolver::new(test_utils::create_test_repositories())
                     .expect("test repositories must not have overlapping prefixes"),
             );
-            let scrubber = RetentionChecker::new(metadata_store.clone(), resolver, None);
+            let scrubber = RetentionChecker::new(
+                test_case.blob_store(),
+                metadata_store.clone(),
+                resolver,
+                None,
+            );
 
             let executor = make_executor(test_case.blob_store(), test_case.metadata_store());
             scrubber.check(namespace, &executor).await.unwrap();
@@ -882,10 +925,15 @@ mod tests {
                 RepositoryResolver::new(test_utils::create_test_repositories())
                     .expect("test repositories must not have overlapping prefixes"),
             );
-            RetentionChecker::new(metadata_store.clone(), resolver, Some(policy))
-                .check(&namespace, &executor)
-                .await
-                .unwrap();
+            RetentionChecker::new(
+                test_case.blob_store(),
+                metadata_store.clone(),
+                resolver,
+                Some(policy),
+            )
+            .check(&namespace, &executor)
+            .await
+            .unwrap();
 
             assert!(
                 metadata_store
@@ -921,10 +969,15 @@ mod tests {
                 RepositoryResolver::new(test_utils::create_test_repositories())
                     .expect("test repositories must not have overlapping prefixes"),
             );
-            RetentionChecker::new(metadata_store.clone(), resolver, None)
-                .check(&namespace, &executor)
-                .await
-                .unwrap();
+            RetentionChecker::new(
+                test_case.blob_store(),
+                metadata_store.clone(),
+                resolver,
+                None,
+            )
+            .check(&namespace, &executor)
+            .await
+            .unwrap();
 
             assert!(
                 metadata_store
@@ -959,10 +1012,15 @@ mod tests {
                 RepositoryResolver::new(test_utils::create_test_repositories())
                     .expect("test repositories must not have overlapping prefixes"),
             );
-            RetentionChecker::new(metadata_store.clone(), resolver, Some(policy.clone()))
-                .check(&namespace, &executor)
-                .await
-                .unwrap();
+            RetentionChecker::new(
+                test_case.blob_store(),
+                metadata_store.clone(),
+                resolver,
+                Some(policy.clone()),
+            )
+            .check(&namespace, &executor)
+            .await
+            .unwrap();
 
             assert!(
                 metadata_store
@@ -978,10 +1036,15 @@ mod tests {
                 RepositoryResolver::new(test_utils::create_test_repositories())
                     .expect("test repositories must not have overlapping prefixes"),
             );
-            RetentionChecker::new(metadata_store.clone(), resolver2, Some(policy))
-                .check(&namespace, &executor2)
-                .await
-                .unwrap();
+            RetentionChecker::new(
+                test_case.blob_store(),
+                metadata_store.clone(),
+                resolver2,
+                Some(policy),
+            )
+            .check(&namespace, &executor2)
+            .await
+            .unwrap();
 
             assert!(
                 metadata_store
@@ -991,6 +1054,73 @@ mod tests {
             );
         })
         .await;
+    }
+
+    /// One `check` collects a tagged index and the child it pinned.
+    async fn assert_index_and_child_collected_in_one_pass(test_case: &dyn RegistryTestCase) {
+        let namespace = Namespace::new("test-repo/app").unwrap();
+        let metadata_store = test_case.metadata_store();
+        let blob_store = test_case.blob_store();
+
+        let child_digest = test_utils::put_blob_body(&blob_store, TEST_MANIFEST).await;
+        let index_digest = test_utils::put_blob_body(&blob_store, TEST_INDEX).await;
+        assert!(
+            child_digest.to_string() < index_digest.to_string(),
+            "fixture must keep the child ahead of the index in the listing"
+        );
+
+        setup_index_scenario(&metadata_store, &namespace, &index_digest, &child_digest).await;
+
+        // Retains nothing, so the tag goes, then the index, then the child.
+        let policy = Arc::new(RetentionPolicy::new(
+            &RetentionPolicyConfig {
+                rules: vec![CelRule::compile("image.tag == 'keep-me'").unwrap()],
+            },
+            Arc::new(SystemClock),
+        ));
+
+        let executor = make_executor(blob_store.clone(), metadata_store.clone());
+        let resolver = Arc::new(
+            RepositoryResolver::new(test_utils::create_test_repositories())
+                .expect("test repositories must not have overlapping prefixes"),
+        );
+        RetentionChecker::new(blob_store, metadata_store.clone(), resolver, Some(policy))
+            .check(&namespace, &executor)
+            .await
+            .unwrap();
+
+        assert!(
+            metadata_store
+                .read_link(&namespace, &LinkKind::Digest(index_digest))
+                .await
+                .is_err(),
+            "the untagged index must be collected"
+        );
+        assert!(
+            metadata_store
+                .read_link(&namespace, &LinkKind::Digest(child_digest))
+                .await
+                .is_err(),
+            "the child must be collected in the same pass, not left for the next run"
+        );
+    }
+
+    /// The child sorts before the index in the revision listing, the ordering
+    /// that used to leave the child for a second run.
+    #[tokio::test]
+    async fn index_child_collected_in_the_same_pass() {
+        for_each_backend(async |test_case| {
+            assert_index_and_child_collected_in_one_pass(test_case).await;
+        })
+        .await;
+    }
+
+    /// The same with the stores on separate roots, which `for_each_backend`
+    /// shares and so cannot catch a read of the wrong one.
+    #[tokio::test]
+    async fn index_child_collected_in_the_same_pass_across_split_backends() {
+        assert_index_and_child_collected_in_one_pass(&FSRegistryTestCase::with_split_backends())
+            .await;
     }
 
     #[tokio::test]
@@ -1025,7 +1155,12 @@ mod tests {
             RepositoryResolver::new(test_utils::create_test_repositories())
                 .expect("test repositories must not have overlapping prefixes"),
         );
-        let scrubber = RetentionChecker::new(metadata_store.clone(), resolver, Some(policy));
+        let scrubber = RetentionChecker::new(
+            test_case.blob_store(),
+            metadata_store.clone(),
+            resolver,
+            Some(policy),
+        );
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
         scrubber.check(namespace, &sink).await.unwrap();
@@ -1113,10 +1248,15 @@ mod tests {
             },
             Arc::new(SystemClock),
         ));
-        RetentionChecker::new(metadata_store.clone(), resolver, Some(policy))
-            .check(namespace, &executor)
-            .await
-            .unwrap();
+        RetentionChecker::new(
+            test_case.blob_store(),
+            metadata_store.clone(),
+            resolver,
+            Some(policy),
+        )
+        .check(namespace, &executor)
+        .await
+        .unwrap();
 
         assert!(
             metadata_store
@@ -1194,10 +1334,15 @@ mod tests {
                 RepositoryResolver::new(test_utils::create_test_repositories())
                     .expect("test repositories must not have overlapping prefixes"),
             );
-            RetentionChecker::new(metadata_store.clone(), resolver, Some(policy))
-                .check(&namespace, &executor)
-                .await
-                .unwrap();
+            RetentionChecker::new(
+                test_case.blob_store(),
+                metadata_store.clone(),
+                resolver,
+                Some(policy),
+            )
+            .check(&namespace, &executor)
+            .await
+            .unwrap();
 
             // The healthy revision must be cleaned up: the broken one did not block the loop.
             assert!(
@@ -1598,6 +1743,7 @@ mod tests {
             },
         ));
         let checker = RetentionChecker::new(
+            case.blob_store(),
             metadata_store_over(hooked),
             Arc::new(RepositoryResolver::new(Arc::new(HashMap::new())).unwrap()),
             None,

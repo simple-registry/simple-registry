@@ -150,6 +150,23 @@ pub fn revision_links(manifest: &Manifest, revision: &Digest) -> Vec<(LinkKind, 
     links
 }
 
+/// The revisions `manifest` pins that deleting it would release: an index's
+/// children plus, for a subject-bearing manifest, its subject.
+pub fn unpinned_by_delete(manifest: &Manifest) -> Vec<Digest> {
+    let mut unpinned = match &manifest.content {
+        Content::Index { manifests } => manifests.iter().map(|c| c.digest.clone()).collect(),
+        Content::Image { .. } => Vec::new(),
+    };
+
+    unpinned.extend(
+        manifest
+            .subject
+            .as_ref()
+            .map(|subject| subject.digest.clone()),
+    );
+    unpinned
+}
+
 /// The config / layer / child-manifest links `manifest` implies under
 /// `revision`, each paired with the digest it targets. Config and layers come
 /// in manifest order, and an index yields its children instead.
@@ -583,5 +600,34 @@ mod tests {
             panic!("child manifest Delete op with referrer must be present");
         };
         assert_eq!(referrer.as_ref(), Some(&parent));
+    }
+
+    // unpinned_by_delete
+
+    #[test]
+    fn unpinned_by_delete_yields_index_children() {
+        let child = d(0xa0);
+        assert_eq!(
+            unpinned_by_delete(&manifest_with_child(child.clone())),
+            vec![child]
+        );
+    }
+
+    #[test]
+    fn unpinned_by_delete_yields_the_subject() {
+        let subject = d(0xa1);
+        assert_eq!(
+            unpinned_by_delete(&manifest_with_subject(subject.clone())),
+            vec![subject]
+        );
+    }
+
+    #[test]
+    fn unpinned_by_delete_ignores_config_and_layers() {
+        let unpinned = unpinned_by_delete(&manifest_with_config_and_layer(d(0xa2), d(0xa3)));
+        assert!(
+            unpinned.is_empty(),
+            "config and layers are blobs, not revisions"
+        );
     }
 }
