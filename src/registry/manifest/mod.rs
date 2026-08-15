@@ -88,11 +88,18 @@ where
     Ok(request_body)
 }
 
-/// The manifest stored at `digest`, `None` when its body is unreadable or
-/// unparseable.
-pub async fn read_manifest(blob_store: &BlobStore, digest: &Digest) -> Option<Manifest> {
-    let body = blob_store.read(digest).await.ok()?;
-    Manifest::from_slice(&body).ok()
+/// The manifest stored at `digest`. `Ok(None)` when the blob is absent or its
+/// body does not parse; a backend fault propagates instead, so a caller
+/// cascading a delete cannot mistake an outage for a manifest with no children.
+pub async fn read_manifest(
+    blob_store: &BlobStore,
+    digest: &Digest,
+) -> Result<Option<Manifest>, Error> {
+    match blob_store.read(digest).await {
+        Ok(body) => Ok(Manifest::from_slice(&body).ok()),
+        Err(Error::BlobUnknown) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 impl Registry {
@@ -556,7 +563,9 @@ impl Registry {
 
         // Read while the manifest is still here: once gone, neither this job nor
         // its retries can name the subject holding the referrer's descriptor.
-        let subject = self.referrer_subject(resolved_repository, reference).await;
+        let subject = self
+            .referrer_subject(resolved_repository, reference)
+            .await?;
 
         // A digest delete cascades to every pointing tag; the scan, the plan and
         // the commit run together under the blob-data lock. LWW guarding of a
@@ -597,17 +606,17 @@ impl Registry {
         &self,
         repository: Option<&Repository>,
         reference: &Reference,
-    ) -> Option<Digest> {
+    ) -> Result<Option<Digest>, Error> {
         let Reference::Digest(digest) = reference else {
-            return None;
+            return Ok(None);
         };
         if repository.is_none_or(|repository| repository.replication.is_empty()) {
-            return None;
+            return Ok(None);
         }
-        read_manifest(&self.blob_store, digest)
+        Ok(read_manifest(&self.blob_store, digest)
             .await?
-            .subject
-            .map(|subject| subject.digest)
+            .and_then(|manifest| manifest.subject)
+            .map(|subject| subject.digest))
     }
 
     /// Whether the reference counted as present before the delete, gating the
@@ -647,7 +656,7 @@ impl Registry {
             return Ok(link_plan::delete(reference, None, &[]));
         };
 
-        let manifest = read_manifest(&self.blob_store, digest).await;
+        let manifest = read_manifest(&self.blob_store, digest).await?;
         Ok(link_plan::delete(
             reference,
             manifest.as_ref(),

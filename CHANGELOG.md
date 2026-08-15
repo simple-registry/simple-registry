@@ -64,6 +64,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A ranged blob pull on a pull-through repository forwards the range to the upstream instead of returning `416` until the blob is cached, so one URL no longer answers `206` or `416` depending on cache state.
 - `top_pushed(n)` and `top_pulled(n)` rank only the tags carrying the time they order by, so a namespace holding n tags or fewer no longer keeps every tag forever whatever its push and pull history.
 - `prune` collects an orphan manifest and everything under it in a single run, where it used to free one nesting level per run and let digest order decide what a run reclaimed.
+- A manifest delete whose body cannot be read is refused rather than committing a cascade that names no config, layer or child links, which used to strand those links holding their blobs with no body left to replan the cascade from.
 
 ## 1.4.5
 
