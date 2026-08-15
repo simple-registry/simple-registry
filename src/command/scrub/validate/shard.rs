@@ -51,6 +51,10 @@ impl Validator {
             // empty set is degenerate leftover.
             return self.delete_corrupt(WalkedStore::Metadata, key).await;
         }
+        // Witness for blob GC, which otherwise decides from a per-blob listing
+        // of this same directory: the walk reached this shard through a
+        // whole-store scan, so the two enumerations can be compared.
+        self.record_shard_reference(digest);
 
         match self.blob_store.size(digest).await {
             Ok(_) => {

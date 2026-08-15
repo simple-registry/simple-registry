@@ -65,6 +65,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `top_pushed(n)` and `top_pulled(n)` rank only the tags carrying the time they order by, so a namespace holding n tags or fewer no longer keeps every tag forever whatever its push and pull history.
 - `prune` collects an orphan manifest and everything under it in a single run, where it used to free one nesting level per run and let digest order decide what a run reclaimed.
 - A manifest delete whose body cannot be read is refused rather than committing a cascade that names no config, layer or child links, which used to strand those links holding their blobs with no body left to replan the cascade from.
+- `scrub` no longer reclaims a blob's bytes when its shard walk read references the per-blob index read did not, so a backend that drops a key from a listing can no longer make a referenced blob look unreferenced.
 
 ## 1.4.5
 
