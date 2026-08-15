@@ -14,8 +14,7 @@ use crate::{
         Config, Jwk,
         validator::{
             Jwks, OpenIdConfiguration, fetch_jwks, fetch_oidc_configuration, jwks_cache_key,
-            oidc_configuration_cache_key, validate_oidc_token, verify_allowed_algorithm,
-            verify_jwt_with_header,
+            oidc_configuration_cache_key, validate_oidc_token, verify_jwt_with_header,
         },
     },
     cache,
@@ -51,7 +50,6 @@ fn verify_jwt(
 ) -> Result<OidcClaims, Error> {
     let header = decode_header(token)
         .map_err(|e| Error::Unauthorized(format!("Failed to decode JWT header: {e}")))?;
-    verify_allowed_algorithm(provider, header.alg)?;
     verify_jwt_with_header(token, &header, jwks, provider_name, provider)
 }
 
@@ -548,10 +546,14 @@ async fn test_validate_oidc_token_invalid_signature() {
 }
 
 #[tokio::test]
-async fn test_validate_oidc_token_rejects_disallowed_algorithm_before_jwks_fetch() {
+async fn test_validate_oidc_token_rejects_disallowed_algorithm() {
     let mock_server = MockServer::start().await;
-    let claims = valid_claims(&mock_server.uri(), "test-audience");
 
+    mount_jwks(&mock_server, static_jwks_response()).await;
+
+    let claims = valid_claims(&mock_server.uri(), "test-audience");
+    // The token is signed ES256 and the key resolves, so only the allowlist can
+    // refuse it.
     let token = make_token(&claims, KID);
     let provider = Config {
         allowed_algorithms: vec![Algorithm::RS256],
@@ -565,9 +567,33 @@ async fn test_validate_oidc_token_rejects_disallowed_algorithm_before_jwks_fetch
         validate_oidc_token("test-provider", &provider, &token, &client, cache.as_ref()).await;
 
     match result.unwrap_err() {
-        Error::Unauthorized(msg) => assert!(msg.contains("algorithm ES256 not allowed")),
+        Error::Unauthorized(msg) => assert!(msg.contains("InvalidAlgorithm")),
         e => panic!("expected Unauthorized, got {e:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_validate_oidc_token_accepts_multi_family_algorithm_list() {
+    let mock_server = MockServer::start().await;
+
+    mount_jwks(&mock_server, static_jwks_response()).await;
+
+    let claims = valid_claims(&mock_server.uri(), "test-audience");
+    let token = make_token(&claims, KID);
+    // An allowlist spanning two key families must still admit a token signed
+    // with one of them.
+    let provider = Config {
+        allowed_algorithms: vec![Algorithm::RS256, Algorithm::ES256],
+        ..build_test_provider_config(&mock_server.uri())
+    };
+
+    let client = Client::new();
+    let cache = cache::Config::Memory.to_backend().unwrap();
+
+    let claims = validate_oidc_token("test-provider", &provider, &token, &client, cache.as_ref())
+        .await
+        .expect("ES256 token must validate under a mixed-family allowlist");
+    assert_eq!(claims.claims.get("sub").unwrap(), "unit-test-subject");
 }
 
 #[tokio::test]

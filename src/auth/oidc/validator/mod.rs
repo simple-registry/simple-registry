@@ -52,7 +52,6 @@ pub async fn validate_oidc_token(
 ) -> Result<OidcClaims, Error> {
     let header = decode_header(token)
         .map_err(|e| Error::Unauthorized(format!("Failed to decode JWT header: {e}")))?;
-    verify_allowed_algorithm(provider, header.alg)?;
 
     let mut jwks = fetch_jwks(provider, client, cache).await?;
     if jwks.from_cache
@@ -126,21 +125,17 @@ fn verify_jwt_with_header(
     })
 }
 
-fn verify_allowed_algorithm(provider: &Config, alg: Algorithm) -> Result<(), Error> {
-    if provider.allowed_algorithms.contains(&alg) {
-        return Ok(());
-    }
-    Err(Error::Unauthorized(format!(
-        "algorithm {alg:?} not allowed for issuer {}",
-        provider.issuer
-    )))
-}
-
 fn build_validation(provider: &Config, alg: Algorithm) -> Validation {
     let mut validation = Validation::new(alg);
-    validation
-        .algorithms
-        .clone_from(&provider.allowed_algorithms);
+    // `decode` rejects a header algorithm absent from this list, and separately
+    // rejects the whole list when an entry belongs to another key family, so
+    // only the allowed algorithms of the header's own family may be offered.
+    validation.algorithms = provider
+        .allowed_algorithms
+        .iter()
+        .filter(|allowed| allowed.family() == alg.family())
+        .copied()
+        .collect();
     validation.set_issuer(&[provider.issuer.as_str()]);
     if let Some(aud) = &provider.required_audience {
         validation.set_audience(&[aud.as_str()]);

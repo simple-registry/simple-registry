@@ -50,6 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A basic-auth username matching an OIDC provider name is refused at startup instead of locking that user out, since a Basic credential naming a provider is read as that provider's token.
 - An authorization webhook now receives the caller's OIDC provider and subject, so it can decide per user and its decision cache no longer serves one answer to every OIDC caller performing the same action.
 - An upstream token response that omits `expires_in` is now cached for the 60 seconds the spec defines as its default rather than an hour, so angos stops sending a token long after its issuer stopped honouring it.
+- An `auth.oidc.<name>.allowed_algorithms` naming more than one key family, such as `RS256` and `ES256`, admits a token signed with any of them instead of rejecting every token that provider issues.
 - A referrers request whose digest or `artifactType` is malformed is answered with `400 DIGEST_INVALID` as the spec requires, instead of the `404` an unserved path gets.
 - A blob `GET` carrying a `Range` angos cannot read (an unknown unit, or syntax that does not parse) serves the whole blob as RFC 9110 requires, instead of `416`, which now answers only a range that reads correctly and cannot be met.
 - A manifest pushed with parameters on its `Content-Type` (`; charset=utf-8`) is accepted rather than refused as a media-type mismatch, and the parameters are dropped instead of stored and echoed on pull.
