@@ -40,13 +40,24 @@ impl Validator {
         Ok(())
     }
 
-    /// Delete unreferenced bytes unless this run force-deleted one of the
-    /// blob's shards, in which case the references vanished unrepaired and
-    /// reclaim must wait for the next run's re-grant.
+    /// Delete unreferenced bytes, unless this run force-deleted one of the
+    /// blob's shards (the references vanished unrepaired, so reclaim waits for
+    /// the next run's re-grant) or the shard walk read references the index
+    /// read above did not.
     async fn reclaim_orphan_blob(&self, digest: &Digest) -> Result<(), Error> {
         if self.blob_gc_held(digest) {
             warn!(
                 "scrub: blob '{digest}' lost a corrupt shard this run; leaving bytes for the next run"
+            );
+            return Ok(());
+        }
+        // The index read pages one directory listing; the shard walk reached
+        // the same shards through a whole-store scan. Disagreement means a
+        // listing dropped a key it holds, so the bytes may well be live.
+        if self.shard_walk_saw_references(digest) {
+            warn!(
+                "scrub: blob '{digest}' reads as unreferenced but the shard walk found references for it; \
+                 refusing to reclaim, the backend's listing is incomplete"
             );
             return Ok(());
         }

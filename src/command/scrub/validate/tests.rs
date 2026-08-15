@@ -548,6 +548,61 @@ async fn orphan_blob_is_reclaimed() {
     .await;
 }
 
+/// Blob GC reads one listing of the blob's `refs/` directory, while the shard
+/// walk reaches those same shards through a whole-store scan. When the two
+/// disagree the listing must not win: a backend that drops a key from a listing
+/// would otherwise reclaim the bytes of a referenced blob.
+#[tokio::test]
+async fn a_blob_the_shard_walk_saw_referenced_is_never_reclaimed() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/shard-witness").unwrap();
+        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let validator = Validator::new(
+            test_case.blob_store(),
+            metadata_store.clone(),
+            sink.clone() as Arc<dyn ActionSink>,
+            Arc::new(WalkStats::default()),
+            false,
+        );
+
+        let shard_key = path_builder::blob_index_shard_path(&layer_digest, namespace);
+        validator
+            .validate_shard(&shard_key, &layer_digest, namespace)
+            .await
+            .expect("the shard walk must read the layer's references");
+
+        // The per-blob index read now finds nothing, as it would on a backend
+        // that dropped this key from the listing behind it.
+        metadata_store
+            .store()
+            .object_store()
+            .delete(&shard_key)
+            .await
+            .expect("shard removal");
+
+        validator
+            .validate_blob(&layer_digest)
+            .await
+            .expect("blob validation");
+
+        let emitted = match sink.lock() {
+            Ok(actions) => actions,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        assert!(
+            !emitted
+                .iter()
+                .any(|action| matches!(action, Action::DeleteOrphanBlob(d) if d == &layer_digest)),
+            "the shard walk saw references, so the bytes must not be reclaimed, got: {:?}",
+            emitted.iter().map(ToString::to_string).collect::<Vec<_>>()
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn orphan_referrer_link_is_deleted() {
     for_each_backend(async |test_case| {

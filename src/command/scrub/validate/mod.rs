@@ -86,6 +86,9 @@ pub struct Validator {
     handled: Mutex<HashSet<String>>,
     /// Digests exempted from this run's blob GC (see [`Self::hold_blob_gc`]).
     gc_holds: Mutex<HashSet<Digest>>,
+    /// Digests the shard walk read live references for (see
+    /// [`Self::record_shard_reference`]).
+    shard_refs: Mutex<HashSet<Digest>>,
     /// Intent records already fetched this run, keyed by log file name. An
     /// intent's expiry and mutation keys never change once written, so a
     /// cached entry stays valid for the whole run.
@@ -108,6 +111,7 @@ impl Validator {
             delete_unknown,
             handled: Mutex::new(HashSet::new()),
             gc_holds: Mutex::new(HashSet::new()),
+            shard_refs: Mutex::new(HashSet::new()),
             intent_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -329,6 +333,24 @@ impl Validator {
     pub fn blob_gc_held(&self, digest: &Digest) -> bool {
         match self.gc_holds.lock() {
             Ok(holds) => holds.contains(digest),
+            Err(poisoned) => poisoned.into_inner().contains(digest),
+        }
+    }
+
+    /// Record that the shard walk read a live reference to `digest`. The walk
+    /// enumerates the whole store, so this is an independent witness against
+    /// the per-blob listing blob GC otherwise decides from.
+    pub fn record_shard_reference(&self, digest: &Digest) {
+        match self.shard_refs.lock() {
+            Ok(mut refs) => refs.insert(digest.clone()),
+            Err(poisoned) => poisoned.into_inner().insert(digest.clone()),
+        };
+    }
+
+    /// Whether the shard walk read a live reference to `digest`.
+    pub fn shard_walk_saw_references(&self, digest: &Digest) -> bool {
+        match self.shard_refs.lock() {
+            Ok(refs) => refs.contains(digest),
             Err(poisoned) => poisoned.into_inner().contains(digest),
         }
     }
