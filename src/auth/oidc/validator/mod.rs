@@ -53,7 +53,7 @@ pub async fn validate_oidc_token(
     let header = decode_header(token)
         .map_err(|e| Error::Unauthorized(format!("Failed to decode JWT header: {e}")))?;
 
-    let mut jwks = fetch_jwks(provider, client, cache).await?;
+    let mut jwks = fetch_jwks(provider, client, cache, true).await?;
     if jwks.from_cache
         && cached_jwks_misses_kid(&jwks.value, &header)
         && let Some(refreshed) = refresh_jwks_rate_limited(provider, client, cache).await?
@@ -272,14 +272,21 @@ where
     })
 }
 
-/// Load the provider's JWKS, preferring the cache. `from_cache` on the result
-/// tells the caller whether it may still be stale for a just-rotated key.
+/// Load the provider's JWKS. With `read_cache` the cached document is preferred
+/// under the normal request timeout, and `from_cache` on the result tells the
+/// caller whether it may still be stale for a just-rotated key; without it the
+/// fetch is forced under the shorter refresh timeout a rotated key id needs.
 async fn fetch_jwks(
     provider: &Config,
     client: &Client,
     cache: &Cache,
+    read_cache: bool,
 ) -> Result<CachedJson<Jwks>, Error> {
-    let timeout = Duration::from_secs(provider.http_request_timeout_secs);
+    let timeout = Duration::from_secs(if read_cache {
+        provider.http_request_timeout_secs
+    } else {
+        provider.jwks_refresh_timeout_secs
+    });
     let cache_key = jwks_cache_key(provider);
     let jwks_url = get_jwks_url(provider, client, cache, Some(timeout)).await?;
     let fetched = fetch_cached_json::<Jwks, _>(
@@ -289,7 +296,7 @@ async fn fetch_jwks(
             cache_key: &cache_key,
             url: &jwks_url,
             ttl: provider.jwks_refresh_interval,
-            read_cache: true,
+            read_cache,
             fetch_timeout: Some(timeout),
         },
         |_| Ok(()),
@@ -331,35 +338,7 @@ async fn refresh_jwks_rate_limited(
         .await;
 
     info!("Refreshing JWKS for issuer {}", provider.issuer);
-    refresh_jwks(provider, client, cache).await.map(Some)
-}
-
-/// Force a fresh JWKS fetch, bypassing the cache under a short timeout. Used
-/// when a cached JWKS is missing the token's key id (a rotated signing key).
-async fn refresh_jwks(
-    provider: &Config,
-    client: &Client,
-    cache: &Cache,
-) -> Result<CachedJson<Jwks>, Error> {
-    let timeout = Duration::from_secs(provider.jwks_refresh_timeout_secs);
-    let cache_key = jwks_cache_key(provider);
-    let jwks_url = get_jwks_url(provider, client, cache, Some(timeout)).await?;
-    let fetched = fetch_cached_json::<Jwks, _>(
-        CachedJsonRequest {
-            client,
-            cache,
-            cache_key: &cache_key,
-            url: &jwks_url,
-            ttl: provider.jwks_refresh_interval,
-            read_cache: false,
-            fetch_timeout: Some(timeout),
-        },
-        |_| Ok(()),
-    )
-    .await?;
-
-    info!("Fetched JWKS from {jwks_url}");
-    Ok(fetched)
+    fetch_jwks(provider, client, cache, false).await.map(Some)
 }
 
 #[cfg(test)]

@@ -77,7 +77,7 @@ async fn test_fetch_jwks_with_explicit_uri() {
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
-    let result = fetch_jwks(&provider, &client, cache.as_ref()).await;
+    let result = fetch_jwks(&provider, &client, cache.as_ref(), true).await;
 
     assert!(result.is_ok());
     let jwks = result.unwrap();
@@ -121,7 +121,7 @@ async fn test_fetch_jwks_with_discovery() {
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
-    let result = fetch_jwks(&provider, &client, cache.as_ref()).await;
+    let result = fetch_jwks(&provider, &client, cache.as_ref(), true).await;
 
     assert!(result.is_ok());
     let jwks = result.unwrap();
@@ -158,10 +158,10 @@ async fn test_fetch_jwks_uses_cache() {
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
-    let result1 = fetch_jwks(&provider, &client, cache.as_ref()).await;
+    let result1 = fetch_jwks(&provider, &client, cache.as_ref(), true).await;
     assert!(result1.is_ok());
 
-    let result2 = fetch_jwks(&provider, &client, cache.as_ref()).await;
+    let result2 = fetch_jwks(&provider, &client, cache.as_ref(), true).await;
     assert!(result2.is_ok());
     assert!(result2.unwrap().from_cache);
 }
@@ -184,7 +184,7 @@ async fn test_fetch_jwks_http_error() {
     let client = Client::new();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
-    let result = fetch_jwks(&provider, &client, cache.as_ref()).await;
+    let result = fetch_jwks(&provider, &client, cache.as_ref(), true).await;
 
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -347,7 +347,7 @@ async fn test_fetch_jwks_network_error_returns_provider_unavailable() {
         .unwrap();
     let cache = cache::Config::Memory.to_backend().unwrap();
 
-    let result = fetch_jwks(&provider, &client, cache.as_ref()).await;
+    let result = fetch_jwks(&provider, &client, cache.as_ref(), true).await;
 
     assert!(result.is_err());
     match result.unwrap_err() {
