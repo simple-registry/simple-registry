@@ -24,6 +24,7 @@ use crate::{
     metrics_provider::metrics_provider,
     registry::{
         Error, Registry, Repository,
+        blob_store::BlobStore,
         metadata_store::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, ReferencePolicy},
         repository_name,
     },
@@ -85,6 +86,13 @@ where
         return Err(Error::ManifestBodyTooLarge { limit });
     }
     Ok(request_body)
+}
+
+/// The manifest stored at `digest`, `None` when its body is unreadable or
+/// unparseable.
+pub async fn read_manifest(blob_store: &BlobStore, digest: &Digest) -> Option<Manifest> {
+    let body = blob_store.read(digest).await.ok()?;
+    Manifest::from_slice(&body).ok()
 }
 
 impl Registry {
@@ -596,10 +604,8 @@ impl Registry {
         if repository.is_none_or(|repository| repository.replication.is_empty()) {
             return None;
         }
-        let body = self.blob_store.read(digest).await.ok()?;
-        Manifest::from_slice(&body)
-            .map_err(|e| Error::manifest_invalid(&e))
-            .ok()?
+        read_manifest(&self.blob_store, digest)
+            .await?
             .subject
             .map(|subject| subject.digest)
     }
@@ -641,12 +647,7 @@ impl Registry {
             return Ok(link_plan::delete(reference, None, &[]));
         };
 
-        let manifest = self
-            .blob_store
-            .read(digest)
-            .await
-            .ok()
-            .and_then(|content| Manifest::from_slice(&content).ok());
+        let manifest = read_manifest(&self.blob_store, digest).await;
         Ok(link_plan::delete(
             reference,
             manifest.as_ref(),

@@ -109,6 +109,7 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
 
     let global_policy = global_retention_policy(&config.global.retention_policy);
     let checker = RetentionChecker::new(
+        blob_backend.clone(),
         metadata_store.clone(),
         repositories.clone(),
         global_policy.clone(),

@@ -21,7 +21,7 @@ use crate::{
     http_response::{ResponseBody, build_response, json_response},
     jobs::store as job_store,
     jobs::{JobState, Queue},
-    registry::{Error, Registry, metadata_store::LinkKind},
+    registry::{Error, Registry, manifest::read_manifest, metadata_store::LinkKind},
 };
 
 #[derive(Debug)]
@@ -681,7 +681,7 @@ impl Registry {
         // order so the merged map values stay deterministic.
         let analyses: Vec<_> = stream::iter(all_revisions.iter().cloned())
             .map(|digest| async move {
-                let manifest = self.read_manifest(&digest).await?;
+                let manifest = read_manifest(&self.blob_store, &digest).await?;
                 let analysis = analyze_manifest(&manifest);
                 let mut referrers = Vec::with_capacity(analysis.referrer_candidates.len());
                 for referrer in analysis.referrer_candidates {
@@ -721,7 +721,7 @@ impl Registry {
         mut info: ReferrerInfo,
         child_digest: &Digest,
     ) -> ReferrerInfo {
-        if let Some(child_manifest) = self.read_manifest(child_digest).await
+        if let Some(child_manifest) = read_manifest(&self.blob_store, child_digest).await
             && let Some(predicate) = extract_in_toto_predicate(&child_manifest)
         {
             info.annotations
@@ -851,11 +851,6 @@ impl Registry {
         namespaces.sort_unstable();
         namespaces.dedup();
         Ok(namespaces)
-    }
-
-    async fn read_manifest(&self, digest: &Digest) -> Option<Manifest> {
-        let blob = self.blob_store.read(digest).await.ok()?;
-        Manifest::from_slice(&blob).ok()
     }
 }
 
