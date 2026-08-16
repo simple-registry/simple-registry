@@ -33,7 +33,7 @@ use crate::{
         CAS_RETRY_BACKOFF, TransactionExecutor, common,
         common::{
             ApplyMode, build_intent, discard_staged_bodies, finish, rollback, stage_bodies,
-            stamp_applied, stamp_progress, write_intent,
+            stamp_applied, write_intent,
         },
     },
     intent::{DEFAULT_INTENT_TTL_SECS, IntentRecord, MutationRecord},
@@ -206,15 +206,7 @@ impl CasExecutor {
     ) -> Result<(), Error> {
         match apply_cas(self.store.as_ref(), mutation, ApplyMode::Reconcile).await {
             Ok(()) => {
-                if let Err(stamp_err) = stamp_progress(self.store.as_ref(), intent, idx).await {
-                    warn!(
-                        tx_id = %intent.id,
-                        idx,
-                        error = %stamp_err,
-                        "Failed to stamp stale-stamp-recovered mutation; \
-                         recovery will re-apply idempotently"
-                    );
-                }
+                intent.mark_applied(idx);
                 Ok(())
             }
             Err(Error::PartialCommit) => {

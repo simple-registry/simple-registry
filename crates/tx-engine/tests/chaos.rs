@@ -286,11 +286,11 @@ async fn recovery_replays_fully_stamped_intent() {
 /// `PutIfAbsent` for the blob-data key and `Put` mutations for the link key
 /// and blob-index shard key, mirroring what `manifest_engine.rs` builds.
 ///
-/// Each successful Apply stamps its `progress[idx]` slot to `Applied`; once
-/// any slot is `Applied` the recovery loop replays every mutation idempotently
-/// (`PutIfAbsent` skips when the key exists; Put/Delete/Copy are write-anywhere).
-/// Before the first Apply succeeds the recovery loop rolls back (deletes the
-/// intent + bodies).
+/// The first successful Apply stamps its `progress[idx]` slot to `Applied`;
+/// once any slot is `Applied` the recovery loop replays every mutation
+/// idempotently (`PutIfAbsent` skips when the key exists; Put/Delete/Copy are
+/// write-anywhere). Before the first Apply succeeds the recovery loop rolls
+/// back (deletes the intent + bodies).
 ///
 /// Invariants verified:
 /// 1. For crash points before the intent lands (writes 0-3): no canonical keys
@@ -310,14 +310,12 @@ async fn manifest_push_crash_mid_apply_recovery_converges() {
     //   write 2: body staging for mutation 2
     //   write 3: intent PUT  ← linearisation point
     //   write 4: Apply mutation 0 (PutIfAbsent blob-data)
-    //   write 5: stamp_progress (intent re-PUT marking mutation 0 Applied)
+    //   write 5: commit-point stamp (intent re-PUT marking mutation 0 Applied)
     //   write 6: Apply mutation 1 (Put link-key)
-    //   write 7: stamp_progress (intent re-PUT marking mutation 1 Applied)
-    //   write 8: Apply mutation 2 (Put shard-key)
-    //   write 9: stamp_progress (intent re-PUT marking mutation 2 Applied)
-    //   write 10: Reap bodies delete_prefix
-    //   write 11: Reap intent delete
-    for crash_on in 0usize..=11 {
+    //   write 7: Apply mutation 2 (Put shard-key)
+    //   write 8: Reap bodies delete_prefix
+    //   write 9: Reap intent delete
+    for crash_on in 0usize..=9 {
         let inner = Arc::new(MemoryObjectStore::new());
         let crashing = crashing_store_permanent(inner.clone(), crash_on);
 
@@ -389,7 +387,7 @@ async fn partial_apply_error_preserves_intent_for_recovery() {
     //   write 1: body staging for mutation 1
     //   write 2: intent PUT
     //   write 3: Apply mutation 0 (Put k0)
-    //   write 4: stamp_progress (intent re-PUT marking mutation 0 Applied)
+    //   write 4: commit-point stamp (intent re-PUT marking mutation 0 Applied)
     //   write 5: Apply mutation 1 (Put k1)  ← crash here (transient)
     // Crashing on write 5 fails the second apply put after mutation 0 has
     // applied and stamped. Being non-permanent, the later reap writes would
@@ -447,7 +445,7 @@ async fn partial_apply_error_preserves_intent_for_recovery() {
     test_util::assert_no_orphans(&*inner).await;
 }
 
-// Progress-vector invariants under both executors
+// Commit-point invariants under both executors
 
 /// Read the (only) intent under `.tx-log/` directly, bypassing the recovery
 /// loop, and return its parsed form.
@@ -465,178 +463,144 @@ async fn read_only_intent(inner: &MemoryObjectStore) -> IntentRecord {
     serde_json::from_slice(&body).expect("intent must parse")
 }
 
-/// Locked executor: a crash at the Reap step leaves an intent whose progress
-/// vector is fully `Applied`; a crash mid-Apply leaves the applied prefix
-/// `Applied` and the remaining suffix `Pending`.
-#[tokio::test(flavor = "multi_thread")]
-async fn progress_vector_reflects_apply_state_locked() {
-    // Three mutations: writes 0,1,2 = body stage; 3 = intent;
-    //   4 = apply0, 5 = stamp0, 6 = apply1, 7 = stamp1,
-    //   8 = apply2, 9 = stamp2, 10 = reap-prefix, 11 = reap-intent.
+/// Three `Put` mutations, as both executors write them:
+///   0,1,2 = body stage; 3 = intent; 4 = apply0; 5 = commit-point stamp;
+///   6 = apply1; 7 = apply2; 8 = reap-prefix; 9 = reap-intent.
+fn three_puts(prefix: &str) -> Transaction {
+    Transaction::builder()
+        .mutation(Mutation::Put {
+            key: format!("{prefix}/a"),
+            body: Bytes::from_static(b"A"),
+            expected: None,
+        })
+        .mutation(Mutation::Put {
+            key: format!("{prefix}/b"),
+            body: Bytes::from_static(b"B"),
+            expected: None,
+        })
+        .mutation(Mutation::Put {
+            key: format!("{prefix}/c"),
+            body: Bytes::from_static(b"C"),
+            expected: None,
+        })
+        .build()
+}
 
-    // (a) Crash permanently from the Reap step onward: every mutation is
-    // Applied; the intent remains for inspection.
-    {
-        let inner = Arc::new(MemoryObjectStore::new());
-        let crashing = crashing_store_permanent(inner.clone(), 10);
-        let lock = test_util::memory_lock();
-        let executor = test_util::locked_executor(crashing.clone(), lock);
-
-        let tx = Transaction::builder()
-            .mutation(Mutation::Put {
-                key: "p/a".to_owned(),
-                body: Bytes::from_static(b"A"),
-                expected: None,
-            })
-            .mutation(Mutation::Put {
-                key: "p/b".to_owned(),
-                body: Bytes::from_static(b"B"),
-                expected: None,
-            })
-            .mutation(Mutation::Put {
-                key: "p/c".to_owned(),
-                body: Bytes::from_static(b"C"),
-                expected: None,
-            })
-            .build();
-
-        let _ = executor.execute(tx).await;
-        let intent = read_only_intent(&inner).await;
-        assert_eq!(intent.mutations.len(), 3);
-        for (idx, p) in intent.mutations.iter().map(|m| m.progress).enumerate() {
-            assert!(
-                matches!(p, MutationProgress::Applied),
-                "progress[{idx}] expected Applied, got {p:?}"
-            );
-        }
-    }
-
-    // (b) Crash permanently from apply 1 onward (write 6): the executor
-    // applies + stamps mutation 0, then every subsequent write fails, so the
-    // intent remains and the stamp for 0 is preserved while 1 and 2 are still
-    // Pending.
-    {
-        let inner = Arc::new(MemoryObjectStore::new());
-        let crashing = crashing_store_permanent(inner.clone(), 6);
-        let lock = test_util::memory_lock();
-        let executor = test_util::locked_executor(crashing.clone(), lock);
-
-        let tx = Transaction::builder()
-            .mutation(Mutation::Put {
-                key: "p/a".to_owned(),
-                body: Bytes::from_static(b"A"),
-                expected: None,
-            })
-            .mutation(Mutation::Put {
-                key: "p/b".to_owned(),
-                body: Bytes::from_static(b"B"),
-                expected: None,
-            })
-            .mutation(Mutation::Put {
-                key: "p/c".to_owned(),
-                body: Bytes::from_static(b"C"),
-                expected: None,
-            })
-            .build();
-
-        let _ = executor.execute(tx).await;
-        let intent = read_only_intent(&inner).await;
-        assert_eq!(intent.mutations.len(), 3);
-        assert!(matches!(
-            intent.mutations[0].progress,
-            MutationProgress::Applied
-        ));
-        assert!(matches!(
-            intent.mutations[1].progress,
-            MutationProgress::Pending
-        ));
-        assert!(matches!(
-            intent.mutations[2].progress,
-            MutationProgress::Pending
-        ));
+/// Assert the surviving intent records the transaction as committed, with the
+/// commit-point slot `Applied` and the rest still `Pending`.
+///
+/// Progress past the commit point is deliberately a lower bound: only the first
+/// mutation is written back, and recovery re-applies every unconfirmed slot
+/// idempotently. What must never happen is the reverse, a record claiming a
+/// mutation applied when it did not, which would let recovery skip it.
+async fn assert_committed_at_the_commit_point(inner: &MemoryObjectStore) {
+    let intent = read_only_intent(inner).await;
+    assert_eq!(intent.mutations.len(), 3);
+    assert!(
+        intent.any_applied(),
+        "the record must classify the transaction as committed so recovery replays forward"
+    );
+    assert!(matches!(
+        intent.mutations[0].progress,
+        MutationProgress::Applied
+    ));
+    for idx in 1..3 {
+        assert!(
+            matches!(intent.mutations[idx].progress, MutationProgress::Pending),
+            "progress[{idx}] must stay Pending: only the commit point is written back"
+        );
     }
 }
 
-/// CAS executor: same invariants as the Locked variant. The CAS path stamps
-/// the per-mutation etag (when the backend surfaces one) but the
-/// Applied-vs-Pending classification is identical.
+/// Locked executor: a crash at Reap, and a crash mid-Apply, both leave a record
+/// marked committed, and recovery converges to every mutation from it.
 #[tokio::test(flavor = "multi_thread")]
-async fn progress_vector_reflects_apply_state_cas() {
-    // (a) Crash permanently from the Reap step (write 10) onward: every
-    // mutation Applied; the intent remains for inspection.
+async fn commit_point_survives_a_crash_locked() {
+    // (a) Crash permanently from the Reap step (write 8) onward: all three
+    // mutations applied, and the intent remains for inspection.
     {
         let inner = Arc::new(MemoryObjectStore::new());
-        let crashing = crashing_store_permanent(inner.clone(), 10);
-        let executor = test_util::cas_executor(crashing.clone());
+        let crashing = crashing_store_permanent(inner.clone(), 8);
+        let lock = test_util::memory_lock();
+        let executor = test_util::locked_executor(crashing.clone(), lock);
 
-        let tx = Transaction::builder()
-            .mutation(Mutation::Put {
-                key: "cas/a".to_owned(),
-                body: Bytes::from_static(b"A"),
-                expected: None,
-            })
-            .mutation(Mutation::Put {
-                key: "cas/b".to_owned(),
-                body: Bytes::from_static(b"B"),
-                expected: None,
-            })
-            .mutation(Mutation::Put {
-                key: "cas/c".to_owned(),
-                body: Bytes::from_static(b"C"),
-                expected: None,
-            })
-            .build();
+        let _ = executor.execute(three_puts("p")).await;
+        assert_committed_at_the_commit_point(&inner).await;
 
-        let _ = executor.execute(tx).await;
-        let intent = read_only_intent(&inner).await;
-        assert_eq!(intent.mutations.len(), 3);
-        for (idx, p) in intent.mutations.iter().map(|m| m.progress).enumerate() {
-            assert!(
-                matches!(p, MutationProgress::Applied),
-                "progress[{idx}] expected Applied, got {p:?}"
-            );
-        }
+        backdate_intents(&inner).await;
+        test_util::sweep_once(inner.clone(), test_util::memory_lock()).await;
+        test_util::assert_no_orphans(&*inner).await;
     }
 
-    // (b) Crash permanently from apply 1 onward (write 6): the executor
-    // applies + stamps mutation 0, then every subsequent write fails.
+    // (b) Crash permanently from apply 1 onward (write 6): only mutation 0
+    // landed, so recovery must replay 1 and 2 rather than roll the
+    // transaction back.
+    {
+        let inner = Arc::new(MemoryObjectStore::new());
+        let crashing = crashing_store_permanent(inner.clone(), 6);
+        let lock = test_util::memory_lock();
+        let executor = test_util::locked_executor(crashing.clone(), lock);
+
+        let _ = executor.execute(three_puts("p")).await;
+        assert_committed_at_the_commit_point(&inner).await;
+        assert!(
+            inner.get("p/b").await.is_err(),
+            "mutation 1 must not have landed before the crash"
+        );
+
+        backdate_intents(&inner).await;
+        test_util::sweep_once(inner.clone(), test_util::memory_lock()).await;
+
+        for (key, body) in [("p/a", b"A"), ("p/b", b"B"), ("p/c", b"C")] {
+            let stored = inner
+                .get(key)
+                .await
+                .expect("recovery must replay every mutation of a committed transaction");
+            assert_eq!(stored, body);
+        }
+        test_util::assert_no_orphans(&*inner).await;
+    }
+}
+
+/// CAS executor: same invariants as the Locked variant, driven through the
+/// conditional primitives.
+#[tokio::test(flavor = "multi_thread")]
+async fn commit_point_survives_a_crash_cas() {
+    {
+        let inner = Arc::new(MemoryObjectStore::new());
+        let crashing = crashing_store_permanent(inner.clone(), 8);
+        let executor = test_util::cas_executor(crashing.clone());
+
+        let _ = executor.execute(three_puts("cas")).await;
+        assert_committed_at_the_commit_point(&inner).await;
+
+        backdate_intents(&inner).await;
+        test_util::sweep_once_cas(inner.clone(), test_util::memory_lock()).await;
+        test_util::assert_no_orphans(&*inner).await;
+    }
+
     {
         let inner = Arc::new(MemoryObjectStore::new());
         let crashing = crashing_store_permanent(inner.clone(), 6);
         let executor = test_util::cas_executor(crashing.clone());
 
-        let tx = Transaction::builder()
-            .mutation(Mutation::Put {
-                key: "cas/a".to_owned(),
-                body: Bytes::from_static(b"A"),
-                expected: None,
-            })
-            .mutation(Mutation::Put {
-                key: "cas/b".to_owned(),
-                body: Bytes::from_static(b"B"),
-                expected: None,
-            })
-            .mutation(Mutation::Put {
-                key: "cas/c".to_owned(),
-                body: Bytes::from_static(b"C"),
-                expected: None,
-            })
-            .build();
+        let _ = executor.execute(three_puts("cas")).await;
+        assert_committed_at_the_commit_point(&inner).await;
+        assert!(
+            inner.get("cas/b").await.is_err(),
+            "mutation 1 must not have landed before the crash"
+        );
 
-        let _ = executor.execute(tx).await;
-        let intent = read_only_intent(&inner).await;
-        assert_eq!(intent.mutations.len(), 3);
-        assert!(matches!(
-            intent.mutations[0].progress,
-            MutationProgress::Applied
-        ));
-        assert!(matches!(
-            intent.mutations[1].progress,
-            MutationProgress::Pending
-        ));
-        assert!(matches!(
-            intent.mutations[2].progress,
-            MutationProgress::Pending
-        ));
+        backdate_intents(&inner).await;
+        test_util::sweep_once_cas(inner.clone(), test_util::memory_lock()).await;
+
+        for (key, body) in [("cas/a", b"A"), ("cas/b", b"B"), ("cas/c", b"C")] {
+            let stored = inner
+                .get(key)
+                .await
+                .expect("recovery must replay every mutation of a committed transaction");
+            assert_eq!(stored, body);
+        }
+        test_util::assert_no_orphans(&*inner).await;
     }
 }

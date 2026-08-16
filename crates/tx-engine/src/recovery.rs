@@ -295,6 +295,7 @@ impl RecoveryLoop {
                     error = %e,
                     "RecoveryLoop: failed to replay mutation; will retry next sweep"
                 );
+                common::save_progress(self.store.as_ref(), intent).await;
                 return;
             }
         }
@@ -316,8 +317,9 @@ impl RecoveryLoop {
     /// Already-`Applied` mutations are skipped (recovery never overwrites a
     /// successful commit). Pending mutations dispatch to the idempotent CAS
     /// variant when a [`ConditionalStore`] is wired; otherwise they use
-    /// unconditional ops. On success the mutation's `progress` slot is stamped
-    /// and the intent JSON is re-PUT so subsequent sweeps see the updated state.
+    /// unconditional ops. On success the mutation's `progress` slot is marked
+    /// in memory; a sweep that gives up part-way writes the accumulated
+    /// progress back once, and one that completes reaps the intent instead.
     ///
     /// A missing staging body (`NotFound` on `body_ref`) is treated as evidence
     /// that the Reap deleted the body prefix already; the canonical write has
@@ -343,7 +345,7 @@ impl RecoveryLoop {
             .await?;
         }
 
-        common::stamp_applied(self.store.as_ref(), intent, idx).await;
+        intent.mark_applied(idx);
         Ok(())
     }
 }

@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `auth.oidc.<name>.bearer_token_file` presents a token on those fetches instead, read per fetch and sent only to the issuer's own origin, so angos reaches a closed kube-apiserver with its own service-account token.
 
+### Changed
+
+- A transaction records its commit point once instead of re-writing its journal after every mutation, cutting one storage round trip per mutation from every multi-key write.
+
 ## 1.5.0
 
 ### Added

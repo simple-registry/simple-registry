@@ -35,37 +35,33 @@ pub async fn write_intent(store: &dyn ObjectStore, intent: &IntentRecord) -> Res
     Ok(())
 }
 
-/// Mark mutation `idx` as `Applied` and re-PUT the intent record.
-///
-/// The in-memory mark lands before the write and survives its failure, which
-/// [`finish`] depends on: a lost stamp must still leave the transaction looking
-/// committed to this process, or an error on a later mutation would reap the
-/// intent out from under a canonical write that already applied.
-///
-/// # Errors
-///
-/// Propagates any error from [`write_intent`].
-pub async fn stamp_progress(
-    store: &dyn ObjectStore,
-    intent: &mut IntentRecord,
-    idx: usize,
-) -> Result<(), Error> {
-    intent.mark_applied(idx);
-    write_intent(store, intent).await
+/// Re-PUT `intent` so the progress marked on it survives this process, warning
+/// rather than failing: a lost progress write only costs the recovery loop an
+/// idempotent re-apply.
+pub async fn save_progress(store: &dyn ObjectStore, intent: &IntentRecord) {
+    if let Err(e) = write_intent(store, intent).await {
+        warn!(
+            tx_id = %intent.id,
+            error = %e,
+            "Failed to persist mutation progress; recovery will re-apply idempotently"
+        );
+    }
 }
 
-/// Mark mutation `idx` `Applied` and re-PUT the intent, warning (not failing)
-/// when the stamp write fails. The recovery loop re-applies idempotently if a
-/// stamp is lost. Shared by both executors' per-mutation apply loops.
+/// Mark mutation `idx` `Applied`, persisting the intent only at the commit
+/// point: the first mutation to apply is what switches recovery from rollback
+/// to replay-forward, and one write records it.
+///
+/// Later marks stay in memory, so a transaction costs one intent write instead
+/// of one per mutation. The durable record then trails the applied set, which
+/// is what `Pending` already means: recovery re-applies every unconfirmed slot
+/// idempotently. [`finish`] persists the accumulated progress on the paths that
+/// leave the intent behind, so only a process death loses it.
 pub async fn stamp_applied(store: &dyn ObjectStore, intent: &mut IntentRecord, idx: usize) {
-    let tx_id = intent.id;
-    if let Err(stamp_err) = stamp_progress(store, intent, idx).await {
-        warn!(
-            tx_id = %tx_id,
-            idx,
-            error = %stamp_err,
-            "Failed to stamp mutation progress; recovery will re-apply idempotently"
-        );
+    let commit_point = !intent.any_applied();
+    intent.mark_applied(idx);
+    if commit_point {
+        save_progress(store, intent).await;
     }
 }
 
@@ -470,6 +466,10 @@ pub async fn rollback(store: &dyn ObjectStore, intent: &IntentRecord) {
 /// would orphan the partial canonical write. On the `Precondition` +
 /// nothing-applied path the executor has already rolled back, so reaping
 /// deleted objects here is a harmless no-op.
+///
+/// Preserving the intent is also where the progress accumulated since the
+/// commit point is written back, so the sweep that picks the transaction up
+/// skips what already applied instead of re-applying it.
 pub async fn finish(
     store: &dyn ObjectStore,
     apply_result: &Result<(), Error>,
@@ -477,5 +477,79 @@ pub async fn finish(
 ) {
     if apply_result.is_ok() || !intent.any_applied() {
         reap(store, intent).await;
+    } else {
+        save_progress(store, intent).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+
+    use angos_storage::{
+        Error as StorageError, MemoryObjectStore, ObjectStore,
+        test_util::{HookedStore, StoreHook, StoreOp},
+    };
+
+    use crate::{
+        executor::TransactionExecutor,
+        intent::INTENT_LOG_PREFIX,
+        test_util::{locked_executor, memory_lock},
+        transaction::{Mutation, Transaction},
+    };
+
+    /// Counts writes to the intent log, leaving every call to proceed.
+    #[derive(Default)]
+    struct IntentWrites {
+        count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl StoreHook for IntentWrites {
+        async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+            if let StoreOp::Put { key, .. } = op
+                && key.starts_with(INTENT_LOG_PREFIX)
+            {
+                self.count.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+    }
+
+    /// A committed transaction writes its intent twice whatever its size: once
+    /// to log it, once to record the commit point. Stamping every mutation made
+    /// the write path cost one extra round trip per mutation, all of them
+    /// against an intent the reap deletes moments later.
+    #[tokio::test]
+    async fn a_transaction_writes_its_intent_twice_whatever_its_size() {
+        for mutations in [1usize, 12] {
+            let store = Arc::new(HookedStore::new(
+                Arc::new(MemoryObjectStore::new()) as Arc<dyn ObjectStore>,
+                IntentWrites::default(),
+            ));
+            let executor = locked_executor(store.clone(), memory_lock());
+
+            let mut builder = Transaction::builder();
+            for idx in 0..mutations {
+                builder = builder.mutation(Mutation::Put {
+                    key: format!("k{idx}"),
+                    body: Bytes::from(format!("body-{idx}")),
+                    expected: None,
+                });
+            }
+            executor.execute(builder.build()).await.expect("commit");
+
+            assert_eq!(
+                store.hook().count.load(Ordering::Relaxed),
+                2,
+                "{mutations} mutations must still cost two intent writes"
+            );
+        }
     }
 }
