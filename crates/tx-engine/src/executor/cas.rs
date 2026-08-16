@@ -864,7 +864,10 @@ mod tests {
                             .read("k", Bytes::from_static(b"v0"))
                             .mutation(Mutation::Put {
                                 key: "k".to_string(),
-                                body: Bytes::from(format!("v{n}")),
+                                // Neither body may equal the seed, or the
+                                // racer writing it leaves the other's read
+                                // fingerprint intact and both commit.
+                                body: Bytes::from(format!("racer-{n}")),
                                 expected: None,
                             })
                             .build(),
