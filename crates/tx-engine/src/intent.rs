@@ -141,9 +141,6 @@ pub struct IntentRecord {
     /// replay-forward vs rollback (any `Applied` entry implies the transaction
     /// is committed).
     pub mutations: Vec<PlannedMutation>,
-    /// Coarse lock keys captured at build time so recovery can reconstruct
-    /// the full lock set when reclaiming a stale intent.
-    pub coarse_lock_keys: Vec<String>,
 }
 
 /// A mutation as a stored intent may hold it: paired with its own progress,
@@ -168,8 +165,6 @@ struct StoredIntent {
     ttl_secs: u64,
     reads: Vec<Read>,
     mutations: Vec<StoredMutation>,
-    #[serde(default)]
-    coarse_lock_keys: Vec<String>,
     #[serde(default)]
     progress: Option<Vec<MutationProgress>>,
 }
@@ -206,7 +201,6 @@ impl TryFrom<StoredIntent> for IntentRecord {
             ttl_secs: stored.ttl_secs,
             reads: stored.reads,
             mutations,
-            coarse_lock_keys: stored.coarse_lock_keys,
         })
     }
 }
@@ -296,7 +290,6 @@ mod tests {
             ttl_secs: 300,
             reads: vec![],
             mutations,
-            coarse_lock_keys: vec![],
         }
     }
 

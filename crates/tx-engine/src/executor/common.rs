@@ -144,7 +144,6 @@ pub fn build_intent(
     ttl_secs: u64,
     reads: &[Read],
     mutations: Vec<MutationRecord>,
-    coarse_lock_keys: Vec<String>,
 ) -> IntentRecord {
     let mutations = mutations
         .into_iter()
@@ -159,7 +158,6 @@ pub fn build_intent(
         ttl_secs,
         reads: reads.to_vec(),
         mutations,
-        coarse_lock_keys,
     }
 }
 

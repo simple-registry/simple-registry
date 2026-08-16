@@ -78,7 +78,6 @@ impl MetadataStore {
             DEFAULT_RETRY_BUDGET,
         )
         .await
-        .map(|_| ())
         .map_err(Error::from)
     }
 

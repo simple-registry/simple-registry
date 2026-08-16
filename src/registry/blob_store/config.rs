@@ -138,8 +138,8 @@ impl BlobStoreConfig {
                 );
                 let object: Arc<dyn ObjectStore> = backend.clone();
                 let presign: Arc<dyn PresignedStore> = backend;
-                Ok(BlobStore::new(object, Some(presign))
-                    .with_presign_ttl(Duration::from_secs(config.transport.presign_ttl_secs)))
+                let ttl = Duration::from_secs(config.transport.presign_ttl_secs);
+                Ok(BlobStore::new(object, Some((presign, ttl))))
             }
         }
     }

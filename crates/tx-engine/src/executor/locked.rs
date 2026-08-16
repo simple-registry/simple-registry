@@ -26,7 +26,7 @@ use angos_storage::{Error as StorageError, ObjectStore};
 use crate::{
     error::Error,
     executor::{
-        Outcome, TransactionExecutor,
+        TransactionExecutor,
         common::{
             ApplyMode, apply_object_store, build_intent, discard_staged_bodies, finish,
             stage_bodies, stamp_applied, write_intent,
@@ -164,7 +164,7 @@ impl TransactionExecutor for LockedExecutor {
     /// mutations unconditionally, reaps the intent and staged bodies, then
     /// releases the lock. Any caller-held [`LockSession`](crate::lock::LockSession) is independent of
     /// this call; the caller releases it explicitly after `execute` returns.
-    async fn execute(&self, tx: Transaction) -> Result<Outcome, Error> {
+    async fn execute(&self, tx: Transaction) -> Result<(), Error> {
         let tx_id = Uuid::new_v4();
         let lock_set = tx.lock_set();
 
@@ -190,13 +190,7 @@ impl TransactionExecutor for LockedExecutor {
             return Err(e);
         }
 
-        let mut intent = build_intent(
-            tx_id,
-            self.ttl_secs,
-            &tx.reads,
-            mutation_records,
-            tx.coarse_lock_keys.clone(),
-        );
+        let mut intent = build_intent(tx_id, self.ttl_secs, &tx.reads, mutation_records);
         if let Err(e) = write_intent(self.store.as_ref(), &intent).await {
             session.release().await;
             discard_staged_bodies(self.store.as_ref(), tx_id).await;
@@ -247,7 +241,7 @@ impl TransactionExecutor for LockedExecutor {
         session.release().await;
 
         apply_result?;
-        Ok(Outcome { tx_id })
+        Ok(())
     }
 }
 
@@ -261,7 +255,7 @@ mod tests {
 
     use crate::{
         error::Error,
-        executor::{Outcome, TransactionExecutor, locked::LockedExecutor},
+        executor::{TransactionExecutor, locked::LockedExecutor},
         lock::{primitive::Lock, storage::memory::MemoryLockStorage},
         test_util::list_count,
         transaction::{Mutation, Transaction},
@@ -292,7 +286,7 @@ mod tests {
             })
             .build();
 
-        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        let result: Result<(), Error> = executor.execute(tx).await;
         assert!(result.is_ok(), "matching body should commit: {result:?}");
     }
 
@@ -311,7 +305,7 @@ mod tests {
             })
             .build();
 
-        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        let result: Result<(), Error> = executor.execute(tx).await;
         assert!(
             matches!(result, Err(Error::Conflict)),
             "stale body should return Conflict, got: {result:?}"
@@ -337,7 +331,7 @@ mod tests {
             })
             .build();
 
-        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        let result: Result<(), Error> = executor.execute(tx).await;
         assert!(matches!(result, Err(Error::Conflict)));
 
         assert_eq!(
@@ -360,7 +354,7 @@ mod tests {
             })
             .build();
 
-        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        let result: Result<(), Error> = executor.execute(tx).await;
         assert!(
             matches!(result, Err(Error::Conflict)),
             "absent key should return Conflict, got: {result:?}"
@@ -380,7 +374,7 @@ mod tests {
             })
             .build();
 
-        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        let result: Result<(), Error> = executor.execute(tx).await;
         assert!(
             result.is_ok(),
             "a read recording absence must match a missing key: {result:?}"
@@ -406,7 +400,7 @@ mod tests {
             })
             .build();
 
-        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        let result: Result<(), Error> = executor.execute(tx).await;
         assert!(
             matches!(result, Err(Error::Conflict)),
             "an empty object written since the absence was recorded must conflict, got: {result:?}"
@@ -429,7 +423,7 @@ mod tests {
             })
             .build();
 
-        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        let result: Result<(), Error> = executor.execute(tx).await;
         assert!(
             matches!(result, Err(Error::Precondition)),
             "PutIfAbsent on existing key should return Precondition, got: {result:?}"
@@ -466,7 +460,7 @@ mod tests {
             })
             .build();
 
-        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        let result: Result<(), Error> = executor.execute(tx).await;
         assert!(
             matches!(result, Err(Error::PartialCommit)),
             "a mid-apply precondition past the commit point must not be retriable, got: {result:?}"
@@ -504,7 +498,7 @@ mod tests {
             })
             .build();
 
-        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        let result: Result<(), Error> = executor.execute(tx).await;
         assert!(
             matches!(result, Err(Error::Precondition)),
             "stale expected etag on Put should return Precondition, got: {result:?}"
@@ -536,7 +530,7 @@ mod tests {
             })
             .build();
 
-        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        let result: Result<(), Error> = executor.execute(tx).await;
         assert!(
             matches!(result, Err(Error::Precondition)),
             "stale expected etag on Delete should return Precondition, got: {result:?}"

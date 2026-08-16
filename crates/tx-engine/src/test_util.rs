@@ -41,9 +41,9 @@ pub fn locked_executor(store: Arc<dyn ObjectStore>, lock: Arc<Lock>) -> Arc<Lock
     Arc::new(LockedExecutor::builder(store, lock).build())
 }
 
-/// Build a `CasExecutor` over `store`, serialising coarse locks on `lock`.
-pub fn cas_executor(store: Arc<dyn ConditionalStore>, lock: Arc<Lock>) -> Arc<CasExecutor> {
-    Arc::new(CasExecutor::builder(store, lock).build())
+/// Build a `CasExecutor` over `store`.
+pub fn cas_executor(store: Arc<dyn ConditionalStore>) -> Arc<CasExecutor> {
+    Arc::new(CasExecutor::builder(store).build())
 }
 
 /// Stage a mutation body at its `.tx-bodies/{tx_id}/{index}` key.
@@ -59,7 +59,7 @@ pub async fn stage_body(store: &dyn ObjectStore, tx_id: Uuid, index: usize, body
 }
 
 /// Build an [`IntentRecord`] the recovery loop already treats as stale:
-/// created an hour ago with a one-second TTL, no reads, no coarse lock keys.
+/// created an hour ago with a one-second TTL and no reads.
 #[must_use]
 pub fn stale_intent(
     tx_id: Uuid,
@@ -76,7 +76,6 @@ pub fn stale_intent(
             .zip(progress)
             .map(|(record, progress)| PlannedMutation { record, progress })
             .collect(),
-        coarse_lock_keys: vec![],
     }
 }
 

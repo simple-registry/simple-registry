@@ -84,7 +84,7 @@ fn merge_over_absent_key_creates_the_set() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_merge_sets_all_converge_on_cas() {
     let store = Arc::new(MemoryObjectStore::new());
-    let executor = test_util::cas_executor(store.clone(), test_util::memory_lock());
+    let executor = test_util::cas_executor(store.clone());
 
     let writers = 12;
     let mut handles = Vec::new();
@@ -139,7 +139,7 @@ async fn exhausted_merge_with_nothing_applied_rolls_back_as_conflict() {
         inner.clone() as Arc<dyn ConditionalStore>,
         ShardAlwaysContended,
     ));
-    let executor = test_util::cas_executor(store, test_util::memory_lock());
+    let executor = test_util::cas_executor(store);
 
     let tx = Transaction::builder()
         .mutation(Mutation::MergeSet {

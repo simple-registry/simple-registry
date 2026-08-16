@@ -35,7 +35,6 @@ mod registry;
 pub mod registry_client;
 mod replication;
 mod secret;
-mod timing;
 
 #[cfg(test)]
 pub mod test_fixtures;

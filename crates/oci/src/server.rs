@@ -18,7 +18,7 @@ use crate::header::{
     DOCKER_DISTRIBUTION_API_VERSION_V2, DOCKER_UPLOAD_UUID, LINK_REL_NEXT, OCI_FILTERS_APPLIED,
     OCI_INDEX_CONTENT_TYPE, OCI_SUBJECT, OCI_TAG,
 };
-use crate::path::{BLOBS, MANIFESTS, REFERRERS, TAGS_LIST, UPLOADS};
+use crate::path::{BLOBS, MANIFESTS, REFERRERS, UPLOADS};
 use crate::types::http_range::ResponseRange;
 use crate::types::{Digest, MediaRange, MediaType, Namespace, Reference, Tag, UploadSessionId};
 
@@ -181,26 +181,12 @@ pub fn split_referrers_path(api_path: &str) -> Option<(&str, &str)> {
     api_path.rsplit_once(REFERRERS)
 }
 
-/// The namespace of `<namespace>/tags/list`, the counterpart of
-/// [`crate::client::tags_list_path`].
-#[must_use]
-pub fn split_tags_list_path(api_path: &str) -> Option<&str> {
-    api_path.strip_suffix(TAGS_LIST)
-}
-
 /// The namespace of `<namespace>/blobs/uploads/`, the counterpart of
 /// [`crate::client::uploads_start_path`]. The trailing slash is part of the
 /// endpoint the spec defines, so a path without it is not this endpoint.
 #[must_use]
 pub fn split_uploads_start_path(api_path: &str) -> Option<&str> {
     api_path.strip_suffix(UPLOADS)
-}
-
-/// Splits `<namespace>/blobs/uploads/<session>`, whose continuation URL the
-/// registry assigns rather than the client building it.
-#[must_use]
-pub fn split_upload_session_path(api_path: &str) -> Option<(&str, &str)> {
-    api_path.rsplit_once(UPLOADS)
 }
 
 /// Headers a blob answer carries whether or not it has a body: `Accept-Ranges`

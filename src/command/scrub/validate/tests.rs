@@ -907,7 +907,6 @@ async fn put_intent_touching(
             },
             progress: MutationProgress::Pending,
         }],
-        coarse_lock_keys: Vec::new(),
     };
     let log_key = intent.log_key();
     metadata_store

@@ -30,15 +30,14 @@ use angos_storage::{ConditionalStore, Error as StorageError, Etag};
 use crate::{
     error::Error,
     executor::{
-        CAS_RETRY_BACKOFF, Outcome, TransactionExecutor, common,
+        CAS_RETRY_BACKOFF, TransactionExecutor, common,
         common::{
             ApplyMode, build_intent, discard_staged_bodies, finish, rollback, stage_bodies,
             stamp_applied, stamp_progress, write_intent,
         },
     },
     intent::{DEFAULT_INTENT_TTL_SECS, IntentRecord, MutationRecord},
-    lock::primitive::Lock,
-    transaction::{Expectation, Transaction, lock_key_set},
+    transaction::{Expectation, Transaction},
 };
 
 /// CAS-mode executor.
@@ -51,14 +50,12 @@ use crate::{
 /// continued forward (each successful mutation stamps its `progress` slot to
 /// `Applied`, which switches the recovery loop into replay-forward mode).
 ///
-/// The `lock` serialises only the caller-declared coarse lock keys (e.g.
-/// `blob-data:{digest}`) across Apply; the working set itself is coordinated
-/// purely by the conditional operations.
+/// The working set is coordinated purely by the conditional operations; this
+/// executor takes no lock.
 ///
 /// Constructed via [`CasExecutor::builder`].
 pub struct CasExecutor {
     store: Arc<dyn ConditionalStore>,
-    lock: Arc<Lock>,
     ttl_secs: u64,
 }
 
@@ -70,12 +67,10 @@ impl fmt::Debug for CasExecutor {
     }
 }
 
-/// Builder for [`CasExecutor`]. The conditional store and lock are required and
-/// supplied to [`CasExecutor::builder`]; the intent TTL is an optional fluent
-/// setter.
+/// Builder for [`CasExecutor`]. The conditional store is required and supplied
+/// to [`CasExecutor::builder`]; the intent TTL is an optional fluent setter.
 pub struct CasExecutorBuilder {
     store: Arc<dyn ConditionalStore>,
-    lock: Arc<Lock>,
     ttl_secs: Option<u64>,
 }
 
@@ -92,21 +87,18 @@ impl CasExecutorBuilder {
     pub fn build(self) -> CasExecutor {
         CasExecutor {
             store: self.store,
-            lock: self.lock,
             ttl_secs: self.ttl_secs.unwrap_or(DEFAULT_INTENT_TTL_SECS),
         }
     }
 }
 
 impl CasExecutor {
-    /// Return a builder wrapping the conditional `store` and the `lock` that
-    /// serialises coarse lock keys. The intent TTL is an optional fluent
-    /// setter on the returned builder.
+    /// Return a builder wrapping the conditional `store`. The intent TTL is an
+    /// optional fluent setter on the returned builder.
     #[must_use]
-    pub fn builder(store: Arc<dyn ConditionalStore>, lock: Arc<Lock>) -> CasExecutorBuilder {
+    pub fn builder(store: Arc<dyn ConditionalStore>) -> CasExecutorBuilder {
         CasExecutorBuilder {
             store,
-            lock,
             ttl_secs: None,
         }
     }
@@ -512,7 +504,7 @@ impl TransactionExecutor for CasExecutor {
     /// does not acquire a transaction-scoped lock. Any caller-held
     /// [`LockSession`](crate::lock::LockSession) is independent of this call; the caller releases it
     /// explicitly after `execute` returns.
-    async fn execute(&self, tx: Transaction) -> Result<Outcome, Error> {
+    async fn execute(&self, tx: Transaction) -> Result<(), Error> {
         let tx_id = Uuid::new_v4();
 
         let prepared_reads = self.prepare_reads(&tx).await?;
@@ -530,33 +522,8 @@ impl TransactionExecutor for CasExecutor {
         // re-reads and converges, with no lost update and no stuck partial intent.
         apply_read_preconditions(&mut mutation_records, &prepared_reads);
 
-        // CAS executor takes no transaction-scoped lock for its working set.
-        // When the caller declares coarse lock keys (e.g. `blob-data:{digest}`),
-        // acquire only those, hold across Apply, release at Reap.
-        let coarse_session = if tx.coarse_lock_keys.is_empty() {
-            None
-        } else {
-            let keys = lock_key_set(tx.coarse_lock_keys.iter().cloned());
-            match self.lock.acquire(&keys).await {
-                Ok(session) => Some(session),
-                Err(e) => {
-                    discard_staged_bodies(self.store.as_ref(), tx_id).await;
-                    return Err(Error::Lock(e));
-                }
-            }
-        };
-
-        let mut intent = build_intent(
-            tx_id,
-            self.ttl_secs,
-            &tx.reads,
-            mutation_records,
-            tx.coarse_lock_keys.clone(),
-        );
+        let mut intent = build_intent(tx_id, self.ttl_secs, &tx.reads, mutation_records);
         if let Err(e) = write_intent(self.store.as_ref(), &intent).await {
-            if let Some(session) = coarse_session {
-                session.release().await;
-            }
             discard_staged_bodies(self.store.as_ref(), tx_id).await;
             return Err(e);
         }
@@ -570,12 +537,8 @@ impl TransactionExecutor for CasExecutor {
         // reaping here is a harmless no-op.
         finish(self.store.as_ref(), &apply_result, &intent).await;
 
-        if let Some(session) = coarse_session {
-            session.release().await;
-        }
-
         apply_result?;
-        Ok(Outcome { tx_id })
+        Ok(())
     }
 }
 
@@ -584,7 +547,7 @@ mod tests {
     use angos_storage::{MemoryObjectStore, ObjectStore};
 
     use super::*;
-    use crate::{lock::storage::memory::MemoryLockStorage, transaction::Mutation};
+    use crate::transaction::Mutation;
 
     fn put(key: &str) -> MutationRecord {
         MutationRecord::Put {
@@ -655,12 +618,7 @@ mod tests {
     async fn prepare_conflicts_when_an_empty_object_appeared_at_an_absent_read() {
         let store = Arc::new(MemoryObjectStore::new());
         store.put("k", Bytes::new()).await.unwrap();
-        let lock = Arc::new(
-            Lock::builder(Arc::new(MemoryLockStorage::new()))
-                .build()
-                .unwrap(),
-        );
-        let executor = CasExecutor::builder(store as Arc<dyn ConditionalStore>, lock).build();
+        let executor = CasExecutor::builder(store as Arc<dyn ConditionalStore>).build();
 
         let tx = Transaction::builder()
             .read_absent("k")
@@ -671,7 +629,7 @@ mod tests {
             })
             .build();
 
-        let result: Result<Outcome, Error> = executor.execute(tx).await;
+        let result: Result<(), Error> = executor.execute(tx).await;
         assert!(
             matches!(result, Err(Error::Conflict)),
             "an empty object written since the absence was recorded must conflict, got: {result:?}"

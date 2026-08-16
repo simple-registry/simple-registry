@@ -1193,3 +1193,101 @@ fn a_stored_envelope_keeps_its_budget() {
         "the budget must stay a plain number on the wire: {json}"
     );
 }
+
+/// The scan walks pending keys in ascending time order, so a body it cannot
+/// read used to strand every job queued after it. The record is discarded
+/// rather than stepped over: it can no longer name the work it stood for, and
+/// both queues re-enqueue what was lost.
+#[tokio::test]
+async fn a_poison_pending_record_is_discarded_and_does_not_wedge_the_queue() {
+    for_each_job_backend(async |h| {
+        h.store
+            .enqueue(dummy_envelope("cache.ns:sha256:poison"))
+            .await
+            .expect("enqueue poison");
+        let poisoned = h
+            .store
+            .list_pending_page(Queue::Cache, 10, None)
+            .await
+            .expect("list")
+            .items
+            .first()
+            .cloned()
+            .expect("the first job must be listed");
+        let path = crate::jobs::store::job_pending_path("cache", &poisoned);
+        h.raw
+            .put(&path, Bytes::from_static(b"{ truncated"))
+            .await
+            .expect("corrupt the body");
+
+        // Phase one: the scan meets the poison record and drops it. Ordering
+        // against a second job is not assumed: two enqueues can share a
+        // millisecond, so their storage keys may tie.
+        let outcome = h.store.claim_one(Queue::Cache).await.expect("claim");
+        assert!(
+            outcome.claimed.is_none(),
+            "an unreadable record must not claim as a job"
+        );
+        assert!(
+            h.raw.head(&path).await.is_err(),
+            "the unreadable record must be gone, not re-warned on every scan"
+        );
+
+        // Phase two: the queue still drains, which the old abort prevented for
+        // every job queued after the poison record.
+        h.store
+            .enqueue(dummy_envelope("cache.ns:sha256:healthy"))
+            .await
+            .expect("enqueue healthy");
+        let claimed = h
+            .store
+            .claim_one(Queue::Cache)
+            .await
+            .expect("claim")
+            .claimed
+            .expect("the queue must keep draining");
+        assert_eq!(
+            claimed.envelope.lock_key.to_string(),
+            "cache.ns:sha256:healthy"
+        );
+    })
+    .await;
+}
+
+/// Retiring the record through the admin API is the only recovery path, and it
+/// needed the body it cannot read: only the `lock_key` came from there, so the
+/// delete proceeds without the index fold.
+#[tokio::test]
+async fn a_poison_pending_record_can_be_deleted() {
+    for_each_job_backend(async |h| {
+        h.store
+            .enqueue(dummy_envelope("cache.ns:sha256:poison"))
+            .await
+            .expect("enqueue");
+        let poisoned = h
+            .store
+            .list_pending_page(Queue::Cache, 10, None)
+            .await
+            .expect("list")
+            .items
+            .first()
+            .cloned()
+            .expect("the job must be listed");
+        let path = crate::jobs::store::job_pending_path("cache", &poisoned);
+        h.raw
+            .put(&path, Bytes::from_static(b"{ truncated"))
+            .await
+            .expect("corrupt the body");
+
+        h.store
+            .delete_job(Queue::Cache, JobState::Pending, &poisoned)
+            .await
+            .expect("an unreadable pending record must still be deletable");
+
+        assert!(
+            h.raw.head(&path).await.is_err(),
+            "the pending object must be gone"
+        );
+    })
+    .await;
+}

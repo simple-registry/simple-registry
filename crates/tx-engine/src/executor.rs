@@ -1,4 +1,4 @@
-//! Transaction executor trait and outcome type.
+//! Transaction executor trait.
 
 pub mod cas;
 pub mod common;
@@ -6,12 +6,10 @@ pub mod locked;
 
 use std::{future::Future, time::Duration};
 
+use angos_backoff::Backoff;
 use async_trait::async_trait;
 use tokio::time::sleep;
 use tracing::debug;
-use uuid::Uuid;
-
-use angos_backoff::Backoff;
 
 use crate::{error::Error, transaction::Transaction};
 
@@ -28,13 +26,6 @@ pub const DEFAULT_RETRY_BUDGET: u32 = 10;
 pub const CAS_RETRY_BACKOFF: Backoff =
     Backoff::exponential(Duration::from_millis(25), Duration::from_millis(250)).with_jitter();
 
-/// The result of a successfully committed transaction.
-#[derive(Debug, Clone)]
-pub struct Outcome {
-    /// The unique identifier of the committed transaction.
-    pub tx_id: Uuid,
-}
-
 /// Drives a [`Transaction`] through Build → Prepare → Commit-intent →
 /// Apply → Reap.
 ///
@@ -43,7 +34,7 @@ pub struct Outcome {
 /// executor the deployment is configured to use.
 #[async_trait]
 pub trait TransactionExecutor: Send + Sync {
-    /// Execute `tx` and return the commit [`Outcome`] on success.
+    /// Execute `tx`, returning once it has committed.
     ///
     /// The executor manages whatever locking it needs internally (the Locked
     /// executor acquires distributed locks on the transaction's lock set; the
@@ -65,7 +56,7 @@ pub trait TransactionExecutor: Send + Sync {
     /// - [`Error::Lock`]: a lock could not be acquired within the retry
     ///   budget.
     /// - [`Error::Storage`]: an underlying storage operation failed.
-    async fn execute(&self, tx: Transaction) -> Result<Outcome, Error>;
+    async fn execute(&self, tx: Transaction) -> Result<(), Error>;
 }
 
 /// Execute a transaction and a caller-defined payload built by `build`,
@@ -91,7 +82,7 @@ pub async fn execute_with_retry_payload<E, F, Fut, T>(
     executor: &E,
     mut build: F,
     max_attempts: u32,
-) -> Result<(Outcome, T), Error>
+) -> Result<T, Error>
 where
     E: TransactionExecutor + ?Sized,
     F: FnMut() -> Fut + Send,
@@ -102,7 +93,7 @@ where
     loop {
         let (tx, payload) = build().await?;
         match executor.execute(tx).await {
-            Ok(o) => return Ok((o, payload)),
+            Ok(()) => return Ok(payload),
             Err(e) if e.is_retriable() && attempts < max_attempts => {
                 debug!(attempts, max_attempts, "Transaction conflict, retrying");
                 sleep(CAS_RETRY_BACKOFF.delay(attempts)).await;
@@ -142,13 +133,13 @@ pub async fn execute_with_retry<E, F, Fut>(
     executor: &E,
     mut build: F,
     max_attempts: u32,
-) -> Result<Outcome, Error>
+) -> Result<(), Error>
 where
     E: TransactionExecutor + ?Sized,
     F: FnMut() -> Fut + Send,
     Fut: Future<Output = Result<Transaction, Error>> + Send,
 {
-    let (outcome, ()) = execute_with_retry_payload(
+    execute_with_retry_payload(
         executor,
         move || {
             let fut = build();
@@ -156,6 +147,5 @@ where
         },
         max_attempts,
     )
-    .await?;
-    Ok(outcome)
+    .await
 }

@@ -76,7 +76,7 @@ async fn no_orphans_after_commit_locked() {
 #[tokio::test(flavor = "multi_thread")]
 async fn committed_mutations_are_visible_cas() {
     let store = Arc::new(MemoryObjectStore::new());
-    let executor = test_util::cas_executor(store.clone(), test_util::memory_lock());
+    let executor = test_util::cas_executor(store.clone());
 
     let tx = Transaction::builder()
         .mutation(Mutation::Put {
@@ -169,7 +169,7 @@ async fn move_mutation_relocates_body_cas() {
         .await
         .unwrap();
 
-    let executor = test_util::cas_executor(store.clone(), test_util::memory_lock());
+    let executor = test_util::cas_executor(store.clone());
 
     let tx = Transaction::builder()
         .mutation(Mutation::Move {

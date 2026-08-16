@@ -73,7 +73,6 @@ pub struct RecoveryLoopBuilder {
     store: Arc<dyn ObjectStore>,
     conditional_store: Option<Arc<dyn ConditionalStore>>,
     lock: Arc<Lock>,
-    interval: Option<Duration>,
     cancellation: Option<CancellationToken>,
     abandon_after_secs: Option<u64>,
 }
@@ -86,13 +85,6 @@ impl RecoveryLoopBuilder {
     #[must_use]
     pub fn conditional_store(mut self, store: Arc<dyn ConditionalStore>) -> Self {
         self.conditional_store = Some(store);
-        self
-    }
-
-    /// Set the scan interval. Defaults to 30 seconds.
-    #[must_use]
-    pub fn interval(mut self, interval: Duration) -> Self {
-        self.interval = Some(interval);
         self
     }
 
@@ -120,29 +112,24 @@ impl RecoveryLoopBuilder {
             store: self.store,
             conditional_store: self.conditional_store,
             lock: self.lock,
-            interval: self.interval.unwrap_or(Duration::from_secs(30)),
+            interval: Duration::from_secs(30),
             cancellation: self.cancellation.unwrap_or_default(),
             abandon_after_secs: self.abandon_after_secs,
         }
     }
 }
 
-/// Reconstruct the lock set for an intent: reads ∪ mutation keys ∪ coarse
-/// lock keys, sorted and de-duplicated. Matches what `Transaction::lock_set`
-/// produces from the original `Transaction`.
+/// Reconstruct the lock set for an intent: reads ∪ mutation keys, sorted and
+/// de-duplicated. Matches what `Transaction::lock_set` produces from the
+/// original `Transaction`.
 fn intent_lock_set(intent: &IntentRecord) -> Vec<String> {
     lock_key_set(
-        intent
-            .reads
-            .iter()
-            .map(|r| r.key.clone())
-            .chain(
-                intent
-                    .mutations
-                    .iter()
-                    .flat_map(|planned| planned.record.all_keys().map(ToOwned::to_owned)),
-            )
-            .chain(intent.coarse_lock_keys.iter().cloned()),
+        intent.reads.iter().map(|r| r.key.clone()).chain(
+            intent
+                .mutations
+                .iter()
+                .flat_map(|planned| planned.record.all_keys().map(ToOwned::to_owned)),
+        ),
     )
 }
 
@@ -159,7 +146,6 @@ impl RecoveryLoop {
             store,
             conditional_store: None,
             lock,
-            interval: None,
             cancellation: None,
             abandon_after_secs: None,
         }

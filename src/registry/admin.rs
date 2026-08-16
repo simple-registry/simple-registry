@@ -8,7 +8,7 @@ use futures_util::stream::{self, StreamExt, TryStreamExt};
 use hyper::{HeaderMap, Response, StatusCode};
 use serde::Serialize;
 use tokio::try_join;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use angos_oci::request::GetReferrersRequest;
 use angos_oci::{
@@ -540,6 +540,12 @@ impl Registry {
                         }))
                     }
                     Err(job_store::Error::NotFound) => Ok(None),
+                    // One unreadable record drops its row rather than failing
+                    // the page, which would hide every other job on it.
+                    Err(job_store::Error::Corrupt(e)) => {
+                        warn!("admin: skipping unreadable job record '{storage_key}': {e}");
+                        Ok(None)
+                    }
                     Err(e) => Err(Error::from(e)),
                 }
             })
@@ -587,6 +593,12 @@ impl Registry {
                         last_error: record.last_error,
                     })),
                     Err(job_store::Error::NotFound) => Ok(None),
+                    // One unreadable record drops its row rather than failing
+                    // the page, which would hide every other job on it.
+                    Err(job_store::Error::Corrupt(e)) => {
+                        warn!("admin: skipping unreadable job record '{storage_key}': {e}");
+                        Ok(None)
+                    }
                     Err(e) => Err(Error::from(e)),
                 }
             })

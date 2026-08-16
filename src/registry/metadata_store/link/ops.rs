@@ -330,7 +330,7 @@ impl MetadataStore {
         operations: &[LinkOperation],
         tx: LinksTx<'_>,
     ) -> Result<LinksCommit, Error> {
-        let (_, result) = execute_with_retry_payload(
+        let result = execute_with_retry_payload(
             self.store().executor().as_ref(),
             || self.plan_links_attempt(namespace, operations, &tx),
             DEFAULT_RETRY_BUDGET,
