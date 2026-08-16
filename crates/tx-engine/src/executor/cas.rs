@@ -169,17 +169,11 @@ impl CasExecutor {
     async fn apply_commit_point(
         &self,
         intent: &mut IntentRecord,
+        mutation: &MutationRecord,
         reads: &PreparedReads,
     ) -> Result<(), Error> {
-        let Some(mutation) = intent
-            .mutations
-            .first()
-            .map(|planned| planned.record.clone())
-        else {
-            return Ok(());
-        };
-        let seed = merge_seed(&mutation, reads);
-        match apply_cas(self.store.as_ref(), &mutation, ApplyMode::Abort, seed).await {
+        let seed = merge_seed(mutation, reads);
+        match apply_cas(self.store.as_ref(), mutation, ApplyMode::Abort, seed).await {
             Ok(()) => {
                 stamp_applied(self.store.as_ref(), intent, 0).await;
                 Ok(())
@@ -199,12 +193,24 @@ impl CasExecutor {
     /// Apply every mutation: the commit point alone, then the rest
     /// concurrently, then [`Self::recover_mid_apply`] over any that failed
     /// their precondition, in mutation order.
+    ///
+    /// A transaction with no mutations has nothing to commit; a caller whose
+    /// plan came out empty (a delete of an already-absent link, a write a
+    /// last-writer-wins gate superseded) submits one.
     async fn apply_all(
         &self,
         intent: &mut IntentRecord,
         reads: &PreparedReads,
     ) -> Result<(), Error> {
-        self.apply_commit_point(intent, reads).await?;
+        let Some(commit_point) = intent
+            .mutations
+            .first()
+            .map(|planned| planned.record.clone())
+        else {
+            return Ok(());
+        };
+        self.apply_commit_point(intent, &commit_point, reads)
+            .await?;
 
         let rest: Vec<MutationRecord> = intent.mutations[1..]
             .iter()

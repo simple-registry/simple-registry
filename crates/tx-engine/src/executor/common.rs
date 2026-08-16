@@ -601,9 +601,28 @@ mod tests {
     use crate::{
         executor::TransactionExecutor,
         intent::{INLINE_BODY_MAX_BYTES, INTENT_BODIES_PREFIX, INTENT_LOG_PREFIX},
-        test_util::{list_count, locked_executor, memory_lock},
+        test_util::{assert_no_orphans, cas_executor, list_count, locked_executor, memory_lock},
         transaction::{Mutation, Transaction},
     };
+
+    /// A planner whose attempt comes out empty (a delete of an already-absent
+    /// link, a write a last-writer-wins gate superseded) still submits the
+    /// transaction, so neither executor may assume it has a commit point.
+    #[tokio::test]
+    async fn a_transaction_with_no_mutations_commits() {
+        let store = Arc::new(MemoryObjectStore::new());
+
+        locked_executor(store.clone(), memory_lock())
+            .execute(Transaction::builder().build())
+            .await
+            .expect("the locked executor must commit an empty transaction");
+        cas_executor(store.clone())
+            .execute(Transaction::builder().build())
+            .await
+            .expect("the CAS executor must commit an empty transaction");
+
+        assert_no_orphans(store.as_ref()).await;
+    }
 
     /// The cap decides where a body travels, and either route must land the
     /// same bytes and leave no staging behind.
