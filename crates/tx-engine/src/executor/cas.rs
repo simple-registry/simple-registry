@@ -146,7 +146,11 @@ impl CasExecutor {
     /// reported in read order, so a conflict names the same key however the
     /// reads interleaved.
     async fn prepare_reads(&self, tx: &Transaction) -> Result<PreparedReads, Error> {
-        let checks: Vec<_> = tx.reads.iter().map(|read| self.observe_read(read)).collect();
+        let checks: Vec<_> = tx
+            .reads
+            .iter()
+            .map(|read| self.observe_read(read))
+            .collect();
         let observed: Vec<Result<Observed, Error>> = stream::iter(checks)
             .buffered(STORE_CONCURRENCY)
             .collect()
@@ -174,7 +178,11 @@ impl CasExecutor {
     /// error for the caller to re-read against, which is what
     /// [`apply_read_preconditions`] orders the read-keyed mutations first for.
     async fn apply_commit_point(&self, intent: &mut IntentRecord) -> Result<(), Error> {
-        let Some(mutation) = intent.mutations.first().map(|planned| planned.record.clone()) else {
+        let Some(mutation) = intent
+            .mutations
+            .first()
+            .map(|planned| planned.record.clone())
+        else {
             return Ok(());
         };
         match apply_cas(self.store.as_ref(), &mutation, ApplyMode::Abort).await {

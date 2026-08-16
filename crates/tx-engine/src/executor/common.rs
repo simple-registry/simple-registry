@@ -407,7 +407,10 @@ fn keys_are_distinct(records: &[MutationRecord]) -> bool {
 /// another fails: landing them is what the recovery loop would do anyway, and
 /// the caller reconciles the failures from the returned outcomes. A transaction
 /// touching one key twice applies serially, keeping the two in order.
-pub async fn apply_rest<'a, F, Fut>(records: &'a [MutationRecord], apply: F) -> Vec<Result<(), Error>>
+pub async fn apply_rest<'a, F, Fut>(
+    records: &'a [MutationRecord],
+    apply: F,
+) -> Vec<Result<(), Error>>
 where
     F: Fn(&'a MutationRecord) -> Fut,
     Fut: Future<Output = Result<(), Error>>,
@@ -729,8 +732,14 @@ mod tests {
             .mutation(put("sibling"))
             .build();
 
-        let error = executor.execute(tx).await.expect_err("the commit point loses");
-        assert!(error.is_retriable(), "expected a retriable error, got {error:?}");
+        let error = executor
+            .execute(tx)
+            .await
+            .expect_err("the commit point loses");
+        assert!(
+            error.is_retriable(),
+            "expected a retriable error, got {error:?}"
+        );
         assert!(
             matches!(store.get("sibling").await, Err(StorageError::NotFound)),
             "no mutation may land once the commit point failed"

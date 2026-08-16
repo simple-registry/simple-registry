@@ -156,7 +156,11 @@ impl LockedExecutor {
     /// retriable one to [`Error::PartialCommit`] when a mutation already
     /// applied, and releases the lock session either way.
     async fn apply_all(&self, intent: &mut IntentRecord) -> Result<(), Error> {
-        let Some(first) = intent.mutations.first().map(|planned| planned.record.clone()) else {
+        let Some(first) = intent
+            .mutations
+            .first()
+            .map(|planned| planned.record.clone())
+        else {
             return Ok(());
         };
         apply_object_store(self.store.as_ref(), &first, ApplyMode::Abort).await?;
