@@ -4,8 +4,11 @@
 //! with both `ConditionalStore` (CAS executor) and plain `ObjectStore` (Locked
 //! executor): both traits are supertraits of `ObjectStore`.
 
+use std::{collections::HashSet, future::Future};
+
 use bytes::Bytes;
 use chrono::Utc;
+use futures_util::stream::{self, StreamExt};
 use serde_json::Value;
 use tracing::warn;
 
@@ -13,6 +16,7 @@ use angos_storage::{Error as StorageError, Etag, ObjectStore};
 
 use crate::{
     error::Error,
+    executor::STORE_CONCURRENCY,
     intent::{
         INTENT_BODIES_PREFIX, IntentRecord, MutationProgress, MutationRecord, PlannedMutation,
         body_ref_key,
@@ -49,14 +53,13 @@ pub async fn save_progress(store: &dyn ObjectStore, intent: &IntentRecord) {
 }
 
 /// Mark mutation `idx` `Applied`, persisting the intent only at the commit
-/// point: the first mutation to apply is what switches recovery from rollback
-/// to replay-forward, and one write records it.
+/// point, the first mutation to apply, which is what switches recovery from
+/// rollback to replay-forward.
 ///
-/// Later marks stay in memory, so a transaction costs one intent write instead
-/// of one per mutation. The durable record then trails the applied set, which
-/// is what `Pending` already means: recovery re-applies every unconfirmed slot
-/// idempotently. [`finish`] persists the accumulated progress on the paths that
-/// leave the intent behind, so only a process death loses it.
+/// Later marks stay in memory, so the durable record trails the applied set,
+/// which is what `Pending` already means: recovery re-applies every unconfirmed
+/// slot idempotently. [`finish`] writes the accumulated progress back on the
+/// paths that leave the intent behind, so only a process death loses it.
 pub async fn stamp_applied(store: &dyn ObjectStore, intent: &mut IntentRecord, idx: usize) {
     let commit_point = !intent.any_applied();
     intent.mark_applied(idx);
@@ -65,68 +68,92 @@ pub async fn stamp_applied(store: &dyn ObjectStore, intent: &mut IntentRecord, i
     }
 }
 
-/// Stage `Put`/`PutIfAbsent` bodies at `.tx-bodies/<tx_id>/<idx>` and return
-/// the matching [`MutationRecord`]s for the intent.
+/// Stage one mutation's body, if it carries one, and return its
+/// [`MutationRecord`].
 ///
 /// # Errors
 ///
-/// Returns [`Error::Storage`] if any body PUT fails.
+/// Returns [`Error::Storage`] if the body PUT fails.
+async fn stage_mutation(
+    store: &dyn ObjectStore,
+    mutation: &Mutation,
+    tx_id: Uuid,
+    idx: usize,
+) -> Result<MutationRecord, Error> {
+    match mutation {
+        Mutation::Put {
+            key,
+            body,
+            expected,
+        } => {
+            let body_ref = body_ref_key(tx_id, idx);
+            store
+                .put(&body_ref, body.clone())
+                .await
+                .map_err(Error::Storage)?;
+            Ok(MutationRecord::Put {
+                key: key.clone(),
+                body_ref,
+                expected: expected.clone(),
+            })
+        }
+        Mutation::PutIfAbsent { key, body } => {
+            let body_ref = body_ref_key(tx_id, idx);
+            store
+                .put(&body_ref, body.clone())
+                .await
+                .map_err(Error::Storage)?;
+            Ok(MutationRecord::PutIfAbsent {
+                key: key.clone(),
+                body_ref,
+            })
+        }
+        Mutation::Delete { key, expected } => Ok(MutationRecord::Delete {
+            key: key.clone(),
+            expected: expected.clone(),
+        }),
+        Mutation::Copy { src, dst } => Ok(MutationRecord::Copy {
+            src: src.clone(),
+            dst: dst.clone(),
+        }),
+        Mutation::Move { src, dst } => Ok(MutationRecord::Move {
+            src: src.clone(),
+            dst: dst.clone(),
+        }),
+        Mutation::MergeSet { key, add, remove } => Ok(MutationRecord::MergeSet {
+            key: key.clone(),
+            add: add.clone(),
+            remove: remove.clone(),
+        }),
+    }
+}
+
+/// Stage `Put`/`PutIfAbsent` bodies at `.tx-bodies/<tx_id>/<idx>` and return
+/// the matching [`MutationRecord`]s for the intent, in mutation order.
+///
+/// Every staging is awaited even once one fails, so the caller's
+/// [`discard_staged_bodies`] has the complete set to reclaim.
+///
+/// # Errors
+///
+/// Returns [`Error::Storage`] from the first failing body PUT.
 pub async fn stage_bodies(
     store: &dyn ObjectStore,
     tx: &Transaction,
     tx_id: Uuid,
 ) -> Result<Vec<MutationRecord>, Error> {
-    let mut records = Vec::with_capacity(tx.mutations.len());
-    for (idx, mutation) in tx.mutations.iter().enumerate() {
-        let record = match mutation {
-            Mutation::Put {
-                key,
-                body,
-                expected,
-            } => {
-                let body_ref = body_ref_key(tx_id, idx);
-                store
-                    .put(&body_ref, body.clone())
-                    .await
-                    .map_err(Error::Storage)?;
-                MutationRecord::Put {
-                    key: key.clone(),
-                    body_ref,
-                    expected: expected.clone(),
-                }
-            }
-            Mutation::PutIfAbsent { key, body } => {
-                let body_ref = body_ref_key(tx_id, idx);
-                store
-                    .put(&body_ref, body.clone())
-                    .await
-                    .map_err(Error::Storage)?;
-                MutationRecord::PutIfAbsent {
-                    key: key.clone(),
-                    body_ref,
-                }
-            }
-            Mutation::Delete { key, expected } => MutationRecord::Delete {
-                key: key.clone(),
-                expected: expected.clone(),
-            },
-            Mutation::Copy { src, dst } => MutationRecord::Copy {
-                src: src.clone(),
-                dst: dst.clone(),
-            },
-            Mutation::Move { src, dst } => MutationRecord::Move {
-                src: src.clone(),
-                dst: dst.clone(),
-            },
-            Mutation::MergeSet { key, add, remove } => MutationRecord::MergeSet {
-                key: key.clone(),
-                add: add.clone(),
-                remove: remove.clone(),
-            },
-        };
-        records.push(record);
-    }
-    Ok(records)
+    let stagings: Vec<_> = tx
+        .mutations
+        .iter()
+        .enumerate()
+        .map(|(idx, mutation)| stage_mutation(store, mutation, tx_id, idx))
+        .collect();
+    stream::iter(stagings)
+        .buffered(STORE_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect()
 }
 
 /// Assemble the [`IntentRecord`] written at the Commit-intent stage.
@@ -363,6 +390,37 @@ async fn check_expected_match(
     }
 }
 
+/// `true` when no key is touched by two of `records`, so they commute and
+/// [`apply_rest`] can fan them out.
+fn keys_are_distinct(records: &[MutationRecord]) -> bool {
+    let mut seen = HashSet::new();
+    records
+        .iter()
+        .flat_map(MutationRecord::all_keys)
+        .all(|key| seen.insert(key))
+}
+
+/// Apply the mutations that follow the commit point, returning one outcome per
+/// record in order.
+///
+/// They belong to a committed transaction, so every one is applied even after
+/// another fails: landing them is what the recovery loop would do anyway, and
+/// the caller reconciles the failures from the returned outcomes. A transaction
+/// touching one key twice applies serially, keeping the two in order.
+pub async fn apply_rest<'a, F, Fut>(records: &'a [MutationRecord], apply: F) -> Vec<Result<(), Error>>
+where
+    F: Fn(&'a MutationRecord) -> Fut,
+    Fut: Future<Output = Result<(), Error>>,
+{
+    let concurrency = if keys_are_distinct(records) {
+        STORE_CONCURRENCY
+    } else {
+        1
+    };
+    let applies: Vec<Fut> = records.iter().map(apply).collect();
+    stream::iter(applies).buffered(concurrency).collect().await
+}
+
 /// Which cleanup path is running, selecting the warn labels and the
 /// prefix-delete-failure behaviour for [`cleanup`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,11 +523,9 @@ pub async fn rollback(store: &dyn ObjectStore, intent: &IntentRecord) {
 /// recovery loop can replay-forward idempotently and converge; reaping here
 /// would orphan the partial canonical write. On the `Precondition` +
 /// nothing-applied path the executor has already rolled back, so reaping
-/// deleted objects here is a harmless no-op.
-///
-/// Preserving the intent is also where the progress accumulated since the
-/// commit point is written back, so the sweep that picks the transaction up
-/// skips what already applied instead of re-applying it.
+/// deleted objects here is a harmless no-op. Preserving it also writes the
+/// progress accumulated since the commit point back, so the sweep that picks
+/// the transaction up skips what already applied.
 pub async fn finish(
     store: &dyn ObjectStore,
     apply_result: &Result<(), Error>,
@@ -484,13 +540,20 @@ pub async fn finish(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
     use async_trait::async_trait;
     use bytes::Bytes;
+    use tokio::{
+        sync::Barrier,
+        time::{sleep, timeout},
+    };
 
     use angos_storage::{
         Error as StorageError, MemoryObjectStore, ObjectStore,
@@ -503,6 +566,23 @@ mod tests {
         test_util::{locked_executor, memory_lock},
         transaction::{Mutation, Transaction},
     };
+
+    /// An unconditional `Put` of `key`, the shape every test here builds on.
+    fn put(key: &str) -> Mutation {
+        Mutation::Put {
+            key: key.to_owned(),
+            body: Bytes::from(format!("body-{key}")),
+            expected: None,
+        }
+    }
+
+    /// Build a store whose calls run through `hook`, and an executor over it.
+    fn hooked<H: StoreHook + 'static>(hook: H) -> Arc<HookedStore<Arc<dyn ObjectStore>, H>> {
+        Arc::new(HookedStore::new(
+            Arc::new(MemoryObjectStore::new()) as Arc<dyn ObjectStore>,
+            hook,
+        ))
+    }
 
     /// Counts writes to the intent log, leaving every call to proceed.
     #[derive(Default)]
@@ -529,19 +609,12 @@ mod tests {
     #[tokio::test]
     async fn a_transaction_writes_its_intent_twice_whatever_its_size() {
         for mutations in [1usize, 12] {
-            let store = Arc::new(HookedStore::new(
-                Arc::new(MemoryObjectStore::new()) as Arc<dyn ObjectStore>,
-                IntentWrites::default(),
-            ));
+            let store = hooked(IntentWrites::default());
             let executor = locked_executor(store.clone(), memory_lock());
 
             let mut builder = Transaction::builder();
             for idx in 0..mutations {
-                builder = builder.mutation(Mutation::Put {
-                    key: format!("k{idx}"),
-                    body: Bytes::from(format!("body-{idx}")),
-                    expected: None,
-                });
+                builder = builder.mutation(put(&format!("k{idx}")));
             }
             executor.execute(builder.build()).await.expect("commit");
 
@@ -551,5 +624,116 @@ mod tests {
                 "{mutations} mutations must still cost two intent writes"
             );
         }
+    }
+
+    /// Holds every write to a key under `prefix` until `barrier` releases.
+    struct GateWrites {
+        prefix: &'static str,
+        barrier: Barrier,
+    }
+
+    #[async_trait]
+    impl StoreHook for GateWrites {
+        async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+            if let StoreOp::Put { key, .. } = op
+                && key.starts_with(self.prefix)
+            {
+                self.barrier.wait().await;
+            }
+            Ok(())
+        }
+    }
+
+    /// Only the two mutations past the commit point are gated, so a barrier of
+    /// two releases exactly when they overlap and never when applies are
+    /// serial.
+    #[tokio::test]
+    async fn mutations_past_the_commit_point_apply_concurrently() {
+        let store = hooked(GateWrites {
+            prefix: "gated/",
+            barrier: Barrier::new(2),
+        });
+        let executor = locked_executor(store.clone(), memory_lock());
+
+        let tx = Transaction::builder()
+            .mutation(put("commit-point"))
+            .mutation(put("gated/a"))
+            .mutation(put("gated/b"))
+            .build();
+
+        timeout(Duration::from_secs(5), executor.execute(tx))
+            .await
+            .expect("serial applies would leave the first gated mutation waiting forever")
+            .expect("commit");
+    }
+
+    /// Delays every write to `key`, so applying it alongside a later mutation
+    /// on the same key would let that one land first.
+    struct SlowKey {
+        key: &'static str,
+    }
+
+    #[async_trait]
+    impl StoreHook for SlowKey {
+        async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+            if let StoreOp::Put { key, .. } = op
+                && key == self.key
+            {
+                sleep(Duration::from_millis(50)).await;
+            }
+            Ok(())
+        }
+    }
+
+    /// Two mutations on one key do not commute, so they apply in order even
+    /// though they sit past the commit point. Applying them together would let
+    /// the delete land first and leave the key present.
+    #[tokio::test]
+    async fn mutations_on_one_key_keep_their_order() {
+        let store = hooked(SlowKey { key: "shared" });
+        let executor = locked_executor(store.clone(), memory_lock());
+
+        let tx = Transaction::builder()
+            .mutation(put("commit-point"))
+            .mutation(put("shared"))
+            .mutation(Mutation::Delete {
+                key: "shared".to_owned(),
+                expected: None,
+            })
+            .build();
+        executor.execute(tx).await.expect("commit");
+
+        assert!(
+            matches!(store.get("shared").await, Err(StorageError::NotFound)),
+            "the delete must apply after the put it follows"
+        );
+    }
+
+    /// A precondition lost on the commit point commits nothing, so the error
+    /// stays retriable and the caller re-runs the whole transaction. Past that
+    /// point the same failure is a non-retriable partial commit.
+    #[tokio::test]
+    async fn a_precondition_lost_on_the_commit_point_stays_retriable() {
+        let store = hooked(IntentWrites::default());
+        store
+            .put("taken", Bytes::from_static(b"held"))
+            .await
+            .expect("seed");
+        let executor = locked_executor(store.clone(), memory_lock());
+
+        let tx = Transaction::builder()
+            .mutation(Mutation::PutIfAbsent {
+                key: "taken".to_owned(),
+                body: Bytes::from_static(b"loses"),
+            })
+            .mutation(put("sibling"))
+            .build();
+
+        let error = executor.execute(tx).await.expect_err("the commit point loses");
+        assert!(error.is_retriable(), "expected a retriable error, got {error:?}");
+        assert!(
+            matches!(store.get("sibling").await, Err(StorageError::NotFound)),
+            "no mutation may land once the commit point failed"
+        );
     }
 }

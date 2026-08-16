@@ -16,6 +16,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::stream::{self, StreamExt};
 use sha2::{Digest as _, Sha256};
 use tokio::select;
 use tracing::{debug, warn};
@@ -26,23 +27,22 @@ use angos_storage::{Error as StorageError, ObjectStore};
 use crate::{
     error::Error,
     executor::{
-        TransactionExecutor,
+        STORE_CONCURRENCY, TransactionExecutor,
         common::{
-            ApplyMode, apply_object_store, build_intent, discard_staged_bodies, finish,
+            ApplyMode, apply_object_store, apply_rest, build_intent, discard_staged_bodies, finish,
             stage_bodies, stamp_applied, write_intent,
         },
     },
-    intent::{DEFAULT_INTENT_TTL_SECS, IntentRecord},
+    intent::{DEFAULT_INTENT_TTL_SECS, IntentRecord, MutationRecord},
     lock::primitive::Lock,
-    transaction::{Expectation, Transaction},
+    transaction::{Expectation, Read, Transaction},
 };
 
 /// Locked-mode executor.
 ///
-/// Acquires distributed locks on `reads ∪ mutations` in sorted
-/// order (deadlock-free), writes the intent record, applies mutations under
-/// the lock with unconditional storage operations, stamps each mutation's
-/// progress slot to `Applied` as it succeeds, then reaps bodies and intent.
+/// Acquires distributed locks on `reads ∪ mutations` in sorted order
+/// (deadlock-free), writes the intent record, applies mutations under the lock
+/// with unconditional storage operations, then reaps bodies and intent.
 ///
 /// An abort once a mutation has applied is reported as
 /// [`Error::PartialCommit`] rather than a retriable error, because the intent
@@ -103,55 +103,83 @@ impl LockedExecutor {
         }
     }
 
-    /// Verify read fingerprints after acquiring the lock.
-    ///
-    /// Re-fetches each key and checks it against the state recorded at build
-    /// time. A hash mismatch, a vanished key, or a key that appeared where
-    /// absence was recorded returns [`Error::Conflict`] so the caller retries.
-    async fn verify_reads_under_lock(&self, tx: &Transaction) -> Result<(), Error> {
-        for read in &tx.reads {
-            match self.store.get(&read.key).await {
-                Ok(body) => {
-                    // A live object matches only a read that recorded one.
-                    let Expectation::Present(expected) = read.expected else {
-                        return Err(Error::Conflict);
-                    };
-                    let actual: [u8; 32] = Sha256::digest(&body).into();
-                    if actual != expected {
-                        debug!(
-                            key = read.key,
-                            "Locked executor: content hash mismatch, signalling Conflict"
-                        );
-                        return Err(Error::Conflict);
-                    }
+    /// Re-fetch one key and check it against the state recorded at build time.
+    /// A hash mismatch, a vanished key, or a key that appeared where absence
+    /// was recorded returns [`Error::Conflict`] so the caller retries.
+    async fn verify_read(&self, read: &Read) -> Result<(), Error> {
+        match self.store.get(&read.key).await {
+            Ok(body) => {
+                // A live object matches only a read that recorded one.
+                let Expectation::Present(expected) = read.expected else {
+                    return Err(Error::Conflict);
+                };
+                let actual: [u8; 32] = Sha256::digest(&body).into();
+                if actual != expected {
+                    debug!(
+                        key = read.key,
+                        "Locked executor: content hash mismatch, signalling Conflict"
+                    );
+                    return Err(Error::Conflict);
                 }
-                Err(StorageError::NotFound) => {
-                    // An absent key matches only a read that recorded absence.
-                    if !matches!(read.expected, Expectation::Absent) {
-                        return Err(Error::Conflict);
-                    }
-                }
-                Err(e) => return Err(Error::Storage(e)),
+                Ok(())
             }
+            Err(StorageError::NotFound) => {
+                // An absent key matches only a read that recorded absence.
+                if matches!(read.expected, Expectation::Absent) {
+                    Ok(())
+                } else {
+                    Err(Error::Conflict)
+                }
+            }
+            Err(e) => Err(Error::Storage(e)),
         }
-        Ok(())
     }
 
-    /// Apply all mutations under the pre-acquired lock.
+    /// Verify every read fingerprint after acquiring the lock, reporting a
+    /// failure in read order so a conflict names the same key however the reads
+    /// interleaved.
+    async fn verify_reads_under_lock(&self, tx: &Transaction) -> Result<(), Error> {
+        let checks: Vec<_> = tx.reads.iter().map(|read| self.verify_read(read)).collect();
+        stream::iter(checks)
+            .buffered(STORE_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect()
+    }
+
+    /// Apply all mutations under the pre-acquired lock: the commit point alone
+    /// so that failing it commits nothing and stays retriable, then the rest
+    /// concurrently.
     ///
-    /// Returns `Ok(())` on success or `Err` on the first hard error; `execute`
-    /// downgrades a retriable error to [`Error::PartialCommit`] when a mutation
-    /// already applied. The caller is responsible for releasing the lock session
-    /// in both cases.
+    /// Returns the first error in mutation order; `execute` downgrades a
+    /// retriable one to [`Error::PartialCommit`] when a mutation already
+    /// applied, and releases the lock session either way.
     async fn apply_all(&self, intent: &mut IntentRecord) -> Result<(), Error> {
-        for idx in 0..intent.mutations.len() {
-            let mutation = intent.mutations[idx].record.clone();
-            match apply_object_store(self.store.as_ref(), &mutation, ApplyMode::Abort).await {
-                Ok(()) => stamp_applied(self.store.as_ref(), intent, idx).await,
-                Err(e) => return Err(e),
+        let Some(first) = intent.mutations.first().map(|planned| planned.record.clone()) else {
+            return Ok(());
+        };
+        apply_object_store(self.store.as_ref(), &first, ApplyMode::Abort).await?;
+        stamp_applied(self.store.as_ref(), intent, 0).await;
+
+        let rest: Vec<MutationRecord> = intent.mutations[1..]
+            .iter()
+            .map(|planned| planned.record.clone())
+            .collect();
+        let outcomes = apply_rest(&rest, |mutation| {
+            apply_object_store(self.store.as_ref(), mutation, ApplyMode::Abort)
+        })
+        .await;
+
+        let mut failure = None;
+        for (offset, outcome) in outcomes.into_iter().enumerate() {
+            match outcome {
+                Ok(()) => intent.mark_applied(offset + 1),
+                Err(e) if failure.is_none() => failure = Some(e),
+                Err(_) => {}
             }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 }
 

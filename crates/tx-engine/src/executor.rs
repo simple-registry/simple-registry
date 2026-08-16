@@ -19,6 +19,11 @@ use crate::{error::Error, transaction::Transaction};
 /// of maintaining their own retry constants.
 pub const DEFAULT_RETRY_BUDGET: u32 = 10;
 
+/// Storage operations one transaction keeps in flight while verifying reads,
+/// staging bodies, or applying mutations. Caps the fan-out a large multi-key
+/// transaction puts on the backend.
+pub const STORE_CONCURRENCY: usize = 16;
+
 /// Backoff between CAS contention retries (a lost `put_if_match`/`put_if_absent`
 /// race), jittered so concurrent writers on a shared key decorrelate instead of
 /// colliding in lockstep on every S3 round-trip. Shared by the whole-transaction

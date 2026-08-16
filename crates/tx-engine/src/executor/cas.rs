@@ -19,6 +19,7 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::stream::{self, StreamExt};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use tokio::time::sleep;
@@ -30,14 +31,14 @@ use angos_storage::{ConditionalStore, Error as StorageError, Etag};
 use crate::{
     error::Error,
     executor::{
-        CAS_RETRY_BACKOFF, TransactionExecutor, common,
+        CAS_RETRY_BACKOFF, STORE_CONCURRENCY, TransactionExecutor, common,
         common::{
-            ApplyMode, build_intent, discard_staged_bodies, finish, rollback, stage_bodies,
-            stamp_applied, write_intent,
+            ApplyMode, apply_rest, build_intent, discard_staged_bodies, finish, rollback,
+            stage_bodies, stamp_applied, write_intent,
         },
     },
     intent::{DEFAULT_INTENT_TTL_SECS, IntentRecord, MutationRecord},
-    transaction::{Expectation, Transaction},
+    transaction::{Expectation, Read, Transaction},
 };
 
 /// CAS-mode executor.
@@ -103,90 +104,125 @@ impl CasExecutor {
         }
     }
 
+    /// Re-read one key and check it against the state the read recorded,
+    /// returning [`Error::Conflict`] when the content differs, a
+    /// present-expecting key has vanished, or an absent-expecting key now
+    /// exists.
+    async fn observe_read(&self, read: &Read) -> Result<Observed, Error> {
+        match self.store.get_with_etag(&read.key).await {
+            Ok((body, etag)) => {
+                // A live object matches only a read that recorded one.
+                let Expectation::Present(expected) = read.expected else {
+                    return Err(Error::Conflict);
+                };
+                let actual: [u8; 32] = Sha256::digest(&body).into();
+                if actual != expected {
+                    debug!(
+                        key = read.key,
+                        "CAS executor: content hash mismatch at Prepare, signalling Conflict"
+                    );
+                    return Err(Error::Conflict);
+                }
+                Ok(Observed::Present(etag))
+            }
+            Err(StorageError::NotFound) => {
+                // An absent key matches only a read that recorded absence.
+                if matches!(read.expected, Expectation::Absent) {
+                    Ok(Observed::Absent)
+                } else {
+                    Err(Error::Conflict)
+                }
+            }
+            Err(e) => Err(Error::Storage(e)),
+        }
+    }
+
     /// Verify the read set, capturing each present read key's live etag and
     /// each key a read confirmed absent.
     ///
-    /// Re-reads every read key and checks it against the state recorded at
-    /// build time, returning [`Error::Conflict`] when the content differs, a
-    /// present-expecting key has vanished, or an absent-expecting key now
-    /// exists. The etags let the caller turn a same-key write into a
-    /// compare-and-swap; the absent set lets it turn a same-key write into a
-    /// `PutIfAbsent` so the absence precondition holds through Apply, not just
-    /// Prepare.
+    /// The etags let the caller turn a same-key write into a compare-and-swap;
+    /// the absent set lets it turn one into a `PutIfAbsent`, so the absence
+    /// precondition holds through Apply and not just Prepare. Failures are
+    /// reported in read order, so a conflict names the same key however the
+    /// reads interleaved.
     async fn prepare_reads(&self, tx: &Transaction) -> Result<PreparedReads, Error> {
+        let checks: Vec<_> = tx.reads.iter().map(|read| self.observe_read(read)).collect();
+        let observed: Vec<Result<Observed, Error>> = stream::iter(checks)
+            .buffered(STORE_CONCURRENCY)
+            .collect()
+            .await;
+
         let mut prepared = PreparedReads::default();
-        for read in &tx.reads {
-            match self.store.get_with_etag(&read.key).await {
-                Ok((body, etag)) => {
-                    // A live object matches only a read that recorded one.
-                    let Expectation::Present(expected) = read.expected else {
-                        return Err(Error::Conflict);
-                    };
-                    let actual: [u8; 32] = Sha256::digest(&body).into();
-                    if actual != expected {
-                        debug!(
-                            key = read.key,
-                            "CAS executor: content hash mismatch at Prepare, signalling Conflict"
-                        );
-                        return Err(Error::Conflict);
-                    }
+        for (read, outcome) in tx.reads.iter().zip(observed) {
+            match outcome? {
+                Observed::Present(etag) => {
                     if let Some(etag) = etag {
                         prepared.etags.insert(read.key.clone(), etag);
                     }
                 }
-                Err(StorageError::NotFound) => {
-                    // An absent key matches only a read that recorded absence.
-                    if !matches!(read.expected, Expectation::Absent) {
-                        return Err(Error::Conflict);
-                    }
+                Observed::Absent => {
                     prepared.absent.insert(read.key.clone());
                 }
-                Err(e) => return Err(Error::Storage(e)),
             }
         }
         Ok(prepared)
     }
 
-    /// Apply all mutations in the intent.
+    /// Apply the transaction's first mutation, its commit point.
     ///
-    /// Returns `Ok(())` after all mutations are applied. On `Precondition`
-    /// failure before any mutation has been applied, rolls back and returns
-    /// `Err(Error::Precondition)`. A merge that exhausts its attempt budget
-    /// before any mutation has been applied likewise rolls back, returning
-    /// `Err(Error::Conflict)` so the caller's retry loop re-runs the whole
-    /// transaction. On `Precondition` failure mid-Apply (at
-    /// least one mutation already stamped `Applied`), uses the stale-stamp
-    /// recovery heuristic:
-    ///
-    /// - If the live body at the failing key matches the staged body, the
-    ///   healthy-path write already landed without its stamp. The slot is
-    ///   marked `Applied` and the loop continues to the next mutation.
-    /// - If the live body does not match, this is true contention. The intent
-    ///   is left in `.tx-log/` for the recovery loop and
-    ///   `Err(Error::PartialCommit)` is returned so the caller skips `reap`.
+    /// Failing here commits nothing, so it rolls back and returns a retriable
+    /// error for the caller to re-read against, which is what
+    /// [`apply_read_preconditions`] orders the read-keyed mutations first for.
+    async fn apply_commit_point(&self, intent: &mut IntentRecord) -> Result<(), Error> {
+        let Some(mutation) = intent.mutations.first().map(|planned| planned.record.clone()) else {
+            return Ok(());
+        };
+        match apply_cas(self.store.as_ref(), &mutation, ApplyMode::Abort).await {
+            Ok(()) => {
+                stamp_applied(self.store.as_ref(), intent, 0).await;
+                Ok(())
+            }
+            Err(Error::Precondition) => {
+                rollback(self.store.as_ref(), intent).await;
+                Err(Error::Precondition)
+            }
+            Err(Error::PartialCommit) => {
+                rollback(self.store.as_ref(), intent).await;
+                Err(Error::Conflict)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Apply every mutation: the commit point alone, then the rest
+    /// concurrently, then [`Self::recover_mid_apply`] over any that failed
+    /// their precondition, in mutation order.
     async fn apply_all(&self, intent: &mut IntentRecord) -> Result<(), Error> {
-        for idx in 0..intent.mutations.len() {
-            let mutation = intent.mutations[idx].record.clone();
-            match apply_cas(self.store.as_ref(), &mutation, ApplyMode::Abort).await {
-                Ok(()) => stamp_applied(self.store.as_ref(), intent, idx).await,
-                Err(Error::Precondition) => {
-                    if intent.any_applied() {
-                        // Committed (a slot is Applied): reconcile this slot,
-                        // continuing forward when it recovers and propagating
-                        // `PartialCommit` on true contention.
-                        self.recover_mid_apply(intent, idx, &mutation).await?;
-                    } else {
-                        rollback(self.store.as_ref(), intent).await;
-                        return Err(Error::Precondition);
-                    }
+        self.apply_commit_point(intent).await?;
+
+        let rest: Vec<MutationRecord> = intent.mutations[1..]
+            .iter()
+            .map(|planned| planned.record.clone())
+            .collect();
+        let outcomes = apply_rest(&rest, |mutation| {
+            apply_cas(self.store.as_ref(), mutation, ApplyMode::Abort)
+        })
+        .await;
+
+        let mut failures = Vec::new();
+        for (offset, outcome) in outcomes.into_iter().enumerate() {
+            match outcome {
+                Ok(()) => intent.mark_applied(offset + 1),
+                Err(e) => failures.push((offset, e)),
+            }
+        }
+        for (offset, error) in failures {
+            match error {
+                Error::Precondition => {
+                    self.recover_mid_apply(intent, offset + 1, &rest[offset])
+                        .await?;
                 }
-                Err(Error::PartialCommit) if !intent.any_applied() => {
-                    // Merge attempt budget exhausted with nothing applied yet:
-                    // roll back and signal a retriable conflict instead.
-                    rollback(self.store.as_ref(), intent).await;
-                    return Err(Error::Conflict);
-                }
-                Err(e) => return Err(e),
+                e => return Err(e),
             }
         }
         Ok(())
@@ -228,6 +264,13 @@ impl CasExecutor {
 struct PreparedReads {
     etags: HashMap<String, Etag>,
     absent: HashSet<String>,
+}
+
+/// What Prepare found at a read's key, once it matched the state the read
+/// recorded. A present key carries whatever `ETag` the backend surfaced.
+enum Observed {
+    Present(Option<Etag>),
+    Absent,
 }
 
 /// Promote same-key read-modify-write mutations to conditional writes and order
