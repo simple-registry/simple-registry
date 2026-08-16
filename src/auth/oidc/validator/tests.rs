@@ -1,11 +1,12 @@
-use std::{collections::HashMap, net::TcpListener, time::Duration};
+use std::{collections::HashMap, fs, net::TcpListener, time::Duration};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header, decode_header, encode};
 use reqwest::Client;
 use serde_json::json;
+use tempfile::tempdir;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{header, method, path},
 };
 
 use crate::{
@@ -13,8 +14,9 @@ use crate::{
     auth::oidc::{
         Config, Jwk,
         validator::{
-            Jwks, OpenIdConfiguration, fetch_jwks, fetch_oidc_configuration, jwks_cache_key,
-            oidc_configuration_cache_key, validate_oidc_token, verify_jwt_with_header,
+            Jwks, OpenIdConfiguration, fetch_jwks, fetch_oidc_configuration, issuer_bearer_token,
+            jwks_cache_key, oidc_configuration_cache_key, validate_oidc_token,
+            verify_jwt_with_header,
         },
     },
     cache,
@@ -30,6 +32,7 @@ pub fn build_test_provider_config(uri: &str) -> Config {
         server_ca_bundle: None,
         client_certificate_bundle: None,
         client_private_key: None,
+        bearer_token_file: None,
         issuer: uri.to_string(),
         jwks_uri: Some(format!("{uri}/.well-known/jwks")),
         required_claims: Vec::new(),
@@ -798,6 +801,7 @@ fn test_provider(issuer: &str, audience: Option<&str>) -> Config {
         server_ca_bundle: None,
         client_certificate_bundle: None,
         client_private_key: None,
+        bearer_token_file: None,
         issuer: issuer.to_string(),
         jwks_uri: None,
         required_claims: Vec::new(),
@@ -1137,5 +1141,107 @@ fn verify_jwt_preserves_custom_claims() {
     assert_eq!(
         oidc.claims.get("job_workflow_ref").and_then(|v| v.as_str()),
         Some("owner/repo/.github/workflows/ci.yml@refs/heads/main")
+    );
+}
+
+/// The token is read at fetch time rather than baked into the HTTP client, so
+/// a Kubernetes projected token rotated in place stays usable.
+#[test]
+fn a_rotated_bearer_token_is_picked_up_on_the_next_fetch() {
+    let material = tempdir().unwrap();
+    let token_path = material.path().join("token");
+    fs::write(&token_path, "first-token\n").unwrap();
+
+    let provider = Config {
+        bearer_token_file: Some(token_path.clone()),
+        ..build_test_provider_config("https://kubernetes.default.svc")
+    };
+    let jwks_url = "https://kubernetes.default.svc/openid/v1/jwks";
+
+    assert_eq!(
+        issuer_bearer_token(&provider, jwks_url).unwrap(),
+        Some("first-token".to_string())
+    );
+
+    fs::write(&token_path, "second-token\n").unwrap();
+    assert_eq!(
+        issuer_bearer_token(&provider, jwks_url).unwrap(),
+        Some("second-token".to_string())
+    );
+}
+
+/// `jwks_uri` comes out of the discovery document, so an issuer naming a host
+/// of its own choosing must not be handed the token.
+#[test]
+fn a_bearer_token_never_leaves_the_issuer_origin() {
+    let material = tempdir().unwrap();
+    let token_path = material.path().join("token");
+    fs::write(&token_path, "service-account-token").unwrap();
+
+    let provider = Config {
+        bearer_token_file: Some(token_path),
+        ..build_test_provider_config("https://kubernetes.default.svc")
+    };
+
+    for url in [
+        "https://keys.example.com/openid/v1/jwks",
+        "https://kubernetes.default.svc:8443/openid/v1/jwks",
+        "http://kubernetes.default.svc/openid/v1/jwks",
+    ] {
+        assert_eq!(
+            issuer_bearer_token(&provider, url).unwrap(),
+            None,
+            "{url} is not the issuer's origin"
+        );
+    }
+}
+
+#[test]
+fn an_unreadable_bearer_token_file_fails_the_fetch() {
+    let provider = Config {
+        bearer_token_file: Some("/nonexistent/token".into()),
+        ..build_test_provider_config("https://kubernetes.default.svc")
+    };
+
+    let error = issuer_bearer_token(&provider, "https://kubernetes.default.svc/jwks").unwrap_err();
+    assert!(
+        matches!(&error, Error::ProviderUnavailable(msg) if msg.contains("/nonexistent/token")),
+        "got: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_bearer_token_reaches_an_issuer_that_requires_it() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/jwks"))
+        .and(header("Authorization", "Bearer service-account-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(static_jwks_response()))
+        .mount(&mock_server)
+        .await;
+
+    let material = tempdir().unwrap();
+    let token_path = material.path().join("token");
+    fs::write(&token_path, "service-account-token").unwrap();
+
+    let anonymous = build_test_provider_config(&mock_server.uri());
+    let authenticated = Config {
+        bearer_token_file: Some(token_path),
+        ..anonymous.clone()
+    };
+
+    let client = Client::new();
+    let cache = cache::Config::Memory.to_backend().unwrap();
+
+    assert!(
+        fetch_jwks(&anonymous, &client, cache.as_ref(), true)
+            .await
+            .is_err(),
+        "the issuer serves its JWKS to authenticated callers only"
+    );
+    assert!(
+        fetch_jwks(&authenticated, &client, cache.as_ref(), true)
+            .await
+            .is_ok()
     );
 }
