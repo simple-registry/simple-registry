@@ -193,7 +193,14 @@ where
     T: DeserializeOwned,
 {
     let fetch = async {
-        let mut request = client.get(url).header(ACCEPT, "application/json");
+        // The body is parsed as JSON whatever the issuer labels it, so anything
+        // is acceptable; the listed types only state a preference to an issuer
+        // that negotiates. A kube-apiserver serves its JWKS as
+        // `application/jwk-set+json`.
+        let mut request = client.get(url).header(
+            ACCEPT,
+            "application/jwk-set+json, application/json;q=0.9, */*;q=0.8",
+        );
         if let Some(token) = issuer_bearer_token(provider, url)? {
             request = request.bearer_auth(token);
         }
