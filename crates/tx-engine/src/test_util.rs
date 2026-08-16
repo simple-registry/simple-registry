@@ -17,7 +17,9 @@ use angos_storage::{ConditionalStore, ObjectStore};
 
 use crate::{
     executor::{cas::CasExecutor, locked::LockedExecutor},
-    intent::{IntentRecord, MutationProgress, MutationRecord, PlannedMutation, body_ref_key},
+    intent::{
+        IntentRecord, MutationBody, MutationProgress, MutationRecord, PlannedMutation, body_ref_key,
+    },
     lock::{primitive::Lock, storage::memory::MemoryLockStorage},
     recovery::RecoveryLoop,
 };
@@ -48,14 +50,19 @@ pub fn cas_executor(store: Arc<dyn ConditionalStore>) -> Arc<CasExecutor> {
 
 /// Stage a mutation body at its `.tx-bodies/{tx_id}/{index}` key.
 ///
-/// Returns the staging key, ready to use as the mutation's `body_ref`.
+/// Returns the staged reference, ready to use as the mutation's `body`.
 ///
 /// # Panics
 /// When the staging write fails.
-pub async fn stage_body(store: &dyn ObjectStore, tx_id: Uuid, index: usize, body: Bytes) -> String {
+pub async fn stage_body(
+    store: &dyn ObjectStore,
+    tx_id: Uuid,
+    index: usize,
+    body: Bytes,
+) -> MutationBody {
     let body_ref = body_ref_key(tx_id, index);
     store.put(&body_ref, body).await.expect("stage body");
-    body_ref
+    MutationBody::Staged(body_ref)
 }
 
 /// Build an [`IntentRecord`] the recovery loop already treats as stale:

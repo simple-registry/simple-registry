@@ -221,12 +221,12 @@ async fn recovery_loop_cleans_stale_intent() {
 
     // Manually inject a stale intent whose only mutation is still Pending.
     let tx_id = Uuid::new_v4();
-    let body_ref = test_util::stage_body(&*store, tx_id, 0, Bytes::from_static(b"body")).await;
+    let body = test_util::stage_body(&*store, tx_id, 0, Bytes::from_static(b"body")).await;
     let intent = test_util::stale_intent(
         tx_id,
         vec![MutationRecord::Put {
             key: "recovery/key".to_owned(),
-            body_ref,
+            body,
             expected: None,
         }],
         vec![MutationProgress::Pending],

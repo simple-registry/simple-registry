@@ -257,8 +257,7 @@ async fn recovery_abandons_unreconcilable_committed_intent_past_grace() {
     // etag-pinned Put that can never match: the live object carries a different
     // etag and a different body than the staged one.
     let tx_id = Uuid::new_v4();
-    let body_ref =
-        test_util::stage_body(store.as_ref(), tx_id, 1, Bytes::from_static(b"staged")).await;
+    let body = test_util::stage_body(store.as_ref(), tx_id, 1, Bytes::from_static(b"staged")).await;
     let intent = test_util::stale_intent(
         tx_id,
         vec![
@@ -269,7 +268,7 @@ async fn recovery_abandons_unreconcilable_committed_intent_past_grace() {
             },
             MutationRecord::Put {
                 key: "k".to_string(),
-                body_ref,
+                body,
                 expected: Some(Etag::new("\"stale\"")),
             },
         ],

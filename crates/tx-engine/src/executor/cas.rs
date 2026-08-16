@@ -327,14 +327,14 @@ fn apply_read_preconditions(records: &mut [MutationRecord], reads: &PreparedRead
         }
         if let MutationRecord::Put {
             key,
-            body_ref,
+            body,
             expected: None,
         } = record
             && matches!(reads.observed.get(key.as_str()), Some(Observed::Absent))
         {
             *record = MutationRecord::PutIfAbsent {
                 key: key.clone(),
-                body_ref: body_ref.clone(),
+                body: body.clone(),
             };
         }
     }
@@ -379,10 +379,10 @@ pub async fn apply_cas(
     match mutation {
         MutationRecord::Put {
             key,
-            body_ref,
+            body,
             expected,
         } => {
-            let Some(body_bytes) = fetch_staged_body(store, body_ref, mode).await? else {
+            let Some(body_bytes) = common::resolve_body(store, body, mode).await? else {
                 return Ok(());
             };
             let Some(etag) = expected else {
@@ -404,8 +404,8 @@ pub async fn apply_cas(
                 Err(e) => Err(Error::Storage(e)),
             }
         }
-        MutationRecord::PutIfAbsent { key, body_ref } => {
-            let Some(body_bytes) = fetch_staged_body(store, body_ref, mode).await? else {
+        MutationRecord::PutIfAbsent { key, body } => {
+            let Some(body_bytes) = common::resolve_body(store, body, mode).await? else {
                 return Ok(());
             };
             match store.put_if_absent(key, body_bytes).await {
@@ -528,30 +528,6 @@ async fn apply_merge_set_cas(
     Err(Error::PartialCommit)
 }
 
-/// Fetch the staged body for a `Put`/`PutIfAbsent`.
-///
-/// Returns `Ok(Some(bytes))` with the staged body, or `Ok(None)` when the body
-/// is gone and the mutation should be skipped (only in [`ApplyMode::Reconcile`],
-/// where a vanished staged body means the canonical write already landed and the
-/// prefix was reaped). In [`ApplyMode::Abort`] a missing body propagates as a
-/// storage error.
-///
-/// # Errors
-///
-/// Returns `Err(Error::Storage(...))` on a hard storage error (and, in
-/// `Abort` mode, on a `NotFound` for the staged body).
-async fn fetch_staged_body(
-    store: &dyn ConditionalStore,
-    body_ref: &str,
-    mode: ApplyMode,
-) -> Result<Option<Bytes>, Error> {
-    match store.get(body_ref).await {
-        Ok(body) => Ok(Some(Bytes::from(body))),
-        Err(StorageError::NotFound) if mode == ApplyMode::Reconcile => Ok(None),
-        Err(e) => Err(Error::Storage(e)),
-    }
-}
-
 /// Return `true` when the live object at `key` has the same SHA-256 hash as
 /// `expected_body`. `NotFound` counts as no match (nothing landed).
 ///
@@ -636,12 +612,12 @@ mod tests {
     };
 
     use super::*;
-    use crate::transaction::Mutation;
+    use crate::{intent::MutationBody, transaction::Mutation};
 
     fn put(key: &str) -> MutationRecord {
         MutationRecord::Put {
             key: key.to_string(),
-            body_ref: format!("body/{key}"),
+            body: MutationBody::Staged(format!("body/{key}")),
             expected: None,
         }
     }
@@ -665,8 +641,8 @@ mod tests {
         assert!(
             matches!(
                 &records[0],
-                MutationRecord::PutIfAbsent { key, body_ref }
-                    if key == "tag" && body_ref == "body/tag"
+                MutationRecord::PutIfAbsent { key, body }
+                    if key == "tag" && *body == MutationBody::Staged("body/tag".to_string())
             ),
             "an absent-read same-key Put must become PutIfAbsent, got {:?}",
             records[0]

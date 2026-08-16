@@ -18,8 +18,8 @@ use crate::{
     error::Error,
     executor::STORE_CONCURRENCY,
     intent::{
-        INTENT_BODIES_PREFIX, IntentRecord, MutationProgress, MutationRecord, PlannedMutation,
-        body_ref_key,
+        INLINE_BODY_MAX_BYTES, INTENT_BODIES_PREFIX, IntentRecord, MutationBody, MutationProgress,
+        MutationRecord, PlannedMutation, body_ref_key,
     },
     transaction::{Mutation, Read, Transaction},
 };
@@ -68,6 +68,31 @@ pub async fn stamp_applied(store: &dyn ObjectStore, intent: &mut IntentRecord, i
     }
 }
 
+/// Carry `body` in the record when it is small enough, otherwise stage it at
+/// `.tx-bodies/<tx_id>/<idx>` and record where it went.
+///
+/// # Errors
+///
+/// Returns [`Error::Storage`] if the staging PUT fails.
+async fn place_body(
+    store: &dyn ObjectStore,
+    body: &Bytes,
+    tx_id: Uuid,
+    idx: usize,
+) -> Result<MutationBody, Error> {
+    if body.len() <= INLINE_BODY_MAX_BYTES {
+        return Ok(MutationBody::Inline {
+            bytes: body.clone(),
+        });
+    }
+    let body_ref = body_ref_key(tx_id, idx);
+    store
+        .put(&body_ref, body.clone())
+        .await
+        .map_err(Error::Storage)?;
+    Ok(MutationBody::Staged(body_ref))
+}
+
 /// Stage one mutation's body, if it carries one, and return its
 /// [`MutationRecord`].
 ///
@@ -85,29 +110,15 @@ async fn stage_mutation(
             key,
             body,
             expected,
-        } => {
-            let body_ref = body_ref_key(tx_id, idx);
-            store
-                .put(&body_ref, body.clone())
-                .await
-                .map_err(Error::Storage)?;
-            Ok(MutationRecord::Put {
-                key: key.clone(),
-                body_ref,
-                expected: expected.clone(),
-            })
-        }
-        Mutation::PutIfAbsent { key, body } => {
-            let body_ref = body_ref_key(tx_id, idx);
-            store
-                .put(&body_ref, body.clone())
-                .await
-                .map_err(Error::Storage)?;
-            Ok(MutationRecord::PutIfAbsent {
-                key: key.clone(),
-                body_ref,
-            })
-        }
+        } => Ok(MutationRecord::Put {
+            key: key.clone(),
+            body: place_body(store, body, tx_id, idx).await?,
+            expected: expected.clone(),
+        }),
+        Mutation::PutIfAbsent { key, body } => Ok(MutationRecord::PutIfAbsent {
+            key: key.clone(),
+            body: place_body(store, body, tx_id, idx).await?,
+        }),
         Mutation::Delete { key, expected } => Ok(MutationRecord::Delete {
             key: key.clone(),
             expected: expected.clone(),
@@ -286,6 +297,33 @@ pub enum ApplyMode {
     Reconcile,
 }
 
+/// Resolve a mutation's bytes: an inline body is already here, a staged one is
+/// fetched.
+///
+/// Returns `Ok(None)` when a staged body is gone and the mutation should be
+/// skipped, which only happens in [`ApplyMode::Reconcile`], where a vanished
+/// staging object means the canonical write already landed and the prefix was
+/// reaped. In [`ApplyMode::Abort`] a missing body propagates as a storage error.
+///
+/// # Errors
+///
+/// Returns [`Error::Storage`] on a hard storage error, and in `Abort` mode on a
+/// `NotFound` for a staged body.
+pub async fn resolve_body(
+    store: &dyn ObjectStore,
+    body: &MutationBody,
+    mode: ApplyMode,
+) -> Result<Option<Bytes>, Error> {
+    match body {
+        MutationBody::Inline { bytes } => Ok(Some(bytes.clone())),
+        MutationBody::Staged(key) => match store.get(key).await {
+            Ok(bytes) => Ok(Some(Bytes::from(bytes))),
+            Err(StorageError::NotFound) if mode == ApplyMode::Reconcile => Ok(None),
+            Err(e) => Err(Error::Storage(e)),
+        },
+    }
+}
+
 /// Apply one mutation against a plain [`ObjectStore`] (the Locked-executor world,
 /// which has no conditional store). Conditional `Put`/`Delete` are honored via a
 /// HEAD/ETag compare under the caller's lock. The conditional-store equivalent is
@@ -305,7 +343,7 @@ pub async fn apply_object_store(
     match mutation {
         MutationRecord::Put {
             key,
-            body_ref,
+            body,
             expected,
         } => {
             if mode == ApplyMode::Abort
@@ -313,31 +351,24 @@ pub async fn apply_object_store(
             {
                 check_expected_match(store, key, etag).await?;
             }
-            match store.get(body_ref).await {
-                Ok(body) => store
-                    .put(key, Bytes::from(body))
-                    .await
-                    .map_err(Error::Storage),
-                // Reconcile: a reaped staging body means the canonical write already landed.
-                Err(StorageError::NotFound) if mode == ApplyMode::Reconcile => Ok(()),
-                Err(e) => Err(Error::Storage(e)),
-            }
+            let Some(bytes) = resolve_body(store, body, mode).await? else {
+                return Ok(());
+            };
+            store.put(key, bytes).await.map_err(Error::Storage)
         }
-        MutationRecord::PutIfAbsent { key, body_ref } => match store.head(key).await {
+        MutationRecord::PutIfAbsent { key, body } => match store.head(key).await {
             // Abort: the key exists, so the precondition fails. Reconcile: that is
             // the expected idempotent outcome of a replayed insert.
             Ok(_) => match mode {
                 ApplyMode::Abort => Err(Error::Precondition),
                 ApplyMode::Reconcile => Ok(()),
             },
-            Err(StorageError::NotFound) => match store.get(body_ref).await {
-                Ok(body) => store
-                    .put(key, Bytes::from(body))
-                    .await
-                    .map_err(Error::Storage),
-                Err(StorageError::NotFound) if mode == ApplyMode::Reconcile => Ok(()),
-                Err(e) => Err(Error::Storage(e)),
-            },
+            Err(StorageError::NotFound) => {
+                let Some(bytes) = resolve_body(store, body, mode).await? else {
+                    return Ok(());
+                };
+                store.put(key, bytes).await.map_err(Error::Storage)
+            }
             Err(e) => Err(Error::Storage(e)),
         },
         MutationRecord::Delete { key, expected } => {
@@ -439,11 +470,15 @@ enum CleanupMode {
 
 /// Delete a transaction's staged body objects, then its intent log entry.
 ///
-/// `mode` selects the warn labels and the prefix-delete-failure behaviour:
-/// see [`CleanupMode`].
+/// A transaction whose bodies all rode inline staged nothing, so it skips
+/// straight to the log entry rather than deleting a prefix that was never
+/// written. `mode` selects the warn labels and the prefix-delete-failure
+/// behaviour: see [`CleanupMode`].
 async fn cleanup(store: &dyn ObjectStore, intent: &IntentRecord, mode: CleanupMode) {
     let prefix = intent.bodies_prefix();
-    if let Err(e) = store.delete_prefix(&prefix).await {
+    if intent.has_staged_bodies()
+        && let Err(e) = store.delete_prefix(&prefix).await
+    {
         match mode {
             CleanupMode::Reap => {
                 warn!(
@@ -565,10 +600,46 @@ mod tests {
 
     use crate::{
         executor::TransactionExecutor,
-        intent::INTENT_LOG_PREFIX,
-        test_util::{locked_executor, memory_lock},
+        intent::{INLINE_BODY_MAX_BYTES, INTENT_BODIES_PREFIX, INTENT_LOG_PREFIX},
+        test_util::{list_count, locked_executor, memory_lock},
         transaction::{Mutation, Transaction},
     };
+
+    /// The cap decides where a body travels, and either route must land the
+    /// same bytes and leave no staging behind.
+    #[tokio::test]
+    async fn the_cap_decides_whether_a_body_is_staged() {
+        for (len, staging_writes) in [(8, 0), (INLINE_BODY_MAX_BYTES + 1, 1)] {
+            let store = hooked(PrefixWrites::under(INTENT_BODIES_PREFIX));
+            let executor = locked_executor(store.clone(), memory_lock());
+            let body = Bytes::from(vec![b'x'; len]);
+
+            executor
+                .execute(
+                    Transaction::builder()
+                        .mutation(Mutation::Put {
+                            key: "k".to_owned(),
+                            body: body.clone(),
+                            expected: None,
+                        })
+                        .build(),
+                )
+                .await
+                .expect("commit");
+
+            assert_eq!(
+                store.hook().count.load(Ordering::Relaxed),
+                staging_writes,
+                "a {len}-byte body must take {staging_writes} staging write(s)"
+            );
+            assert_eq!(store.get("k").await.expect("k"), &body[..]);
+            assert_eq!(
+                list_count(store.as_ref(), ".tx-bodies/").await,
+                0,
+                "a {len}-byte body must leave no staging behind"
+            );
+        }
+    }
 
     /// An unconditional `Put` of `key`, the shape every test here builds on.
     fn put(key: &str) -> Mutation {
@@ -587,17 +658,26 @@ mod tests {
         ))
     }
 
-    /// Counts writes to the intent log, leaving every call to proceed.
-    #[derive(Default)]
-    struct IntentWrites {
+    /// Counts writes under one prefix, leaving every call to proceed.
+    struct PrefixWrites {
+        prefix: &'static str,
         count: AtomicUsize,
     }
 
+    impl PrefixWrites {
+        fn under(prefix: &'static str) -> Self {
+            Self {
+                prefix,
+                count: AtomicUsize::new(0),
+            }
+        }
+    }
+
     #[async_trait]
-    impl StoreHook for IntentWrites {
+    impl StoreHook for PrefixWrites {
         async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
             if let StoreOp::Put { key, .. } = op
-                && key.starts_with(INTENT_LOG_PREFIX)
+                && key.starts_with(self.prefix)
             {
                 self.count.fetch_add(1, Ordering::Relaxed);
             }
@@ -612,7 +692,7 @@ mod tests {
     #[tokio::test]
     async fn a_transaction_writes_its_intent_twice_whatever_its_size() {
         for mutations in [1usize, 12] {
-            let store = hooked(IntentWrites::default());
+            let store = hooked(PrefixWrites::under(INTENT_LOG_PREFIX));
             let executor = locked_executor(store.clone(), memory_lock());
 
             let mut builder = Transaction::builder();
@@ -717,7 +797,7 @@ mod tests {
     /// point the same failure is a non-retriable partial commit.
     #[tokio::test]
     async fn a_precondition_lost_on_the_commit_point_stays_retriable() {
-        let store = hooked(IntentWrites::default());
+        let store = hooked(PrefixWrites::under(INTENT_LOG_PREFIX));
         store
             .put("taken", Bytes::from_static(b"held"))
             .await

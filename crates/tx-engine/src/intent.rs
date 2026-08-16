@@ -5,16 +5,18 @@
 //! the transaction WILL be observed (either by the owning worker finishing
 //! Apply/Reap, or by the recovery loop replaying it).
 //!
-//! Body bytes for `Put` and `PutIfAbsent` mutations are staged at
-//! `.tx-bodies/<tx-id>/<idx>` *before* the intent PUT, so the intent JSON
-//! stays small (KB-scale). The `body_ref` field records where to find the
-//! bytes during Apply and recovery.
+//! A `Put` or `PutIfAbsent` body up to [`INLINE_BODY_MAX_BYTES`] travels in the
+//! record itself, which spares the staging write and the read that would fetch
+//! it back. A larger one is staged at `.tx-bodies/<tx-id>/<idx>` *before* the
+//! intent PUT, so the intent JSON stays small; its `body` field then records
+//! where to find the bytes during Apply and recovery.
 
 /// Default intent TTL in seconds used by both executors when no explicit TTL
 /// is provided. Named here so the value is defined once and referenced by both
 /// `CasExecutor` and `LockedExecutor` builders.
 pub const DEFAULT_INTENT_TTL_SECS: u64 = 300;
 
+use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,22 +27,77 @@ use angos_storage::Etag;
 
 use crate::transaction::Read;
 
+/// Largest body carried inside an intent record rather than staged under
+/// `.tx-bodies/`.
+///
+/// Either route moves the bytes twice (inline, because the record is written to
+/// log the transaction and again to stamp its commit point; staged, because the
+/// body is written then read back), so the cap is not about bandwidth. It bounds
+/// the record instead: the intent PUT is a serialisation point that Apply waits
+/// on, while staging writes run concurrently, and every sweep of the recovery
+/// loop and the body janitor re-reads each record. At this cap a full
+/// transaction's bodies stay near a megabyte encoded, which is under what one
+/// round trip is worth, and a link body runs about a kilobyte.
+pub const INLINE_BODY_MAX_BYTES: usize = 64 * 1024;
+
+/// Where a `Put`/`PutIfAbsent` mutation's bytes live.
+///
+/// The staged spelling is a bare string, the one the intent log has always
+/// used, so a record any earlier angos wrote still replays.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum MutationBody {
+    /// Bytes staged at `.tx-bodies/<tx-id>/<idx>`.
+    Staged(String),
+    /// Bytes carried in the record, base64 so arbitrary content survives JSON.
+    Inline {
+        #[serde(rename = "inline", with = "inline_body")]
+        bytes: Bytes,
+    },
+}
+
+/// Base64 codec for an inline body, so a body that is not valid UTF-8 still
+/// round-trips through the JSON record.
+mod inline_body {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use bytes::Bytes;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S: Serializer>(bytes: &Bytes, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Bytes, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        STANDARD
+            .decode(&encoded)
+            .map(Bytes::from)
+            .map_err(D::Error::custom)
+    }
+}
+
 /// The operation variant recorded in an intent record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op")]
 pub enum MutationRecord {
-    /// Write `body_ref` to `key`.
+    /// Write `body` to `key`.
     ///
     /// `expected` is honored by both executors: the CAS executor via
     /// `put_if_match`, and the Locked executor via a HEAD + `ETag` comparison
     /// under the lock.
     Put {
         key: String,
-        body_ref: String,
+        /// The wire name is the one the intent log has always used.
+        #[serde(rename = "body_ref")]
+        body: MutationBody,
         expected: Option<Etag>,
     },
-    /// Write `body_ref` to `key` only if the key is absent.
-    PutIfAbsent { key: String, body_ref: String },
+    /// Write `body` to `key` only if the key is absent.
+    PutIfAbsent {
+        key: String,
+        #[serde(rename = "body_ref")]
+        body: MutationBody,
+    },
     /// Delete `key`.
     ///
     /// `expected` is honored by both executors: the CAS executor via
@@ -54,7 +111,7 @@ pub enum MutationRecord {
     Move { src: String, dst: String },
     /// Idempotently merge `add`/`remove` into the JSON-array set at `key`.
     ///
-    /// Carries no `body_ref` (the small deltas live inline) and no etag: each
+    /// Carries no body (the small deltas live inline) and no etag: each
     /// apply and replay re-reads live state and recomputes, so it always
     /// converges instead of leaving a permanent partial commit.
     MergeSet {
@@ -224,6 +281,24 @@ impl IntentRecord {
         body_ref_key(self.id, idx)
     }
 
+    /// Whether any mutation staged its body under `.tx-bodies/`. A transaction
+    /// whose bodies all rode inline has no staging prefix to reclaim.
+    #[must_use]
+    pub fn has_staged_bodies(&self) -> bool {
+        self.mutations.iter().any(|planned| {
+            matches!(
+                &planned.record,
+                MutationRecord::Put {
+                    body: MutationBody::Staged(_),
+                    ..
+                } | MutationRecord::PutIfAbsent {
+                    body: MutationBody::Staged(_),
+                    ..
+                }
+            )
+        })
+    }
+
     /// Returns `true` if the owner's heartbeat is considered stale.
     #[must_use]
     pub fn is_stale(&self, now: DateTime<Utc>) -> bool {
@@ -265,10 +340,13 @@ impl IntentRecord {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use chrono::Utc;
     use uuid::Uuid;
 
-    use crate::intent::{IntentRecord, MutationProgress, MutationRecord, PlannedMutation};
+    use crate::intent::{
+        IntentRecord, MutationBody, MutationProgress, MutationRecord, PlannedMutation,
+    };
     use crate::transaction::{Expectation, Fingerprint, Read};
 
     fn sample_intent(progress: Vec<MutationProgress>) -> IntentRecord {
@@ -278,7 +356,7 @@ mod tests {
             .map(|(idx, progress)| PlannedMutation {
                 record: MutationRecord::Put {
                     key: format!("k{idx}"),
-                    body_ref: format!("b{idx}"),
+                    body: MutationBody::Staged(format!("b{idx}")),
                     expected: None,
                 },
                 progress,
@@ -347,6 +425,45 @@ mod tests {
             assert!(
                 serde_json::from_str::<Read>(stored).is_err(),
                 "a malformed fingerprint must not parse: {stored}"
+            );
+        }
+    }
+
+    /// A staged body keeps the bare-string spelling every earlier angos wrote,
+    /// so a new record is still the one an old one would recognise, and an
+    /// inline body survives bytes that are not valid UTF-8.
+    #[test]
+    fn a_body_keeps_its_spelling_whichever_route_it_took() {
+        let staged = MutationRecord::Put {
+            key: "k".to_string(),
+            body: MutationBody::Staged(".tx-bodies/x/0".to_string()),
+            expected: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&staged).unwrap(),
+            r#"{"op":"Put","key":"k","body_ref":".tx-bodies/x/0","expected":null}"#,
+            "a staged body must stay a bare string under the name the log has always used"
+        );
+
+        let inline = MutationRecord::Put {
+            key: "k".to_string(),
+            body: MutationBody::Inline {
+                bytes: Bytes::from_static(&[0xff, 0x00, 0xfe]),
+            },
+            expected: None,
+        };
+        let json = serde_json::to_string(&inline).unwrap();
+        assert!(
+            json.contains(r#""body_ref":{"inline":"/wD+"}"#),
+            "an inline body must be base64 under the same name: {json}"
+        );
+
+        for record in [staged, inline] {
+            assert_eq!(
+                serde_json::from_str::<MutationRecord>(&serde_json::to_string(&record).unwrap())
+                    .unwrap(),
+                record,
+                "a record must read back unchanged"
             );
         }
     }

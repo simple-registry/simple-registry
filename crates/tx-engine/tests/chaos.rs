@@ -107,16 +107,16 @@ async fn backdate_intents(inner: &MemoryObjectStore) {
 
 // Crash tests
 
-/// Crash before the intent is written (`crash_on` = 1 = the intent PUT).
+/// Crash on the intent write itself, the transaction's first write now that a
+/// small body rides inside the record instead of being staged first.
 ///
-/// The body object(s) are staged (write 0) but the intent never lands.
-/// After recovery: both the body and intent are orphans that the janitor would
-/// eventually clean. The canonical key must NOT exist.
+/// The intent never lands, so there is nothing to recover and the canonical key
+/// must NOT exist.
 #[tokio::test(flavor = "multi_thread")]
 async fn crash_before_intent() {
     let inner = Arc::new(MemoryObjectStore::new());
-    // Write 0 = body staging; write 1 = intent PUT (which we crash on).
-    let crashing = crashing_store(inner.clone(), 1);
+    // Write 0 = intent PUT (which we crash on).
+    let crashing = crashing_store(inner.clone(), 0);
 
     let lock = test_util::memory_lock();
     let executor = test_util::locked_executor(crashing.clone(), lock);
@@ -157,11 +157,11 @@ async fn crash_before_intent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn crash_after_intent_before_apply() {
     let inner = Arc::new(MemoryObjectStore::new());
-    // Write 0 = body staging; write 1 = intent PUT; write 2 = first apply.
+    // Write 0 = intent PUT; write 1 = first apply.
     // The crash is permanent: a process that dies mid-Apply cannot run the
     // rollback writes either, which is what leaves the intent behind for
     // recovery to find.
-    let crashing = crashing_store_permanent(inner.clone(), 2);
+    let crashing = crashing_store_permanent(inner.clone(), 1);
 
     let lock = test_util::memory_lock();
     let executor = test_util::locked_executor(crashing.clone(), lock);
@@ -174,7 +174,7 @@ async fn crash_after_intent_before_apply() {
         })
         .build();
 
-    // The intent lands (write 1) but Apply crashes (write 2).
+    // The intent lands (write 0) but Apply crashes (write 1).
     let result = executor.execute(tx).await;
     assert!(result.is_err(), "execute must fail on injected crash");
     assert!(
@@ -202,11 +202,11 @@ async fn crash_after_intent_before_apply() {
 #[tokio::test(flavor = "multi_thread")]
 async fn crash_during_reap() {
     let inner = Arc::new(MemoryObjectStore::new());
-    // We want the transaction to complete Apply but crash on the first Reap write
-    // (delete_prefix for bodies). Count: body_staging=0, intent=1, apply=2,
-    // stamp=3, reap bodies delete_prefix=4. Permanent, so the reap cannot
-    // resume on its own and recovery is what finishes it.
-    let crashing = crashing_store_permanent(inner.clone(), 4);
+    // We want the transaction to complete Apply but crash on the Reap. Count:
+    // intent=0, apply=1, stamp=2, reap intent delete=3. The body rode inline,
+    // so there is no staging prefix to delete first. Permanent, so the reap
+    // cannot resume on its own and recovery is what finishes it.
+    let crashing = crashing_store_permanent(inner.clone(), 3);
 
     let lock = test_util::memory_lock();
     let executor = test_util::locked_executor(crashing.clone(), lock);
@@ -253,15 +253,14 @@ async fn recovery_replays_fully_stamped_intent() {
     // Stage the body for the replayed mutation. Recovery's replay path re-reads
     // the body and PUTs it unconditionally; the canonical bytes happen to be
     // the same as the staged bytes here, so replay is a no-op observationally.
-    let body_ref =
-        test_util::stage_body(&*inner, tx_id, 0, Bytes::from_static(b"already-there")).await;
+    let body = test_util::stage_body(&*inner, tx_id, 0, Bytes::from_static(b"already-there")).await;
 
     // Write a stale intent with the only mutation marked Applied.
     let intent = test_util::stale_intent(
         tx_id,
         vec![MutationRecord::Put {
             key: "stamped/key".to_owned(),
-            body_ref,
+            body,
             expected: None,
         }],
         vec![MutationProgress::Applied],
@@ -304,18 +303,14 @@ async fn manifest_push_crash_mid_apply_recovery_converges() {
     let shard_key = "blob_index/sha256:abcdef/refs/ns.json";
 
     // Write sequence for the Locked executor with 3 mutations
-    // (PutIfAbsent + Put + Put), each with a body:
-    //   write 0: body staging for mutation 0
-    //   write 1: body staging for mutation 1
-    //   write 2: body staging for mutation 2
-    //   write 3: intent PUT  ← linearisation point
-    //   write 4: Apply mutation 0 (PutIfAbsent blob-data)
-    //   write 5: commit-point stamp (intent re-PUT marking mutation 0 Applied)
-    //   write 6: Apply mutation 1 (Put link-key)
-    //   write 7: Apply mutation 2 (Put shard-key)
-    //   write 8: Reap bodies delete_prefix
-    //   write 9: Reap intent delete
-    for crash_on in 0usize..=9 {
+    // (PutIfAbsent + Put + Put), each body small enough to ride inline:
+    //   write 0: intent PUT  ← linearisation point
+    //   write 1: Apply mutation 0 (PutIfAbsent blob-data)
+    //   write 2: commit-point stamp (intent re-PUT marking mutation 0 Applied)
+    //   write 3: Apply mutation 1 (Put link-key)
+    //   write 4: Apply mutation 2 (Put shard-key)
+    //   write 5: Reap intent delete
+    for crash_on in 0usize..=5 {
         let inner = Arc::new(MemoryObjectStore::new());
         let crashing = crashing_store_permanent(inner.clone(), crash_on);
 
@@ -346,8 +341,8 @@ async fn manifest_push_crash_mid_apply_recovery_converges() {
 
         test_util::sweep_once(inner.clone(), test_util::memory_lock()).await;
 
-        // Invariant 1: before the intent lands (writes 0-3), no canonical keys.
-        if crash_on <= 3 {
+        // Invariant 1: the intent never landed, so no canonical keys.
+        if crash_on == 0 {
             assert!(
                 inner.get(blob_data_key).await.is_err(),
                 "blob-data must not exist when transaction never committed (crash_on={crash_on})"
@@ -383,17 +378,15 @@ async fn partial_apply_error_preserves_intent_for_recovery() {
     let inner = Arc::new(MemoryObjectStore::new());
 
     // Two-mutation Put transaction. Write sequence for the Locked executor:
-    //   write 0: body staging for mutation 0
-    //   write 1: body staging for mutation 1
-    //   write 2: intent PUT
-    //   write 3: Apply mutation 0 (Put k0)
-    //   write 4: commit-point stamp (intent re-PUT marking mutation 0 Applied)
-    //   write 5: Apply mutation 1 (Put k1)  ← crash here (transient)
-    // Crashing on write 5 fails the second apply put after mutation 0 has
+    //   write 0: intent PUT
+    //   write 1: Apply mutation 0 (Put k0)
+    //   write 2: commit-point stamp (intent re-PUT marking mutation 0 Applied)
+    //   write 3: Apply mutation 1 (Put k1)  ← crash here (transient)
+    // Crashing on write 3 fails the second apply put after mutation 0 has
     // applied and stamped. Being non-permanent, the later reap writes would
     // succeed, which is exactly the scenario the buggy unconditional reap
     // mishandled.
-    let crashing = crashing_store(inner.clone(), 5);
+    let crashing = crashing_store(inner.clone(), 3);
 
     let lock = test_util::memory_lock();
     let executor = test_util::locked_executor(crashing.clone(), lock);
@@ -463,9 +456,10 @@ async fn read_only_intent(inner: &MemoryObjectStore) -> IntentRecord {
     serde_json::from_slice(&body).expect("intent must parse")
 }
 
-/// Three `Put` mutations, as both executors write them:
-///   0,1,2 = body stage; 3 = intent; 4 = apply0; 5 = commit-point stamp;
-///   6 = apply1; 7 = apply2; 8 = reap-prefix; 9 = reap-intent.
+/// Three `Put` mutations, as both executors write them. Every body rides inline,
+/// so there is no staging write and no staging prefix to reap:
+///   0 = intent; 1 = apply0; 2 = commit-point stamp; 3 = apply1; 4 = apply2;
+///   5 = reap-intent.
 fn three_puts(prefix: &str) -> Transaction {
     Transaction::builder()
         .mutation(Mutation::Put {
@@ -516,11 +510,11 @@ async fn assert_committed_at_the_commit_point(inner: &MemoryObjectStore) {
 /// marked committed, and recovery converges to every mutation from it.
 #[tokio::test(flavor = "multi_thread")]
 async fn commit_point_survives_a_crash_locked() {
-    // (a) Crash permanently from the Reap step (write 8) onward: all three
+    // (a) Crash permanently from the Reap step (write 5) onward: all three
     // mutations applied, and the intent remains for inspection.
     {
         let inner = Arc::new(MemoryObjectStore::new());
-        let crashing = crashing_store_permanent(inner.clone(), 8);
+        let crashing = crashing_store_permanent(inner.clone(), 5);
         let lock = test_util::memory_lock();
         let executor = test_util::locked_executor(crashing.clone(), lock);
 
@@ -532,12 +526,12 @@ async fn commit_point_survives_a_crash_locked() {
         test_util::assert_no_orphans(&*inner).await;
     }
 
-    // (b) Crash permanently from apply 1 onward (write 6): only mutation 0
+    // (b) Crash permanently from apply 1 onward (write 3): only mutation 0
     // landed, so recovery must replay 1 and 2 rather than roll the
     // transaction back.
     {
         let inner = Arc::new(MemoryObjectStore::new());
-        let crashing = crashing_store_permanent(inner.clone(), 6);
+        let crashing = crashing_store_permanent(inner.clone(), 3);
         let lock = test_util::memory_lock();
         let executor = test_util::locked_executor(crashing.clone(), lock);
 
@@ -568,7 +562,7 @@ async fn commit_point_survives_a_crash_locked() {
 async fn commit_point_survives_a_crash_cas() {
     {
         let inner = Arc::new(MemoryObjectStore::new());
-        let crashing = crashing_store_permanent(inner.clone(), 8);
+        let crashing = crashing_store_permanent(inner.clone(), 5);
         let executor = test_util::cas_executor(crashing.clone());
 
         let _ = executor.execute(three_puts("cas")).await;
@@ -581,7 +575,7 @@ async fn commit_point_survives_a_crash_cas() {
 
     {
         let inner = Arc::new(MemoryObjectStore::new());
-        let crashing = crashing_store_permanent(inner.clone(), 6);
+        let crashing = crashing_store_permanent(inner.clone(), 3);
         let executor = test_util::cas_executor(crashing.clone());
 
         let _ = executor.execute(three_puts("cas")).await;

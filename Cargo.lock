@@ -156,6 +156,7 @@ dependencies = [
  "angos-storage",
  "angos-tx-engine",
  "async-trait",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "futures-util",

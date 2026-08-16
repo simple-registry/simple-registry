@@ -113,12 +113,12 @@ async fn concurrent_recovery_loops_apply_each_mutation_exactly_once() {
             // enters replay-forward.
             MutationRecord::PutIfAbsent {
                 key: "race/sibling".to_string(),
-                body_ref: sibling_ref,
+                body: sibling_ref,
             },
             // Pending mutation under test.
             MutationRecord::Put {
                 key: "race/dst".to_string(),
-                body_ref: dst_ref,
+                body: dst_ref,
                 expected: None,
             },
         ],
@@ -173,12 +173,12 @@ async fn already_applied_mutations_are_skipped() {
         vec![
             MutationRecord::Put {
                 key: "applied/k0".to_string(),
-                body_ref: k0_ref,
+                body: k0_ref,
                 expected: None,
             },
             MutationRecord::Put {
                 key: "applied/k1".to_string(),
-                body_ref: k1_ref,
+                body: k1_ref,
                 expected: None,
             },
         ],
@@ -241,11 +241,11 @@ async fn cas_recovery_treats_stale_etag_with_matching_body_as_applied() {
         vec![
             MutationRecord::PutIfAbsent {
                 key: "cas/sibling".to_string(),
-                body_ref: sibling_ref,
+                body: sibling_ref,
             },
             MutationRecord::Put {
                 key: "cas/dst".to_string(),
-                body_ref: dst_ref,
+                body: dst_ref,
                 expected: Some(stale_etag),
             },
         ],
@@ -296,11 +296,11 @@ async fn cas_recovery_stops_on_true_contention() {
         vec![
             MutationRecord::PutIfAbsent {
                 key: "cas/sibling".to_string(),
-                body_ref: sibling_ref,
+                body: sibling_ref,
             },
             MutationRecord::Put {
                 key: "cas/dst".to_string(),
-                body_ref: dst_ref,
+                body: dst_ref,
                 expected: Some(stale_etag),
             },
         ],
@@ -794,7 +794,7 @@ async fn recovery_skips_an_intent_reaped_between_the_read_and_the_takeover() {
             // Applied sibling, so the intent takes the replay-forward path.
             MutationRecord::PutIfAbsent {
                 key: "reaped/sibling".to_string(),
-                body_ref: sibling_ref,
+                body: sibling_ref,
             },
             MutationRecord::Delete {
                 key: "reaped/key".to_string(),
