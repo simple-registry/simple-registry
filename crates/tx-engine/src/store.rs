@@ -768,21 +768,23 @@ mod tests {
             .await
             .expect("session record");
 
-        // Primitive: backend completion lands the assembled object at the
-        // upload key. The caller (registry) then composes the promotion and
-        // record cleanup into a single engine transaction.
+        // Backend completion lands the assembled object at the upload key and
+        // the caller relocates it, both outside the engine: blob bytes are
+        // content-addressed, so the promotion is idempotent on its own. Only
+        // the mutable session record is transactional.
         store
             .object_store()
             .complete_upload("upload/u1")
             .await
             .expect("complete");
         store
+            .object_store()
+            .move_object("upload/u1", "blob-data/abc")
+            .await
+            .expect("promote");
+        store
             .execute(
                 Transaction::builder()
-                    .mutation(Mutation::Move {
-                        src: "upload/u1".to_string(),
-                        dst: "blob-data/abc".to_string(),
-                    })
                     .mutation(Mutation::Delete {
                         key: "upload-sessions/u1.json".to_string(),
                         expected: None,
@@ -790,7 +792,7 @@ mod tests {
                     .build(),
             )
             .await
-            .expect("promote");
+            .expect("clear the session record");
 
         // Assembled object promoted to the canonical key...
         assert!(store.object_store().get("blob-data/abc").await.is_ok());

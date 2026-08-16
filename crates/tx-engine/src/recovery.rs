@@ -128,7 +128,7 @@ fn intent_lock_set(intent: &IntentRecord) -> Vec<String> {
             intent
                 .mutations
                 .iter()
-                .flat_map(|planned| planned.record.all_keys().map(ToOwned::to_owned)),
+                .map(|planned| planned.record.key().to_owned()),
         ),
     )
 }

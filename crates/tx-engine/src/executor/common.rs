@@ -123,14 +123,6 @@ async fn stage_mutation(
             key: key.clone(),
             expected: expected.clone(),
         }),
-        Mutation::Copy { src, dst } => Ok(MutationRecord::Copy {
-            src: src.clone(),
-            dst: dst.clone(),
-        }),
-        Mutation::Move { src, dst } => Ok(MutationRecord::Move {
-            src: src.clone(),
-            dst: dst.clone(),
-        }),
         Mutation::MergeSet { key, add, remove } => Ok(MutationRecord::MergeSet {
             key: key.clone(),
             add: add.clone(),
@@ -192,30 +184,6 @@ pub fn build_intent(
         ttl_secs,
         reads: reads.to_vec(),
         mutations,
-    }
-}
-
-/// Apply a `Move` idempotently: copy `src` to `dst`, then delete `src`
-/// tolerating a missing source.
-///
-/// Shared by both appliers' reconcile paths ([`apply_object_store`] and
-/// [`super::cas::apply_cas`]) so the idempotent Move shape stays in lock-step.
-/// The `copy` still propagates errors; only a `NotFound` on the source delete is
-/// swallowed so re-application after a partial Move converges.
-///
-/// # Errors
-///
-/// Returns the underlying [`angos_storage::Error`] from `copy`, or from
-/// `delete` when it fails with anything other than `NotFound`.
-pub async fn move_idempotent(
-    store: &dyn ObjectStore,
-    src: &str,
-    dst: &str,
-) -> Result<(), StorageError> {
-    store.copy(src, dst).await?;
-    match store.delete(src).await {
-        Ok(()) | Err(StorageError::NotFound) => Ok(()),
-        Err(e) => Err(e),
     }
 }
 
@@ -328,7 +296,7 @@ pub async fn resolve_body(
 /// which has no conditional store). Conditional `Put`/`Delete` are honored via a
 /// HEAD/ETag compare under the caller's lock. The conditional-store equivalent is
 /// [`super::cas::apply_cas`]; keeping both as mode-parameterized appliers stops
-/// the `Move`/`PutIfAbsent`/precondition semantics from drifting.
+/// the `PutIfAbsent`/precondition semantics from drifting.
 ///
 /// # Errors
 ///
@@ -392,13 +360,6 @@ pub async fn apply_object_store(
                 Err(e) => Err(Error::Storage(e)),
             }
         }
-        MutationRecord::Copy { src, dst } => store.copy(src, dst).await.map_err(Error::Storage),
-        MutationRecord::Move { src, dst } => match mode {
-            ApplyMode::Abort => store.move_object(src, dst).await.map_err(Error::Storage),
-            ApplyMode::Reconcile => move_idempotent(store, src, dst)
-                .await
-                .map_err(Error::Storage),
-        },
         MutationRecord::MergeSet { key, add, remove } => {
             apply_merge_set_object(store, key, add, remove).await
         }
@@ -427,7 +388,7 @@ fn keys_are_distinct(records: &[MutationRecord]) -> bool {
     let mut seen = HashSet::new();
     records
         .iter()
-        .flat_map(MutationRecord::all_keys)
+        .map(MutationRecord::key)
         .all(|key| seen.insert(key))
 }
 

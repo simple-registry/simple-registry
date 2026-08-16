@@ -383,8 +383,7 @@ impl From<&IntentRecord> for CachedIntent {
         let touched_keys = intent
             .mutations
             .iter()
-            .flat_map(|planned| planned.record.all_keys())
-            .map(str::to_string)
+            .map(|planned| planned.record.key().to_string())
             .collect();
         Self {
             expires_at,

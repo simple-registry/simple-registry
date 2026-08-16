@@ -175,9 +175,8 @@ pub trait ObjectStore: Send + Sync {
     /// `delete` of the source, which is correct for every backend. Backends
     /// with a cheaper primitive (notably a same-filesystem `rename`, which is
     /// atomic and never reads the object body into memory) should override
-    /// this. The transaction engine routes `Mutation::Move` through here, so a
-    /// large staged blob promoted to its canonical location is moved without
-    /// buffering the whole object.
+    /// this, so a large staged blob promoted to its canonical location is moved
+    /// without buffering the whole object.
     async fn move_object(&self, source: &str, destination: &str) -> Result<(), Error> {
         self.copy(source, destination).await?;
         self.delete(source).await

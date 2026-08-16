@@ -124,20 +124,6 @@ pub enum Mutation {
     /// success in both cases).
     Delete { key: String, expected: Option<Etag> },
 
-    /// Server-side copy from `src` to `dst`.
-    ///
-    /// The engine calls `ObjectStore::copy`. Neither end of the copy is
-    /// held in `.tx-bodies`; this is intended for promoting staged data
-    /// (already in the store) to its canonical location.
-    Copy { src: String, dst: String },
-
-    /// Server-side move from `src` to `dst`: `copy(src, dst)` followed by
-    /// `delete(src)`.
-    ///
-    /// Both steps are individually idempotent under replay: a `delete` of a
-    /// missing `src` is treated as success, and `copy` is overwrite-anywhere.
-    Move { src: String, dst: String },
-
     /// Idempotently merge `add`/`remove` into the JSON-array set stored at
     /// `key`.
     ///
@@ -156,27 +142,13 @@ pub enum Mutation {
 }
 
 impl Mutation {
-    /// Return the destination key that this mutation writes to or deletes.
-    ///
-    /// For `Copy` and `Move`, this is the destination key (`dst`).
+    /// Return the key this mutation writes to or deletes.
     pub fn key(&self) -> &str {
         match self {
             Mutation::Put { key, .. }
             | Mutation::PutIfAbsent { key, .. }
             | Mutation::Delete { key, .. }
             | Mutation::MergeSet { key, .. } => key,
-            Mutation::Copy { dst, .. } | Mutation::Move { dst, .. } => dst,
-        }
-    }
-
-    /// Return all keys this mutation touches (both source and destination for
-    /// `Copy`/`Move`, so they can be included in the lock set).
-    pub fn all_keys(&self) -> impl Iterator<Item = &str> {
-        match self {
-            Mutation::Copy { src, dst } | Mutation::Move { src, dst } => {
-                vec![src.as_str(), dst.as_str()].into_iter()
-            }
-            _ => vec![self.key()].into_iter(),
         }
     }
 }
@@ -225,11 +197,10 @@ impl Transaction {
     #[must_use]
     pub fn lock_set(&self) -> Vec<String> {
         lock_key_set(
-            self.reads.iter().map(|r| r.key.clone()).chain(
-                self.mutations
-                    .iter()
-                    .flat_map(|m| m.all_keys().map(ToOwned::to_owned)),
-            ),
+            self.reads
+                .iter()
+                .map(|r| r.key.clone())
+                .chain(self.mutations.iter().map(|m| m.key().to_owned())),
         )
     }
 }

@@ -104,11 +104,6 @@ pub enum MutationRecord {
     /// `delete_if_match`, and the Locked executor via a HEAD + `ETag` comparison
     /// under the lock.
     Delete { key: String, expected: Option<Etag> },
-    /// Server-side copy from `src` to `dst`.
-    Copy { src: String, dst: String },
-    /// Server-side move from `src` to `dst`: copy then delete-src, both
-    /// idempotent under replay.
-    Move { src: String, dst: String },
     /// Idempotently merge `add`/`remove` into the JSON-array set at `key`.
     ///
     /// Carries no body (the small deltas live inline) and no etag: each
@@ -122,19 +117,15 @@ pub enum MutationRecord {
 }
 
 impl MutationRecord {
-    /// Return every canonical key this mutation touches (source and
-    /// destination for `Copy`/`Move`; just the target for the rest). Used by
-    /// recovery to reconstruct the transaction's lock set without rebuilding
-    /// the original `Transaction` value.
-    pub fn all_keys(&self) -> impl Iterator<Item = &str> {
+    /// Return the canonical key this mutation touches. Used by recovery to
+    /// reconstruct the transaction's lock set without rebuilding the original
+    /// `Transaction` value.
+    pub fn key(&self) -> &str {
         match self {
             MutationRecord::Put { key, .. }
             | MutationRecord::PutIfAbsent { key, .. }
             | MutationRecord::Delete { key, .. }
-            | MutationRecord::MergeSet { key, .. } => vec![key.as_str()].into_iter(),
-            MutationRecord::Copy { src, dst } | MutationRecord::Move { src, dst } => {
-                vec![src.as_str(), dst.as_str()].into_iter()
-            }
+            | MutationRecord::MergeSet { key, .. } => key,
         }
     }
 }

@@ -344,14 +344,7 @@ fn apply_read_preconditions(records: &mut [MutationRecord], reads: &PreparedRead
             };
         }
     }
-    records.sort_by_key(|record| u8::from(!is_read_keyed(record, reads)));
-}
-
-/// `true` when any key the mutation touches was part of the read set.
-fn is_read_keyed(record: &MutationRecord, reads: &PreparedReads) -> bool {
-    record
-        .all_keys()
-        .any(|key| reads.observed.contains_key(key))
+    records.sort_by_key(|record| u8::from(!reads.observed.contains_key(record.key())));
 }
 
 /// Apply a single mutation using conditional storage operations.
@@ -437,19 +430,6 @@ pub async fn apply_cas(
                 Err(StorageError::NotFound) if mode == ApplyMode::Reconcile => Ok(()),
                 Err(e) => Err(Error::Storage(e)),
             },
-        },
-        MutationRecord::Copy { src, dst } => {
-            store.copy(src, dst).await.map_err(Error::Storage)?;
-            Ok(())
-        }
-        MutationRecord::Move { src, dst } => match mode {
-            ApplyMode::Abort => {
-                store.move_object(src, dst).await.map_err(Error::Storage)?;
-                Ok(())
-            }
-            ApplyMode::Reconcile => common::move_idempotent(store, src, dst)
-                .await
-                .map_err(Error::Storage),
         },
         // Mode-independent: the merge re-reads and recomputes against live state,
         // so it is idempotent on both the healthy apply and recovery replay.

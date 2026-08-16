@@ -570,8 +570,7 @@ impl ObjectStore for Backend {
     async fn complete_upload(&self, key: &str) -> Result<(), Error> {
         // Ensure the staging file exists (an upload completed with no writes
         // still produces an empty object at `key`), then no-op: the data already
-        // lives at `key`. The caller's transactional move (Mutation::Move)
-        // promotes it to the canonical location.
+        // lives at `key`. The caller then moves it to the canonical location.
         match self.head(key).await {
             Ok(_) => Ok(()),
             Err(Error::NotFound) => self.put(key, Bytes::new()).await,
