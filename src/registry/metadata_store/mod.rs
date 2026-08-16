@@ -1,5 +1,7 @@
 use std::{future::Future, sync::Arc};
 
+use tokio::select;
+
 use angos_oci::Digest;
 use angos_tx_engine::{lock::LockSession, store::Store};
 
@@ -132,6 +134,14 @@ impl MetadataStore {
     /// Run `op` while holding the coarse blob-data lock for `digest`,
     /// releasing the lock whatever the outcome. `op` is not polled before the
     /// lock is acquired.
+    ///
+    /// `op` is raced against the session's cancellation, which the heartbeat
+    /// fires once ownership is lost or the hold outlives its maximum. A peer may
+    /// hold the key from that moment, so `op` is dropped rather than left
+    /// writing beside it, and the caller sees [`Error::Conflict`] and retries.
+    /// Without the fence a serialised pair could both run, and the delete path's
+    /// unreferenced check could reclaim a blob a concurrent push was still
+    /// referencing.
     pub async fn with_blob_data_lock<T, E>(
         &self,
         digest: &Digest,
@@ -141,7 +151,14 @@ impl MetadataStore {
         E: From<Error>,
     {
         let session = self.acquire_blob_data_lock(digest).await?;
-        let result = op.await;
+        let cancelled = session.cancellation();
+        let result = select! {
+            biased;
+            () = cancelled.cancelled() => Err(E::from(Error::Conflict(format!(
+                "blob-data lock for {digest} was lost before the operation completed"
+            )))),
+            result = op => result,
+        };
         session.release().await;
         result
     }

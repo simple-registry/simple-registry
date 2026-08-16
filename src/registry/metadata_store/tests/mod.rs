@@ -6,18 +6,23 @@ mod list_namespaces;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::Duration as StdDuration,
 };
 
 use bytes::Bytes;
 use chrono::{Duration, Utc};
 use futures_util::TryStreamExt;
+use tokio::time::sleep;
 
 use angos_oci::request::GetReferrersRequest;
 use angos_oci::{Algorithm, Descriptor, Digest, MediaType, Namespace, Tag};
 use angos_s3_client::Backend as S3HttpBackend;
 use angos_storage::Page;
 use angos_storage::{ConditionalStore, ObjectStore, s3::Backend as StorageS3Backend};
-use angos_tx_engine::{lock::LockStrategy, store::Store};
+use angos_tx_engine::{
+    lock::{LockStrategy, S3LockConfig, primitive::MIN_LOCK_TTL_SECS},
+    store::Store,
+};
 
 use crate::{
     cache::Cache,
@@ -2127,4 +2132,42 @@ fn test_link_metadata_backward_compat_no_media_type() {
     );
     let metadata: LinkMetadata = serde_json::from_slice(json.as_bytes()).unwrap();
     assert_eq!(metadata.media_type, None);
+}
+
+/// The coarse blob-data lock is only a guarantee while it is owned. Once the
+/// heartbeat reports it lost, a peer may hold the key, so the operation it was
+/// serialising must stop rather than keep writing alongside that peer. Left
+/// unfenced, a push could still be recording a reference while a delete decided
+/// the blob was unreferenced and reclaimed it.
+#[tokio::test(start_paused = true)]
+async fn a_lost_blob_data_lock_aborts_the_operation_it_guards() {
+    metrics_provider::init_for_tests();
+    let backend = Arc::new(angos_storage::MemoryObjectStore::new());
+    let store = Store::new(
+        backend.clone(),
+        Some(backend.clone()),
+        // The shortest hold the lock permits, so the heartbeat invalidates the
+        // session while the operation is still running.
+        LockStrategy::S3(S3LockConfig {
+            ttl_secs: MIN_LOCK_TTL_SECS,
+            max_hold_secs: MIN_LOCK_TTL_SECS,
+            ..S3LockConfig::default()
+        }),
+        Some(backend),
+    )
+    .expect("store");
+    let metadata_store = MetadataStore::builder(Arc::new(store)).build();
+    let digest = Digest::try_from(format!("sha256:{}", "b".repeat(64)).as_str()).unwrap();
+
+    let outcome: Result<(), Error> = metadata_store
+        .with_blob_data_lock(&digest, async {
+            sleep(StdDuration::from_mins(10)).await;
+            Ok(())
+        })
+        .await;
+
+    assert!(
+        matches!(outcome, Err(Error::Conflict(_))),
+        "losing the lock must abort the operation, got {outcome:?}"
+    );
 }

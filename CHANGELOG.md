@@ -15,6 +15,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A manifest push commits its metadata in about half the storage requests it used to, and no longer serialises them one per key.
 - Requests of one instance contending for the same metadata key queue instead of racing, so a loser retries without having written anything and concurrent pushes stop amplifying each other's storage traffic.
 
+### Fixed
+
+- An operation whose coarse blob-data lock expires now aborts instead of running on beside the peer that took the key, so a blob cannot be reclaimed while a concurrent push is still recording its reference.
+
 ## 1.5.0
 
 ### Added
