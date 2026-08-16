@@ -335,7 +335,8 @@ impl RecoveryLoop {
 
         let mutation = intent.mutations[idx].record.clone();
         if let Some(cs) = &self.conditional_store {
-            apply_cas(cs.as_ref(), &mutation, ApplyMode::Reconcile).await?;
+            // No seed: recovery holds no Prepare observation of its own.
+            apply_cas(cs.as_ref(), &mutation, ApplyMode::Reconcile, None).await?;
         } else {
             common::apply_object_store(
                 self.store.as_ref(),

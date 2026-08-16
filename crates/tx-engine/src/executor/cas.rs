@@ -11,11 +11,7 @@
 //! body differs, so return `Error::PartialCommit` and preserve the intent for
 //! the recovery loop).
 
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-    sync::Arc,
-};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -123,7 +119,10 @@ impl CasExecutor {
                     );
                     return Err(Error::Conflict);
                 }
-                Ok(Observed::Present(etag))
+                Ok(Observed::Present {
+                    body: Bytes::from(body),
+                    etag,
+                })
             }
             Err(StorageError::NotFound) => {
                 // An absent key matches only a read that recorded absence.
@@ -137,37 +136,27 @@ impl CasExecutor {
         }
     }
 
-    /// Verify the read set, capturing each present read key's live etag and
-    /// each key a read confirmed absent.
+    /// Verify the read set, capturing what Prepare observed at each key.
     ///
-    /// The etags let the caller turn a same-key write into a compare-and-swap;
-    /// the absent set lets it turn one into a `PutIfAbsent`, so the absence
-    /// precondition holds through Apply and not just Prepare. Failures are
-    /// reported in read order, so a conflict names the same key however the
-    /// reads interleaved.
+    /// A captured etag lets the caller turn a same-key write into a
+    /// compare-and-swap and a captured absence lets it turn one into a
+    /// `PutIfAbsent`, so the precondition holds through Apply and not just
+    /// Prepare. Failures are reported in read order, so a conflict names the
+    /// same key however the reads interleaved.
     async fn prepare_reads(&self, tx: &Transaction) -> Result<PreparedReads, Error> {
         let checks: Vec<_> = tx
             .reads
             .iter()
             .map(|read| self.observe_read(read))
             .collect();
-        let observed: Vec<Result<Observed, Error>> = stream::iter(checks)
+        let outcomes: Vec<Result<Observed, Error>> = stream::iter(checks)
             .buffered(STORE_CONCURRENCY)
             .collect()
             .await;
 
         let mut prepared = PreparedReads::default();
-        for (read, outcome) in tx.reads.iter().zip(observed) {
-            match outcome? {
-                Observed::Present(etag) => {
-                    if let Some(etag) = etag {
-                        prepared.etags.insert(read.key.clone(), etag);
-                    }
-                }
-                Observed::Absent => {
-                    prepared.absent.insert(read.key.clone());
-                }
-            }
+        for (read, outcome) in tx.reads.iter().zip(outcomes) {
+            prepared.observed.insert(read.key.clone(), outcome?);
         }
         Ok(prepared)
     }
@@ -177,7 +166,11 @@ impl CasExecutor {
     /// Failing here commits nothing, so it rolls back and returns a retriable
     /// error for the caller to re-read against, which is what
     /// [`apply_read_preconditions`] orders the read-keyed mutations first for.
-    async fn apply_commit_point(&self, intent: &mut IntentRecord) -> Result<(), Error> {
+    async fn apply_commit_point(
+        &self,
+        intent: &mut IntentRecord,
+        reads: &PreparedReads,
+    ) -> Result<(), Error> {
         let Some(mutation) = intent
             .mutations
             .first()
@@ -185,7 +178,8 @@ impl CasExecutor {
         else {
             return Ok(());
         };
-        match apply_cas(self.store.as_ref(), &mutation, ApplyMode::Abort).await {
+        let seed = merge_seed(&mutation, reads);
+        match apply_cas(self.store.as_ref(), &mutation, ApplyMode::Abort, seed).await {
             Ok(()) => {
                 stamp_applied(self.store.as_ref(), intent, 0).await;
                 Ok(())
@@ -205,15 +199,24 @@ impl CasExecutor {
     /// Apply every mutation: the commit point alone, then the rest
     /// concurrently, then [`Self::recover_mid_apply`] over any that failed
     /// their precondition, in mutation order.
-    async fn apply_all(&self, intent: &mut IntentRecord) -> Result<(), Error> {
-        self.apply_commit_point(intent).await?;
+    async fn apply_all(
+        &self,
+        intent: &mut IntentRecord,
+        reads: &PreparedReads,
+    ) -> Result<(), Error> {
+        self.apply_commit_point(intent, reads).await?;
 
         let rest: Vec<MutationRecord> = intent.mutations[1..]
             .iter()
             .map(|planned| planned.record.clone())
             .collect();
         let outcomes = apply_rest(&rest, |mutation| {
-            apply_cas(self.store.as_ref(), mutation, ApplyMode::Abort)
+            apply_cas(
+                self.store.as_ref(),
+                mutation,
+                ApplyMode::Abort,
+                merge_seed(mutation, reads),
+            )
         })
         .await;
 
@@ -248,7 +251,9 @@ impl CasExecutor {
         idx: usize,
         mutation: &MutationRecord,
     ) -> Result<(), Error> {
-        match apply_cas(self.store.as_ref(), mutation, ApplyMode::Reconcile).await {
+        // No seed: the precondition just failed, so whatever Prepare observed at
+        // this key is stale and the reconcile has to read the live state.
+        match apply_cas(self.store.as_ref(), mutation, ApplyMode::Reconcile, None).await {
             Ok(()) => {
                 intent.mark_applied(idx);
                 Ok(())
@@ -266,19 +271,29 @@ impl CasExecutor {
     }
 }
 
-/// Verified read set: live etags for keys read as present, and the keys a read
-/// confirmed absent.
-#[derive(Default)]
-struct PreparedReads {
-    etags: HashMap<String, Etag>,
-    absent: HashSet<String>,
+/// What Prepare found at a read's key, once it matched the state the read
+/// recorded. A present key carries whatever `ETag` the backend surfaced
+/// alongside the bytes, which a same-key merge reuses instead of re-reading.
+#[derive(Clone)]
+pub enum Observed {
+    Present { body: Bytes, etag: Option<Etag> },
+    Absent,
 }
 
-/// What Prepare found at a read's key, once it matched the state the read
-/// recorded. A present key carries whatever `ETag` the backend surfaced.
-enum Observed {
-    Present(Option<Etag>),
-    Absent,
+/// The verified read set: what Prepare observed at each read key.
+#[derive(Default)]
+pub struct PreparedReads {
+    observed: HashMap<String, Observed>,
+}
+
+/// What Prepare observed at `mutation`'s key, when reusing it can spare a read.
+/// Only a merge re-reads its own key on the healthy path, so only a merge is
+/// seeded.
+fn merge_seed<'a>(mutation: &MutationRecord, reads: &'a PreparedReads) -> Option<&'a Observed> {
+    match mutation {
+        MutationRecord::MergeSet { key, .. } => reads.observed.get(key.as_str()),
+        _ => None,
+    }
 }
 
 /// Promote same-key read-modify-write mutations to conditional writes and order
@@ -292,7 +307,7 @@ enum Observed {
 /// The read-keyed mutations are stably moved to the front so that abort lands
 /// clean.
 fn apply_read_preconditions(records: &mut [MutationRecord], reads: &PreparedReads) {
-    if reads.etags.is_empty() && reads.absent.is_empty() {
+    if reads.observed.is_empty() {
         return;
     }
     for record in records.iter_mut() {
@@ -301,7 +316,10 @@ fn apply_read_preconditions(records: &mut [MutationRecord], reads: &PreparedRead
             | MutationRecord::Delete { key, expected }
                 if expected.is_none() =>
             {
-                if let Some(etag) = reads.etags.get(key) {
+                if let Some(Observed::Present {
+                    etag: Some(etag), ..
+                }) = reads.observed.get(key.as_str())
+                {
                     *expected = Some(etag.clone());
                 }
             }
@@ -312,7 +330,7 @@ fn apply_read_preconditions(records: &mut [MutationRecord], reads: &PreparedRead
             body_ref,
             expected: None,
         } = record
-            && reads.absent.contains(key)
+            && matches!(reads.observed.get(key.as_str()), Some(Observed::Absent))
         {
             *record = MutationRecord::PutIfAbsent {
                 key: key.clone(),
@@ -327,7 +345,7 @@ fn apply_read_preconditions(records: &mut [MutationRecord], reads: &PreparedRead
 fn is_read_keyed(record: &MutationRecord, reads: &PreparedReads) -> bool {
     record
         .all_keys()
-        .any(|key| reads.etags.contains_key(key) || reads.absent.contains(key))
+        .any(|key| reads.observed.contains_key(key))
 }
 
 /// Apply a single mutation using conditional storage operations.
@@ -356,6 +374,7 @@ pub async fn apply_cas(
     store: &dyn ConditionalStore,
     mutation: &MutationRecord,
     mode: ApplyMode,
+    seed: Option<&Observed>,
 ) -> Result<(), Error> {
     match mutation {
         MutationRecord::Put {
@@ -429,7 +448,7 @@ pub async fn apply_cas(
         // Mode-independent: the merge re-reads and recomputes against live state,
         // so it is idempotent on both the healthy apply and recovery replay.
         MutationRecord::MergeSet { key, add, remove } => {
-            apply_merge_set_cas(store, key, add, remove).await
+            apply_merge_set_cas(store, key, add, remove, seed).await
         }
     }
 }
@@ -458,23 +477,43 @@ async fn apply_merge_set_cas(
     key: &str,
     add: &[Value],
     remove: &[Value],
+    seed: Option<&Observed>,
 ) -> Result<(), Error> {
+    let mut seed = seed;
     for attempt in 0..MERGE_SET_MAX_ATTEMPTS {
-        let outcome = match store.get_with_etag(key).await {
-            Ok((current, Some(etag))) => match common::merge_json_set(&current, add, remove)? {
-                Some(body) => store.put_if_match(key, &etag, body).await.map(|_| ()),
+        // Prepare read this key already, so the first attempt merges into what
+        // it saw. A writer that slipped in since fails the compare-and-swap and
+        // the next attempt re-reads, exactly as an unseeded one does.
+        let observed = match seed.take() {
+            Some(observed) => observed.clone(),
+            None => match store.get_with_etag(key).await {
+                Ok((body, etag)) => Observed::Present {
+                    body: Bytes::from(body),
+                    etag,
+                },
+                Err(StorageError::NotFound) => Observed::Absent,
+                Err(e) => return Err(Error::Storage(e)),
+            },
+        };
+        let outcome = match observed {
+            Observed::Present {
+                body,
+                etag: Some(etag),
+            } => match common::merge_json_set(&body, add, remove)? {
+                Some(merged) => store.put_if_match(key, &etag, merged).await.map(|_| ()),
                 None => store.delete_if_match(key, &etag).await,
             },
             // Present but no etag: no CAS is possible, so write unconditionally.
-            Ok((current, None)) => match common::merge_json_set(&current, add, remove)? {
-                Some(body) => store.put(key, body).await,
-                None => store.delete(key).await,
-            },
-            Err(StorageError::NotFound) => match common::merge_json_set(&[], add, remove)? {
-                Some(body) => store.put_if_absent(key, body).await.map(|_| ()),
+            Observed::Present { body, etag: None } => {
+                match common::merge_json_set(&body, add, remove)? {
+                    Some(merged) => store.put(key, merged).await,
+                    None => store.delete(key).await,
+                }
+            }
+            Observed::Absent => match common::merge_json_set(&[], add, remove)? {
+                Some(merged) => store.put_if_absent(key, merged).await.map(|_| ()),
                 None => return Ok(()),
             },
-            Err(e) => return Err(Error::Storage(e)),
         };
         match outcome {
             Ok(()) => return Ok(()),
@@ -571,7 +610,7 @@ impl TransactionExecutor for CasExecutor {
             return Err(e);
         }
 
-        let apply_result = self.apply_all(&mut intent).await;
+        let apply_result = self.apply_all(&mut intent, &prepared_reads).await;
 
         // Reap only when the transaction either fully committed or applied
         // nothing (see `common::finish`). This subsumes the `PartialCommit`
@@ -587,7 +626,14 @@ impl TransactionExecutor for CasExecutor {
 
 #[cfg(test)]
 mod tests {
-    use angos_storage::{MemoryObjectStore, ObjectStore};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use serde_json::json;
+
+    use angos_storage::{
+        MemoryObjectStore, ObjectStore,
+        test_util::{HookedStore, StoreHook, StoreOp},
+    };
 
     use super::*;
     use crate::transaction::Mutation;
@@ -600,12 +646,18 @@ mod tests {
         }
     }
 
+    /// A read set holding a single observation of `key`.
+    fn observing(key: &str, observed: Observed) -> PreparedReads {
+        let mut reads = PreparedReads::default();
+        reads.observed.insert(key.to_string(), observed);
+        reads
+    }
+
     #[test]
     fn absent_read_promotes_same_key_put_to_put_if_absent() {
         // The Put carries the absence precondition through Apply, so a racing
         // create in the Prepare->Apply window aborts rather than being clobbered.
-        let mut reads = PreparedReads::default();
-        reads.absent.insert("tag".to_string());
+        let reads = observing("tag", Observed::Absent);
 
         let mut records = vec![put("tag")];
         apply_read_preconditions(&mut records, &reads);
@@ -623,8 +675,13 @@ mod tests {
 
     #[test]
     fn present_read_conditions_same_key_put_on_its_etag() {
-        let mut reads = PreparedReads::default();
-        reads.etags.insert("tag".to_string(), Etag::new("etag-1"));
+        let reads = observing(
+            "tag",
+            Observed::Present {
+                body: Bytes::from_static(b"observed"),
+                etag: Some(Etag::new("etag-1")),
+            },
+        );
 
         let mut records = vec![put("tag")];
         apply_read_preconditions(&mut records, &reads);
@@ -650,6 +707,128 @@ mod tests {
             &records[0],
             MutationRecord::Put { expected: None, .. }
         ));
+    }
+
+    /// A transaction merging into a shard it read, the shape every manifest
+    /// push commits.
+    fn merge_tx(observed: &'static [u8]) -> Transaction {
+        Transaction::builder()
+            .read("shard", Bytes::from_static(observed))
+            .mutation(Mutation::MergeSet {
+                key: "shard".to_string(),
+                add: vec![json!("b")],
+                remove: vec![],
+            })
+            .build()
+    }
+
+    /// Counts `get_with_etag` calls against one key.
+    struct CountReads {
+        key: &'static str,
+        count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl StoreHook for CountReads {
+        async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+            if let StoreOp::GetWithEtag { key } = op
+                && key == self.key
+            {
+                self.count.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+    }
+
+    /// Prepare reads every key in the read set, so a merge on one of them
+    /// already has the bytes and the etag it needs to commit. Re-reading cost a
+    /// round trip per merged key, which on a manifest push is one per layer.
+    #[tokio::test]
+    async fn a_read_keyed_merge_reuses_what_prepare_observed() {
+        let inner = Arc::new(MemoryObjectStore::new());
+        inner
+            .put("shard", Bytes::from_static(br#"["a"]"#))
+            .await
+            .expect("seed");
+        let store = Arc::new(HookedStore::new(
+            inner.clone() as Arc<dyn ConditionalStore>,
+            CountReads {
+                key: "shard",
+                count: AtomicUsize::new(0),
+            },
+        ));
+        let executor = CasExecutor::builder(store.clone() as Arc<dyn ConditionalStore>).build();
+
+        executor
+            .execute(merge_tx(br#"["a"]"#))
+            .await
+            .expect("commit");
+
+        assert_eq!(
+            store.hook().count.load(Ordering::Relaxed),
+            1,
+            "Prepare already read the shard, so the merge must not read it again"
+        );
+        let merged: Vec<String> =
+            serde_json::from_slice(&inner.get("shard").await.expect("shard")).expect("parse");
+        assert_eq!(merged, ["a", "b"]);
+    }
+
+    /// Overwrites `key` as the merge first tries to commit, so the seeded
+    /// compare-and-swap loses its race.
+    struct RaceFirstCommit {
+        key: &'static str,
+        inner: Arc<MemoryObjectStore>,
+        raced: AtomicBool,
+    }
+
+    #[async_trait]
+    impl StoreHook for RaceFirstCommit {
+        async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+            if let StoreOp::PutIfMatch { key, .. } = op
+                && key == self.key
+                && !self.raced.swap(true, Ordering::Relaxed)
+            {
+                self.inner
+                    .put(key, Bytes::from_static(br#"["racer"]"#))
+                    .await?;
+            }
+            Ok(())
+        }
+    }
+
+    /// The seed is only an optimistic first attempt: a writer landing between
+    /// Prepare and Apply fails its compare-and-swap, and the retry re-reads and
+    /// merges into the live body rather than clobbering it.
+    #[tokio::test]
+    async fn a_merge_whose_seed_went_stale_re_reads_and_converges() {
+        let inner = Arc::new(MemoryObjectStore::new());
+        inner
+            .put("shard", Bytes::from_static(br#"["a"]"#))
+            .await
+            .expect("seed");
+        let store = Arc::new(HookedStore::new(
+            inner.clone() as Arc<dyn ConditionalStore>,
+            RaceFirstCommit {
+                key: "shard",
+                inner: inner.clone(),
+                raced: AtomicBool::new(false),
+            },
+        ));
+        let executor = CasExecutor::builder(store.clone() as Arc<dyn ConditionalStore>).build();
+
+        executor
+            .execute(merge_tx(br#"["a"]"#))
+            .await
+            .expect("commit");
+
+        let merged: Vec<String> =
+            serde_json::from_slice(&inner.get("shard").await.expect("shard")).expect("parse");
+        assert_eq!(
+            merged,
+            ["racer", "b"],
+            "the racing write must survive and the delta must land on top of it"
+        );
     }
 
     /// A read recording absence is about the key existing, not about its

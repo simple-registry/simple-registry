@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A transaction records its commit point once instead of re-writing its journal after every mutation, cutting one storage round trip per mutation from every multi-key write.
 - A transaction verifies its reads, stages its bodies, and applies its mutations concurrently, so a multi-key write costs about one round trip per stage instead of one per key.
+- A blob-index merge commits against the shard bytes the transaction already read, dropping one storage read per merged key from every manifest push.
 
 ## 1.5.0
 
