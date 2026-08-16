@@ -1,6 +1,8 @@
 //! Transaction value type: a declarative description of reads and mutations
 //! that the engine either commits atomically or leaves entirely unapplied.
 
+use std::collections::HashSet;
+
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -203,6 +205,26 @@ impl Transaction {
                 .chain(self.mutations.iter().map(|m| m.key().to_owned())),
         )
     }
+
+    /// Collect the keys this transaction writes under a precondition, sorted and
+    /// de-duplicated: two transactions writing one of them cannot both commit.
+    ///
+    /// A `PutIfAbsent` always carries one, and a `Put`/`Delete` carries one when
+    /// it names an expected etag or writes a key the transaction read, which is
+    /// what the CAS executor conditions such a write on. The rest cannot fail a
+    /// precondition: an unconditional write to an unread key always lands, and a
+    /// [`Mutation::MergeSet`] resolves its own contention by re-reading.
+    #[must_use]
+    pub fn conditional_keys(&self) -> Vec<String> {
+        let read: HashSet<&str> = self.reads.iter().map(|r| r.key.as_str()).collect();
+        lock_key_set(self.mutations.iter().filter_map(|mutation| match mutation {
+            Mutation::PutIfAbsent { key, .. } => Some(key.clone()),
+            Mutation::Put { key, expected, .. } | Mutation::Delete { key, expected } => {
+                (expected.is_some() || read.contains(key.as_str())).then(|| key.clone())
+            }
+            Mutation::MergeSet { .. } => None,
+        }))
+    }
 }
 
 /// Builder for [`Transaction`].
@@ -253,5 +275,54 @@ impl TransactionBuilder {
             reads: self.reads,
             mutations: self.mutations,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put(key: &str, expected: Option<Etag>) -> Mutation {
+        Mutation::Put {
+            key: key.to_string(),
+            body: Bytes::from_static(b"body"),
+            expected,
+        }
+    }
+
+    /// The gate exists to serialise writes that can lose a precondition, and
+    /// only those: gating a merge or an unconditional write would serialise the
+    /// pushes that are meant to run in parallel.
+    #[test]
+    fn only_writes_carrying_a_precondition_are_conditional() {
+        let tx = Transaction::builder()
+            .read("read-key", "observed")
+            .mutation(put("read-key", None))
+            .mutation(put("etag-key", Some(Etag::new("e1"))))
+            .mutation(Mutation::PutIfAbsent {
+                key: "absent-key".to_string(),
+                body: Bytes::from_static(b"body"),
+            })
+            .mutation(put("unread-key", None))
+            .mutation(Mutation::Delete {
+                key: "unread-delete".to_string(),
+                expected: None,
+            })
+            .mutation(Mutation::MergeSet {
+                key: "shard".to_string(),
+                add: vec![],
+                remove: vec![],
+            })
+            .build();
+
+        assert_eq!(
+            tx.conditional_keys(),
+            vec![
+                "absent-key".to_string(),
+                "etag-key".to_string(),
+                "read-key".to_string()
+            ],
+            "an unconditional write to an unread key and a merge must stay ungated"
+        );
     }
 }

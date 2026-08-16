@@ -2,6 +2,7 @@
 
 pub mod cas;
 pub mod common;
+pub mod gate;
 pub mod locked;
 
 use std::{future::Future, time::Duration};

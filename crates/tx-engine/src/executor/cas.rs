@@ -32,6 +32,7 @@ use crate::{
             ApplyMode, apply_rest, build_intent, discard_staged_bodies, finish, rollback,
             stage_bodies, stamp_applied, write_intent,
         },
+        gate::KeyGate,
     },
     intent::{DEFAULT_INTENT_TTL_SECS, IntentRecord, MutationRecord},
     transaction::{Expectation, Read, Transaction},
@@ -54,6 +55,7 @@ use crate::{
 pub struct CasExecutor {
     store: Arc<dyn ConditionalStore>,
     ttl_secs: u64,
+    gate: KeyGate,
 }
 
 impl fmt::Debug for CasExecutor {
@@ -85,6 +87,7 @@ impl CasExecutorBuilder {
         CasExecutor {
             store: self.store,
             ttl_secs: self.ttl_secs.unwrap_or(DEFAULT_INTENT_TTL_SECS),
+            gate: KeyGate::default(),
         }
     }
 }
@@ -549,6 +552,12 @@ impl TransactionExecutor for CasExecutor {
     /// [`LockSession`](crate::lock::LockSession) is independent of this call; the caller releases it
     /// explicitly after `execute` returns.
     async fn execute(&self, tx: Transaction) -> Result<(), Error> {
+        // Serialise against sibling requests contending for the same
+        // conditional writes, so a loser conflicts while verifying its reads
+        // instead of after staging its bodies and writing its intent. Only
+        // cross-process contention is left for the conditional operations.
+        let gates = self.gate.acquire(&tx.conditional_keys()).await;
+
         let tx_id = Uuid::new_v4();
 
         let prepared_reads = self.prepare_reads(&tx).await?;
@@ -573,6 +582,8 @@ impl TransactionExecutor for CasExecutor {
         }
 
         let apply_result = self.apply_all(&mut intent, &prepared_reads).await;
+        // Past Apply the keys are settled; reaping does not contend for them.
+        drop(gates);
 
         // Reap only when the transaction either fully committed or applied
         // nothing (see `common::finish`). This subsumes the `PartialCommit`
@@ -588,8 +599,12 @@ impl TransactionExecutor for CasExecutor {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::{
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        time::Duration,
+    };
 
+    use futures_util::future::join_all;
     use serde_json::json;
 
     use angos_storage::{
@@ -598,7 +613,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::{intent::MutationBody, transaction::Mutation};
+    use crate::{
+        intent::{INTENT_LOG_PREFIX, MutationBody},
+        transaction::Mutation,
+    };
 
     fn put(key: &str) -> MutationRecord {
         MutationRecord::Put {
@@ -790,6 +808,90 @@ mod tests {
             merged,
             ["racer", "b"],
             "the racing write must survive and the delta must land on top of it"
+        );
+    }
+
+    /// Slows the read of one key so both racing transactions are inside Prepare
+    /// at once, and counts what reaches the intent log.
+    struct SlowRead {
+        key: &'static str,
+        intent_writes: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl StoreHook for SlowRead {
+        async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+            match op {
+                StoreOp::GetWithEtag { key } if key == self.key => {
+                    sleep(Duration::from_millis(50)).await;
+                }
+                StoreOp::Put { key, .. } if key.starts_with(INTENT_LOG_PREFIX) => {
+                    self.intent_writes.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    /// Two requests contending for one conditional write are serialised in
+    /// process, so the loser conflicts while verifying its reads and never
+    /// stages a body or writes an intent. Racing them through Apply instead
+    /// costs a full transaction that has to be rolled back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn contending_requests_are_serialised_before_they_write() {
+        let inner = Arc::new(MemoryObjectStore::new());
+        inner
+            .put("k", Bytes::from_static(b"v0"))
+            .await
+            .expect("seed");
+        let store = Arc::new(HookedStore::new(
+            inner.clone() as Arc<dyn ConditionalStore>,
+            SlowRead {
+                key: "k",
+                intent_writes: AtomicUsize::new(0),
+            },
+        ));
+        let executor =
+            Arc::new(CasExecutor::builder(store.clone() as Arc<dyn ConditionalStore>).build());
+
+        let racers = (0..2).map(|n| {
+            let executor = Arc::clone(&executor);
+            tokio::spawn(async move {
+                executor
+                    .execute(
+                        Transaction::builder()
+                            .read("k", Bytes::from_static(b"v0"))
+                            .mutation(Mutation::Put {
+                                key: "k".to_string(),
+                                body: Bytes::from(format!("v{n}")),
+                                expected: None,
+                            })
+                            .build(),
+                    )
+                    .await
+            })
+        });
+        let outcomes: Vec<Result<(), Error>> = join_all(racers)
+            .await
+            .into_iter()
+            .map(|joined| joined.expect("racer"))
+            .collect();
+
+        assert_eq!(
+            outcomes.iter().filter(|r| r.is_ok()).count(),
+            1,
+            "exactly one racer may commit, got {outcomes:?}"
+        );
+        assert!(
+            outcomes.iter().any(|r| matches!(r, Err(Error::Conflict))),
+            "the loser must conflict at Prepare, not after applying: {outcomes:?}"
+        );
+        assert_eq!(
+            store.hook().intent_writes.load(Ordering::Relaxed),
+            2,
+            "only the winner may reach the intent log, once to log and once to \
+             stamp its commit point"
         );
     }
 
