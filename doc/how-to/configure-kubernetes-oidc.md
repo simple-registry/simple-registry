@@ -51,10 +51,35 @@ it. Give angos an identity of its own and bind that role to it alone, rather
 than granting it to `system:unauthenticated`, which publishes the cluster's
 signing keys and issuer metadata to everyone who can reach the apiserver.
 
-Issue a client certificate through the `kubernetes.io/kube-apiserver-client`
-signer, or from any CA in the apiserver's `--client-ca-file`. Its subject `CN`
-becomes the username the apiserver authenticates, and its `O` values the groups,
-so the binding names the `CN` you signed:
+Angos running in the cluster already has one, the service-account token mounted
+in its own pod. Bind the role to that account and point `bearer_token_file` at
+the token:
+
+```bash
+kubectl create clusterrolebinding angos-issuer-discovery \
+  --clusterrole=system:service-account-issuer-discovery \
+  --serviceaccount=angos:angos
+```
+
+```toml
+[auth.oidc.kube]
+issuer = "https://kubernetes.default.svc"
+server_ca_bundle = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+required_audience = "angos"
+```
+
+The file is read on every fetch, so the token the kubelet rotates in place keeps
+working, and a path angos cannot read fails startup. The token goes only to URLs
+on the issuer's own origin: a cluster publishing its keys elsewhere through
+`--service-account-jwks-uri` gets an anonymous fetch for them rather than the
+token.
+
+Angos outside the cluster has no such token and presents a client certificate
+instead, issued through the `kubernetes.io/kube-apiserver-client` signer or from
+any CA in the apiserver's `--client-ca-file`. Its subject `CN` becomes the
+username the apiserver authenticates, and its `O` values the groups, so the
+binding names the `CN` you signed:
 
 ```bash
 kubectl create clusterrolebinding angos-issuer-discovery \
@@ -63,12 +88,8 @@ kubectl create clusterrolebinding angos-issuer-discovery \
 ```
 
 ```toml
-[auth.oidc.kube]
-issuer = "https://kubernetes.default.svc"
-server_ca_bundle = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 client_certificate_bundle = "/certs/angos-client.pem"   # CN=angos
 client_private_key = "/certs/angos-client-key.pem"
-required_audience = "angos"
 ```
 
 Configuring one of the two without the other fails startup, so a half-configured

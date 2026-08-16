@@ -37,6 +37,11 @@ pub struct Config {
     pub client_certificate_bundle: Option<PathBuf>,
     #[serde(default)]
     pub client_private_key: Option<PathBuf>,
+    /// File holding a bearer token sent on those same fetches, for an issuer
+    /// authenticating callers with one. Read per fetch, so a token rotated in
+    /// place (a Kubernetes projected service-account token) stays current.
+    #[serde(default)]
+    pub bearer_token_file: Option<PathBuf>,
     /// Discovered from the issuer's `.well-known/openid-configuration` when omitted.
     #[serde(default)]
     pub jwks_uri: Option<String>,
@@ -194,7 +199,7 @@ fn extract_oidc_credential(parts: &Parts, provider_name: &str) -> Option<String>
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+    use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc};
 
     use serde_json::json;
     use wiremock::MockServer;
@@ -238,6 +243,7 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.issuer, "https://auth.example.com");
         assert!(config.jwks_uri.is_none());
+        assert!(config.bearer_token_file.is_none());
         assert!(config.required_claims.is_empty());
         assert_eq!(config.jwks_refresh_interval, 3600);
         assert!(config.required_audience.is_none());
@@ -252,6 +258,7 @@ mod tests {
         let toml = r#"
             issuer = "https://auth.example.com"
             jwks_uri = "https://auth.example.com/jwks"
+            bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
             required_claims = ["repository", "actor"]
             jwks_refresh_interval = 7200
             required_audience = "my-app"
@@ -263,6 +270,12 @@ mod tests {
         assert_eq!(
             config.jwks_uri,
             Some("https://auth.example.com/jwks".to_string())
+        );
+        assert_eq!(
+            config.bearer_token_file.as_deref(),
+            Some(Path::new(
+                "/var/run/secrets/kubernetes.io/serviceaccount/token"
+            ))
         );
         assert_eq!(config.required_claims, vec!["repository", "actor"]);
         assert_eq!(config.jwks_refresh_interval, 7200);

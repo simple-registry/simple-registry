@@ -1,10 +1,11 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, fs, time::Duration};
 
 use jsonwebtoken::{Algorithm, Header, Validation, decode, decode_header};
 use reqwest::{Client, header::ACCEPT};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
+use url::Url;
 
 use crate::{
     auth::Error,
@@ -35,6 +36,7 @@ struct CachedJson<T> {
 
 struct CachedJsonRequest<'a> {
     client: &'a Client,
+    provider: &'a Config,
     cache: &'a Cache,
     cache_key: &'a str,
     url: &'a str,
@@ -155,8 +157,35 @@ fn cached_jwks_misses_kid(jwks: &Jwks, header: &Header) -> bool {
     !jwks.keys.iter().any(|key| key.kid() == Some(kid))
 }
 
+/// The provider's bearer token, when one is configured and `url` sits on the
+/// issuer's own origin. `jwks_uri` comes out of the discovery document, so an
+/// issuer pointing it at a third party would otherwise be handed the token.
+fn issuer_bearer_token(provider: &Config, url: &str) -> Result<Option<String>, Error> {
+    let Some(path) = provider.bearer_token_file.as_deref() else {
+        return Ok(None);
+    };
+
+    let on_issuer_origin = match (Url::parse(&provider.issuer), Url::parse(url)) {
+        (Ok(issuer), Ok(target)) => issuer.origin() == target.origin(),
+        _ => false,
+    };
+    if !on_issuer_origin {
+        debug!("Withholding the bearer token from {url}: not on the issuer's origin");
+        return Ok(None);
+    }
+
+    let token = fs::read_to_string(path).map_err(|e| {
+        Error::ProviderUnavailable(format!(
+            "Failed to read bearer token file {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(Some(token.trim().to_string()))
+}
+
 async fn query_json<T>(
     client: &Client,
+    provider: &Config,
     url: &str,
     fetch_timeout: Option<Duration>,
 ) -> Result<T, Error>
@@ -164,9 +193,12 @@ where
     T: DeserializeOwned,
 {
     let fetch = async {
-        let response = client
-            .get(url)
-            .header(ACCEPT, "application/json")
+        let mut request = client.get(url).header(ACCEPT, "application/json");
+        if let Some(token) = issuer_bearer_token(provider, url)? {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request
             .send()
             .await
             .map_err(|e| Error::ProviderUnavailable(format!("Failed to fetch URL {url}: {e}")))?;
@@ -255,7 +287,13 @@ where
         }
     }
 
-    let value = query_json::<T>(request.client, request.url, request.fetch_timeout).await?;
+    let value = query_json::<T>(
+        request.client,
+        request.provider,
+        request.url,
+        request.fetch_timeout,
+    )
+    .await?;
     validate_fresh(&value)?;
 
     if let Err(err) = request
@@ -292,6 +330,7 @@ async fn fetch_jwks(
     let fetched = fetch_cached_json::<Jwks, _>(
         CachedJsonRequest {
             client,
+            provider,
             cache,
             cache_key: &cache_key,
             url: &jwks_url,
@@ -361,6 +400,7 @@ async fn fetch_oidc_configuration_with_timeout(
     let fetched = fetch_cached_json::<OpenIdConfiguration, _>(
         CachedJsonRequest {
             client,
+            provider,
             cache,
             cache_key: &cache_key,
             url: &config_url,

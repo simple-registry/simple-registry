@@ -439,6 +439,7 @@ tokens are validated, so there is no provider type to select.
 | `server_ca_bundle`      | string | -          | PEM CA bundle trusted for this provider's HTTPS fetches |
 | `client_certificate_bundle` | string | -      | PEM client certificate presented on those fetches, requires `client_private_key` |
 | `client_private_key`    | string | -          | PEM key for `client_certificate_bundle`      |
+| `bearer_token_file`     | string | -          | File holding a bearer token sent on those fetches, read per fetch |
 | `required_claims`       | array  | `[]`       | Claims a token must carry; a missing or null one is rejected |
 | `jwks_refresh_interval` | u64    | `3600`     | JWKS refresh interval (seconds)              |
 | `required_audience`     | string | -          | Required audience claim                      |
@@ -465,6 +466,13 @@ Set `client_certificate_bundle` and `client_private_key` for an issuer that
 refuses an anonymous caller on those endpoints, a kube-apiserver serving
 discovery to authenticated users only being the usual case. Configuring one
 without the other fails startup rather than fetching anonymously.
+
+Set `bearer_token_file` instead for an issuer that authenticates callers with a
+token, such as the same kube-apiserver reached with angos's own projected
+service-account token. The file is read on every fetch, so a token the kubelet
+rotates in place stays current, and an unreadable path fails startup. The token
+is sent only to URLs on the issuer's own origin: `jwks_uri` comes out of the
+discovery document, and an issuer naming another host is not handed it.
 
 `required_claims` checks presence only. Predicates over claim *values* belong in
 the access policy, which sees the whole claim map.

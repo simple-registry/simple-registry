@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, fs, net::SocketAddr, sync::Arc};
 
 use hyper::http::request::Parts;
 use reqwest::Client;
@@ -281,6 +281,17 @@ fn build_oidc_client(name: &str, config: &oidc::Config) -> Result<Arc<Client>, E
             "both client_certificate_bundle and client_private_key are required for mTLS"
                 .to_string(),
         ));
+    }
+
+    // The token itself is read per fetch since it rotates; this only refuses an
+    // unreadable path at startup rather than at the first JWKS fetch.
+    if let Some(path) = config.bearer_token_file.as_deref()
+        && let Err(e) = fs::read(path)
+    {
+        return Err(initialization_error(format!(
+            "Failed to read bearer token file {}: {e}",
+            path.display()
+        )));
     }
 
     // No client-level timeout: each fetch carries a per-request timeout from the
@@ -567,6 +578,49 @@ mod tests {
 
         let Err(error) = Authenticator::build_oidc_validators(&config.auth, &cache) else {
             panic!("half a client identity must be refused rather than fetch anonymously");
+        };
+        assert!(
+            matches!(&error, Error::Initialization(msg) if msg.contains("auth.oidc.kube")),
+            "got: {error:?}"
+        );
+    }
+
+    /// A Kubernetes projected service-account token reaches the apiserver's
+    /// discovery endpoints without the operator signing a client certificate.
+    #[test]
+    fn a_provider_may_present_a_bearer_token() {
+        let material = tempdir().unwrap();
+        let token_path = material.path().join("token");
+        fs::write(&token_path, "service-account-token").unwrap();
+
+        let config = load_config(&format!(
+            r#"
+            [auth.oidc.kube]
+            issuer = "https://kubernetes.default.svc"
+            bearer_token_file = "{}"
+        "#,
+            token_path.display()
+        ));
+
+        let cache = cache::Config::Memory.to_backend().unwrap();
+
+        assert!(Authenticator::build_oidc_validators(&config.auth, &cache).is_ok());
+    }
+
+    #[test]
+    fn a_bearer_token_file_that_does_not_load_is_refused_at_startup() {
+        let config = load_config(
+            r#"
+            [auth.oidc.kube]
+            issuer = "https://kubernetes.default.svc"
+            bearer_token_file = "/nonexistent/token"
+        "#,
+        );
+
+        let cache = cache::Config::Memory.to_backend().unwrap();
+
+        let Err(error) = Authenticator::build_oidc_validators(&config.auth, &cache) else {
+            panic!("an unreadable bearer token file must be refused");
         };
         assert!(
             matches!(&error, Error::Initialization(msg) if msg.contains("auth.oidc.kube")),
