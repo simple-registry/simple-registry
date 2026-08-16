@@ -61,11 +61,10 @@ pub struct BlobStore {
     /// Object reads/writes and the upload lifecycle. On FS the backend prunes
     /// its own empty ancestor directories on delete, so callers don't.
     object: Arc<dyn ObjectStore>,
-    /// Presign backend, when the storage supports it (S3 only). Absent for FS,
-    /// where reads stream instead.
-    presign: Option<Arc<dyn PresignedStore>>,
-    /// Lifetime of a generated presigned download URL.
-    presign_ttl: Duration,
+    /// Presign backend paired with the lifetime of the URLs it signs, when the
+    /// storage supports presigning (S3 only). Absent for FS, where reads
+    /// stream instead.
+    presign: Option<(Arc<dyn PresignedStore>, Duration)>,
     /// Concurrent directory scans an upload-namespace walk keeps in flight.
     namespace_walk_concurrency: usize,
 }
@@ -78,24 +77,18 @@ impl Debug for BlobStore {
 
 impl BlobStore {
     /// Construct a blob store over `object`, optionally with a `presign`
-    /// backend for signed download URLs (S3; `None` on FS). Presigned URLs
-    /// default to [`DEFAULT_PRESIGN_TTL_SECS`]; override with
-    /// [`Self::with_presign_ttl`].
+    /// backend for signed download URLs and the lifetime those URLs carry
+    /// (S3; `None` on FS, which has no presign concept and so no TTL).
     #[must_use]
-    pub fn new(object: Arc<dyn ObjectStore>, presign: Option<Arc<dyn PresignedStore>>) -> Self {
+    pub fn new(
+        object: Arc<dyn ObjectStore>,
+        presign: Option<(Arc<dyn PresignedStore>, Duration)>,
+    ) -> Self {
         BlobStore {
             object,
             presign,
-            presign_ttl: Duration::from_secs(DEFAULT_PRESIGN_TTL_SECS),
             namespace_walk_concurrency: pagination::NAMESPACE_WALK_CONCURRENCY,
         }
-    }
-
-    /// Set the lifetime of generated presigned download URLs.
-    #[must_use]
-    pub fn with_presign_ttl(mut self, ttl: Duration) -> Self {
-        self.presign_ttl = ttl;
-        self
     }
 
     /// Set the concurrent directory-scan fan-out for upload-namespace walks.
@@ -281,13 +274,11 @@ impl BlobStore {
         digest: &Digest,
         content_type: Option<&str>,
     ) -> Result<Option<String>, Error> {
-        let Some(presign) = &self.presign else {
+        let Some((presign, ttl)) = &self.presign else {
             return Ok(None);
         };
         let path = path_builder::blob_path(digest);
-        let url = presign
-            .presign_get(&path, self.presign_ttl, content_type)
-            .await?;
+        let url = presign.presign_get(&path, *ttl, content_type).await?;
         Ok(Some(url))
     }
 }

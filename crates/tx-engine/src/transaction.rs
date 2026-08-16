@@ -196,18 +196,12 @@ pub struct Transaction {
     pub reads: Vec<Read>,
     /// Mutations to apply atomically.
     pub mutations: Vec<Mutation>,
-    /// Additional keys to serialise on that are neither read nor written.
-    ///
-    /// Used to close races against subsystems that touch a shared resource
-    /// outside the transaction's read/mutation set (e.g. `blob-data:{digest}`
-    /// while a manifest delete's link transaction is in flight).
-    pub coarse_lock_keys: Vec<String>,
 }
 
 /// Collect an iterator of lock keys into a sorted, de-duplicated set.
 ///
 /// This is the single authoritative "shape" for every lock-set derivation
-/// (reads ∪ mutation keys ∪ coarse lock keys). Each caller builds its own key
+/// (reads ∪ mutation keys). Each caller builds its own key
 /// iterator (the families differ: [`Transaction`]/[`Read`]/[`Mutation`] here,
 /// the `IntentRecord`/`ReadRecord`/`MutationRecord` family in recovery), then
 /// passes it here so the result stays byte-identical across call sites.
@@ -227,19 +221,15 @@ impl Transaction {
     }
 
     /// Collect the full set of keys that must be locked for this transaction
-    /// (reads ∪ mutations ∪ coarse lock keys), sorted and de-duplicated.
+    /// (reads ∪ mutations), sorted and de-duplicated.
     #[must_use]
     pub fn lock_set(&self) -> Vec<String> {
         lock_key_set(
-            self.reads
-                .iter()
-                .map(|r| r.key.clone())
-                .chain(
-                    self.mutations
-                        .iter()
-                        .flat_map(|m| m.all_keys().map(ToOwned::to_owned)),
-                )
-                .chain(self.coarse_lock_keys.iter().cloned()),
+            self.reads.iter().map(|r| r.key.clone()).chain(
+                self.mutations
+                    .iter()
+                    .flat_map(|m| m.all_keys().map(ToOwned::to_owned)),
+            ),
         )
     }
 }
@@ -251,7 +241,6 @@ impl Transaction {
 pub struct TransactionBuilder {
     reads: Vec<Read>,
     mutations: Vec<Mutation>,
-    coarse_lock_keys: Vec<String>,
 }
 
 impl TransactionBuilder {
@@ -286,24 +275,12 @@ impl TransactionBuilder {
         self
     }
 
-    /// Add a coarse lock key.
-    ///
-    /// The key is folded into the transaction's lock set but is otherwise
-    /// not read or written. Use for serialising against subsystems that
-    /// touch a shared resource outside the transaction's working set.
-    #[must_use]
-    pub fn coarse_lock(mut self, key: impl Into<String>) -> Self {
-        self.coarse_lock_keys.push(key.into());
-        self
-    }
-
     /// Consume the builder and produce the [`Transaction`].
     #[must_use]
     pub fn build(self) -> Transaction {
         Transaction {
             reads: self.reads,
             mutations: self.mutations,
-            coarse_lock_keys: self.coarse_lock_keys,
         }
     }
 }

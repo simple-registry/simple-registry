@@ -115,7 +115,7 @@ impl MetadataStore {
     /// Acquire the coarse `blob-data:{digest}` lock, which
     /// serialises blob-data creation (upload completion) against reclamation
     /// (unreferenced delete) and against concurrent manifest pushes, which
-    /// declare the same coarse lock on their link transactions.
+    /// take the same lock around their link transactions.
     ///
     /// Lives on the METADATA engine, the one domain every blob-data
     /// participant (manifest push, upload, scrub) agrees on, even though the

@@ -21,7 +21,7 @@ use angos_storage::{MemoryObjectStore, ObjectStore};
 
 use angos_tx_engine::{
     error::Error,
-    executor::{DEFAULT_RETRY_BUDGET, Outcome, execute_with_retry},
+    executor::{DEFAULT_RETRY_BUDGET, execute_with_retry},
     lock::LockStrategy,
     store::Store,
     transaction::{Mutation, Transaction},
@@ -85,7 +85,7 @@ async fn caller_session_released_after_successful_execute_with_retry() {
         "caller key should be held by the session before release"
     );
 
-    let result: Result<Outcome, Error> = execute_with_retry(
+    let result: Result<(), Error> = execute_with_retry(
         store.executor().as_ref(),
         || async { Ok(simple_tx()) },
         DEFAULT_RETRY_BUDGET,
@@ -124,7 +124,7 @@ async fn caller_session_survives_conflict_exhaust() {
         .await
         .expect("acquire caller session");
 
-    let result: Result<Outcome, Error> = execute_with_retry(
+    let result: Result<(), Error> = execute_with_retry(
         store.executor().as_ref(),
         || async {
             Ok(Transaction::builder()
@@ -174,7 +174,7 @@ async fn intent_log_reaped_before_execute_with_retry_returns() {
         .await
         .expect("acquire caller session");
 
-    let result: Result<Outcome, Error> = execute_with_retry(
+    let result: Result<(), Error> = execute_with_retry(
         store.executor().as_ref(),
         || async { Ok(simple_tx()) },
         DEFAULT_RETRY_BUDGET,
@@ -202,7 +202,7 @@ async fn executor_execute_never_releases_caller_session() {
         .await
         .expect("acquire caller session");
 
-    let result: Result<Outcome, Error> = store.execute(simple_tx()).await;
+    let result: Result<(), Error> = store.execute(simple_tx()).await;
     assert!(result.is_ok(), "execute should commit: {result:?}");
 
     assert!(

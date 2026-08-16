@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, str::FromStr};
 use hyper::{Method, Uri};
 use serde::{Deserialize, de::DeserializeOwned};
 
-use angos_oci::path::API_PREFIX;
+use angos_oci::path::{API_PREFIX, TAGS_LIST, UPLOADS};
 use angos_oci::server;
 use angos_oci::{Algorithm, Digest, MediaType, Namespace, Reference, Tag, UploadSessionId};
 
@@ -307,7 +307,7 @@ fn try_parse_upload(method: &Method, path: &str, params: Option<&str>) -> Option
         });
     }
 
-    let (namespace_str, session_id) = server::split_upload_session_path(path)?;
+    let (namespace_str, session_id) = path.rsplit_once(UPLOADS)?;
     let namespace = Namespace::new(namespace_str).ok()?;
     let session_id = UploadSessionId::from_str(session_id).ok()?;
 
@@ -450,7 +450,7 @@ fn try_find_referrers(method: &Method, path: &str, params: Option<&str>) -> Opti
 }
 
 fn try_find_tags(method: &Method, path: &str, params: Option<&str>) -> Option<Action> {
-    if let Some(namespace_str) = server::split_tags_list_path(path)
+    if let Some(namespace_str) = path.strip_suffix(TAGS_LIST)
         && *method == Method::GET
     {
         let namespace = Namespace::new(namespace_str).ok()?;

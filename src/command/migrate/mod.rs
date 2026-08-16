@@ -145,7 +145,7 @@ fn needs_backfill(key: &str, metadata: &LinkMetadata) -> bool {
 /// the key's lock on a lock-coordinated one, instead of being silently reverted
 /// to its pre-push target.
 async fn rewrite_link(store: &Store, blob_store: &BlobStore, key: &str) -> Result<Plan, Error> {
-    let (_, plan) = store
+    let plan = store
         .update_with_payload(
             &[key.to_string()],
             |bodies| async move {

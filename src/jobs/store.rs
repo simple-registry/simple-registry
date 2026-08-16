@@ -875,7 +875,7 @@ impl JobStore {
                     tx.mutations.push(delete);
                 }
                 match self.store.execute(tx).await {
-                    Ok(_) | Err(TxError::Conflict | TxError::Precondition) => Ok(false),
+                    Ok(()) | Err(TxError::Conflict | TxError::Precondition) => Ok(false),
                     Err(e) => {
                         // Surface the transient failure instead of swallowing it
                         // as `false`: the un-retired index would otherwise make
@@ -1012,7 +1012,7 @@ impl JobStore {
             return true;
         }
         match self.store.execute(tx).await {
-            Ok(_) | Err(TxError::Conflict | TxError::Precondition) => true,
+            Ok(()) | Err(TxError::Conflict | TxError::Precondition) => true,
             Err(e) => {
                 warn!(%lock_key, error = %tx_error_to_job(e), "Failed to retire dedup index at claim");
                 false
@@ -1080,7 +1080,7 @@ impl JobStore {
         // A `Conflict` or `Precondition` here means another replica won the
         // race: treat as a dedup hit, not an error.
         match self.store.execute(tx).await {
-            Ok(_) => {
+            Ok(()) => {
                 metrics_provider()
                     .job_queue_enqueued_total
                     .with_label_values(&[envelope.queue.as_str(), "miss"])
@@ -1143,7 +1143,7 @@ impl JobStore {
         let path = job_pending_path(queue.as_str(), storage_key);
         match self.store.object_store().delete(&path).await {
             Ok(()) => {
-                warn!("job queue: discarded unreadable pending job '{storage_key}': {reason}")
+                warn!("job queue: discarded unreadable pending job '{storage_key}': {reason}");
             }
             Err(e) => {
                 warn!(
@@ -1310,7 +1310,7 @@ impl JobStore {
         }
 
         match self.store.execute(tx).await {
-            Ok(_) => {
+            Ok(()) => {
                 session.release().await;
                 Ok(CompleteOutcome::Completed)
             }
@@ -1545,7 +1545,7 @@ impl JobStore {
         // is gone); either way the job is back in flight, so both join the
         // success arm.
         match self.store.execute(tx).await {
-            Ok(_) | Err(TxError::Conflict | TxError::Precondition) => Ok(()),
+            Ok(()) | Err(TxError::Conflict | TxError::Precondition) => Ok(()),
             Err(e) => Err(tx_error_to_job(e)),
         }
     }
@@ -1576,11 +1576,7 @@ impl JobStore {
                         expected,
                     })
                     .build();
-                self.store
-                    .execute(tx)
-                    .await
-                    .map(|_| ())
-                    .map_err(tx_error_to_job)
+                self.store.execute(tx).await.map_err(tx_error_to_job)
             }
             JobState::Pending => self.delete_pending(queue, storage_key).await,
         }
@@ -1618,11 +1614,7 @@ impl JobStore {
                 .await?;
         }
 
-        self.store
-            .execute(tx)
-            .await
-            .map(|_| ())
-            .map_err(tx_error_to_job)
+        self.store.execute(tx).await.map_err(tx_error_to_job)
     }
 }
 

@@ -67,19 +67,11 @@ impl fmt::Debug for BodyJanitor {
 /// Builder for [`BodyJanitor`].
 pub struct BodyJanitorBuilder {
     store: Arc<dyn ObjectStore>,
-    interval: Option<Duration>,
     orphan_age: Option<Duration>,
     cancellation: Option<CancellationToken>,
 }
 
 impl BodyJanitorBuilder {
-    /// Set the sweep interval. Defaults to 5 minutes.
-    #[must_use]
-    pub fn interval(mut self, interval: Duration) -> Self {
-        self.interval = Some(interval);
-        self
-    }
-
     /// Set the minimum age for orphan body prefixes. Defaults to 1 hour.
     #[must_use]
     pub fn orphan_age(mut self, age: Duration) -> Self {
@@ -99,7 +91,7 @@ impl BodyJanitorBuilder {
     pub fn build(self) -> BodyJanitor {
         BodyJanitor {
             store: self.store,
-            interval: self.interval.unwrap_or(Duration::from_mins(5)),
+            interval: Duration::from_mins(5),
             orphan_age: self
                 .orphan_age
                 .unwrap_or(Duration::from_secs(DEFAULT_ORPHAN_AGE_SECS)),
@@ -117,7 +109,6 @@ impl BodyJanitor {
     pub fn builder(store: Arc<dyn ObjectStore>) -> BodyJanitorBuilder {
         BodyJanitorBuilder {
             store,
-            interval: None,
             orphan_age: None,
             cancellation: None,
         }
@@ -358,19 +349,11 @@ impl fmt::Debug for LockJanitor {
 /// Builder for [`LockJanitor`].
 pub struct LockJanitorBuilder {
     store: Arc<dyn ConditionalStore>,
-    interval: Option<Duration>,
     orphan_age: Option<Duration>,
     cancellation: Option<CancellationToken>,
 }
 
 impl LockJanitorBuilder {
-    /// Set the sweep interval. Defaults to 5 minutes.
-    #[must_use]
-    pub fn interval(mut self, interval: Duration) -> Self {
-        self.interval = Some(interval);
-        self
-    }
-
     /// Set the grace period applied on top of each lock's own TTL. Defaults to
     /// 5 minutes.
     #[must_use]
@@ -391,7 +374,7 @@ impl LockJanitorBuilder {
     pub fn build(self) -> LockJanitor {
         LockJanitor {
             store: self.store,
-            interval: self.interval.unwrap_or(Duration::from_mins(5)),
+            interval: Duration::from_mins(5),
             orphan_age: self
                 .orphan_age
                 .unwrap_or(Duration::from_secs(DEFAULT_LOCK_ORPHAN_AGE_SECS)),
@@ -409,7 +392,6 @@ impl LockJanitor {
     pub fn builder(store: Arc<dyn ConditionalStore>) -> LockJanitorBuilder {
         LockJanitorBuilder {
             store,
-            interval: None,
             orphan_age: None,
             cancellation: None,
         }

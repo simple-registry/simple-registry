@@ -339,7 +339,6 @@ async fn cas_recovery_stops_on_true_contention() {
 #[tokio::test]
 async fn cas_executor_stale_stamp_mid_apply_continues_and_commits() {
     let store = Arc::new(MemoryObjectStore::new());
-    let lock = test_util::memory_lock();
 
     // mutation[0]: unconditional Put, will succeed normally.
     // mutation[1]: conditional Put with a stale etag, will return
@@ -358,7 +357,7 @@ async fn cas_executor_stale_stamp_mid_apply_continues_and_commits() {
 
     let stale_etag = Etag::new("\"stale-etag-never-matches\"");
 
-    let executor = test_util::cas_executor(store.clone(), lock);
+    let executor = test_util::cas_executor(store.clone());
 
     let tx = Transaction::builder()
         .mutation(Mutation::Put {
@@ -395,7 +394,6 @@ async fn cas_executor_stale_stamp_mid_apply_continues_and_commits() {
 #[tokio::test]
 async fn cas_executor_true_contention_mid_apply_leaves_intent() {
     let store = Arc::new(MemoryObjectStore::new());
-    let lock = test_util::memory_lock();
 
     // Pre-land mutation[1]'s destination with a *different* body from what
     // the transaction will stage. This is true contention.
@@ -408,7 +406,7 @@ async fn cas_executor_true_contention_mid_apply_leaves_intent() {
     let stale_etag = Etag::new("\"stale-etag-never-matches\"");
     let our_staged_body = Bytes::from_static(b"our-staged-body");
 
-    let executor = test_util::cas_executor(store.clone(), lock);
+    let executor = test_util::cas_executor(store.clone());
 
     let tx = Transaction::builder()
         .mutation(Mutation::Put {

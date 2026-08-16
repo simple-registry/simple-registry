@@ -37,7 +37,7 @@ use crate::lock::storage::redis::RedisLockStorage;
 use crate::{
     error::Error,
     executor::{
-        CAS_RETRY_BACKOFF, DEFAULT_RETRY_BUDGET, Outcome, TransactionExecutor, cas::CasExecutor,
+        CAS_RETRY_BACKOFF, DEFAULT_RETRY_BUDGET, TransactionExecutor, cas::CasExecutor,
         locked::LockedExecutor,
     },
     janitor::{BodyJanitor, LockJanitor},
@@ -155,7 +155,7 @@ impl Store {
         // used on the healthy path.
         if let Some(cs) = conditional {
             let executor: Arc<dyn TransactionExecutor> =
-                Arc::new(CasExecutor::builder(cs.clone(), lock.clone()).build());
+                Arc::new(CasExecutor::builder(cs.clone()).build());
             info!(
                 executor = "cas",
                 lock_backend, "transactional engine executor selected"
@@ -290,7 +290,7 @@ impl Store {
     ///
     /// Propagates any [`Error`] from the executor (`Conflict`, `Precondition`,
     /// `Storage`, etc.).
-    pub async fn execute(&self, tx: Transaction) -> Result<Outcome, Error> {
+    pub async fn execute(&self, tx: Transaction) -> Result<(), Error> {
         self.executor.execute(tx).await
     }
 
@@ -348,22 +348,20 @@ impl Store {
         keys: &[String],
         mut map: F,
         max_attempts: u32,
-    ) -> Result<Outcome, Error>
+    ) -> Result<(), Error>
     where
         F: FnMut(Vec<Option<Bytes>>) -> Fut + Send,
         Fut: Future<Output = Result<Vec<Mutation>, Error>> + Send,
     {
-        let (outcome, ()) = self
-            .update_with_payload(
-                keys,
-                move |bodies| {
-                    let fut = map(bodies);
-                    async move { fut.await.map(|m| (m, ())) }
-                },
-                max_attempts,
-            )
-            .await?;
-        Ok(outcome)
+        self.update_with_payload(
+            keys,
+            move |bodies| {
+                let fut = map(bodies);
+                async move { fut.await.map(|m| (m, ())) }
+            },
+            max_attempts,
+        )
+        .await
     }
 
     /// Like [`Store::update`], but `map` also threads a per-attempt payload
@@ -383,7 +381,7 @@ impl Store {
         keys: &[String],
         mut map: F,
         max_attempts: u32,
-    ) -> Result<(Outcome, T), Error>
+    ) -> Result<T, Error>
     where
         F: FnMut(Vec<Option<Bytes>>) -> Fut + Send,
         Fut: Future<Output = Result<(Vec<Mutation>, T), Error>> + Send,
@@ -407,7 +405,7 @@ impl Store {
                 builder = builder.mutation(mutation);
             }
             match self.executor.execute(builder.build()).await {
-                Ok(outcome) => return Ok((outcome, payload)),
+                Ok(()) => return Ok(payload),
                 Err(e) if e.is_retriable() && attempts < max_attempts => {
                     debug!(attempts, max_attempts, "Transaction conflict, retrying");
                     sleep(CAS_RETRY_BACKOFF.delay(attempts)).await;
@@ -466,7 +464,7 @@ impl Store {
         F: Fn(Bytes) -> Result<(Bytes, T), Error> + Send,
         T: Send,
     {
-        let (_outcome, payload) = self
+        let payload = self
             .update_with_payload(
                 &[key.to_string()],
                 move |bodies| {
@@ -731,7 +729,7 @@ mod tests {
         let backend = Arc::new(MemoryObjectStore::new());
         let store = store_over(backend);
 
-        let (_outcome, payload) = store
+        let payload = store
             .update_with_payload(
                 &["k".to_string()],
                 |_bodies| async {

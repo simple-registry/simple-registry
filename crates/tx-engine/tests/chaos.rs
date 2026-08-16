@@ -567,8 +567,7 @@ async fn progress_vector_reflects_apply_state_cas() {
     {
         let inner = Arc::new(MemoryObjectStore::new());
         let crashing = crashing_store_permanent(inner.clone(), 10);
-        let lock = test_util::memory_lock();
-        let executor = test_util::cas_executor(crashing.clone(), lock);
+        let executor = test_util::cas_executor(crashing.clone());
 
         let tx = Transaction::builder()
             .mutation(Mutation::Put {
@@ -604,8 +603,7 @@ async fn progress_vector_reflects_apply_state_cas() {
     {
         let inner = Arc::new(MemoryObjectStore::new());
         let crashing = crashing_store_permanent(inner.clone(), 6);
-        let lock = test_util::memory_lock();
-        let executor = test_util::cas_executor(crashing.clone(), lock);
+        let executor = test_util::cas_executor(crashing.clone());
 
         let tx = Transaction::builder()
             .mutation(Mutation::Put {

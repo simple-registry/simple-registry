@@ -217,6 +217,5 @@ async fn flush_one_access_time(
             DEFAULT_RETRY_BUDGET,
         )
         .await
-        .map(|_| ())
         .map_err(Error::from)
 }
