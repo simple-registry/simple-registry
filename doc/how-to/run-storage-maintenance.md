@@ -36,7 +36,7 @@ Before applying a cross-key repair, scrub confirms the inconsistency is settled 
 | Withheld references | Left alone: a reference the namespace holds neither a link nor a grant for is never re-derived, so scrub cannot grant read access a permissive push refused |
 | Dangling references | Removes tags and revisions whose manifest blob is missing, and orphan referrer entries |
 | Invalid names | Deletes tag, namespace, and upload directories whose names violate the OCI grammar (nothing can address them) |
-| Corrupt content | Deletes links, job records, and index shards whose content does not parse |
+| Corrupt content | Deletes links, job records, and index shards whose content does not parse. A shard is proof the namespace held entries there, so its references are re-derived from the manifests rather than lost with it |
 | Orphan blobs | Reclaims blobs with no index references, re-checked under the blob-data lock at apply time |
 | Unrecognized keys | Moves them to `_lost_and_found/` in the same store, preserving their bytes |
 | Engine housekeeping | Runs the transaction engine's own janitor sweeps: orphaned `.tx-bodies/` staging and expired `.tx-locks/` objects (age-gated by engine thresholds; skipped in dry-run) |

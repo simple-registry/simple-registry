@@ -11,16 +11,18 @@ use crate::store::{GateStore, sha256_hex};
 pub const GATE_NS: &str = "conformance/gate";
 pub const GATE2_NS: &str = "conformance/gate2";
 pub const GATE_TAG: &str = "gate";
-/// `GATE_NS` percent-encoded the way blob-index shard filenames encode it.
+/// The two namespaces percent-encoded the way blob-index shard filenames
+/// encode them.
 const GATE_NS_ENCODED: &str = "conformance%2Fgate";
+const GATE2_NS_ENCODED: &str = "conformance%2Fgate2";
 
 /// Counters the first scrub run over the seeded store must report. Repairs
-/// are a floor, not a pin: the gate2 back-link heal lands on run 2 because
-/// its revision validation aborts at the corrupt shard on run 1.
+/// are a floor, not a pin: a repair that cascades out of another one can land
+/// on a later run.
 pub const EXPECTED_QUARANTINED: u64 = 5;
 pub const EXPECTED_CORRUPT: u64 = 7;
-pub const EXPECTED_FAILURES_RUN1: u64 = 1;
-pub const EXPECTED_MIN_REPAIRS: u64 = 9;
+pub const EXPECTED_FAILURES_RUN1: u64 = 0;
+pub const EXPECTED_MIN_REPAIRS: u64 = 11;
 
 /// Storage keys of the seeded config-orphan jobs: structurally valid records
 /// whose downstream / pull-through repository is not configured. Scrub must
@@ -66,22 +68,14 @@ pub struct Probes {
 }
 
 impl Probes {
-    /// Links a repair run must have recreated from the intact manifest.
+    /// Links a repair run must have recreated from the intact manifest. A
+    /// layer or config reference has no link object, so its repair is the
+    /// blob-index entry ([`Self::gate2_config_shard`]) instead.
     pub fn recreated_links(&self) -> Vec<String> {
-        vec![
-            format!(
-                "v2/repositories/{GATE_NS}/_layers/sha256/{}/link",
-                self.gate_layer_digest
-            ),
-            format!(
-                "v2/repositories/{GATE_NS}/_config/sha256/{}/link",
-                self.gate_config_digest
-            ),
-            format!(
-                "v2/repositories/{GATE_NS}/_manifests/revisions/sha256/{}/link",
-                self.gate_manifest_digest
-            ),
-        ]
+        vec![format!(
+            "v2/repositories/{GATE_NS}/_manifests/revisions/sha256/{}/link",
+            self.gate_manifest_digest
+        )]
     }
 
     /// Every seeded artifact that must be gone once the store converges.
@@ -113,6 +107,7 @@ impl Probes {
                 "v2/repositories/{GATE_NS}/_uploads/11111111-0000-4000-8000-000000000000/startedat"
             ),
         ];
+        gone.push(self.superseded_layer_link());
         gone.extend(self.aliens().into_iter().map(|alien| alien.key));
         gone
     }
@@ -150,12 +145,24 @@ impl Probes {
         ]
     }
 
-    /// The gate2 config link whose `referenced_by` set was damaged.
-    pub fn gate2_config_link(&self) -> String {
+    /// The gate2 shard of the shared config blob, whose entry set was damaged:
+    /// the real revision's entry missing and a stale one in its place.
+    pub fn gate2_config_shard(&self) -> String {
+        shard_key(&self.gate_config_digest, GATE2_NS_ENCODED)
+    }
+
+    /// A layer link in the pre-entry layout, which scrub migrates then
+    /// reclaims.
+    pub fn superseded_layer_link(&self) -> String {
         format!(
-            "v2/repositories/{GATE2_NS}/_config/sha256/{}/link",
-            self.gate_config_digest
+            "v2/repositories/{GATE_NS}/_layers/sha256/{}/link",
+            self.gate_layer_digest
         )
+    }
+
+    /// The shard the superseded link migrates into.
+    pub fn gate_layer_shard(&self) -> String {
+        shard_key(&self.gate_layer_digest, GATE_NS_ENCODED)
     }
 
     /// Canonical data key of the gate image's layer, the audit-teeth target.
@@ -170,12 +177,12 @@ impl Probes {
 
     /// The grant-only blob's per-namespace index shard.
     pub fn grant_only_shard(&self) -> String {
-        shard_key(&self.grant_only_digest)
+        shard_key(&self.grant_only_digest, GATE_NS_ENCODED)
     }
 
     /// The byteless blob's surviving index shard.
     pub fn byteless_shard(&self) -> String {
-        shard_key(&self.byteless_digest)
+        shard_key(&self.byteless_digest, GATE_NS_ENCODED)
     }
 
     /// Key prefixes a repair run may legitimately touch. A snapshot-diff line
@@ -270,10 +277,23 @@ pub async fn seed_defects(store: &GateStore, registry: &RegistryClient) -> GateR
         probes.decoy_upload_path
     );
 
-    // Repair defects: deleted derivable links (layer, config, revision).
+    // Repair defect: the deleted revision link, derivable from its tag.
     for link in probes.recreated_links() {
         store.delete(&link).await?;
     }
+
+    // A layer link in the layout that predates the blob-index entry: the live
+    // referrer must migrate to an entry and the dead one must not, after which
+    // the object itself is reclaimed.
+    store
+        .put(
+            &probes.superseded_layer_link(),
+            format!(
+                "{{\"target\":\"sha256:{0}\",\"created_at\":null,\"referenced_by\":[\"sha256:{1}\",\"sha256:{2}\"]}}",
+                probes.gate_layer_digest, probes.gate_manifest_digest, probes.missing_digest
+            ),
+        )
+        .await?;
 
     // A tag whose target blob does not exist, and a tag directory whose name
     // fails the OCI tag grammar.
@@ -334,24 +354,21 @@ pub async fn seed_defects(store: &GateStore, registry: &RegistryClient) -> GateR
         )
         .await?;
 
-    // Back-link damage on gate2's config link: a stale referrer entry and the
-    // real revision's entry missing.
+    // Entry damage on gate2's shard of the shared config blob: a stale entry
+    // and the real revision's entry missing. The ownership grant stays so the
+    // shard does not empty, which is what keeps the reference repairable.
     store
         .put(
-            &probes.gate2_config_link(),
+            &probes.gate2_config_shard(),
             format!(
-                "{{\"target\":\"sha256:{0}\",\"created_at\":null,\"referenced_by\":[\"sha256:{1}\"]}}",
+                "[{{\"Blob\":\"sha256:{0}\"}},{{\"Digest\":\"sha256:{1}\"}}]",
                 probes.gate_config_digest, probes.missing_digest
             ),
         )
         .await?;
 
     // Corrupt-content defects, deleted outright by the walk.
-    let gate2_shard = format!(
-        "v2/blobs/sha256/{}/{}/refs/conformance%2Fgate2.json",
-        &probes.gate2_layer_digest[..2],
-        probes.gate2_layer_digest
-    );
+    let gate2_shard = shard_key(&probes.gate2_layer_digest, GATE2_NS_ENCODED);
     let corrupt: [(String, &str); 7] = [
         (
             format!("v2/repositories/{GATE_NS}/_manifests/tags/garbled/current/link"),
@@ -433,7 +450,7 @@ pub async fn seed_defects(store: &GateStore, registry: &RegistryClient) -> GateR
         .put(ORPHAN_FAILED_JOB_KEY, serde_json::to_vec(&failed)?)
         .await?;
 
-    let seeded = if multipart_seeded { 27 } else { 26 };
+    let seeded = if multipart_seeded { 26 } else { 25 };
     println!("seeded {seeded} defects across 4 classes plus 2 decoys");
     Ok(probes)
 }
@@ -443,10 +460,10 @@ fn blob_data_key(digest: &str) -> String {
     format!("v2/blobs/sha256/{}/{digest}/data", &digest[..2])
 }
 
-/// The `GATE_NS` blob-index shard key of a blob digest.
-fn shard_key(digest: &str) -> String {
+/// The blob-index shard key of a blob digest for one encoded namespace.
+fn shard_key(digest: &str, namespace_encoded: &str) -> String {
     format!(
-        "v2/blobs/sha256/{}/{digest}/refs/{GATE_NS_ENCODED}.json",
+        "v2/blobs/sha256/{}/{digest}/refs/{namespace_encoded}.json",
         &digest[..2]
     )
 }

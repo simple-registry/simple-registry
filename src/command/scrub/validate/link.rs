@@ -4,6 +4,8 @@
 //! clearing), plus the migration of a link object superseded by the
 //! blob-index entry naming its referrer.
 
+use std::collections::HashSet;
+
 use tracing::{debug, warn};
 
 use angos_oci::{Digest, Manifest, Namespace, Tag};
@@ -47,9 +49,9 @@ impl Validator {
                 self.validate_referrer_link(key, &namespace, &subject, &referrer)
                     .await
             }
-            // The ownership grant is still written and is its own record, so
-            // it is neither migrated nor reclaimed. It is still read, because
-            // that is what deletes one whose content no longer parses.
+            // Ownership lives in the blob-index shard, so this object is a
+            // legacy one nothing writes and nothing reads. It is still read
+            // here, because that is what deletes one that no longer parses.
             ParsedLink::Blob(_) => self.read_link_body(key).await.map(|_| ()),
             ParsedLink::Layer(digest) | ParsedLink::Config(digest) => {
                 self.migrate_superseded_link(key, &namespace, &digest).await
@@ -190,27 +192,53 @@ impl Validator {
     /// guessing in favour of access.
     ///
     /// A tracked reference has only the entry now, the link object having gone
-    /// with the layout change, so a lost shard is not recoverable from a
-    /// manifest body: an owned reference and one a permissive push withheld
-    /// look the same, and the conservative reading wins. Re-pushing the
-    /// manifest restores it.
+    /// with the layout change, so a shard that was never written is not
+    /// recoverable from a manifest body: an owned reference and one a
+    /// permissive push withheld look the same, and the conservative reading
+    /// wins. Re-pushing the manifest restores it. Unreadable shard content is
+    /// the one exception, being itself proof the namespace held entries here.
     async fn holds_reference(
         &self,
         namespace: &Namespace,
         target: &Digest,
         link: &LinkKind,
     ) -> Result<bool, Error> {
-        match self
-            .metadata_store
-            .read_blob_index_namespace(namespace, target)
-            .await
-        {
-            Ok(links) if !links.is_empty() => return Ok(true),
-            Ok(_) | Err(RegistryError::NotFound) => {}
-            Err(e) => return Err(e.into()),
+        let Some(links) = self.shard_entries(namespace, target).await? else {
+            return Ok(true);
+        };
+        if !links.is_empty() {
+            return Ok(true);
         }
         let link_key = path_builder::link_path(link, namespace);
         Ok(self.read_link_body(&link_key).await?.is_some())
+    }
+
+    /// The namespace's blob-index entries for `blob`, empty when it has no
+    /// shard. `None` when the shard held unreadable content, which is deleted
+    /// here: a grant cannot merge onto content that does not parse, and the
+    /// walk would otherwise reclaim the bytes before the next run re-derives
+    /// the reference the content witnessed.
+    async fn shard_entries(
+        &self,
+        namespace: &Namespace,
+        blob: &Digest,
+    ) -> Result<Option<HashSet<LinkKind>>, Error> {
+        match self
+            .metadata_store
+            .read_blob_index_namespace(namespace, blob)
+            .await
+        {
+            Ok(links) => Ok(Some(links)),
+            Err(RegistryError::NotFound) => Ok(Some(HashSet::new())),
+            Err(RegistryError::Serde(e)) => {
+                warn!("scrub: blob-index shard for '{namespace}@{blob}' does not parse ({e})");
+                self.hold_blob_gc(blob);
+                let key = path_builder::blob_index_shard_path(blob, namespace);
+                self.delete_corrupt(WalkedStore::Metadata, &key).await?;
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// A referrer link is live only while its referrer manifest is a current
@@ -354,14 +382,10 @@ impl Validator {
         blob: &Digest,
         link: &LinkKind,
     ) -> Result<(), Error> {
-        match self
-            .metadata_store
-            .read_blob_index_namespace(namespace, blob)
-            .await
+        if let Some(links) = self.shard_entries(namespace, blob).await?
+            && links.contains(link)
         {
-            Ok(links) if links.contains(link) => return Ok(()),
-            Ok(_) | Err(RegistryError::NotFound) => {}
-            Err(e) => return Err(e.into()),
+            return Ok(());
         }
         match self.blob_store.size(blob).await {
             Ok(_) => {}

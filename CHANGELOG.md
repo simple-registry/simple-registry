@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - An operation whose coarse blob-data lock expires now aborts instead of running on beside the peer that took the key, so a blob cannot be reclaimed while a concurrent push is still recording its reference.
+- `angos scrub` re-derives the references a blob-index shard held when its content no longer parses, instead of deleting the shard and letting the next run reclaim the blob as an orphan.
 
 ## 1.5.0
 

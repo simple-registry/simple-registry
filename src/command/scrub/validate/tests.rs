@@ -501,28 +501,26 @@ async fn stale_shard_entry_is_removed() {
 }
 
 #[tokio::test]
-async fn a_corrupt_shard_is_deleted_and_its_tracked_references_are_not_guessed() {
+async fn a_missing_shard_leaves_its_tracked_references_unguessed() {
     for_each_backend(async |test_case| {
-        let namespace = &Namespace::new("test-repo/corrupt-shard").unwrap();
-        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let namespace = &Namespace::new("test-repo/missing-shard").unwrap();
+        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
         let shard_key = path_builder::blob_index_shard_path(&layer_digest, namespace);
         metadata_store
             .store()
             .object_store()
-            .put(&shard_key, Bytes::from_static(b"not a shard"))
+            .delete(&shard_key)
             .await
             .unwrap();
 
         scrub_apply(test_case).await;
         scrub_apply(test_case).await;
 
-        // The entry was the only record that this namespace held the layer, so
-        // losing it is not recoverable from the manifest body: an owned
-        // reference and one a permissive push withheld read the same, and
-        // scrub declines to mint access. Re-pushing restores it.
-        let _ = manifest_digest;
+        // A shard that was never written and one lost read the same, as do an
+        // owned reference and one a permissive push withheld, so scrub
+        // declines to mint access from a manifest body. Re-pushing restores it.
         assert!(
             metadata_store
                 .read_blob_index_namespace(namespace, &layer_digest)
@@ -1052,6 +1050,40 @@ async fn a_corrupt_link_of_any_kind_is_deleted() {
                 "a corrupt {link} must be deleted"
             );
         }
+    })
+    .await;
+}
+
+/// A shard whose content no longer parses is itself proof the namespace held
+/// entries there, so it is deleted and its references re-derived. Treating it
+/// as absent instead leaves the layer unpullable and its bytes reclaimed as an
+/// orphan, the manifest body alone not being allowed to grant a reference.
+#[tokio::test]
+async fn a_corrupt_shard_is_rebuilt_from_the_manifest() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/corrupt-shard").unwrap();
+        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        metadata_store
+            .store()
+            .object_store()
+            .put(
+                &path_builder::blob_index_shard_path(&layer_digest, namespace),
+                Bytes::from_static(b"not a shard"),
+            )
+            .await
+            .expect("raw shard write");
+
+        scrub_apply(test_case).await;
+
+        let links = metadata_store
+            .read_blob_index_namespace(namespace, &layer_digest)
+            .await
+            .expect("the layer reference must survive a corrupt shard");
+        assert!(
+            links.contains(&LinkKind::Digest(manifest_digest)),
+            "the manifest's entry must be re-derived, got: {links:?}"
+        );
     })
     .await;
 }

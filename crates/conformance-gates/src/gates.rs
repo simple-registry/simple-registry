@@ -215,17 +215,31 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
             format!("quarantined bytes wrong for {}", alien.key)
         })?;
     }
-    let backlink = ctx
+    let shard = ctx
         .store
-        .body(&probes.gate2_config_link())
+        .body(&probes.gate2_config_shard())
         .await?
-        .ok_or_else(|| fail("gate2 config link vanished during repair"))?;
-    let backlink = String::from_utf8_lossy(&backlink);
-    ensure(backlink.contains(&probes.gate2_manifest_digest), || {
-        "missing back-link was not re-added".to_string()
+        .ok_or_else(|| fail("gate2 config shard vanished during repair"))?;
+    let shard = String::from_utf8_lossy(&shard);
+    ensure(shard.contains(&probes.gate2_manifest_digest), || {
+        "missing blob-index entry was not re-derived".to_string()
     })?;
-    ensure(!backlink.contains(&probes.missing_digest), || {
-        "stale back-link was not pruned".to_string()
+    ensure(!shard.contains(&probes.missing_digest), || {
+        "stale blob-index entry was not pruned".to_string()
+    })?;
+
+    // The superseded link migrated only the referrer that is still a revision.
+    let migrated = ctx
+        .store
+        .body(&probes.gate_layer_shard())
+        .await?
+        .ok_or_else(|| fail("gate layer shard vanished during repair"))?;
+    let migrated = String::from_utf8_lossy(&migrated);
+    ensure(migrated.contains(&probes.gate_manifest_digest), || {
+        "the live referrer was not migrated to an entry".to_string()
+    })?;
+    ensure(!migrated.contains(&probes.missing_digest), || {
+        "a dead referrer was migrated to an entry".to_string()
     })?;
 
     // Ownership boundary: scrub must have left every age-gated and
