@@ -182,6 +182,8 @@ impl Registry {
     ) -> Result<ManifestMeta, Error> {
         let blob_link = LinkKind::from_reference(reference);
         let link = self.read_manifest_link(namespace, &blob_link).await?;
+        self.probe_revision_for_tag(namespace, reference, &link.target)
+            .await?;
 
         // A missing body is a genuine 404; a backend fault is not, and must not
         // reach the client as a deleted manifest.
@@ -359,13 +361,42 @@ impl Registry {
         let blob_link = LinkKind::from_reference(reference);
         let link = self.read_manifest_link(namespace, &blob_link).await?;
 
-        let content = self.blob_store.read(&link.target).await?;
-
+        // A tag is history and can outlive the manifest, whose bytes wait
+        // for the collector; the revision record is existence, so a tag
+        // resolving to a deleted revision reads as gone (a request, checked
+        // alongside the body read).
+        let (revision, content) = tokio::join!(
+            self.probe_revision_for_tag(namespace, reference, &link.target),
+            self.blob_store.read(&link.target),
+        );
+        revision?;
         Ok(ManifestBody {
             media_type: link.media_type,
             digest: link.target,
-            content,
+            content: content?,
         })
+    }
+
+    /// `Err(ManifestUnknown)` when a tag reference resolves to a revision
+    /// that no longer exists; a digest reference already read the revision.
+    async fn probe_revision_for_tag(
+        &self,
+        namespace: &Namespace,
+        reference: &Reference,
+        target: &Digest,
+    ) -> Result<(), Error> {
+        if !matches!(reference, Reference::Tag(_)) {
+            return Ok(());
+        }
+        match self
+            .metadata_store
+            .read_link_reference(namespace, &LinkKind::Digest(target.clone()))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(Error::NotFound) => Err(Error::ManifestUnknown),
+            Err(e) => Err(e),
+        }
     }
 
     /// Test-only wrapper that stores a manifest without a replication `source_ts`.
@@ -447,20 +478,16 @@ impl Registry {
         }
 
         // Write the manifest blob-data to the blob store before the link
-        // transaction (a link must never point at absent bytes) and hold the
-        // blob-data lock across both so a concurrent delete cannot reclaim the
-        // blob between the write and the link. A crash or LWW-supersession in
-        // between leaves at most an orphan blob, which scrub reclaims.
+        // waves (a record must never point at absent bytes); the fresh bytes
+        // sit inside the collector's grace period, so no lock is needed. A
+        // crash or LWW-supersession in between leaves at most an orphan blob,
+        // which the collector reclaims.
+        self.blob_store
+            .put_blob(&computed_digest, Bytes::copy_from_slice(body))
+            .await?;
         let commit: LinksCommit = self
             .metadata_store
-            .with_blob_data_lock(&computed_digest, async {
-                self.blob_store
-                    .put_blob(&computed_digest, Bytes::copy_from_slice(body))
-                    .await?;
-                self.metadata_store
-                    .store_manifest(namespace, &ops, created_at, reference_policy)
-                    .await
-            })
+            .store_manifest(namespace, &ops, created_at, reference_policy)
             .await?;
 
         // Changed-state check from the prior target the committed transaction
@@ -695,33 +722,27 @@ impl Registry {
             return Ok(existed_before);
         };
 
+        let pointing_tags = self
+            .metadata_store
+            .find_tags_pointing_at(namespace, digest)
+            .await?;
+        let existed_before = self
+            .manifest_delete_existed_before(
+                resolved_repository,
+                namespace,
+                reference,
+                &pointing_tags,
+            )
+            .await;
+        let ops = self
+            .plan_manifest_delete_ops(reference, &pointing_tags)
+            .await?;
+        // The bytes are the collector's to reclaim once every reference is
+        // stale; both delete endpoints answer `202 Accepted` regardless.
         self.metadata_store
-            .with_blob_data_lock(digest, async {
-                let pointing_tags = self
-                    .metadata_store
-                    .find_tags_pointing_at(namespace, digest)
-                    .await?;
-                let existed_before = self
-                    .manifest_delete_existed_before(
-                        resolved_repository,
-                        namespace,
-                        reference,
-                        &pointing_tags,
-                    )
-                    .await;
-                let ops = self
-                    .plan_manifest_delete_ops(reference, &pointing_tags)
-                    .await?;
-                if self
-                    .metadata_store
-                    .delete_manifest(namespace, digest, &ops, source_ts)
-                    .await?
-                {
-                    self.blob_store.delete_blob(digest).await?;
-                }
-                Ok::<_, Error>(existed_before)
-            })
-            .await
+            .delete_manifest(namespace, digest, &ops, source_ts)
+            .await?;
+        Ok(existed_before)
     }
 
     /// Attempts to short-circuit a manifest GET into a presigned redirect using

@@ -135,22 +135,17 @@ impl CacheFillJobHandler {
         // commit across both. The work is idempotent, so it is safe to redo on a
         // retry even though it no longer commits atomically with job completion.
         //
-        // The presence check runs with the grant under the blob-data lock, so a
-        // concurrent reclaim cannot delete the bytes between the two; absent
-        // bytes fall through to the fetch path.
-        let granted = self
-            .metadata_store
-            .with_blob_data_lock(digest, async {
-                match self.blob_store.size(digest).await {
-                    Ok(_) => BlobOwnership::new(self.metadata_store.as_ref())
-                        .grant(namespace, digest)
-                        .await
-                        .map(|()| true),
-                    Err(RegistryError::BlobUnknown | RegistryError::NotFound) => Ok(false),
-                    Err(error) => Err(error),
-                }
-            })
-            .await?;
+        // The guarded grant catches a reclaim mid-flight; absent (or
+        // vanished) bytes fall through to the fetch path.
+        let granted = match self.blob_store.size(digest).await {
+            Ok(_) => {
+                BlobOwnership::new(self.metadata_store.as_ref())
+                    .grant_existing(&self.blob_store, namespace, digest)
+                    .await?
+            }
+            Err(RegistryError::BlobUnknown | RegistryError::NotFound) => false,
+            Err(error) => return Err(error),
+        };
 
         if !granted {
             let repository = self

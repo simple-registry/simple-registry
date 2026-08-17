@@ -136,6 +136,9 @@ pub fn metadata_store_over_cached(
             .cache(cache::Config::Memory.to_backend().expect("memory cache"))
             .link_cache_ttl(link_cache_ttl_secs)
             .access_time_debounce_secs(0)
+            // Tests exercise reclamation immediately; the race tests that
+            // need the grace protection set their own.
+            .gc_grace_secs(0)
             .build(),
     )
 }

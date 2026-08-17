@@ -9,10 +9,11 @@ use crate::registry::{
 };
 
 /// Promote the upload session's staged bytes to the canonical blob path and
-/// grant `namespace` its reference, both under the `blob-data:{digest}` lock so
-/// a concurrent reclaim cannot interleave with either step. Promotion is
-/// skipped when the bytes already landed (a racer won), per
-/// [`BlobStore::complete_upload`]'s contract; the grant is idempotent.
+/// grant `namespace` its reference. No lock: freshly landed bytes and a fresh
+/// `_own` key both sit inside the collector's grace period, so a sweep cannot
+/// reclaim them. Promotion is skipped when the bytes already landed (a racer
+/// won), per [`BlobStore::complete_upload`]'s contract; the grant is
+/// idempotent. Bytes that pre-existed (and may be old) get the guarded grant.
 pub async fn promote_and_grant(
     blob_store: &BlobStore,
     metadata_store: &MetadataStore,
@@ -21,22 +22,25 @@ pub async fn promote_and_grant(
     digest: &Digest,
     hashed_size: u64,
 ) -> Result<(), Error> {
-    metadata_store
-        .with_blob_data_lock(digest, async {
-            match blob_store.size(digest).await {
-                Ok(_) => {}
-                Err(Error::BlobUnknown | Error::NotFound) => {
-                    blob_store
-                        .complete_upload(namespace, session_key, digest, hashed_size)
-                        .await?;
-                }
-                Err(error) => return Err(error),
+    match blob_store.size(digest).await {
+        Ok(_) => {
+            // Old bytes: run the full guarded grant so a mid-flight reclaim
+            // is caught; a vanished blob falls back to a fresh promotion.
+            if BlobOwnership::new(metadata_store)
+                .grant_existing(blob_store, namespace, digest)
+                .await?
+            {
+                return Ok(());
             }
-
-            BlobOwnership::new(metadata_store)
-                .grant(namespace, digest)
-                .await
-        })
+        }
+        Err(Error::BlobUnknown | Error::NotFound) => {}
+        Err(error) => return Err(error),
+    }
+    blob_store
+        .complete_upload(namespace, session_key, digest, hashed_size)
+        .await?;
+    BlobOwnership::new(metadata_store)
+        .grant(namespace, digest)
         .await
 }
 
@@ -49,11 +53,11 @@ impl<'a> BlobOwnership<'a> {
         Self { metadata_store }
     }
 
-    /// Insert `namespace`'s blob ownership reference into the blob index.
-    /// Committed on the metadata store's executor with the engine's conflict
-    /// retry, and idempotent, so a retry re-grants harmlessly. A caller that
-    /// must serialize against a concurrent reclaim runs this inside
-    /// `MetadataStore::with_blob_data_lock`.
+    /// Insert `namespace`'s blob ownership reference into the blob index:
+    /// one idempotent put, so a retry re-grants harmlessly. Correct on its
+    /// own only for freshly written bytes (the collector's grace period
+    /// covers them); a grant against pre-existing bytes goes through
+    /// [`Self::grant_existing`].
     pub async fn grant(&self, namespace: &Namespace, digest: &Digest) -> Result<(), Error> {
         self.metadata_store
             .update_blob_index(
@@ -62,6 +66,28 @@ impl<'a> BlobOwnership<'a> {
                 BlobIndexOperation::Insert(LinkKind::Blob(digest.clone())),
             )
             .await
+    }
+
+    /// Grant a reference to bytes that already exist (a mount, a cache fill,
+    /// a re-upload of a present blob): the grant lands first, then the
+    /// collector check, then a re-probe of the bytes. `false` means the blob
+    /// was, or is being, reclaimed; the dangling grant is byteless and
+    /// prune's sweep reaps it.
+    pub async fn grant_existing(
+        &self,
+        blob_store: &BlobStore,
+        namespace: &Namespace,
+        digest: &Digest,
+    ) -> Result<bool, Error> {
+        self.grant(namespace, digest).await?;
+        if !self.metadata_store.gc_clear(&[digest]).await? {
+            return Ok(false);
+        }
+        match blob_store.size(digest).await {
+            Ok(_) => Ok(true),
+            Err(Error::BlobUnknown | Error::NotFound) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn can_read(&self, namespace: &Namespace, digest: &Digest) -> Result<bool, Error> {

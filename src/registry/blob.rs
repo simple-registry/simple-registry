@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use hyper::{HeaderMap, Response, StatusCode};
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info, instrument, warn};
@@ -36,12 +34,6 @@ fn whole_blob_response(
         server::blob_headers(digest, total_length)?,
         ResponseBody::streaming(body),
     )?)
-}
-
-fn has_non_ownership_reference(links: &HashSet<LinkKind>, digest: &Digest) -> bool {
-    links
-        .iter()
-        .any(|link| !matches!(link, LinkKind::Blob(link_digest) if link_digest == digest))
 }
 
 /// Cache a pull-through blob: stage and finalize its bytes through the blob
@@ -297,27 +289,27 @@ impl Registry {
             return Err(Error::BlobUnknown);
         }
 
-        if has_non_ownership_reference(&links, &request.digest) {
-            return Err(Error::BlobReferenced);
+        // Writers never remove reference entries, so only an entry whose
+        // backing link still resolves counts; a stale one (its manifest
+        // deleted) must not block the client's delete-manifest-then-blobs
+        // flow.
+        for link in &links {
+            if matches!(link, LinkKind::Blob(link_digest) if link_digest == &request.digest) {
+                continue;
+            }
+            if self
+                .metadata_store
+                .reference_backed(&request.namespace, link, &request.digest)
+                .await?
+            {
+                return Err(Error::BlobReferenced);
+            }
         }
 
-        // Hold the coarse `blob-data:{digest}` lock across the revoke + reclaim.
-        // The revoke transaction is crash-atomic on its own, but the lock is what
-        // serialises it against the upload `grant` path (which records ownership
-        // in the shard without a transactional coarse lock), so a concurrent
-        // reference grant cannot be missed during the unreferenced check, and the
-        // blob-store reclaim cannot race a concurrent push of the same digest.
+        // One delete of the `_own` key; the bytes are the collector's to
+        // reclaim once every reference is stale.
         self.metadata_store
-            .with_blob_data_lock(&request.digest, async {
-                if self
-                    .metadata_store
-                    .revoke_blob_ownership(&request.namespace, &request.digest)
-                    .await?
-                {
-                    self.blob_store.delete_blob(&request.digest).await?;
-                }
-                Ok::<_, Error>(())
-            })
+            .revoke_blob_ownership(&request.namespace, &request.digest)
             .await?;
 
         Ok(build_response(
@@ -391,12 +383,12 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Cursor, sync::Arc, time::Duration};
+    use std::{io::Cursor, sync::Arc};
 
     use async_trait::async_trait;
     use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE};
     use tempfile::TempDir;
-    use tokio::time::sleep;
+
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
@@ -444,34 +436,19 @@ mod tests {
             let ownership = registry.blob_ownership();
 
             ownership.grant(first, &digest).await.unwrap();
+            ownership.grant(second, &digest).await.unwrap();
 
-            // Hold the blob-data lock, then start a delete: it must block on
-            // the lock rather than reclaim the bytes.
-            let session = registry
-                .metadata_store
-                .acquire_blob_data_lock(&digest)
+            // A delete only revokes the caller's ownership key; the bytes are
+            // the collector's to reclaim, so a concurrent reference can never
+            // be stranded.
+            registry
+                .delete_blob(DeleteBlobRequest {
+                    namespace: first.clone(),
+                    digest: digest.clone(),
+                })
                 .await
                 .unwrap();
-            let delete = registry.delete_blob(DeleteBlobRequest {
-                namespace: first.clone(),
-                digest: digest.clone(),
-            });
-            tokio::pin!(delete);
 
-            tokio::select! {
-                result = &mut delete => {
-                    panic!("delete completed while blob-data lock was held: {result:?}");
-                }
-                () = sleep(Duration::from_millis(25)) => {}
-            }
-
-            // A second namespace grabs a reference while the delete is parked.
-            ownership.grant(second, &digest).await.unwrap();
-            session.release().await;
-            delete.await.unwrap();
-
-            // The data survives (still referenced by `second`); `first` lost its
-            // reference, `second` keeps it.
             assert_eq!(registry.blob_store.read(&digest).await.unwrap(), content);
             assert!(!ownership.can_read(first, &digest).await.unwrap());
             assert!(ownership.can_read(second, &digest).await.unwrap());
@@ -667,13 +644,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(registry.blob_store.read(&digest).await.is_err());
+            // The delete revokes ownership; the bytes and the stale entry
+            // wait for the collector.
+            assert!(registry.blob_store.read(&digest).await.is_ok());
             assert!(
-                registry
-                    .metadata_store
-                    .read_blob_index(&digest)
+                !registry
+                    .blob_ownership()
+                    .can_read(namespace, &digest)
                     .await
-                    .is_err()
+                    .unwrap()
             );
         })
         .await;
@@ -839,7 +818,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(registry.blob_store.read(&digest).await.is_err());
+            // Every owner revoked: the bytes wait for the collector.
+            assert!(registry.blob_store.read(&digest).await.is_ok());
+            assert!(!ownership.can_read(second, &digest).await.unwrap());
         })
         .await;
     }

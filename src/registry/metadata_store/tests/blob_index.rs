@@ -8,10 +8,7 @@ use angos_tx_engine::lock::{LockStrategy, S3LockConfig};
 use crate::registry::metadata_store::tests::test_config;
 use crate::registry::{
     Error,
-    metadata_store::{
-        BlobIndexOperation, LinkKind, LinkOperation,
-        blob_index::{any_other_namespace_references_blob, shard::read_shard},
-    },
+    metadata_store::{BlobIndexOperation, LinkKind, LinkOperation, blob_index::shard::read_shard},
     path_builder,
     test_utils::fs_test_stack,
 };
@@ -182,10 +179,15 @@ async fn test_tracked_link_deletes_with_referrers() {
             "Tracked link {link} should be deleted"
         );
 
-        let result = backend.read_blob_index(d).await;
+        // The reference entry outlives the link as a stale over-approximation;
+        // pruning it is the collector's.
+        let index = backend.read_blob_index(d).await.unwrap();
         assert!(
-            matches!(result, Err(Error::NotFound)),
-            "Blob index for {d} should be removed after all links deleted"
+            index
+                .namespace
+                .get(&namespace)
+                .is_some_and(|links| links.contains(&link)),
+            "the stale entry is the collector's to prune, not the writer's"
         );
     }
 }
@@ -243,20 +245,16 @@ async fn test_mixed_creates_and_deletes_across_digests() {
     let keep_links = keep_index.namespace.get(&namespace).unwrap();
     assert!(keep_links.contains(&LinkKind::Tag(Tag::new("keep-tag").unwrap())));
 
-    match backend.read_blob_index(&digest_remove).await {
-        Ok(idx) => {
-            let links = idx.namespace.get(&namespace);
-            assert!(
-                links.is_none()
-                    || !links
-                        .unwrap()
-                        .contains(&LinkKind::Tag(Tag::new("remove-tag").unwrap())),
-                "remove-tag should not be in blob index after delete"
-            );
-        }
-        Err(Error::NotFound) => {}
-        Err(e) => panic!("Unexpected error reading blob index: {e}"),
-    }
+    // Writers never remove reference entries: the removed tag's entry stays
+    // as a stale over-approximation until the collector prunes it.
+    let remove_index = backend.read_blob_index(&digest_remove).await.unwrap();
+    assert!(
+        remove_index
+            .namespace
+            .get(&namespace)
+            .is_some_and(|links| links.contains(&LinkKind::Tag(Tag::new("remove-tag").unwrap()))),
+        "the stale entry is the collector's to prune, not the writer's"
+    );
 
     let add_index = backend.read_blob_index(&digest_add).await.unwrap();
     let add_links = add_index.namespace.get(&namespace).unwrap();
@@ -352,12 +350,9 @@ async fn legacy_shards_merge_into_every_read() {
         .unwrap();
     assert!(links.contains(&LinkKind::Blob(digest.clone())));
 
-    assert!(backend.has_blob_references(&digest).await.unwrap());
     assert!(
-        any_other_namespace_references_blob(backend.store(), &new_ns, &digest)
-            .await
-            .unwrap(),
-        "the legacy shard must count from the new namespace's view"
+        backend.blob_references_live(&digest).await.unwrap(),
+        "the legacy shard must pin the blob for the collector"
     );
 }
 
@@ -386,7 +381,7 @@ async fn test_has_blob_references_ignores_empty_cas_shards() {
         .await
         .unwrap();
     assert!(
-        !backend.has_blob_references(&digest).await.unwrap(),
+        !backend.blob_references_live(&digest).await.unwrap(),
         "empty CAS shards must not keep blob data alive"
     );
 
@@ -401,7 +396,7 @@ async fn test_has_blob_references_ignores_empty_cas_shards() {
         .await
         .unwrap();
     assert!(
-        backend.has_blob_references(&digest).await.unwrap(),
+        backend.blob_references_live(&digest).await.unwrap(),
         "a shard holding a link must keep blob data alive"
     );
 
@@ -413,74 +408,58 @@ async fn test_has_blob_references_ignores_empty_cas_shards() {
         .unwrap();
 }
 
-/// The cross-namespace check must read empty shards the way
-/// `has_blob_references` does: an emptied shard is deleted, so an empty one is
-/// an artifact and must not pin the blob in another namespace forever.
+/// The collector's liveness test reads legacy shards the way the old
+/// reclaim check did: an emptied shard was deleted by the old write path, so
+/// a persisted empty one is an artifact and must not pin the blob forever,
+/// while any populated one pins it until scrub converts it.
 #[tokio::test]
-async fn empty_foreign_shard_does_not_block_reclaim() {
-    let stack = fs_test_stack();
-    let store = stack.store.as_ref();
-    let ours = Namespace::new("ours").unwrap();
+async fn legacy_shards_gate_collector_liveness() {
+    let config = test_config();
+    let backend = config.to_backend(false, None).unwrap();
     let theirs = Namespace::new("theirs").unwrap();
     let digest =
         Digest::from_str("sha256:ff00000000000000000000000000000000000000000000000000000000000002")
             .unwrap();
     let theirs_shard = path_builder::blob_index_shard_path(&digest, &theirs);
 
-    store
+    backend
+        .store()
         .object_store()
         .put(&theirs_shard, Bytes::from_static(b"[]"))
         .await
         .unwrap();
     assert!(
-        !any_other_namespace_references_blob(store, &ours, &digest)
-            .await
-            .unwrap(),
-        "an empty foreign shard must not count as a live reference"
+        !backend.blob_references_live(&digest).await.unwrap(),
+        "an empty legacy shard must not count as a live reference"
     );
 
-    // The negative case above only means something if a populated foreign shard
-    // reports the opposite.
     let links = serde_json::to_vec(&[LinkKind::Blob(digest.clone())]).unwrap();
-    store
+    backend
+        .store()
         .object_store()
         .put(&theirs_shard, Bytes::from(links))
         .await
         .unwrap();
     assert!(
-        any_other_namespace_references_blob(store, &ours, &digest)
-            .await
-            .unwrap(),
-        "a foreign shard holding a link must keep the blob alive"
+        backend.blob_references_live(&digest).await.unwrap(),
+        "a populated legacy shard must pin the blob"
     );
-}
 
-/// A shard whose filename no longer decodes to a valid namespace has no
-/// canonical path, so it is joined verbatim and still read. Skipping it would
-/// report the blob unreferenced and reclaim bytes another namespace holds.
-#[tokio::test]
-async fn foreign_shard_with_an_undecodable_name_still_counts() {
-    let stack = fs_test_stack();
-    let store = stack.store.as_ref();
-    let ours = Namespace::new("ours").unwrap();
-    let digest =
+    // A shard whose filename no longer decodes to a valid namespace still
+    // pins: skipping it would reclaim bytes another namespace holds.
+    let bad_digest =
         Digest::from_str("sha256:ff00000000000000000000000000000000000000000000000000000000000003")
             .unwrap();
-
-    // Uppercase is outside the namespace grammar, so this name cannot round
-    // trip through `Namespace::new`.
-    let refs_dir = path_builder::blob_index_refs_dir(&digest);
-    let links = serde_json::to_vec(&[LinkKind::Blob(digest.clone())]).unwrap();
-    store
+    let refs_dir = path_builder::blob_index_refs_dir(&bad_digest);
+    let links = serde_json::to_vec(&[LinkKind::Blob(bad_digest.clone())]).unwrap();
+    backend
+        .store()
         .object_store()
         .put(&format!("{refs_dir}/BAD.json"), Bytes::from(links))
         .await
         .unwrap();
-
     assert!(
-        any_other_namespace_references_blob(store, &ours, &digest)
-            .await
-            .unwrap(),
+        backend.blob_references_live(&bad_digest).await.unwrap(),
         "a shard that cannot be addressed canonically must still pin the blob"
     );
 }

@@ -1,16 +1,16 @@
-//! The consolidated link-transaction planner.
+//! The consolidated link-write planner.
 //!
 //! [`MetadataStore::execute_links_tx`] is the single planner behind every
-//! transactional public method (`update_links`, `delete_links`,
-//! `store_manifest`, `delete_manifest`, `revoke_blob_ownership`): each passes a
-//! [`LinksTx`] kind, and the planner builds the [`Transaction`], runs the retry
-//! loop, and performs post-apply cleanup. Single-link primitives live in
-//! [`super::storage`].
+//! public write method (`update_links`, `delete_links`, `store_manifest`,
+//! `delete_manifest`, `revoke_blob_ownership`): each passes a [`LinksTx`]
+//! kind, and the planner turns it into ordered waves of unconditional
+//! single-object writes. The wave boundaries are load-bearing: reference keys
+//! land before the collector check, the revision record (the commit point)
+//! lands before anything that makes it reachable, and a crash between waves
+//! leaves only over-approximated references or a tagless revision, both
+//! legal. Single-link primitives live in [`super::storage`].
 
-use std::{
-    collections::{HashMap, HashSet},
-    mem,
-};
+use std::collections::{HashMap, HashSet};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -18,22 +18,13 @@ use futures_util::future::join_all;
 use tracing::warn;
 
 use angos_oci::{Descriptor, Digest, MediaType, Namespace};
-use angos_tx_engine::{
-    StorageError,
-    error::Error as TxError,
-    executor::{DEFAULT_RETRY_BUDGET, execute_with_retry_payload},
-    store::Store,
-    transaction::{Mutation, Transaction, TransactionBuilder},
-};
+use angos_tx_engine::{StorageError, error::Error as TxError, store::Store, transaction::Mutation};
 
 use crate::registry::{
     Error,
     metadata_store::{
         BlobIndexOperation, LinkKind, LinkMetadata, LinkOperation, MetadataStore, ReferencePolicy,
-        blob_index::{
-            any_other_namespace_references_blob, namespace_entries_merged, ref_mutation,
-            shard::apply_blob_index_operations,
-        },
+        blob_index::{namespace_entries_merged, ref_mutation},
         link::record::{referrer_set_mutation, revision_set_mutation},
         link::tag::{tag_del_mutation, tag_set_mutation},
     },
@@ -73,10 +64,7 @@ pub enum LinksTx<'a> {
     /// `source_ts` gates each deleted tag via LWW; the caller's
     /// `blob-data:{digest}` lock keeps the unreferenced-check from racing a
     /// concurrent grant.
-    DeleteManifest {
-        blob: &'a Digest,
-        source_ts: Option<DateTime<Utc>>,
-    },
+    DeleteManifest { source_ts: Option<DateTime<Utc>> },
     /// `revoke_blob_ownership`: removes `namespace`'s ownership entry and
     /// reports via `reclaim_blob` whether the blob became unreferenced. The
     /// caller holds the `blob-data:{digest}` lock across the call and reclaims
@@ -88,16 +76,6 @@ pub enum LinksTx<'a> {
 }
 
 impl<'a> LinksTx<'a> {
-    /// Blob-data digest to reclaim when it becomes unreferenced.
-    fn blob_data_delete_if_unreferenced(&self) -> Option<&'a Digest> {
-        match self {
-            LinksTx::DeleteManifest { blob, .. } | LinksTx::RevokeBlobOwnership { blob, .. } => {
-                Some(*blob)
-            }
-            _ => None,
-        }
-    }
-
     /// Direct blob-index ops applied alongside the link-derived ops.
     fn blob_index_ops(&self) -> Option<(&'a Digest, &[BlobIndexOperation])> {
         match self {
@@ -159,13 +137,9 @@ struct LinksTxCaptured {
     /// this to [`Error::ReplicationSuperseded`].
     superseded: Option<String>,
     /// `Some(digest)` when a strict push referenced a digest the namespace
-    /// held no entry for at plan time; the attempt committed an empty
-    /// transaction and the caller maps this to [`Error::ManifestBlobUnknown`].
+    /// held no entry for at plan time; the plan is empty and the caller maps
+    /// this to [`Error::ManifestBlobUnknown`].
     missing_reference: Option<Digest>,
-    /// Whether this transaction left the manifest blob unreferenced, so the
-    /// caller should reclaim its blob-data from the blob store under the
-    /// blob-data lock it already holds.
-    reclaim_blob: bool,
 }
 
 /// Prior link state captured by a committed link transaction. The retry loop
@@ -176,9 +150,6 @@ struct LinksTxCaptured {
 pub struct LinksCommit {
     /// Prior target per `Create` op's link; `None` = the link did not exist.
     pub prior_targets: Vec<(LinkKind, Option<Digest>)>,
-    /// Whether the committed transaction left the manifest blob unreferenced, so
-    /// the caller should reclaim its blob-data from the blob store.
-    pub reclaim_blob: bool,
 }
 
 impl LinksCommit {
@@ -223,29 +194,45 @@ struct LinksSnapshot<'a> {
     /// Current metadata per present `Create` link, consumed by the mutation
     /// builders when merging tracked-link referrers.
     link_cache: HashMap<LinkKind, LinkMetadata>,
-    /// The observed bytes per link path, `None` when the link was absent,
-    /// joined to the transaction read set: any racing write to a touched link
-    /// fails the commit's prepare validation and the retry re-plans against
-    /// fresh state.
-    reads: Vec<(String, Option<Bytes>)>,
 }
 
 /// Whether the pushing namespace already holds any reference entry for each
 /// newly-referenced digest of a policy-checked push, read before planning.
 type ReferenceOwnership = HashMap<Digest, bool>;
 
+/// The compiled waves of one link write.
+#[derive(Default)]
+struct WavePlan {
+    /// Wave A: reference keys.
+    refs: Vec<Mutation>,
+    /// Wave C: revision records, tracked links, tag tombstones, referrer
+    /// removals.
+    records: Vec<Mutation>,
+    /// Wave D: tag entries, referrer records, revision-record deletions.
+    finals: Vec<Mutation>,
+    /// The digests wave A references, checked against collector runs.
+    gc_digests: Vec<Digest>,
+}
+
+/// The planned waves: `refs` land first (wave A), `records` after the
+/// collector check (wave C), `finals` last (wave D). A push puts its revision
+/// record in `records` and its tag entry and referrer record in `finals`, so
+/// a reader that resolves a tag sees a complete manifest; a delete tombstones
+/// tags in `records` and removes the revision record in `finals`, so the tags
+/// are gone before the revision is.
 struct LinkMutations {
-    builder: TransactionBuilder,
+    records: Vec<Mutation>,
+    finals: Vec<Mutation>,
     pending_blob_ops: HashMap<Digest, Vec<BlobIndexOperation>>,
     written_links: Vec<(LinkKind, LinkMetadata)>,
     deleted_links: Vec<LinkKind>,
     /// `Some(digest)` when a strict push referenced an unowned digest; the
-    /// attempt commits nothing and the caller reports a missing reference.
+    /// plan is empty and the caller reports a missing reference.
     missing_reference: Option<Digest>,
 }
 
 impl LinkMutations {
-    /// Queue a blob-index shard op for `digest`.
+    /// Queue a blob-index op for `digest`, compiled into wave A.
     fn push_blob_op(&mut self, digest: &Digest, op: BlobIndexOperation) {
         self.pending_blob_ops
             .entry(digest.clone())
@@ -263,7 +250,7 @@ impl LinkMutations {
         let body = serde_json::to_vec(&metadata)
             .map(Bytes::from)
             .map_err(TxError::Serde)?;
-        self.builder = mem::take(&mut self.builder).mutation(Mutation::Put {
+        self.records.push(Mutation::Put {
             key: path_builder::link_path(link, namespace),
             body,
             expected: None,
@@ -272,11 +259,19 @@ impl LinkMutations {
         Ok(())
     }
 
-    /// `Delete` `link`, queue its blob-index `Remove` against `target`, and
-    /// record it among the deleted links. A revision or referrer also deletes
-    /// its record key, so the legacy fallback cannot resurrect it.
-    fn delete_link(&mut self, namespace: &Namespace, link: &LinkKind, target: &Digest) {
-        self.builder = mem::take(&mut self.builder).mutation(Mutation::Delete {
+    /// `Delete` `link` and record it among the deleted links. A revision or
+    /// referrer also deletes its record key, so the legacy fallback cannot
+    /// resurrect it; a revision goes last (`finals`), after the tombstones
+    /// and referrer removals that reference it. The blob-index entry is left
+    /// for the collector: a writer that removed it could unpin a blob a
+    /// concurrent push is committing.
+    fn delete_link(&mut self, namespace: &Namespace, link: &LinkKind, _target: &Digest) {
+        let wave = if matches!(link, LinkKind::Digest(_)) {
+            &mut self.finals
+        } else {
+            &mut self.records
+        };
+        wave.push(Mutation::Delete {
             key: path_builder::link_path(link, namespace),
             expected: None,
         });
@@ -288,12 +283,16 @@ impl LinkMutations {
             _ => None,
         };
         if let Some(key) = record_key {
-            self.builder = mem::take(&mut self.builder).mutation(Mutation::Delete {
+            let wave = if matches!(link, LinkKind::Digest(_)) {
+                &mut self.finals
+            } else {
+                &mut self.records
+            };
+            wave.push(Mutation::Delete {
                 key,
                 expected: None,
             });
         }
-        self.push_blob_op(target, BlobIndexOperation::Remove(link.clone()));
         self.deleted_links.push(link.clone());
     }
 }
@@ -333,24 +332,21 @@ impl MetadataStore {
             .map(|_| ())
     }
 
-    /// Run the retry loop, build the link-update transaction (plus any blob-data
-    /// / blob-index side effects the [`LinksTx`] kind carries), commit it, and
-    /// perform post-apply cleanup. Every public entry point shares this body,
-    /// differing only in the `tx` kind; the per-attempt planning is split into
-    /// the named steps below.
+    /// Plan the write once, then apply it as ordered waves of unconditional
+    /// single-object writes, and perform post-apply cleanup. Every public
+    /// entry point shares this body, differing only in the `tx` kind. No
+    /// retry loop: every write is idempotent, so a failed wave surfaces to
+    /// the client and a replay is harmless.
     pub async fn execute_links_tx(
         &self,
         namespace: &Namespace,
         operations: &[LinkOperation],
         tx: LinksTx<'_>,
     ) -> Result<LinksCommit, Error> {
-        let result = execute_with_retry_payload(
-            self.store().executor().as_ref(),
-            || self.plan_links_attempt(namespace, operations, &tx),
-            DEFAULT_RETRY_BUDGET,
-        )
-        .await
-        .map_err(Error::from)?;
+        let (plan, result) = self
+            .plan_links(namespace, operations, &tx)
+            .await
+            .map_err(Error::from)?;
 
         if let Some(message) = result.superseded {
             return Err(Error::ReplicationSuperseded(message));
@@ -361,11 +357,21 @@ impl MetadataStore {
             return Err(Error::ManifestBlobUnknown);
         }
 
-        // Post-apply cache maintenance. The committed transaction already
-        // removed the deleted link objects, and on FS the backend prunes the
-        // emptied parent directories on delete; no directory sweep runs here,
-        // because an unvalidated prefix delete could erase a link a concurrent
-        // push just re-created.
+        // Wave A: reference keys, before anything that could commit them.
+        self.apply_writes(&plan.refs).await?;
+        // Wave B: the collector check. An unexpired run covering one of the
+        // referenced blobs means a reclaim may be mid-flight; back off.
+        if !plan.gc_digests.is_empty() {
+            self.gc_backoff(&plan.gc_digests).await?;
+        }
+        // Waves C and D, in order.
+        self.apply_writes(&plan.records).await?;
+        self.apply_writes(&plan.finals).await?;
+
+        // Post-apply cache maintenance. On FS the backend prunes the emptied
+        // parent directories on delete; no directory sweep runs here, because
+        // an unvalidated prefix delete could erase a link a concurrent push
+        // just re-created.
         for (link, metadata) in &result.written_links {
             self.cache_put(namespace, link, metadata).await;
         }
@@ -378,35 +384,65 @@ impl MetadataStore {
 
         Ok(LinksCommit {
             prior_targets: result.prior_targets,
-            reclaim_blob: result.reclaim_blob,
         })
     }
 
-    /// One retry-loop attempt: snapshot the touched links, gate on no-op / LWW
-    /// / reference ownership, and build the transaction plus its captured
-    /// outcome.
-    async fn plan_links_attempt(
+    /// Apply one wave: every write fans out concurrently, and the wave
+    /// completes only when all of them have.
+    async fn apply_writes(&self, writes: &[Mutation]) -> Result<(), Error> {
+        let results = join_all(writes.iter().map(|write| async move {
+            match write {
+                Mutation::Put { key, body, .. } => {
+                    self.store().object_store().put(key, body.clone()).await
+                }
+                Mutation::Delete { key, .. } => self.store().object_store().delete(key).await,
+                // The planner only produces puts and deletes.
+                _ => Ok(()),
+            }
+        }))
+        .await;
+        for result in results {
+            result?;
+        }
+        Ok(())
+    }
+
+    /// The writer half of the reclamation marker protocol: wait out a
+    /// covering collector run briefly, then give up and let the client
+    /// retry. Both sides aborting is safe.
+    async fn gc_backoff(&self, digests: &[Digest]) -> Result<(), Error> {
+        let digests: Vec<&Digest> = digests.iter().collect();
+        if self.gc_clear(&digests).await? {
+            return Ok(());
+        }
+        Err(Error::Internal(
+            "blob reclamation in progress for a referenced blob; retry".to_string(),
+        ))
+    }
+
+    /// The single planning pass: snapshot the touched links, gate on no-op /
+    /// LWW / reference ownership, and compile the ordered waves.
+    async fn plan_links(
         &self,
         namespace: &Namespace,
         operations: &[LinkOperation],
         tx: &LinksTx<'_>,
-    ) -> Result<(Transaction, LinksTxCaptured), TxError> {
-        // Snapshot: one read pass over every operation's link. The observed
-        // bytes join the transaction read set when mutations are built, so a
-        // racing write to any touched link aborts this attempt at prepare and
-        // the retry re-plans against fresh state.
+    ) -> Result<(WavePlan, LinksTxCaptured), TxError> {
+        // Snapshot: one read pass over every operation's link.
         let snapshot = self.snapshot_links(namespace, operations).await?;
 
         // Empty no-op short-circuit: no creates, every delete target
         // already missing, and no extras to apply.
         if is_empty_noop(&snapshot.ops, tx) {
-            return Ok((Transaction::builder().build(), LinksTxCaptured::default()));
+            return Ok((WavePlan::default(), LinksTxCaptured::default()));
         }
 
-        // LWW gate: reject replicated writes/deletes superseded locally.
+        // LWW gate: reject replicated writes/deletes superseded locally. A
+        // racing writer that lands between this read and the waves loses or
+        // wins by key name, never by protocol.
         if let Some(message) = lww_superseded(&snapshot, tx) {
             return Ok((
-                Transaction::builder().build(),
+                WavePlan::default(),
                 LinksTxCaptured {
                     superseded: Some(message),
                     ..LinksTxCaptured::default()
@@ -417,27 +453,26 @@ impl MetadataStore {
         let LinksSnapshot {
             ops,
             mut link_cache,
-            reads,
         } = snapshot;
 
         // Ownership pre-read: one reference lookup per newly-referenced digest
-        // of a policy-checked push. Races with a concurrent reclaim are
-        // serialised by the `blob-data:{digest}` lock both sides hold.
+        // of a policy-checked push.
         let store = self.store_arc();
         let ownership = preread_reference_ownership(store.as_ref(), namespace, &ops, tx).await?;
 
         // Plan: build the link mutations over the snapshot state.
         let LinkMutations {
-            builder,
-            pending_blob_ops,
+            records,
+            finals,
+            mut pending_blob_ops,
             written_links,
             deleted_links,
             missing_reference,
-        } = build_link_mutations(namespace, &ops, &mut link_cache, tx, reads, &ownership)?;
+        } = build_link_mutations(namespace, &ops, &mut link_cache, tx, &ownership)?;
 
         if let Some(digest) = missing_reference {
             return Ok((
-                Transaction::builder().build(),
+                WavePlan::default(),
                 LinksTxCaptured {
                     missing_reference: Some(digest),
                     ..LinksTxCaptured::default()
@@ -445,30 +480,28 @@ impl MetadataStore {
             ));
         }
 
-        // Reference-key mutations plus the reclaim decision. The decision is
-        // not commit-validated: the caller's `blob-data:{digest}` lock is what
-        // keeps it from racing a concurrent grant.
-        let reclaim_digest = tx
-            .blob_data_delete_if_unreferenced()
-            .filter(|digest| pending_blob_ops.contains_key(*digest));
-        let (builder, reclaim_blob) = append_ref_mutations(
-            store.as_ref(),
-            namespace,
-            &pending_blob_ops,
-            reclaim_digest,
-            builder,
-        )
-        .await?;
+        // Direct blob-index ops (`revoke_blob_ownership`'s `_own` removal).
+        if let Some((digest, ops)) = tx.blob_index_ops() {
+            pending_blob_ops
+                .entry(digest.clone())
+                .or_default()
+                .extend(ops.iter().cloned());
+        }
+        let (refs, gc_digests) = build_ref_wave(namespace, &pending_blob_ops);
 
         Ok((
-            builder.build(),
+            WavePlan {
+                refs,
+                records,
+                finals,
+                gc_digests,
+            },
             LinksTxCaptured {
                 written_links,
                 deleted_links,
                 prior_targets: capture_prior_targets(&ops),
                 superseded: None,
                 missing_reference: None,
-                reclaim_blob,
             },
         ))
     }
@@ -523,31 +556,21 @@ impl MetadataStore {
                     Err(Error::NotFound) => None,
                     Err(e) => return Err(TxError::Storage(StorageError::Backend(e.to_string()))),
                 };
-                return Ok((op, None, metadata));
+                return Ok((op, metadata));
             }
             let link_path = path_builder::link_path(link, namespace);
             let found = self.read_link_raw(&link_path).await?;
-            let (bytes, metadata) = match found {
-                Some((bytes, metadata)) => (Some(bytes), Some(metadata)),
-                None => (None, None),
-            };
-            Ok::<_, TxError>((op, Some((link_path, bytes)), metadata))
+            let metadata = found.map(|(_, metadata)| metadata);
+            Ok::<_, TxError>((op, metadata))
         }))
         .await;
 
         let mut snapshot = LinksSnapshot {
             ops: Vec::with_capacity(operations.len()),
             link_cache: HashMap::new(),
-            reads: Vec::new(),
         };
-        let mut seen_paths = HashSet::new();
         for result in results {
-            let (op, read, metadata) = result?;
-            if let Some((link_path, bytes)) = read
-                && seen_paths.insert(link_path.clone())
-            {
-                snapshot.reads.push((link_path, bytes));
-            }
+            let (op, metadata) = result?;
             snapshot.ops.push(match op {
                 LinkOperation::Create {
                     link,
@@ -672,31 +695,12 @@ fn build_link_mutations(
     ops: &[OpSnapshot<'_>],
     link_cache: &mut HashMap<LinkKind, LinkMetadata>,
     tx: &LinksTx<'_>,
-    reads: Vec<(String, Option<Bytes>)>,
     ownership: &ReferenceOwnership,
 ) -> Result<LinkMutations, TxError> {
-    let mut builder = Transaction::builder();
-    for (key, body) in reads {
-        builder = match body {
-            Some(body) => builder.read(key, body),
-            None => builder.read_absent(key),
-        };
-    }
-    let mut pending_blob_ops: HashMap<Digest, Vec<BlobIndexOperation>> = HashMap::new();
-
-    // Seed direct blob-index ops (e.g. `revoke_blob_ownership`'s ownership
-    // revoke) so the unreferenced check and the shard mutations below treat them
-    // like link-derived ops.
-    if let Some((digest, ops)) = tx.blob_index_ops() {
-        pending_blob_ops
-            .entry(digest.clone())
-            .or_default()
-            .extend(ops.iter().cloned());
-    }
-
     let acc = LinkMutations {
-        builder,
-        pending_blob_ops,
+        records: Vec::new(),
+        finals: Vec::new(),
+        pending_blob_ops: HashMap::new(),
         written_links: Vec::new(),
         deleted_links: Vec::new(),
         missing_reference: None,
@@ -794,7 +798,7 @@ fn build_create_mutations(
                     let mutation =
                         tag_set_mutation(namespace, tag, created_at, target, (*media_type).clone())
                             .map_err(TxError::Serde)?;
-                    acc.builder = mem::take(&mut acc.builder).mutation(mutation);
+                    acc.finals.push(mutation);
                     let created_at =
                         path_builder::tag_ord_ts(path_builder::tag_ord(Some(created_at)))
                             .unwrap_or(created_at);
@@ -810,7 +814,7 @@ fn build_create_mutations(
                         (*media_type).clone(),
                     )
                     .map_err(TxError::Serde)?;
-                    acc.builder = mem::take(&mut acc.builder).mutation(mutation);
+                    acc.records.push(mutation);
                     let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
                         .with_media_type((*media_type).clone());
                     acc.written_links.push(((*link).clone(), metadata));
@@ -819,7 +823,7 @@ fn build_create_mutations(
                     let mutation =
                         referrer_set_mutation(namespace, subject, referrer, descriptor.as_deref())
                             .map_err(TxError::Serde)?;
-                    acc.builder = mem::take(&mut acc.builder).mutation(mutation);
+                    acc.finals.push(mutation);
                     let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
                         .with_media_type((*media_type).clone())
                         .with_descriptor(descriptor.as_ref().map(|b| b.as_ref().clone()));
@@ -870,11 +874,7 @@ fn build_delete_mutations(
                 metadata.media_type.clone(),
             )
             .map_err(TxError::Serde)?;
-            acc.builder = mem::take(&mut acc.builder).mutation(mutation);
-            acc.push_blob_op(
-                &metadata.target,
-                BlobIndexOperation::Remove((*link).clone()),
-            );
+            acc.records.push(mutation);
             acc.deleted_links.push((*link).clone());
             continue;
         }
@@ -943,8 +943,8 @@ async fn preread_reference_ownership(
     Ok(ownership)
 }
 
-/// Fold `ops` to one final operation per link (last op wins), so the
-/// transaction carries at most one mutation per reference key.
+/// Fold `ops` to one final operation per link (last op wins), so wave A
+/// carries at most one write per reference key.
 fn fold_ref_ops(ops: &[BlobIndexOperation]) -> Vec<BlobIndexOperation> {
     let mut folded: Vec<BlobIndexOperation> = Vec::new();
     for op in ops {
@@ -958,43 +958,38 @@ fn fold_ref_ops(ops: &[BlobIndexOperation]) -> Vec<BlobIndexOperation> {
     folded
 }
 
-/// The reference-key step plus the reclaim decision: append one put or delete
-/// per pending (digest, link), and decide for `reclaim_digest` whether this
-/// transaction leaves the blob unreferenced (the namespace's merged entries
-/// empty out and no other namespace references it). The decision reads are
-/// plain reads, not commit-validated: the caller's `blob-data:{digest}` lock
-/// is what serialises them against a concurrent grant. The reclaimed blob's
-/// existence is not probed here (the reclaim is an idempotent blob-store
-/// delete).
-async fn append_ref_mutations(
-    store: &Store,
+/// Compile the pending blob-index ops into wave A plus the digests it
+/// references. Inserts always land; the only removal a writer performs is
+/// its own ownership key (an explicit blob delete). Every other removal is
+/// the collector's: a stale entry over-approximates and is aged out, while a
+/// writer-side delete could unpin a blob a concurrent push is committing.
+fn build_ref_wave(
     namespace: &Namespace,
     pending_blob_ops: &HashMap<Digest, Vec<BlobIndexOperation>>,
-    reclaim_digest: Option<&Digest>,
-    mut builder: TransactionBuilder,
-) -> Result<(TransactionBuilder, bool), TxError> {
-    let mut reclaim_blob = false;
+) -> (Vec<Mutation>, Vec<Digest>) {
+    let mut refs = Vec::new();
+    let mut gc_digests = Vec::new();
     for (digest, ops) in pending_blob_ops {
-        if reclaim_digest == Some(digest) {
-            let mut links = namespace_entries_merged(store, namespace, digest)
-                .await
-                .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
-            apply_blob_index_operations(&mut links, ops);
-            if links.is_empty() {
-                reclaim_blob = !any_other_namespace_references_blob(store, namespace, digest)
-                    .await
-                    .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
+        let mut referenced = false;
+        for op in fold_ref_ops(ops) {
+            match &op {
+                BlobIndexOperation::Insert(_) => {
+                    referenced = true;
+                    refs.push(ref_mutation(namespace, digest, &op));
+                }
+                BlobIndexOperation::Remove(LinkKind::Blob(_)) => {
+                    refs.push(ref_mutation(namespace, digest, &op));
+                }
+                BlobIndexOperation::Remove(_) => {}
             }
         }
-        for op in fold_ref_ops(ops) {
-            builder = builder.mutation(ref_mutation(namespace, digest, &op));
+        if referenced {
+            gc_digests.push(digest.clone());
         }
     }
-    Ok((builder, reclaim_blob))
+    (refs, gc_digests)
 }
 
-/// Prior target per `Create` op, from this attempt's read-set-validated
-/// snapshot.
 fn capture_prior_targets(ops: &[OpSnapshot<'_>]) -> Vec<(LinkKind, Option<Digest>)> {
     ops.iter()
         .filter_map(|op| match op {
@@ -1034,24 +1029,20 @@ impl MetadataStore {
         self.execute_links_tx(namespace, operations, tx).await
     }
 
-    /// Delete a manifest: removes link metadata and blob-index reference keys
-    /// as a single atomic transaction. Returns whether the manifest blob became
-    /// unreferenced, so the caller reclaims its blob-data from the blob store
-    /// under the blob-data lock it must hold across this call (so a concurrent
-    /// reference grant isn't missed; the `ManifestBlobUnknown` race).
+    /// Delete a manifest: tag tombstones and referrer removals land first,
+    /// the revision record last. Reference keys are left for the collector,
+    /// and the bytes wait for a sweep, which is what the spec's
+    /// `202 Accepted` licenses.
     pub async fn delete_manifest(
         &self,
         namespace: &Namespace,
-        digest: &Digest,
+        _digest: &Digest,
         operations: &[LinkOperation],
         source_ts: Option<DateTime<Utc>>,
-    ) -> Result<bool, Error> {
-        let tx = LinksTx::DeleteManifest {
-            blob: digest,
-            source_ts,
-        };
+    ) -> Result<(), Error> {
+        let tx = LinksTx::DeleteManifest { source_ts };
         self.execute_links_tx(namespace, operations, tx)
             .await
-            .map(|c| c.reclaim_blob)
+            .map(|_| ())
     }
 }

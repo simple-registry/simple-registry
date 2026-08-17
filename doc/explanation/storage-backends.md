@@ -249,10 +249,11 @@ key_prefix = "angos"
 
 ## Locking Behavior
 
-The lock is held during:
-- Manifest writes (tag updates)
-- Blob link creation
-- Upload completion
+Registry reads and writes are lock-free: metadata is write-once and ordered
+(see Write Coordination below), and blob reclamation is fenced by the
+`v2/gc/` marker protocol. Locks coordinate only the durable job queue
+(replication and cache jobs), whose claim/release cycle runs on the metadata
+store's engine.
 
 ### In-Memory Locking
 
@@ -617,20 +618,36 @@ Without Redis, cache is in-memory per-instance.
 | Cost (large scale) | ❌             | ✅               |
 | Unlimited storage  | ❌             | ✅               |
 
-## Transactional Engine
+## Write Coordination
 
-The transactional engine consolidates multi-step metadata writes behind single atomic `Transaction` objects. It runs on the metadata store, whose `Store` the job store shares; the blob store is pure storage and hosts no engine. Blob-byte writes are content-addressed and idempotent, serialized where needed by a `blob-data:{digest}` coarse lock taken on the metadata engine, the single lock domain every blob-data participant shares. The coordinated write paths are:
+Registry metadata writes need no transactions and no locks: every record is
+write-once and idempotent, so a push or delete is ordered waves of
+unconditional single-object writes. Reference keys land first, then (after
+the collector check below) the revision record, then the tag entry and
+referrer record, so a reader that resolves a tag always sees a complete
+manifest. A crash between waves leaves only legal states: over-approximated
+references the collector ages out, or a revision with no tag, which is the
+push-by-digest state.
 
-| Subsystem | Description |
-|---|---|
-| Metadata store | `MetadataStore::update_links`: link writes plus idempotent blob-index shard merges submitted as one transaction. |
-| Job store | `JobStore::enqueue`, `JobStore::complete`, and `JobStore::fail`: lock release and pending/index deletes commit atomically as one transaction on the metadata store's engine. |
-| Upload store | Blob upload sessions persisted as per-file artifacts under `v2/repositories/<namespace>/_uploads/<uuid>/` (`session`, `startedat`, `hashstates/sha256/<offset>`, `data`); `complete` moves the staged blob to its content-addressed key and clears the session-record files as idempotent effects under the `blob-data:{digest}` lock. A crash mid-promotion leaves a re-drivable state that the caller's retry or scrub reconciles. |
-| Manifest store | `Registry::store_manifest` writes the manifest body to the blob store, then commits its link and blob-index mutations as one transaction under the `blob-data:{digest}` lock; `Registry::delete_manifest` reclaims the body after the link transaction reports it unreferenced. A crash between the body write and the links leaves at most an orphan blob, which scrub reclaims. |
+The one place a writer and a collector must agree is blob reclamation, and it
+is a marker protocol rather than a lock. A collector about to delete blob
+data publishes a run marker under `v2/gc/` naming the digest range it is
+working on, re-reads its own marker before the irreversible delete, and
+removes it afterwards. A writer that has just written its reference keys
+lists `v2/gc/` once: an unexpired run covering one of its digests means back
+off briefly. Freshly written blob data and fresh reference keys are
+unconditionally live for a grace period, which is what lets uploads and
+pushes skip any coordination for new bytes. Deletes only remove records and
+ownership keys; the bytes wait for a collector sweep (`angos scrub`), which
+both delete endpoints' `202 Accepted` licenses.
 
-Blob-index shards are the one hot key that many concurrent pushes contend on, so their mutations are idempotent set-merges carrying an add/remove delta rather than a whole-body overwrite. The shard still joins the read set, so a concurrent write is caught at prepare and the transaction retries cleanly on the fast path; if a write slips in after the commit point, the merge re-reads the live shard and re-applies the delta on replay instead of leaving a committed transaction with a permanently unsatisfiable precondition. The `blob-data:{digest}` coarse lock continues to isolate the delete path's unreferenced check.
-
-The CAS-vs-Lock executor choice happens once inside the engine factory based on the configured `lock_strategy` and detected S3 capabilities; subsystems never see it. The on-disk key layout is unchanged from a non-transactional deployment.
+The transactional engine still runs on the metadata store's `Store` for the
+job store's enqueue/complete/fail paths, which commit atomically with their
+lock release. Blob upload sessions persist as per-file artifacts under
+`v2/repositories/<namespace>/_uploads/<uuid>/`; `complete` moves the staged
+blob to its content-addressed key as an idempotent effect, and a crash
+mid-promotion leaves a re-drivable state that the caller's retry or scrub
+reconciles.
 
 The engine keeps three reserved prefixes in the metadata store's backend: `.tx-log/` holds the transaction journal, `.tx-bodies/` holds staged object bodies, and `.tx-locks/` holds lock objects. The blob store's backend carries none of them. Recovery runs automatically and needs no operator configuration. Every server and worker replica runs a recovery loop that completes or rolls back any transaction interrupted by a crash, sweeping every 30 seconds. A body janitor reaps orphaned staged bodies under `.tx-bodies/` once they exceed a TTL, and a lock janitor reclaims cold lock objects under `.tx-locks/` once they exceed their TTL plus a grace period (a lock object whose body no longer parses states no TTL, so it is aged by its object mtime against the longest permitted TTL instead, which is what keeps a corrupt one from blocking its key for good). Both janitors run as part of every `angos scrub`, not as background loops in the serving processes, so schedule scrub periodically or staging and lock garbage is never reclaimed.
 

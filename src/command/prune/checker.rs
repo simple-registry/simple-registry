@@ -38,17 +38,6 @@ pub struct RetentionChecker {
     global_retention_policy: Option<Arc<RetentionPolicy>>,
 }
 
-fn has_link_kind(
-    blob_index: &BlobIndex,
-    namespace: &Namespace,
-    predicate: impl Fn(&LinkKind) -> bool,
-) -> bool {
-    blob_index
-        .namespace
-        .get(namespace)
-        .is_some_and(|refs| refs.iter().any(predicate))
-}
-
 #[derive(Debug, PartialEq, Eq)]
 enum PolicyDecision {
     Retain,
@@ -501,9 +490,11 @@ impl RetentionChecker {
         }
 
         let has_tags = !is_protected
-            && blob_index.as_ref().is_some_and(|index| {
-                has_link_kind(index, namespace, |link| matches!(link, LinkKind::Tag(_)))
-            });
+            && self
+                .has_backed_link(namespace, digest, blob_index.as_ref(), |link| {
+                    matches!(link, LinkKind::Tag(_))
+                })
+                .await?;
 
         let metadata = if is_protected || has_tags {
             None
@@ -571,15 +562,42 @@ impl RetentionChecker {
         digest: &Digest,
         blob_index: Option<&BlobIndex>,
     ) -> Result<bool, Error> {
-        if blob_index.is_some_and(|index| {
-            has_link_kind(index, namespace, |link| {
-                matches!(link, LinkKind::Manifest { index: _, child: _ })
+        if self
+            .has_backed_link(namespace, digest, blob_index, |link| {
+                matches!(link, LinkKind::Manifest { .. })
             })
-        }) {
+            .await?
+        {
             return Ok(true);
         }
 
         Ok(self.metadata_store.has_referrers(namespace, digest).await?)
+    }
+
+    /// Any index entry matching `predicate` whose backing link still
+    /// resolves. Writers never remove reference entries, so a bare membership
+    /// test would let stale entries steer retention; only backed ones count.
+    async fn has_backed_link(
+        &self,
+        namespace: &Namespace,
+        digest: &Digest,
+        blob_index: Option<&BlobIndex>,
+        predicate: impl Fn(&LinkKind) -> bool,
+    ) -> Result<bool, Error> {
+        let Some(refs) = blob_index.and_then(|index| index.namespace.get(namespace)) else {
+            return Ok(false);
+        };
+        for link in refs {
+            if predicate(link)
+                && self
+                    .metadata_store
+                    .reference_backed(namespace, link, digest)
+                    .await?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 

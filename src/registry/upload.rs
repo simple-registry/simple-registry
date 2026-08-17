@@ -39,49 +39,50 @@ impl Registry {
     where
         S: AsyncRead + Unpin,
     {
-        self.metadata_store
-            .with_blob_data_lock(digest, async {
-                if self.blob_store.size(digest).await.is_err() {
-                    return Ok(false);
-                }
+        {
+            if self.blob_store.size(digest).await.is_err() {
+                return Ok(false);
+            }
 
-                // The blob already exists, so there is nothing to store: hash the
-                // body into a sink under the target algorithm alone, purely to
-                // confirm it matches. With a declared length, drain at most one byte
-                // past it so an over-long body is rejected as soon as the surplus
-                // appears rather than after the whole `bound_blob_stream`-capped
-                // body is read.
-                let mut reader =
-                    HashingReader::new(&mut *stream, Hasher::for_algorithm(digest.algorithm()));
-                match content_length {
-                    Some(expected) => {
-                        // Draining faults are I/O (surface the source); only the
-                        // read-vs-declared comparison is a length mismatch (416).
-                        let read = copy(
-                            &mut (&mut reader).take(expected.saturating_add(1)),
-                            &mut sink(),
-                        )
-                        .await?;
-                        if read != expected {
-                            return Err(Error::RangeNotSatisfiable);
-                        }
-                    }
-                    None => {
-                        copy(&mut reader, &mut sink()).await?;
+            // The blob already exists, so there is nothing to store: hash the
+            // body into a sink under the target algorithm alone, purely to
+            // confirm it matches. With a declared length, drain at most one byte
+            // past it so an over-long body is rejected as soon as the surplus
+            // appears rather than after the whole `bound_blob_stream`-capped
+            // body is read.
+            let mut reader =
+                HashingReader::new(&mut *stream, Hasher::for_algorithm(digest.algorithm()));
+            match content_length {
+                Some(expected) => {
+                    // Draining faults are I/O (surface the source); only the
+                    // read-vs-declared comparison is a length mismatch (416).
+                    let read = copy(
+                        &mut (&mut reader).take(expected.saturating_add(1)),
+                        &mut sink(),
+                    )
+                    .await?;
+                    if read != expected {
+                        return Err(Error::RangeNotSatisfiable);
                     }
                 }
-
-                let upload_digest = reader.into_hasher().digest(digest.algorithm())?;
-                if &upload_digest != digest {
-                    warn!("Expected digest '{digest}', got '{upload_digest}'");
-                    return Err(Error::DigestInvalid);
+                None => {
+                    copy(&mut reader, &mut sink()).await?;
                 }
+            }
 
-                self.blob_ownership().grant(namespace, digest).await?;
+            let upload_digest = reader.into_hasher().digest(digest.algorithm())?;
+            if &upload_digest != digest {
+                warn!("Expected digest '{digest}', got '{upload_digest}'");
+                return Err(Error::DigestInvalid);
+            }
 
-                Ok(true)
-            })
-            .await
+            // The bytes pre-exist and may be old: the guarded grant
+            // catches a mid-flight reclaim, falling back to a fresh
+            // upload of the streamed body.
+            self.blob_ownership()
+                .grant_existing(&self.blob_store, namespace, digest)
+                .await
+        }
     }
 
     async fn finish_completed_upload(
@@ -101,34 +102,37 @@ impl Registry {
         )?)
     }
 
-    /// Grants `namespace` a reference to `mount.digest`, re-checked against the
-    /// authorized `source`, returning `Ok(None)` when the source no longer
-    /// holds the blob or its bytes are gone. Check and grant run under the
-    /// `blob-data:{digest}` lock so a concurrent `delete_blob` cannot leave a
-    /// dangling reference.
+    /// Grants `namespace` a reference to `mount.digest`, re-checked against
+    /// the authorized `source`, returning `Ok(None)` when the source no
+    /// longer holds the blob or its bytes are gone (including a reclaim
+    /// caught mid-flight by the guarded grant), which falls back to a
+    /// regular upload session per the spec.
     async fn try_cross_repo_mount(
         &self,
         namespace: &Namespace,
         mount: &BlobMount,
         source: &Namespace,
     ) -> Result<Option<Digest>, Error> {
-        self.metadata_store
-            .with_blob_data_lock(&mount.digest, async {
-                if self.blob_store.size(&mount.digest).await.is_err()
-                    || !self
-                        .blob_ownership()
-                        .can_read(source, &mount.digest)
-                        .await?
-                {
-                    return Ok(None);
-                }
+        (async {
+            if self.blob_store.size(&mount.digest).await.is_err()
+                || !self
+                    .blob_ownership()
+                    .can_read(source, &mount.digest)
+                    .await?
+            {
+                return Ok(None);
+            }
 
-                self.blob_ownership()
-                    .grant(namespace, &mount.digest)
-                    .await?;
-                Ok(Some(mount.digest.clone()))
-            })
-            .await
+            if !self
+                .blob_ownership()
+                .grant_existing(&self.blob_store, namespace, &mount.digest)
+                .await?
+            {
+                return Ok(None);
+            }
+            Ok(Some(mount.digest.clone()))
+        })
+        .await
     }
 
     /// Source namespaces whose read policy must permit the caller: `[from]`

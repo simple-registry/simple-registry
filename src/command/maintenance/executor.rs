@@ -155,60 +155,87 @@ impl Executor {
 }
 
 impl Executor {
-    /// Deletes the orphan's bytes under the `blob-data:{digest}` coarse lock
-    /// (the same one manifest pushes and upload completions take), so a
-    /// reference a concurrent push is granting cannot be missed and have its
-    /// bytes reclaimed underneath it.
+    /// The collector's only irreversible action, fenced by the marker
+    /// protocol instead of a lock: age-gate the bytes, check reference
+    /// liveness, publish a run covering the digest, re-verify under a
+    /// refreshed marker, then delete the bytes and every stale reference key.
+    /// A writer either wrote its reference before the re-verification (a
+    /// young key reads live) or after the marker was visible to its own
+    /// check, so it backed off.
     async fn delete_orphan_blob(&self, digest: Digest) -> Result<(), Error> {
-        self.metadata_store
-            .with_blob_data_lock(&digest, async {
-                match self.metadata_store.has_blob_references(&digest).await {
-                    Err(e) => Err(Error::from(e)),
-                    Ok(true) => {
-                        info!("skipping orphan blob deletion: reference appeared for {digest}");
-                        Ok(())
-                    }
-                    Ok(false) => match self.blob_store.delete_blob(&digest).await {
-                        Ok(()) | Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
-                            Ok(())
-                        }
-                        Err(e) => Err(Error::from(e)),
-                    },
-                }
-            })
+        let meta = match self
+            .blob_store
+            .object_store()
+            .head(&path_builder::blob_path(&digest))
             .await
+        {
+            Ok(meta) => meta,
+            Err(StorageError::NotFound) => return Ok(()),
+            Err(e) => return Err(Error::from(RegistryError::from(e))),
+        };
+        // Fresh bytes are unconditionally live: an upload's `_own` key or a
+        // push's reference may still be in flight.
+        let grace = i64::try_from(self.metadata_store.gc_grace_secs()).unwrap_or(i64::MAX);
+        let fresh = meta.last_modified.is_none_or(|modified| {
+            Utc::now().signed_duration_since(modified).num_seconds() < grace
+        });
+        if fresh || self.metadata_store.blob_references_live(&digest).await? {
+            info!("skipping orphan blob deletion: '{digest}' reads live");
+            return Ok(());
+        }
+
+        let claim = self.metadata_store.gc_claim(&digest, &digest).await?;
+        // Fence, then re-verify under the published marker.
+        if !self.metadata_store.gc_refresh(&claim).await?
+            || self.metadata_store.blob_references_live(&digest).await?
+        {
+            info!("skipping orphan blob deletion: '{digest}' became live under the marker");
+            return self
+                .metadata_store
+                .gc_release(claim)
+                .await
+                .map_err(Error::from);
+        }
+        match self.blob_store.delete_blob(&digest).await {
+            Ok(()) | Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {}
+            Err(e) => {
+                let _ = self.metadata_store.gc_release(claim).await;
+                return Err(Error::from(e));
+            }
+        }
+        self.metadata_store.delete_blob_references(&digest).await?;
+        self.metadata_store
+            .gc_release(claim)
+            .await
+            .map_err(Error::from)
     }
 
-    /// Remove a blob-index entry under the `blob-data:{blob}` lock, re-checking
-    /// at apply time that the removal is still justified: a byteless grant
-    /// (prune's sweep) or a dangling entry whose link file is gone (scrub's
-    /// shard pass). An entry re-legitimized since classification, by an upload
-    /// or cache fill landing the bytes or a push recreating the link, is kept.
+    /// Remove a blob-index entry, re-checking at apply time that the removal
+    /// is still justified: a byteless grant (prune's sweep) or a dangling
+    /// entry whose link file is gone (scrub's reference pass). An entry
+    /// re-legitimized since classification, by an upload or cache fill
+    /// landing the bytes or a push recreating the link, is kept.
     async fn remove_blob_index_link(
         &self,
         namespace: Namespace,
         blob: Digest,
         link: LinkKind,
     ) -> Result<(), Error> {
-        self.metadata_store
-            .with_blob_data_lock(&blob, async {
-                let bytes_exist = match self.blob_store.size(&blob).await {
-                    Ok(_) => true,
-                    Err(RegistryError::BlobUnknown | RegistryError::NotFound) => false,
-                    Err(e) => return Err(Error::from(e)),
-                };
-                if bytes_exist && self.entry_still_backed(&namespace, &link, &blob).await? {
-                    info!(
-                        "skipping blob-index removal: entry for '{namespace}/{blob}' is live again"
-                    );
-                    return Ok(());
-                }
-                self.metadata_store
-                    .update_blob_index(&namespace, &blob, BlobIndexOperation::Remove(link))
-                    .await?;
-                Ok(())
-            })
-            .await
+        {
+            let bytes_exist = match self.blob_store.size(&blob).await {
+                Ok(_) => true,
+                Err(RegistryError::BlobUnknown | RegistryError::NotFound) => false,
+                Err(e) => return Err(Error::from(e)),
+            };
+            if bytes_exist && self.entry_still_backed(&namespace, &link, &blob).await? {
+                info!("skipping blob-index removal: entry for '{namespace}/{blob}' is live again");
+                return Ok(());
+            }
+            self.metadata_store
+                .update_blob_index(&namespace, &blob, BlobIndexOperation::Remove(link))
+                .await?;
+            Ok(())
+        }
     }
 
     /// Whether the reference entry for `link` is still backed: a blob
@@ -252,38 +279,35 @@ impl Executor {
     }
 
     /// Re-add a blob-index grant the index is missing for a still-referenced
-    /// blob, under the `blob-data:{blob}` lock the orphan-blob reclaim also
-    /// holds.
+    /// blob.
     ///
-    /// Re-checks the bytes under the lock: the checker's existence gate ran
-    /// before this apply, so a concurrent reclaim may have deleted the bytes in
-    /// between. Granting then would resurrect a reference to a deleted blob, so a
-    /// vanished blob is skipped. The insert itself is idempotent, so a concurrent
-    /// push that re-granted the same link is harmless.
+    /// Re-checks the bytes first: the checker's existence gate ran before
+    /// this apply, so a concurrent reclaim may have deleted the bytes in
+    /// between. Granting then would resurrect a reference to a deleted blob,
+    /// so a vanished blob is skipped. The insert itself is idempotent, so a
+    /// concurrent push that re-granted the same link is harmless.
     async fn grant_blob_index_link(
         &self,
         namespace: Namespace,
         blob: Digest,
         link: LinkKind,
     ) -> Result<(), Error> {
-        self.metadata_store
-            .with_blob_data_lock(&blob, async {
-                match self.blob_store.size(&blob).await {
-                    Ok(_) => {}
-                    Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
-                        info!(
-                            "skipping blob-index grant: bytes were reclaimed for '{namespace}/{blob}'"
-                        );
-                        return Ok(());
-                    }
-                    Err(e) => return Err(Error::from(e)),
+        {
+            match self.blob_store.size(&blob).await {
+                Ok(_) => {}
+                Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
+                    info!(
+                        "skipping blob-index grant: bytes were reclaimed for '{namespace}/{blob}'"
+                    );
+                    return Ok(());
                 }
-                self.metadata_store
-                    .update_blob_index(&namespace, &blob, BlobIndexOperation::Insert(link.clone()))
-                    .await?;
-                Ok(())
-            })
-            .await
+                Err(e) => return Err(Error::from(e)),
+            }
+            self.metadata_store
+                .update_blob_index(&namespace, &blob, BlobIndexOperation::Insert(link.clone()))
+                .await?;
+            Ok(())
+        }
     }
 
     /// The migration actions: each converts one legacy shape into its new
@@ -356,39 +380,33 @@ impl Executor {
         namespace: Namespace,
         blob: Digest,
     ) -> Result<(), Error> {
-        self.metadata_store
-            .with_blob_data_lock(&blob, async {
-                // Re-check under the lock: a manifest reference may have appeared
-                // since the checker classified the grant as orphaned.
-                let links = match self
-                    .metadata_store
-                    .read_blob_index_namespace(&namespace, &blob)
-                    .await
-                {
-                    Ok(links) => links,
-                    // The grant vanished since classification (a concurrent revoke
-                    // or delete): nothing left to do.
-                    Err(RegistryError::NotFound) => return Ok(()),
-                    Err(e) => return Err(Error::from(e)),
-                };
-                if links.iter().any(LinkKind::is_tracked) {
-                    info!(
-                        "skipping orphan grant revoke: a manifest reference appeared for '{namespace}/{blob}'"
-                    );
-                    return Ok(());
-                }
-                // Revoke the grant, then reclaim the now-unreferenced manifest
-                // blob-data from the blob store under the same lock.
-                if self
-                    .metadata_store
-                    .revoke_blob_ownership(&namespace, &blob)
-                    .await?
-                {
-                    self.blob_store.delete_blob(&blob).await?;
-                }
-                Ok(())
-            })
-            .await
+        {
+            // Re-check under the lock: a manifest reference may have appeared
+            // since the checker classified the grant as orphaned.
+            let links = match self
+                .metadata_store
+                .read_blob_index_namespace(&namespace, &blob)
+                .await
+            {
+                Ok(links) => links,
+                // The grant vanished since classification (a concurrent revoke
+                // or delete): nothing left to do.
+                Err(RegistryError::NotFound) => return Ok(()),
+                Err(e) => return Err(Error::from(e)),
+            };
+            if links.iter().any(LinkKind::is_tracked) {
+                info!(
+                    "skipping orphan grant revoke: a manifest reference appeared for '{namespace}/{blob}'"
+                );
+                return Ok(());
+            }
+            // Revoke the grant; the bytes are the collector's to reclaim
+            // once every reference is stale.
+            self.metadata_store
+                .revoke_blob_ownership(&namespace, &blob)
+                .await?;
+            Ok(())
+        }
     }
 
     async fn recreate_link(

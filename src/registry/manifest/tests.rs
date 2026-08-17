@@ -1,4 +1,4 @@
-use std::{collections::HashSet, io::Cursor, sync::Arc, time::Duration};
+use std::{collections::HashSet, io::Cursor, sync::Arc};
 
 use futures_util::future::join_all;
 use hyper::{
@@ -6,7 +6,6 @@ use hyper::{
     header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION},
 };
 use serde_json::json;
-use tokio::time::sleep;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -1236,12 +1235,11 @@ async fn test_delete_manifest() {
     .await;
 }
 
-/// Regression: a digest `delete_manifest` must hold the `blob-data:{digest}`
-/// lock across its unreferenced-check + reclaim. Otherwise a concurrent grant
-/// from another repository is missed and a shared blob is reclaimed while a tag
-/// still points at it (conformance `MANIFEST_BLOB_UNKNOWN`).
+/// A digest `delete_manifest` never reclaims bytes: the collector does, once
+/// every reference is stale, so a concurrent grant from another repository
+/// can never be stranded (conformance `MANIFEST_BLOB_UNKNOWN`).
 #[tokio::test]
-async fn delete_manifest_holds_blob_data_lock_against_concurrent_grant() {
+async fn delete_manifest_leaves_bytes_for_the_collector() {
     for_each_backend(async |test_case| {
         let registry = test_case.registry();
         let first = &Namespace::new("test-repo/first").unwrap();
@@ -1279,46 +1277,29 @@ async fn delete_manifest_holds_blob_data_lock_against_concurrent_grant() {
             .unwrap();
         let digest = response.digest.clone();
 
-        // Hold the lock, then start the delete: it must block, not reclaim.
-        let session = registry
-            .metadata_store
-            .acquire_blob_data_lock(&digest)
-            .await
-            .unwrap();
-        let reference = Reference::Digest(digest.clone());
-        let delete = registry.delete_manifest(None, None, first, &reference);
-        tokio::pin!(delete);
-        tokio::select! {
-            result = &mut delete => {
-                panic!(
-                    "delete_manifest completed while blob-data lock was held (ok={})",
-                    result.is_ok()
-                );
-            }
-            () = sleep(Duration::from_millis(25)) => {}
-        }
-
-        // A second repo grants a reference while the delete is parked.
+        // A second repo holds a reference; the delete revokes only the
+        // first's state and never touches the bytes.
         let ownership = BlobOwnership::new(registry.metadata_store.as_ref());
         ownership.grant(second, &digest).await.unwrap();
-        session.release().await;
-        delete.await.unwrap();
+        let reference = Reference::Digest(digest.clone());
+        registry
+            .delete_manifest(None, None, first, &reference)
+            .await
+            .unwrap();
 
-        // The blob survives: `second` still references it.
         assert!(
             registry.blob_store.read(&digest).await.is_ok(),
-            "shared manifest blob was wrongly reclaimed despite a concurrent grant"
+            "the bytes are the collector's to reclaim, never the delete's"
         );
     })
     .await;
 }
 
-/// Regression: the pointing-tag scan and the link plan must run inside the
-/// `blob-data:{digest}` lock. Planned outside it, a tag pushed to the digest in
-/// the window is missed by the cascade, so the revision and child links go while
-/// the fresh tag survives and resolves to a manifest that 404s by digest.
+/// A tag racing a digest delete may survive as an entry pointing at the
+/// deleted revision; the revision-existence probe makes it read as 404 on
+/// every path, and the next push heals it.
 #[tokio::test]
-async fn delete_manifest_by_digest_cascades_a_tag_pushed_while_it_waits_for_the_lock() {
+async fn a_tag_racing_a_digest_delete_reads_as_gone() {
     for_each_backend(async |test_case| {
         let registry = test_case.registry();
         let namespace = &Namespace::new("test-repo").unwrap();
@@ -1335,29 +1316,14 @@ async fn delete_manifest_by_digest_cascades_a_tag_pushed_while_it_waits_for_the_
             .unwrap()
             .digest;
 
-        // Hold the lock, then start the digest delete: it must park before it
-        // can resolve the pointing tags.
-        let session = registry
-            .metadata_store
-            .acquire_blob_data_lock(&digest)
+        let reference = Reference::Digest(digest.clone());
+        registry
+            .delete_manifest(None, None, namespace, &reference)
             .await
             .unwrap();
-        let reference = Reference::Digest(digest.clone());
-        let delete = registry.delete_manifest(None, None, namespace, &reference);
-        tokio::pin!(delete);
-        tokio::select! {
-            result = &mut delete => {
-                panic!(
-                    "delete_manifest completed while blob-data lock was held (ok={})",
-                    result.is_ok()
-                );
-            }
-            () = sleep(Duration::from_millis(25)) => {}
-        }
 
-        // A push lands a second tag on the digest while the delete is parked.
-        // A same-digest push adds exactly this link; the revision and child
-        // links it re-creates are already there from the first push.
+        // A racing push lands its tag entry after the delete's tag scan: the
+        // entry survives, pointing at the deleted revision.
         let fresh = Tag::new("fresh").unwrap();
         registry
             .metadata_store
@@ -1372,25 +1338,26 @@ async fn delete_manifest_by_digest_cascades_a_tag_pushed_while_it_waits_for_the_
             .await
             .unwrap();
 
-        session.release().await;
-        delete.await.unwrap();
-
         let revision = registry
             .metadata_store
             .read_link(namespace, &LinkKind::Digest(digest.clone()))
             .await;
         assert!(
             matches!(revision, Err(Error::NotFound)),
-            "the digest delete must remove the revision link, got: {revision:?}"
+            "the digest delete must remove the revision record, got: {revision:?}"
         );
-        let tag_link = registry
-            .metadata_store
-            .read_link(namespace, &LinkKind::Tag(fresh))
+        let resolved = registry
+            .get_manifest(
+                registry.get_repository_for_namespace(namespace).ok(),
+                &[MediaRange::from(media_type.clone())],
+                namespace,
+                Reference::Tag(fresh),
+                false,
+            )
             .await;
         assert!(
-            matches!(tag_link, Err(Error::NotFound)),
-            "a tag pushed while the delete waited for the lock must cascade with it, \
-             or it serves a digest that now 404s; got: {tag_link:?}"
+            resolved.is_err(),
+            "a surviving racing tag must read as gone, not serve the deleted manifest"
         );
     })
     .await;
@@ -1461,7 +1428,15 @@ async fn delete_manifest_then_delete_uploaded_blobs() {
             .await
             .unwrap();
 
-        assert!(registry.blob_store.read(&manifest_digest).await.is_err());
+        // The manifest body stays for the collector; only the revision is gone.
+        assert!(registry.blob_store.read(&manifest_digest).await.is_ok());
+        assert!(
+            registry
+                .metadata_store
+                .read_link(namespace, &LinkKind::Digest(manifest_digest.clone()))
+                .await
+                .is_err()
+        );
         assert_eq!(
             registry.blob_store.read(&layer_digest).await.unwrap(),
             layer_content
@@ -1486,8 +1461,16 @@ async fn delete_manifest_then_delete_uploaded_blobs() {
             .await
             .unwrap();
 
-        assert!(registry.blob_store.read(&layer_digest).await.is_err());
-        assert!(registry.blob_store.read(&config_digest).await.is_err());
+        // Ownership revoked (the stale manifest-derived entries and the bytes
+        // wait for the collector).
+        let ownership = registry.blob_ownership();
+        for digest in [&layer_digest, &config_digest] {
+            let refs = ownership.references(namespace, digest).await.unwrap();
+            assert!(
+                !refs.contains(&LinkKind::Blob(digest.clone())),
+                "the ownership key must be revoked for {digest}"
+            );
+        }
     })
     .await;
 }
@@ -2305,14 +2288,23 @@ async fn manifest_blob_lives_in_blob_store_with_split_backends() {
         "manifest body must not land in the metadata store",
     );
 
-    // Symmetric delete: reclaiming the manifest removes it from the blob store.
+    // The delete removes the revision; the body stays in the blob store for
+    // the collector to reclaim.
     registry
         .delete_manifest(None, None, &namespace, &Reference::Digest(digest.clone()))
         .await
         .expect("delete by digest must succeed");
     assert!(
-        registry.blob_store.read(&digest).await.is_err(),
-        "manifest blob must be reclaimed from the blob store on delete",
+        registry
+            .metadata_store
+            .read_link(&namespace, &LinkKind::Digest(digest.clone()))
+            .await
+            .is_err(),
+        "the revision must be gone after the delete",
+    );
+    assert!(
+        registry.blob_store.read(&digest).await.is_ok(),
+        "the manifest body is the collector's to reclaim",
     );
 }
 

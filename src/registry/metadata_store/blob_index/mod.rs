@@ -10,18 +10,14 @@ use std::collections::{HashMap, HashSet};
 use std::pin::pin;
 
 use bytes::Bytes;
+use chrono::Utc;
 use futures_util::{Stream, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use angos_oci::{Digest, Namespace};
 use angos_storage::paginated;
-use angos_tx_engine::{
-    StorageError,
-    executor::{DEFAULT_RETRY_BUDGET, execute_with_retry},
-    store::Store,
-    transaction::{Mutation, Transaction},
-};
+use angos_tx_engine::{StorageError, store::Store, transaction::Mutation};
 
 use crate::registry::{
     Error,
@@ -125,59 +121,6 @@ pub async fn namespace_entries_merged(
     Ok(links)
 }
 
-/// Whether any namespace records a reference entry for `digest` under the new
-/// key shape.
-async fn any_ref_entry(store: &Store, digest: &Digest) -> Result<bool, Error> {
-    let dir = path_builder::blob_ref_dir(digest);
-    let mut token = None;
-    loop {
-        let page = store
-            .object_store()
-            .list(&dir, REF_LIST_PAGE, token)
-            .await?;
-        if page
-            .items
-            .iter()
-            .any(|key| path_builder::parse_blob_ref(digest, key).is_some())
-        {
-            return Ok(true);
-        }
-        token = page.next_token;
-        if token.is_none() {
-            return Ok(false);
-        }
-    }
-}
-
-/// `true` when any namespace other than `our_namespace` records a reference
-/// to `digest`: the new reference keys first, the legacy shards second.
-pub async fn any_other_namespace_references_blob(
-    store: &Store,
-    our_namespace: &Namespace,
-    digest: &Digest,
-) -> Result<bool, Error> {
-    let dir = path_builder::blob_ref_dir(digest);
-    let mut token = None;
-    loop {
-        let page = store
-            .object_store()
-            .list(&dir, REF_LIST_PAGE, token)
-            .await?;
-        for key in &page.items {
-            if let Some((namespace, _)) = path_builder::parse_blob_ref(digest, key)
-                && namespace != our_namespace.as_ref()
-            {
-                return Ok(true);
-            }
-        }
-        token = page.next_token;
-        if token.is_none() {
-            break;
-        }
-    }
-    shard::any_other_namespace_shard_references_blob(store, our_namespace, digest).await
-}
-
 // Store-backed methods
 
 impl MetadataStore {
@@ -190,36 +133,28 @@ impl MetadataStore {
         digest: &Digest,
         operation: BlobIndexOperation,
     ) -> Result<(), Error> {
-        let mutation = ref_mutation(namespace, digest, &operation);
-        execute_with_retry(
-            self.store().executor().as_ref(),
-            || {
-                let mutation = mutation.clone();
-                async move { Ok(Transaction::builder().mutation(mutation).build()) }
-            },
-            DEFAULT_RETRY_BUDGET,
-        )
-        .await
+        match ref_mutation(namespace, digest, &operation) {
+            Mutation::Put { key, body, .. } => self.store().object_store().put(&key, body).await,
+            Mutation::Delete { key, .. } => self.store().object_store().delete(&key).await,
+            // `ref_mutation` only produces puts and deletes.
+            _ => Ok(()),
+        }
         .map_err(Error::from)
     }
 
-    /// Revoke `namespace`'s ownership of `digest` in an atomic transaction and
-    /// return whether the blob became unreferenced, so the caller reclaims its
-    /// blob-data from the blob store under the `blob-data:{digest}` lock it must
-    /// hold across this call (serialising against concurrent pushes/deletes of
-    /// the same digest).
+    /// Revoke `namespace`'s ownership of `digest`: one delete of the `_own`
+    /// key, the only reference removal a writer ever performs. The bytes are
+    /// the collector's to reclaim once every reference is stale.
     pub async fn revoke_blob_ownership(
         &self,
         namespace: &Namespace,
         digest: &Digest,
-    ) -> Result<bool, Error> {
+    ) -> Result<(), Error> {
         let tx = LinksTx::RevokeBlobOwnership {
             blob: digest,
             ops: vec![BlobIndexOperation::Remove(LinkKind::Blob(digest.clone()))],
         };
-        self.execute_links_tx(namespace, &[], tx)
-            .await
-            .map(|c| c.reclaim_blob)
+        self.execute_links_tx(namespace, &[], tx).await.map(|_| ())
     }
 
     /// Stream each present shard under `refs_dir` as its relative filename plus
@@ -300,25 +235,6 @@ impl MetadataStore {
     }
 
     #[instrument(skip(self))]
-    pub async fn has_blob_references(&self, digest: &Digest) -> Result<bool, Error> {
-        if any_ref_entry(self.store(), digest).await? {
-            return Ok(true);
-        }
-
-        // Legacy shards: short-circuit on the first non-empty one.
-        let refs_dir = path_builder::blob_index_refs_dir(digest);
-        let mut shards = pin!(self.stream_shards(&refs_dir));
-        while let Some((_, data)) = shards.try_next().await? {
-            let links = serde_json::from_slice::<HashSet<LinkKind>>(&data)?;
-            if !links.is_empty() {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
-    }
-
-    #[instrument(skip(self))]
     pub async fn read_blob_index_namespace(
         &self,
         namespace: &Namespace,
@@ -326,5 +242,108 @@ impl MetadataStore {
     ) -> Result<HashSet<LinkKind>, Error> {
         let links = namespace_entries_merged(self.store(), namespace, digest).await?;
         non_empty_links_or_not_found(links)
+    }
+
+    /// Whether the link behind a reference entry still backs it: a tag,
+    /// revision, or referrer while it resolves to `blob`, every other kind
+    /// while its link file exists. Reads are raw, so a cache cannot mask a
+    /// live reference.
+    pub async fn reference_backed(
+        &self,
+        namespace: &Namespace,
+        link: &LinkKind,
+        blob: &Digest,
+    ) -> Result<bool, Error> {
+        match link {
+            LinkKind::Tag(_) | LinkKind::Digest(_) | LinkKind::Referrer { .. } => {
+                match self.read_link_reference(namespace, link).await {
+                    Ok(metadata) => Ok(&metadata.target == blob),
+                    Err(Error::NotFound) => Ok(false),
+                    Err(e) => Err(e),
+                }
+            }
+            _ => {
+                let link_key = path_builder::link_path(link, namespace);
+                match self.store().object_store().head(&link_key).await {
+                    Ok(_) => Ok(true),
+                    Err(StorageError::NotFound) => Ok(false),
+                    Err(e) => Err(e.into()),
+                }
+            }
+        }
+    }
+
+    /// Collector-side liveness over the reference index: `_own` pins
+    /// unconditionally, an unconverted legacy shard pins, and any other key
+    /// pins while it is younger than the grace period or its backing link
+    /// still resolves. The blob-data age gate is the caller's, since the
+    /// bytes live in the blob store.
+    pub async fn blob_references_live(&self, digest: &Digest) -> Result<bool, Error> {
+        let dir = path_builder::blob_ref_dir(digest);
+        let mut token = None;
+        loop {
+            let page = self.store().object_store().list(&dir, 1000, token).await?;
+            for key in &page.items {
+                let Some((raw, link)) = path_builder::parse_blob_ref(digest, key) else {
+                    continue;
+                };
+                if matches!(link, LinkKind::Blob(_)) {
+                    return Ok(true);
+                }
+                let full_key = format!("{dir}/{key}");
+                match self.store().object_store().head(&full_key).await {
+                    Ok(meta) => {
+                        // No timestamp to gate on: live, never guess in
+                        // favour of deletion.
+                        let Some(modified) = meta.last_modified else {
+                            return Ok(true);
+                        };
+                        let age = Utc::now().signed_duration_since(modified);
+                        if age.num_seconds() < i64::try_from(self.gc_grace_secs).unwrap_or(i64::MAX)
+                        {
+                            return Ok(true);
+                        }
+                    }
+                    Err(StorageError::NotFound) => continue,
+                    Err(e) => return Err(e.into()),
+                }
+                let Ok(namespace) = Namespace::new(&raw) else {
+                    // A key angos cannot address is left to quarantine, and
+                    // pins until then.
+                    return Ok(true);
+                };
+                if self.reference_backed(&namespace, &link, digest).await? {
+                    return Ok(true);
+                }
+            }
+            token = page.next_token;
+            if token.is_none() {
+                break;
+            }
+        }
+        // Any non-empty legacy shard pins the blob until scrub converts it.
+        let refs_dir = path_builder::blob_index_refs_dir(digest);
+        let mut shards = pin!(self.stream_shards(&refs_dir));
+        while let Some((_, data)) = shards.try_next().await? {
+            match serde_json::from_slice::<HashSet<LinkKind>>(&data) {
+                Ok(links) if links.is_empty() => {}
+                // A corrupt shard pins: fail closed.
+                _ => return Ok(true),
+            }
+        }
+        Ok(false)
+    }
+
+    /// Delete every reference key and legacy shard of a reclaimed blob. Only
+    /// the collector calls this, after the marker protocol has fenced the
+    /// blob-data delete.
+    pub async fn delete_blob_references(&self, digest: &Digest) -> Result<(), Error> {
+        for prefix in [
+            path_builder::blob_ref_dir(digest),
+            path_builder::blob_index_refs_dir(digest),
+        ] {
+            self.store().object_store().delete_prefix(&prefix).await?;
+        }
+        Ok(())
     }
 }

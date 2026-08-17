@@ -36,7 +36,7 @@ Before applying a cross-key repair, scrub confirms the inconsistency is settled 
 | Dangling references | Removes tags and revisions whose manifest blob is missing, and orphan referrer entries |
 | Invalid names | Deletes tag, namespace, and upload directories whose names violate the OCI grammar (nothing can address them) |
 | Corrupt content | Deletes links, job records, and index shards whose content does not parse |
-| Orphan blobs | Reclaims blobs with no index references, re-checked under the blob-data lock at apply time |
+| Orphan blobs | Reclaims blobs with no live references, past a grace period and fenced by a `v2/gc/` run marker at apply time |
 | Unrecognized keys | Moves them to `_lost_and_found/` in the same store, preserving their bytes |
 | Engine housekeeping | Runs the transaction engine's own janitor sweeps: orphaned `.tx-bodies/` staging and expired `.tx-locks/` objects (age-gated by engine thresholds; skipped in dry-run) |
 

@@ -11,6 +11,13 @@ pub const REPOS_ROOT: &str = "v2/repositories";
 pub const REF_ROOT: &str = "v2/ref";
 pub const NS_ROOT: &str = "v2/ns";
 pub const CAT_ROOT: &str = "v2/cat";
+pub const GC_ROOT: &str = "v2/gc";
+
+/// One collector run's range marker: the only key a writer and the collector
+/// both consult.
+pub fn gc_run_path(run: &str) -> String {
+    format!("{GC_ROOT}/{run}")
+}
 
 /// Root directory and namespace-name prefix for a namespace tree walk. `None`
 /// walks the whole repositories tree; `Some(repository)` restricts the walk to

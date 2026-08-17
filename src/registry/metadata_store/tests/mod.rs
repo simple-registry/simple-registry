@@ -1,6 +1,7 @@
 mod access_time;
 mod blob_index;
 mod cache;
+mod gc;
 mod list_namespaces;
 mod tag_entries;
 
@@ -80,7 +81,8 @@ impl TestS3Config {
         );
         let mut builder = MetadataStore::builder(facade)
             .link_cache_ttl(self.link_cache_ttl)
-            .access_time_debounce_secs(self.access_time_debounce_secs);
+            .access_time_debounce_secs(self.access_time_debounce_secs)
+            .gc_grace_secs(0);
 
         if let Some(c) = cache {
             builder = builder.cache(c);
@@ -1300,18 +1302,17 @@ pub async fn test_datastore_parallel_mixed_create_delete(m: Arc<MetadataStore>) 
         .unwrap();
     assert_eq!(meta_v3.target, digest_c, "Tag v3 should point to digest_c");
 
+    // The re-pointed tag's old entry persists as a stale over-approximation
+    // until the collector prunes it.
     let tag_v1 = LinkKind::Tag(Tag::new("v1").unwrap());
-    match m.read_blob_index(&digest_a).await {
-        Ok(index_a) => {
-            let links_a = index_a.namespace.get(namespace);
-            assert!(
-                links_a.is_none_or(|s| !s.contains(&tag_v1)),
-                "Blob index for digest_a should not contain Tag(v1) after deletion"
-            );
-        }
-        Err(Error::NotFound) => {}
-        Err(e) => panic!("Unexpected error reading blob index for digest_a: {e:?}"),
-    }
+    let index_a = m.read_blob_index(&digest_a).await.unwrap();
+    assert!(
+        index_a
+            .namespace
+            .get(namespace)
+            .is_some_and(|links| links.contains(&tag_v1)),
+        "the stale entry is the collector's to prune, not the writer's"
+    );
 
     let index_c = m.read_blob_index(&digest_c).await.unwrap();
     let links_c = index_c
@@ -1632,18 +1633,17 @@ pub async fn test_datastore_tracked_delete_removes_when_no_referrers(m: Arc<Meta
         "Link should not exist after all referrers removed, got: {err:?}"
     );
 
+    // The reference entry outlives the link as a stale over-approximation;
+    // pruning it is the collector's.
     let layer_link = LinkKind::Layer(layer_digest.clone());
-    match m.read_blob_index(&layer_digest).await {
-        Ok(index) => {
-            let links = index.namespace.get(namespace);
-            assert!(
-                links.is_none_or(|s| !s.contains(&layer_link)),
-                "Blob index should not contain the Layer link after removal"
-            );
-        }
-        Err(Error::NotFound) => {}
-        Err(e) => panic!("Unexpected error reading blob index: {e:?}"),
-    }
+    let index = m.read_blob_index(&layer_digest).await.unwrap();
+    assert!(
+        index
+            .namespace
+            .get(namespace)
+            .is_some_and(|links| links.contains(&layer_link)),
+        "the stale entry is the collector's to prune, not the writer's"
+    );
 }
 
 #[tokio::test]
@@ -1819,10 +1819,9 @@ pub async fn test_datastore_batch_handles_mixed_insert_remove_same_digest(m: Arc
         .get(namespace)
         .expect("Blob index should have an entry for the namespace");
     assert!(links.contains(&tag_v2), "Blob index should contain Tag(v2)");
-    assert!(
-        !links.contains(&tag_v1),
-        "Blob index should not contain Tag(v1)"
-    );
+    // The superseded entry persists as a stale over-approximation until the
+    // collector prunes it.
+    assert!(links.contains(&tag_v1), "the stale entry must persist");
 }
 
 #[tokio::test]
@@ -1844,14 +1843,15 @@ pub async fn test_datastore_batch_deletes_empty_blob_container(m: Arc<MetadataSt
     delete_link(&m, namespace, &tag_link).await;
 
     match m.read_blob_index(&digest).await {
+        // The stale entry persists for the collector; only the link is gone.
         Ok(index) => {
             let links = index.namespace.get(namespace);
             assert!(
-                links.is_none_or(HashSet::is_empty),
-                "Blob index should have no entries for the namespace after deletion"
+                links.is_some_and(|links| links.contains(&tag_link)),
+                "the stale entry is the collector's to prune, not the writer's"
             );
         }
-        Err(Error::NotFound) => {}
+        Err(Error::NotFound) => panic!("the stale entry must persist for the collector"),
         Err(e) => panic!("Unexpected error reading blob index: {e:?}"),
     }
 }

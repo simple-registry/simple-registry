@@ -1,20 +1,17 @@
 use std::{
     collections::HashSet,
-    future::Future,
     sync::{Arc, Mutex},
 };
 
-use angos_oci::{Digest, Namespace};
-use angos_tx_engine::{lock::LockSession, store::Store};
+use angos_oci::Namespace;
+use angos_tx_engine::store::Store;
 
-use crate::{
-    cache::Cache,
-    registry::{Error, pagination},
-};
+use crate::{cache::Cache, registry::pagination};
 
 mod access_time;
 mod blob_index;
 mod catalog;
+mod gc;
 mod link;
 
 #[cfg(test)]
@@ -36,6 +33,11 @@ pub struct MetadataStore {
     /// Concurrent directory scans a catalog namespace walk keeps in flight.
     namespace_walk_concurrency: usize,
     access_time_writer: Option<AccessTimeWriter>,
+    /// The reclamation grace period: how long fresh blob data and fresh
+    /// reference keys are unconditionally live, and how long a collector's
+    /// range marker outlives its last refresh. Writers and collectors built
+    /// over the same store share the value.
+    gc_grace_secs: u64,
     /// Namespaces whose catalog index key this process already ensured; being
     /// wrong only costs one redundant put.
     catalog_indexed: Arc<Mutex<HashSet<Namespace>>>,
@@ -43,12 +45,18 @@ pub struct MetadataStore {
     _flush_handle: Option<Arc<FlushHandle>>,
 }
 
+/// Default reclamation grace period. It only has to exceed the widest
+/// adjacent-request gap on a write path plus clock skew, so minutes are
+/// comfortable.
+const DEFAULT_GC_GRACE_SECS: u64 = 300;
+
 pub struct Builder {
     store: Arc<Store>,
     cache: Option<Arc<Cache>>,
     link_cache_ttl: u64,
     access_time_debounce_secs: u64,
     namespace_walk_concurrency: usize,
+    gc_grace_secs: u64,
 }
 
 impl Builder {
@@ -59,7 +67,17 @@ impl Builder {
             link_cache_ttl: 30,
             access_time_debounce_secs: 0,
             namespace_walk_concurrency: pagination::NAMESPACE_WALK_CONCURRENCY,
+            gc_grace_secs: DEFAULT_GC_GRACE_SECS,
         }
+    }
+
+    /// The reclamation grace period, in seconds. Production deployments run
+    /// the default; tests shrink it to exercise reclamation immediately.
+    #[cfg(test)]
+    #[must_use]
+    pub fn gc_grace_secs(mut self, secs: u64) -> Self {
+        self.gc_grace_secs = secs;
+        self
     }
 
     pub fn cache(mut self, cache: Arc<Cache>) -> Self {
@@ -95,6 +113,7 @@ impl Builder {
             link_cache_ttl: self.link_cache_ttl,
             namespace_walk_concurrency: self.namespace_walk_concurrency,
             access_time_writer,
+            gc_grace_secs: self.gc_grace_secs,
             catalog_indexed: Arc::new(Mutex::new(HashSet::new())),
             _flush_handle: flush_handle,
         }
@@ -114,43 +133,15 @@ impl MetadataStore {
         self.store.as_ref()
     }
 
+    /// The reclamation grace period, shared by writers and collectors built
+    /// over this store.
+    pub fn gc_grace_secs(&self) -> u64 {
+        self.gc_grace_secs
+    }
+
     /// Returns an owned handle to the storage façade, for closures and helpers
     /// that need to capture it across `await` points.
     pub fn store_arc(&self) -> Arc<Store> {
         self.store.clone()
-    }
-
-    /// Acquire the coarse `blob-data:{digest}` lock, which
-    /// serialises blob-data creation (upload completion) against reclamation
-    /// (unreferenced delete) and against concurrent manifest pushes, which
-    /// take the same lock around their link transactions.
-    ///
-    /// Lives on the METADATA engine, the one domain every blob-data
-    /// participant (manifest push, upload, scrub) agrees on, even though the
-    /// bytes may be mutated on the separate BLOB engine, so the pairing can't
-    /// drift.
-    pub async fn acquire_blob_data_lock(&self, digest: &Digest) -> Result<LockSession, Error> {
-        let keys = [format!("blob-data:{digest}")];
-        self.store
-            .acquire(&keys)
-            .await
-            .map_err(|e| Error::Internal(format!("blob-data lock acquire failed: {e}")))
-    }
-
-    /// Run `op` while holding the coarse blob-data lock for `digest`,
-    /// releasing the lock whatever the outcome. `op` is not polled before the
-    /// lock is acquired.
-    pub async fn with_blob_data_lock<T, E>(
-        &self,
-        digest: &Digest,
-        op: impl Future<Output = Result<T, E>>,
-    ) -> Result<T, E>
-    where
-        E: From<Error>,
-    {
-        let session = self.acquire_blob_data_lock(digest).await?;
-        let result = op.await;
-        session.release().await;
-        result
     }
 }
