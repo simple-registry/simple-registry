@@ -198,6 +198,17 @@ macro_rules! delegate_object_store {
                 self.inner.list(prefix, n, token).await
             }
 
+            async fn list_after(
+                &self,
+                prefix: &str,
+                n: u16,
+                token: Option<String>,
+                start_after: Option<String>,
+            ) -> Result<Page<String>, Error> {
+                self.hook.before(StoreOp::List { prefix }).await?;
+                self.inner.list_after(prefix, n, token, start_after).await
+            }
+
             async fn list_children(
                 &self,
                 prefix: &str,

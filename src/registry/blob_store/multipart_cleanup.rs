@@ -301,6 +301,15 @@ mod tests {
         ) -> Result<Page<String>, StorageError> {
             unimplemented!("not reached by orphan listing")
         }
+        async fn list_after(
+            &self,
+            _prefix: &str,
+            _n: u16,
+            _token: Option<String>,
+            _start_after: Option<String>,
+        ) -> Result<Page<String>, StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
         async fn list_children(
             &self,
             _prefix: &str,

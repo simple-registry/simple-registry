@@ -56,6 +56,24 @@ pub enum Action {
         namespace: Namespace,
         tag: Tag,
     },
+    /// Convert one legacy revision link into a revision record, then delete
+    /// the link. Record first, so an interrupted conversion duplicates rather
+    /// than loses.
+    ConvertRevisionLink {
+        namespace: Namespace,
+        digest: Digest,
+    },
+    /// Convert one legacy referrer link into a referrer record, then delete
+    /// the link.
+    ConvertReferrerLink {
+        namespace: Namespace,
+        subject: Digest,
+        referrer: Digest,
+    },
+    /// Write a namespace's missing catalog index key.
+    EnsureCatalogIndex {
+        namespace: Namespace,
+    },
     /// Convert one legacy blob-index shard into per-link reference keys and
     /// delete it, keys first, so an interrupted conversion duplicates rather
     /// than loses.
@@ -201,6 +219,25 @@ impl fmt::Display for Action {
                     f,
                     "convert legacy tag link '{namespace}:{tag}' to a tag entry"
                 )
+            }
+            Action::ConvertRevisionLink { namespace, digest } => {
+                write!(
+                    f,
+                    "convert legacy revision link '{namespace}@{digest}' to a record"
+                )
+            }
+            Action::ConvertReferrerLink {
+                namespace,
+                subject,
+                referrer,
+            } => {
+                write!(
+                    f,
+                    "convert legacy referrer link '{namespace}:{subject}<-{referrer}' to a record"
+                )
+            }
+            Action::EnsureCatalogIndex { namespace } => {
+                write!(f, "write missing catalog index key for '{namespace}'")
             }
             Action::ConvertBlobIndexShard {
                 key,

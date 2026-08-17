@@ -398,6 +398,23 @@ impl ObjectStore for Backend {
         Ok(Page { items, next_token })
     }
 
+    async fn list_after(
+        &self,
+        prefix: &str,
+        n: u16,
+        token: Option<String>,
+        start_after: Option<String>,
+    ) -> Result<Page<String>, Error> {
+        // S3 rejects StartAfter alongside a continuation token; the token
+        // already encodes the position, so it wins.
+        let start_after = if token.is_some() { None } else { start_after };
+        let (items, next_token) = self
+            .client
+            .list_objects(prefix, n, token, start_after)
+            .await?;
+        Ok(Page { items, next_token })
+    }
+
     async fn list_children(
         &self,
         prefix: &str,

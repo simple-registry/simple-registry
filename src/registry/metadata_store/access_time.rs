@@ -89,10 +89,8 @@ impl AccessTimeWriter {
     }
 
     pub async fn record(&self, namespace: &Namespace, link: &LinkKind) {
-        let key = match link {
-            LinkKind::Tag(tag) => path_builder::tag_atime_path(namespace, tag),
-            _ => path_builder::link_path(link, namespace),
-        };
+        let key = advisory_atime_path(namespace, link)
+            .unwrap_or_else(|| path_builder::link_path(link, namespace));
         self.pending
             .lock()
             .await
@@ -107,18 +105,16 @@ impl AccessTimeWriter {
 
         stream::iter(entries)
             .for_each_concurrent(10, |(namespace, link)| async move {
-                let result = match &link {
-                    // A tag's atime is its own overwritten key: the newest
-                    // arriving timestamp is the correct value, no transaction.
-                    LinkKind::Tag(tag) => store
+                // A tag's or revision's atime is its own overwritten key: the
+                // newest arriving timestamp is the correct value, no
+                // transaction and no read.
+                let result = match advisory_atime_path(&namespace, &link) {
+                    Some(key) => store
                         .object_store()
-                        .put(
-                            &path_builder::tag_atime_path(&namespace, tag),
-                            Bytes::from(Utc::now().to_rfc3339()),
-                        )
+                        .put(&key, Bytes::from(Utc::now().to_rfc3339()))
                         .await
                         .map_err(Error::from),
-                    _ => flush_one_access_time(store, &namespace, &link).await,
+                    None => flush_one_access_time(store, &namespace, &link).await,
                 };
                 if let Err(e) = result {
                     warn!("Failed to flush access time for {namespace}:{link}: {e}");
@@ -183,11 +179,20 @@ impl MetadataStore {
         namespace: &Namespace,
         link: &LinkKind,
     ) -> Result<LinkMetadata, Error> {
-        if let LinkKind::Tag(tag) = link {
-            let mut metadata = self.read_link_reference(namespace, link).await?;
-            self.write_tag_access_time(namespace, tag).await?;
-            metadata.accessed_at = Some(Utc::now());
-            return Ok(metadata);
+        match link {
+            LinkKind::Tag(tag) => {
+                let mut metadata = self.read_link_reference(namespace, link).await?;
+                self.write_tag_access_time(namespace, tag).await?;
+                metadata.accessed_at = Some(Utc::now());
+                return Ok(metadata);
+            }
+            LinkKind::Digest(digest) => {
+                let mut metadata = self.read_link_reference(namespace, link).await?;
+                self.write_revision_access_time(namespace, digest).await?;
+                metadata.accessed_at = Some(Utc::now());
+                return Ok(metadata);
+            }
+            _ => {}
         }
         let link_path = path_builder::link_path(link, namespace);
         self.store()
@@ -201,6 +206,16 @@ impl MetadataStore {
             })
             .await
             .map_err(Error::from)
+    }
+}
+
+/// The kind's dedicated advisory atime key, when its primary state is
+/// write-once and must not be stamped in place.
+fn advisory_atime_path(namespace: &Namespace, link: &LinkKind) -> Option<String> {
+    match link {
+        LinkKind::Tag(tag) => Some(path_builder::tag_atime_path(namespace, tag)),
+        LinkKind::Digest(digest) => Some(path_builder::revision_atime_path(namespace, digest)),
+        _ => None,
     }
 }
 

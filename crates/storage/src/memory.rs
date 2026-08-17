@@ -202,8 +202,18 @@ impl ObjectStore for MemoryObjectStore {
         n: u16,
         token: Option<String>,
     ) -> Result<Page<String>, Error> {
+        self.list_after(prefix, n, token, None).await
+    }
+
+    async fn list_after(
+        &self,
+        prefix: &str,
+        n: u16,
+        token: Option<String>,
+        start_after: Option<String>,
+    ) -> Result<Page<String>, Error> {
         let guard = self.lock();
-        let start_after = token.as_deref().unwrap_or("").to_string();
+        let start_after = token.or(start_after).unwrap_or_default();
 
         // Normalise the separator: if the prefix does not end with '/', strip the
         // leading '/' from each suffix so callers get a clean relative name

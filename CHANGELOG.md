@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Blob references are stored as one write-once key per (namespace, link) under `v2/ref/`, replacing the per-namespace shard JSON and its read-modify-write; legacy shards keep answering reads until `angos scrub` converts them, so no migration step is required.
 - Tags are stored as ordered write-once entries under `v2/ns/`, replacing the mutable `current/link` and its read-modify-write: concurrent same-tag pushes and replicas never contend, and a tag's last-pull timestamp moves to its own advisory key. Legacy links keep answering reads until `angos scrub` converts them; tag timestamps now carry millisecond precision.
+- Manifest revisions and referrers are stored as immutable records under `v2/ns/`, and `v2/cat/` gains one index key per namespace so the catalog serves ordered pages straight off a listing; legacy links keep answering reads until `angos scrub` converts them.
 
 ## 1.5.0
 

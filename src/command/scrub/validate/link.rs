@@ -153,6 +153,7 @@ impl Validator {
         tag: &Tag,
         target: Digest,
     ) -> Result<bool, Error> {
+        self.ensure_catalog(namespace).await?;
         match self.blob_store.size(&target).await {
             Ok(_) => {
                 self.ensure_link(namespace, &LinkKind::Digest(target.clone()), &target)
@@ -172,9 +173,8 @@ impl Validator {
         }
     }
 
-    /// A manifest revision link: the anchor of the derivable state. One
-    /// manifest read drives child-link repair, `referenced_by` back-links,
-    /// and blob-index grant reconciliation.
+    /// A manifest revision link: validated through the shared anchor routine,
+    /// then converted into a revision record and reclaimed when healthy.
     async fn validate_revision_link(
         &self,
         key: &str,
@@ -194,6 +194,46 @@ impl Validator {
             })
             .await?;
         }
+        if self.validate_revision_content(namespace, revision).await? {
+            self.emit(Action::ConvertRevisionLink {
+                namespace: namespace.clone(),
+                digest: revision.clone(),
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// A revision record: the same anchor routine as a legacy link, deduped
+    /// against it per (namespace, digest). Grammars were checked at
+    /// categorization.
+    pub async fn validate_revision_record(
+        &self,
+        namespace_raw: &str,
+        revision: &Digest,
+    ) -> Result<(), Error> {
+        let Ok(namespace) = Namespace::new(namespace_raw) else {
+            return self.handle_invalid_namespace(namespace_raw).await;
+        };
+        self.validate_revision_content(&namespace, revision)
+            .await
+            .map(|_| ())
+    }
+
+    /// The anchor of the derivable state, shared by both revision shapes: one
+    /// manifest read drives child-link repair, `referenced_by` back-links,
+    /// and blob-index grant reconciliation. Returns whether the revision was
+    /// healthy (its manifest blob present). Runs once per (namespace,
+    /// revision) per scrub; a repeat visit only re-answers the health probe.
+    async fn validate_revision_content(
+        &self,
+        namespace: &Namespace,
+        revision: &Digest,
+    ) -> Result<bool, Error> {
+        self.ensure_catalog(namespace).await?;
+        if !self.claim(format!("revision:{namespace}:{revision}")) {
+            return Ok(self.blob_store.size(revision).await.is_ok());
+        }
 
         let content = match self.blob_store.read(revision).await {
             Ok(content) => content,
@@ -201,12 +241,12 @@ impl Validator {
                 warn!(
                     "scrub: manifest blob missing for revision '{namespace}@{revision}'; removing revision"
                 );
-                return self
-                    .emit(Action::DeleteOrphanManifest {
-                        namespace: namespace.clone(),
-                        digest: revision.clone(),
-                    })
-                    .await;
+                self.emit(Action::DeleteOrphanManifest {
+                    namespace: namespace.clone(),
+                    digest: revision.clone(),
+                })
+                .await?;
+                return Ok(false);
             }
             Err(e) => return Err(e.into()),
         };
@@ -242,7 +282,45 @@ impl Validator {
                     .await?;
             }
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// Whether the revision exists in either shape: its record, or its legacy
+    /// link.
+    async fn revision_exists(&self, namespace: &Namespace, digest: &Digest) -> Result<bool, Error> {
+        let record_key = path_builder::revision_record_path(namespace, digest);
+        match self
+            .metadata_store
+            .store()
+            .object_store()
+            .head(&record_key)
+            .await
+        {
+            Ok(_) => return Ok(true),
+            Err(StorageError::NotFound) => {}
+            Err(e) => return Err(RegistryError::from(e).into()),
+        }
+        let link_key = path_builder::link_path(&LinkKind::Digest(digest.clone()), namespace);
+        Ok(self.read_link_body(&link_key).await?.is_some())
+    }
+
+    /// Emit the namespace's catalog index key when it is missing, once per
+    /// namespace per run.
+    async fn ensure_catalog(&self, namespace: &Namespace) -> Result<(), Error> {
+        if !self.claim(format!("catalog:{namespace}")) {
+            return Ok(());
+        }
+        let key = path_builder::catalog_index_path(namespace);
+        match self.metadata_store.store().object_store().head(&key).await {
+            Ok(_) => Ok(()),
+            Err(StorageError::NotFound) => {
+                self.emit(Action::EnsureCatalogIndex {
+                    namespace: namespace.clone(),
+                })
+                .await
+            }
+            Err(e) => Err(RegistryError::from(e).into()),
+        }
     }
 
     /// Whether `namespace` already holds `target`: a live blob-index entry for
@@ -272,7 +350,7 @@ impl Validator {
     }
 
     /// A referrer link is live only while its referrer manifest is a current
-    /// revision.
+    /// revision; a live legacy link converts into a referrer record.
     async fn validate_referrer_link(
         &self,
         key: &str,
@@ -283,16 +361,58 @@ impl Validator {
         if self.read_link_body(key).await?.is_none() {
             return Ok(());
         }
-        let revision_key = path_builder::link_path(&LinkKind::Digest(referrer.clone()), namespace);
-        if self.read_link_body(&revision_key).await?.is_some() {
+        if self.revision_exists(namespace, referrer).await? {
+            return self
+                .emit(Action::ConvertReferrerLink {
+                    namespace: namespace.clone(),
+                    subject: subject.clone(),
+                    referrer: referrer.clone(),
+                })
+                .await;
+        }
+        self.remove_dead_referrer(key, namespace, subject, referrer)
+            .await
+    }
+
+    /// A referrer record is live only while its referrer manifest is a
+    /// current revision. Grammars were checked at categorization.
+    pub async fn validate_referrer_record(
+        &self,
+        namespace_raw: &str,
+        subject: &Digest,
+        referrer: &Digest,
+    ) -> Result<(), Error> {
+        let Ok(namespace) = Namespace::new(namespace_raw) else {
+            return Ok(());
+        };
+        let key = path_builder::referrer_record_path(&namespace, subject, referrer);
+        match self.metadata_store.store().object_store().head(&key).await {
+            Ok(_) => {}
+            Err(StorageError::NotFound) => return Ok(()),
+            Err(e) => return Err(RegistryError::from(e).into()),
+        }
+        if self.revision_exists(&namespace, referrer).await? {
             return Ok(());
         }
-        let evidence = [key.to_string(), revision_key.clone()];
-        let revision_key = &revision_key;
-        let reverify = move || async move {
-            Ok(self.read_link_body(key).await?.is_some()
-                && self.read_link_body(revision_key).await?.is_none())
-        };
+        self.remove_dead_referrer(&key, &namespace, subject, referrer)
+            .await
+    }
+
+    /// The shared removal tail of both referrer shapes: confirm the referrer
+    /// manifest is durably gone, then emit the orphan-referrer deletion.
+    async fn remove_dead_referrer(
+        &self,
+        key: &str,
+        namespace: &Namespace,
+        subject: &Digest,
+        referrer: &Digest,
+    ) -> Result<(), Error> {
+        let evidence = [
+            key.to_string(),
+            path_builder::revision_record_path(namespace, referrer),
+            path_builder::link_path(&LinkKind::Digest(referrer.clone()), namespace),
+        ];
+        let reverify = move || async move { Ok(!self.revision_exists(namespace, referrer).await?) };
         if !self.confirm_repair(&evidence, reverify).await? {
             return Ok(());
         }
@@ -317,19 +437,20 @@ impl Validator {
             return Ok(());
         };
         for referrer in &metadata.referenced_by {
-            let revision_key =
-                path_builder::link_path(&LinkKind::Digest(referrer.clone()), namespace);
-            if self.read_link_body(&revision_key).await?.is_some() {
+            if self.revision_exists(namespace, referrer).await? {
                 continue;
             }
-            let evidence = [key.to_string(), revision_key.clone()];
-            let revision_key = &revision_key;
+            let evidence = [
+                key.to_string(),
+                path_builder::revision_record_path(namespace, referrer),
+                path_builder::link_path(&LinkKind::Digest(referrer.clone()), namespace),
+            ];
             let reverify = move || async move {
                 let Some(current) = self.read_link_body(key).await? else {
                     return Ok(false);
                 };
                 Ok(current.referenced_by.contains(referrer)
-                    && self.read_link_body(revision_key).await?.is_none())
+                    && !self.revision_exists(namespace, referrer).await?)
             };
             if !self.confirm_repair(&evidence, reverify).await? {
                 continue;
@@ -373,6 +494,10 @@ impl Validator {
         link: &LinkKind,
         expected: &Digest,
     ) -> Result<(), Error> {
+        // A revision lives as a record or a legacy link; either satisfies.
+        if matches!(link, LinkKind::Digest(_)) && self.revision_exists(namespace, expected).await? {
+            return Ok(());
+        }
         let link_key = path_builder::link_path(link, namespace);
         if let Some(metadata) = self.read_link_body(&link_key).await?
             && &metadata.target == expected

@@ -407,8 +407,21 @@ impl ObjectStore for Backend {
         n: u16,
         token: Option<String>,
     ) -> Result<Page<String>, Error> {
+        self.list_after(prefix, n, token, None).await
+    }
+
+    async fn list_after(
+        &self,
+        prefix: &str,
+        n: u16,
+        token: Option<String>,
+        start_after: Option<String>,
+    ) -> Result<Page<String>, Error> {
         let all_keys = collect_flat_keys(&self.full_path(prefix)).await?;
-        let start = token.as_deref().map_or(0, |t| {
+        // Listings sort, so a token and a start-after bound resume the same
+        // way: skip to the first key strictly above the cursor.
+        let cursor = token.or(start_after);
+        let start = cursor.as_deref().map_or(0, |t| {
             all_keys
                 .iter()
                 .position(|k| k.as_str() > t)

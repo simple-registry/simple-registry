@@ -794,6 +794,15 @@ impl Registry {
                     .read_link(namespace, &LinkKind::Digest(digest.clone()))
                     .await
                     .map_or((None, None), |m| (m.created_at, m.accessed_at));
+                // A record-shape revision keeps its last pull in the sibling
+                // atime key; take the freshest of the two shapes.
+                let last_pulled_at = self
+                    .metadata_store
+                    .read_revision_access_time(namespace, &digest)
+                    .await
+                    .ok()
+                    .flatten()
+                    .max(last_pulled_at);
 
                 ManifestEntry {
                     digest: digest.to_string(),

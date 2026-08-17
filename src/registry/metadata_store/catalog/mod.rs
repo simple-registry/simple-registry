@@ -3,11 +3,12 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use bytes::Bytes;
 use futures_util::stream::{self, Stream, StreamExt, TryStreamExt};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 use angos_oci::{Algorithm, Digest, Namespace, Tag};
-use angos_storage::{Page, paginated};
+use angos_storage::Page;
 
 use crate::registry::{
     Error,
@@ -72,10 +73,80 @@ impl MetadataStore {
     ) -> Result<Page<Namespace>, Error> {
         debug!("Fetching {n} namespace(s) with continuation token: {last:?}");
 
-        let mut namespaces = self.collect_namespaces(None).await?;
-        namespaces.sort_unstable();
+        // Content-derived side: complete but collected and sorted. It is the
+        // fallback while legacy layouts remain; the catalog index serves the
+        // page straight off its ordered listing.
+        let mut merged: BTreeSet<Namespace> =
+            self.collect_namespaces(None).await?.into_iter().collect();
 
+        // Catalog-index side: ordered pages resumed strictly after `last`,
+        // gathered until one name beyond `n` is in hand so the truncation
+        // marker is accurate. The index is not pruned on delete yet, so a
+        // listed name must still hold content to count.
+        let start_after = last.as_ref().map(|l| format!("{l}!"));
+        let mut token = None;
+        let mut first = true;
+        let mut gathered: usize = 0;
+        'pages: loop {
+            let page = self
+                .store()
+                .object_store()
+                .list_after(
+                    path_builder::CAT_ROOT,
+                    1000,
+                    token,
+                    if first { start_after.clone() } else { None },
+                )
+                .await?;
+            first = false;
+            for key in &page.items {
+                let Some(name) = key.strip_suffix('!') else {
+                    continue;
+                };
+                let Ok(namespace) = Namespace::new(name) else {
+                    continue;
+                };
+                if merged.contains(&namespace) || self.has_manifest_content(&namespace).await? {
+                    merged.insert(namespace);
+                    gathered += 1;
+                }
+                if gathered > usize::from(n) {
+                    break 'pages;
+                }
+            }
+            token = page.next_token;
+            if token.is_none() {
+                break;
+            }
+        }
+
+        let namespaces: Vec<Namespace> = merged.into_iter().collect();
         Ok(pagination::paginate_sorted(&namespaces, n, last.as_deref()))
+    }
+
+    /// Ensure the namespace's catalog index key exists: an empty write-once
+    /// put, deduped by a process-local set, so it costs one put per namespace
+    /// per process. A failed put is forgotten so a later write retries it.
+    pub(crate) async fn ensure_catalog_index(&self, namespace: &Namespace) {
+        let inserted = match self.catalog_indexed.lock() {
+            Ok(mut set) => set.insert(namespace.clone()),
+            Err(poisoned) => poisoned.into_inner().insert(namespace.clone()),
+        };
+        if !inserted {
+            return;
+        }
+        let key = path_builder::catalog_index_path(namespace);
+        if let Err(e) = self.store().object_store().put(&key, Bytes::new()).await {
+            warn!("failed to write catalog index for '{namespace}': {e}");
+            match self.catalog_indexed.lock() {
+                Ok(mut set) => {
+                    set.remove(namespace);
+                }
+                Err(poisoned) => {
+                    poisoned.into_inner().remove(namespace);
+                }
+            }
+        }
     }
 
     /// Walks the manifest catalog in a single concurrent tree walk and returns
@@ -102,11 +173,13 @@ impl MetadataStore {
         )
         .await?;
 
-        // A namespace whose tags live as entries under `v2/ns/` may hold no
+        // A namespace whose tags or revisions live under `v2/ns/` may hold no
         // `_manifests` marker of its own; merge those in from one flat
-        // listing, resolving each tag's winner so a namespace holding only
+        // listing. A revision record's existence is liveness; a tag counts
+        // only when its resolved winner is live, so a namespace holding only
         // tombstones does not resurface.
         let mut fold = WinnerFold::default();
+        let mut record_names: HashSet<String> = HashSet::new();
         let mut token = None;
         loop {
             let page = self
@@ -118,19 +191,20 @@ impl MetadataStore {
                 let Some((name, marker)) = key.split_once('!') else {
                     continue;
                 };
-                if !marker.starts_with("tag/") {
-                    continue;
-                }
                 if let Some(scope) = scope
                     && name != scope
                     && !name.starts_with(&format!("{scope}/"))
                 {
                     continue;
                 }
-                let Some((group, file)) = key.rsplit_once('/') else {
-                    continue;
-                };
-                fold.push(group, file);
+                if marker.starts_with("rev/") {
+                    record_names.insert(name.to_string());
+                } else if marker.starts_with("tag/") {
+                    let Some((group, file)) = key.rsplit_once('/') else {
+                        continue;
+                    };
+                    fold.push(group, file);
+                }
             }
             token = page.next_token;
             if token.is_none() {
@@ -138,14 +212,16 @@ impl MetadataStore {
             }
         }
         let mut seen: HashSet<Namespace> = namespaces.iter().cloned().collect();
-        for (group, state) in fold.finish() {
-            if state.is_none() {
-                continue;
-            }
-            let Some((name, _)) = group.split_once('!') else {
-                continue;
-            };
-            let Ok(namespace) = Namespace::new(name) else {
+        let live_tag_names = fold.finish().into_iter().filter_map(|(group, state)| {
+            state.is_some().then(|| {
+                group
+                    .split_once('!')
+                    .map(|(name, _)| name.to_string())
+                    .unwrap_or(group)
+            })
+        });
+        for name in record_names.into_iter().chain(live_tag_names) {
+            let Ok(namespace) = Namespace::new(&name) else {
                 continue;
             };
             if seen.insert(namespace.clone()) {
@@ -324,38 +400,76 @@ impl MetadataStore {
     }
 
     /// Streams the candidate referrer manifest digests recorded under
-    /// `digest`'s referrers directory, unresolved and unordered. Callers
-    /// resolve each candidate to a descriptor at registry altitude, where the
-    /// blob store holding manifest bodies is in reach.
+    /// `digest`'s referrer records, merged with its legacy referrers
+    /// directory, unresolved and unordered. Callers resolve each candidate to
+    /// a descriptor at registry altitude, where the blob store holding
+    /// manifest bodies is in reach.
     pub fn stream_referrer_digests(
         &self,
         namespace: &Namespace,
         digest: &Digest,
     ) -> impl Stream<Item = Result<Digest, Error>> + Send + '_ {
-        let referrers_dir = path_builder::manifest_referrers_dir(namespace, digest);
-        paginated(move |token| {
-            let referrers_dir = referrers_dir.clone();
-            async move {
+        let record_dir = path_builder::referrer_record_dir(namespace, digest);
+        let legacy_dir = path_builder::manifest_referrers_dir(namespace, digest);
+        stream::once(async move {
+            let mut seen = HashSet::new();
+            let mut referrers = Vec::new();
+            let mut token = None;
+            loop {
                 let page = self
                     .store()
                     .object_store()
-                    .list(&referrers_dir, 100, token)
+                    .list(&record_dir, 1000, token)
                     .await?;
-                let digest_entries = page
-                    .items
-                    .iter()
-                    .filter_map(|key| {
-                        let parts: Vec<&str> = key.split('/').collect();
-                        if parts.len() < 2 {
-                            return None;
-                        }
-                        let algorithm = parts[0].parse::<Algorithm>().ok()?;
-                        Digest::with_algorithm(algorithm, parts[1]).ok()
-                    })
-                    .collect();
-                Ok((digest_entries, page.next_token))
+                for key in &page.items {
+                    let Some((algorithm, hash)) = key.split_once('.') else {
+                        continue;
+                    };
+                    let Ok(algorithm) = algorithm.parse::<Algorithm>() else {
+                        continue;
+                    };
+                    let Ok(referrer) = Digest::with_algorithm(algorithm, hash) else {
+                        continue;
+                    };
+                    if seen.insert(referrer.clone()) {
+                        referrers.push(referrer);
+                    }
+                }
+                token = page.next_token;
+                if token.is_none() {
+                    break;
+                }
             }
+            let mut token = None;
+            loop {
+                let page = self
+                    .store()
+                    .object_store()
+                    .list(&legacy_dir, 1000, token)
+                    .await?;
+                for key in &page.items {
+                    let parts: Vec<&str> = key.split('/').collect();
+                    if parts.len() < 2 {
+                        continue;
+                    }
+                    let Ok(algorithm) = parts[0].parse::<Algorithm>() else {
+                        continue;
+                    };
+                    let Ok(referrer) = Digest::with_algorithm(algorithm, parts[1]) else {
+                        continue;
+                    };
+                    if seen.insert(referrer.clone()) {
+                        referrers.push(referrer);
+                    }
+                }
+                token = page.next_token;
+                if token.is_none() {
+                    break;
+                }
+            }
+            Ok::<_, Error>(stream::iter(referrers.into_iter().map(Ok)))
         })
+        .try_flatten()
     }
 
     /// Whether `namespace` holds any manifest content, by the rule the catalog
@@ -379,16 +493,10 @@ impl MetadataStore {
             return Ok(true);
         }
 
-        // New-shape tags: any entry directory counts. A namespace holding
-        // only tombstoned tags over-reports here, but every tombstone stems
-        // from a push whose revision link the check above already covers.
-        let entries_root = path_builder::tag_entries_root(namespace);
-        let page = self
-            .store()
-            .object_store()
-            .list_children(&entries_root, 1, None, None)
-            .await?;
-        Ok(!page.sub_prefixes.is_empty())
+        // New-shape tags: only a tag whose resolved winner is live counts, so
+        // a namespace holding nothing but tombstones reads as empty.
+        let states = self.collect_entry_tag_states(namespace).await?;
+        Ok(states.values().any(Option::is_some))
     }
 
     pub async fn has_referrers(
@@ -396,42 +504,82 @@ impl MetadataStore {
         namespace: &Namespace,
         subject: &Digest,
     ) -> Result<bool, Error> {
-        let referrers_dir = path_builder::manifest_referrers_dir(namespace, subject);
-        let page = self
-            .store()
-            .object_store()
-            .list(&referrers_dir, 1, None)
-            .await?;
-        Ok(!page.items.is_empty())
+        for dir in [
+            path_builder::referrer_record_dir(namespace, subject),
+            path_builder::manifest_referrers_dir(namespace, subject),
+        ] {
+            let page = self.store().object_store().list(&dir, 1, None).await?;
+            if !page.items.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
-    /// Streams every manifest revision digest in `namespace` lazily: the
-    /// per-algorithm shards (`revisions/<algo>/<hash>`) are chained in
-    /// algorithm order, at most one listing page buffered.
+    /// Streams every manifest revision digest in `namespace`: the new-shape
+    /// records merged with the legacy per-algorithm link directories, deduped
+    /// (a digest appears in both mid-conversion).
     pub fn stream_revisions<'a>(
         &'a self,
         namespace: &'a Namespace,
     ) -> impl Stream<Item = Result<Digest, Error>> + Send + 'a {
-        stream::iter(Algorithm::supported_algorithms()).flat_map(move |algorithm| {
-            let revisions_dir =
-                path_builder::manifest_revisions_link_root_dir(namespace, algorithm.as_str());
-            paginated(move |token| {
-                let revisions_dir = revisions_dir.clone();
-                async move {
+        stream::once(async move {
+            let mut seen = HashSet::new();
+            let mut digests = Vec::new();
+            let root = path_builder::revision_records_root(namespace);
+            let mut token = None;
+            loop {
+                let page = self.store().object_store().list(&root, 1000, token).await?;
+                for key in &page.items {
+                    // `<algo>/<pfx>/<hash>`
+                    let mut parts = key.split('/');
+                    let (Some(algorithm), Some(_), Some(hash), None) =
+                        (parts.next(), parts.next(), parts.next(), parts.next())
+                    else {
+                        continue;
+                    };
+                    let Ok(algorithm) = algorithm.parse::<Algorithm>() else {
+                        continue;
+                    };
+                    let Ok(digest) = Digest::with_algorithm(algorithm, hash) else {
+                        continue;
+                    };
+                    if seen.insert(digest.clone()) {
+                        digests.push(digest);
+                    }
+                }
+                token = page.next_token;
+                if token.is_none() {
+                    break;
+                }
+            }
+            for algorithm in Algorithm::supported_algorithms() {
+                let revisions_dir =
+                    path_builder::manifest_revisions_link_root_dir(namespace, algorithm.as_str());
+                let mut token = None;
+                loop {
                     let page = self
                         .store()
                         .object_store()
                         .list_children(&revisions_dir, 1000, token, None)
                         .await?;
-                    let revisions = page
-                        .sub_prefixes
-                        .into_iter()
-                        .filter_map(|key| Digest::with_algorithm(*algorithm, key).ok())
-                        .collect();
-                    Ok((revisions, page.next_token))
+                    for key in page.sub_prefixes {
+                        let Ok(digest) = Digest::with_algorithm(*algorithm, key.as_str()) else {
+                            continue;
+                        };
+                        if seen.insert(digest.clone()) {
+                            digests.push(digest);
+                        }
+                    }
+                    token = page.next_token;
+                    if token.is_none() {
+                        break;
+                    }
                 }
-            })
+            }
+            Ok::<_, Error>(stream::iter(digests.into_iter().map(Ok)))
         })
+        .try_flatten()
     }
 
     pub async fn count_manifests(&self, namespace: &Namespace) -> Result<usize, Error> {

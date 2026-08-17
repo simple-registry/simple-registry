@@ -115,6 +115,18 @@ pub trait ObjectStore: Send + Sync {
         token: Option<String>,
     ) -> Result<Page<String>, Error>;
 
+    /// Like [`Self::list`], but the enumeration starts strictly after the
+    /// relative key `start_after` on a chain's first page (`token` wins when
+    /// both are set). This is what serves a `last`-cursor page straight off
+    /// the backend's ordered enumeration.
+    async fn list_after(
+        &self,
+        prefix: &str,
+        n: u16,
+        token: Option<String>,
+        start_after: Option<String>,
+    ) -> Result<Page<String>, Error>;
+
     /// One-level enumeration: returns the immediate sub-prefixes under
     /// `prefix` plus any objects sitting directly at that level (the `/`
     /// separator is hard-coded). `start_after` skips entries up to and

@@ -17,15 +17,21 @@ use crate::registry::{
 
 impl MetadataStore {
     /// Read the stored [`LinkMetadata`] for `link` within `namespace`. A tag
-    /// resolves from its ordered entries (with the legacy-link fallback);
-    /// every other kind is one link-file read.
+    /// resolves from its ordered entries, a revision or referrer from its
+    /// immutable record (each with the legacy-link fallback); every other
+    /// kind is one link-file read.
     pub async fn read_link_reference(
         &self,
         namespace: &Namespace,
         link: &LinkKind,
     ) -> Result<LinkMetadata, Error> {
-        if let LinkKind::Tag(tag) = link {
-            return self.resolve_tag(namespace, tag).await;
+        match link {
+            LinkKind::Tag(tag) => return self.resolve_tag(namespace, tag).await,
+            LinkKind::Digest(digest) => return self.resolve_revision(namespace, digest).await,
+            LinkKind::Referrer { subject, referrer } => {
+                return self.resolve_referrer(namespace, subject, referrer).await;
+            }
+            _ => {}
         }
         let link_path = path_builder::link_path(link, namespace);
         match self.store().object_store().get(&link_path).await {

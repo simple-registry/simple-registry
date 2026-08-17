@@ -138,7 +138,8 @@ impl Validator {
     }
 
     /// Whether the link behind a reference key still backs it: a tag backs
-    /// its key while it resolves to the blob, every other kind while its link
+    /// its key while it resolves to the blob, a revision or referrer while
+    /// its record or legacy link resolves, every other kind while its link
     /// file exists.
     async fn ref_backed(
         &self,
@@ -146,28 +147,32 @@ impl Validator {
         link: &LinkKind,
         blob: &Digest,
     ) -> Result<bool, Error> {
-        if matches!(link, LinkKind::Tag(_)) {
-            return match self
-                .metadata_store
-                .read_link_reference(namespace, link)
-                .await
-            {
-                Ok(metadata) => Ok(&metadata.target == blob),
-                Err(RegistryError::NotFound) => Ok(false),
-                Err(e) => Err(e.into()),
-            };
-        }
-        let link_key = path_builder::link_path(link, namespace);
-        match self
-            .metadata_store
-            .store()
-            .object_store()
-            .head(&link_key)
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(StorageError::NotFound) => Ok(false),
-            Err(e) => Err(RegistryError::from(e).into()),
+        match link {
+            LinkKind::Tag(_) | LinkKind::Digest(_) | LinkKind::Referrer { .. } => {
+                match self
+                    .metadata_store
+                    .read_link_reference(namespace, link)
+                    .await
+                {
+                    Ok(metadata) => Ok(&metadata.target == blob),
+                    Err(RegistryError::NotFound) => Ok(false),
+                    Err(e) => Err(e.into()),
+                }
+            }
+            _ => {
+                let link_key = path_builder::link_path(link, namespace);
+                match self
+                    .metadata_store
+                    .store()
+                    .object_store()
+                    .head(&link_key)
+                    .await
+                {
+                    Ok(_) => Ok(true),
+                    Err(StorageError::NotFound) => Ok(false),
+                    Err(e) => Err(RegistryError::from(e).into()),
+                }
+            }
         }
     }
 

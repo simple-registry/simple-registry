@@ -5,7 +5,7 @@ use angos_oci::{Namespace, Tag, UploadSessionId};
 use crate::registry::{
     metadata_store::{LinkKind, LinkOperation},
     path_builder,
-    test_utils::{self, for_each_backend},
+    test_utils::{self, FSRegistryTestCase, RegistryTestCase, for_each_backend},
 };
 
 /// The catalog is derived directly from stored content: a namespace appears in
@@ -150,4 +150,83 @@ async fn collect_upload_namespaces_keys_off_uploads_not_manifests() {
 
     })
     .await;
+}
+
+/// Nested repositories `a` and `a/b` coexist on FS: the catalog index key's
+/// `!` terminator keeps `a`'s leaf beside `a/b`'s directory, and both list in
+/// lexical order.
+#[tokio::test]
+async fn nested_namespaces_coexist_in_the_catalog_on_fs() {
+    let case = FSRegistryTestCase::new();
+    let store = case.metadata_store();
+    for (i, name) in ["cat-nest", "cat-nest/b"].iter().enumerate() {
+        let namespace = Namespace::new(name).unwrap();
+        let digest = angos_oci::Digest::sha256_of_bytes(format!("nested-{i}").as_bytes());
+        store
+            .update_links(
+                &namespace,
+                &[LinkOperation::create(
+                    LinkKind::Digest(digest.clone()),
+                    digest,
+                )],
+            )
+            .await
+            .unwrap();
+        store
+            .store()
+            .object_store()
+            .head(&path_builder::catalog_index_path(&namespace))
+            .await
+            .expect("the catalog index key must exist beside the nested directory");
+    }
+
+    let listed = store.list_namespaces(10, None).await.unwrap().items;
+    let names: Vec<&str> = listed.iter().map(AsRef::as_ref).collect();
+    assert_eq!(names, ["cat-nest", "cat-nest/b"]);
+}
+
+/// Catalog pages come off the index's ordered listing: lexical order
+/// (`-` < `.` < `/`) with `n` plus `last` pagination, no legacy tree needed.
+#[tokio::test]
+async fn catalog_pages_serve_lexical_order_from_the_index() {
+    let case = FSRegistryTestCase::new();
+    let store = case.metadata_store();
+    // Seeded out of lexical order on purpose.
+    for (i, name) in ["cat-z", "cat-p/b", "cat-p", "cat-p-b", "cat-p.c"]
+        .iter()
+        .enumerate()
+    {
+        let namespace = Namespace::new(name).unwrap();
+        let digest = angos_oci::Digest::sha256_of_bytes(format!("lexical-{i}").as_bytes());
+        store
+            .update_links(
+                &namespace,
+                &[LinkOperation::create(
+                    LinkKind::Digest(digest.clone()),
+                    digest,
+                )],
+            )
+            .await
+            .unwrap();
+    }
+
+    let page = store.list_namespaces(2, None).await.unwrap();
+    let names: Vec<&str> = page.items.iter().map(AsRef::as_ref).collect();
+    assert_eq!(names, ["cat-p", "cat-p-b"]);
+    assert!(page.next_token.is_some(), "more pages must be signalled");
+
+    let page = store
+        .list_namespaces(2, Some("cat-p-b".to_string()))
+        .await
+        .unwrap();
+    let names: Vec<&str> = page.items.iter().map(AsRef::as_ref).collect();
+    assert_eq!(names, ["cat-p.c", "cat-p/b"]);
+
+    let page = store
+        .list_namespaces(2, Some("cat-p/b".to_string()))
+        .await
+        .unwrap();
+    let names: Vec<&str> = page.items.iter().map(AsRef::as_ref).collect();
+    assert_eq!(names, ["cat-z"]);
+    assert!(page.next_token.is_none(), "the last page ends the chain");
 }

@@ -10,6 +10,7 @@ pub const BLOBS_ROOT: &str = "v2/blobs";
 pub const REPOS_ROOT: &str = "v2/repositories";
 pub const REF_ROOT: &str = "v2/ref";
 pub const NS_ROOT: &str = "v2/ns";
+pub const CAT_ROOT: &str = "v2/cat";
 
 /// Root directory and namespace-name prefix for a namespace tree walk. `None`
 /// walks the whole repositories tree; `Some(repository)` restricts the walk to
@@ -191,6 +192,60 @@ pub fn tag_entry_path(
 /// from the write-once entries so those never mutate.
 pub fn tag_atime_path(namespace: &Namespace, tag: &Tag) -> String {
     format!("{NS_ROOT}/{namespace}!atime/tag/{tag}")
+}
+
+/// One namespace's catalog index key: empty, write-once, one per namespace.
+/// The `!` terminator is what lets `a` and `a/b` coexist on FS (a file cannot
+/// also be a directory) while keeping the flat listing in lexical order.
+pub fn catalog_index_path(namespace: &Namespace) -> String {
+    format!("{CAT_ROOT}/{namespace}!")
+}
+
+/// The immutable record of a stored manifest revision. Its existence is what
+/// makes the digest resolvable; its body carries what a HEAD needs.
+pub fn revision_record_path(namespace: &Namespace, digest: &Digest) -> String {
+    format!(
+        "{}/{}/{}/{}",
+        revision_records_root(namespace),
+        digest.algorithm(),
+        digest.hash_prefix(),
+        digest.hash()
+    )
+}
+
+/// Directory holding every revision record of `namespace`.
+pub fn revision_records_root(namespace: &Namespace) -> String {
+    format!("{NS_ROOT}/{namespace}!rev")
+}
+
+/// Directory holding `subject`'s referrer records: one key per referring
+/// manifest, whose body is that manifest's descriptor.
+pub fn referrer_record_dir(namespace: &Namespace, subject: &Digest) -> String {
+    format!(
+        "{NS_ROOT}/{namespace}!sub/{}/{}/{}",
+        subject.algorithm(),
+        subject.hash_prefix(),
+        subject.hash()
+    )
+}
+
+pub fn referrer_record_path(namespace: &Namespace, subject: &Digest, referrer: &Digest) -> String {
+    format!(
+        "{}/{}.{}",
+        referrer_record_dir(namespace, subject),
+        referrer.algorithm(),
+        referrer.hash()
+    )
+}
+
+/// Advisory last-pull timestamp for a manifest revision, overwritten in
+/// place, kept apart from the immutable record it annotates.
+pub fn revision_atime_path(namespace: &Namespace, digest: &Digest) -> String {
+    format!(
+        "{NS_ROOT}/{namespace}!atime/rev/{}/{}",
+        digest.algorithm(),
+        digest.hash()
+    )
 }
 
 /// The inverted-timestamp ordinal of `ts`: entries sort newest first.

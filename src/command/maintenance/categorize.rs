@@ -22,7 +22,7 @@ use crate::{
     registry::{
         metadata_store::{LinkKind, decode_blob_index_shard_namespace},
         path_builder::{
-            BLOBS_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT, parse_blob_ref, parse_tag_entry,
+            BLOBS_ROOT, CAT_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT, parse_blob_ref, parse_tag_entry,
         },
     },
 };
@@ -46,9 +46,22 @@ pub enum KeyCategory {
     /// write-once tag event. Grammars are checked at categorization, so both
     /// names are known valid.
     TagEntry { namespace: String, tag: String },
-    /// `v2/ns/{ns}!atime/tag/{tag}` (metadata store): a tag's advisory
-    /// last-pull timestamp, overwritten in place.
+    /// `v2/ns/{ns}!atime/tag/{tag}` or `v2/ns/{ns}!atime/rev/{alg}/{hash}`
+    /// (metadata store): an advisory last-pull timestamp, overwritten in
+    /// place.
     TagAccessTime,
+    /// `v2/ns/{ns}!rev/{alg}/{prefix}/{hash}` (metadata store): the immutable
+    /// record of a stored manifest revision.
+    RevisionRecord { namespace: String, digest: Digest },
+    /// `v2/ns/{ns}!sub/{alg}/{prefix}/{hash}/{r-alg}.{r-hash}` (metadata
+    /// store): one referrer record under its subject.
+    ReferrerRecord {
+        namespace: String,
+        subject: Digest,
+        referrer: Digest,
+    },
+    /// `v2/cat/{ns}!` (metadata store): a namespace's catalog index key.
+    CatalogIndex { namespace: String },
     /// A link file under `v2/repositories/{ns}/...` (metadata store). The
     /// namespace is raw: its validity is a validation concern.
     Link { namespace: String, link: ParsedLink },
@@ -150,6 +163,14 @@ pub fn categorize(key: &str) -> KeyCategory {
     if let Some(rest) = strip_prefix_dir(key, NS_ROOT) {
         return categorize_ns(rest);
     }
+    if let Some(rest) = strip_prefix_dir(key, CAT_ROOT) {
+        return match rest.strip_suffix('!') {
+            Some(name) if Namespace::new(name).is_ok() => KeyCategory::CatalogIndex {
+                namespace: name.to_string(),
+            },
+            _ => KeyCategory::Unknown,
+        };
+    }
     if let Some(rest) = strip_prefix_dir(key, REPOS_ROOT) {
         return categorize_repository(rest);
     }
@@ -244,6 +265,54 @@ fn categorize_ns(rest: &str) -> KeyCategory {
         && Tag::new(tag).is_ok()
     {
         return KeyCategory::TagAccessTime;
+    }
+    if let Some(rest) = marker.strip_prefix("atime/rev/") {
+        let mut parts = rest.splitn(2, '/');
+        if let (Some(algorithm), Some(hash)) = (parts.next(), parts.next())
+            && parse_digest(algorithm, hash).is_some()
+        {
+            return KeyCategory::TagAccessTime;
+        }
+        return KeyCategory::Unknown;
+    }
+    if let Some(rest) = marker.strip_prefix("rev/") {
+        let segments: Vec<&str> = rest.split('/').collect();
+        let [algorithm, prefix, hash] = segments.as_slice() else {
+            return KeyCategory::Unknown;
+        };
+        let Some(digest) = parse_digest(algorithm, hash) else {
+            return KeyCategory::Unknown;
+        };
+        if hash.as_bytes().get(..2) != Some(prefix.as_bytes()) {
+            return KeyCategory::Unknown;
+        }
+        return KeyCategory::RevisionRecord {
+            namespace: namespace.to_string(),
+            digest,
+        };
+    }
+    if let Some(rest) = marker.strip_prefix("sub/") {
+        let segments: Vec<&str> = rest.split('/').collect();
+        let [algorithm, prefix, hash, entry] = segments.as_slice() else {
+            return KeyCategory::Unknown;
+        };
+        let Some(subject) = parse_digest(algorithm, hash) else {
+            return KeyCategory::Unknown;
+        };
+        if hash.as_bytes().get(..2) != Some(prefix.as_bytes()) {
+            return KeyCategory::Unknown;
+        }
+        let Some((r_algorithm, r_hash)) = entry.split_once('.') else {
+            return KeyCategory::Unknown;
+        };
+        let Some(referrer) = parse_digest(r_algorithm, r_hash) else {
+            return KeyCategory::Unknown;
+        };
+        return KeyCategory::ReferrerRecord {
+            namespace: namespace.to_string(),
+            subject,
+            referrer,
+        };
     }
     KeyCategory::Unknown
 }

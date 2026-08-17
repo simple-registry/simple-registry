@@ -1,6 +1,10 @@
-use std::{future::Future, sync::Arc};
+use std::{
+    collections::HashSet,
+    future::Future,
+    sync::{Arc, Mutex},
+};
 
-use angos_oci::Digest;
+use angos_oci::{Digest, Namespace};
 use angos_tx_engine::{lock::LockSession, store::Store};
 
 use crate::{
@@ -32,6 +36,9 @@ pub struct MetadataStore {
     /// Concurrent directory scans a catalog namespace walk keeps in flight.
     namespace_walk_concurrency: usize,
     access_time_writer: Option<AccessTimeWriter>,
+    /// Namespaces whose catalog index key this process already ensured; being
+    /// wrong only costs one redundant put.
+    catalog_indexed: Arc<Mutex<HashSet<Namespace>>>,
     // Held for Drop side-effect: signals the flush task to exit when the last clone is dropped.
     _flush_handle: Option<Arc<FlushHandle>>,
 }
@@ -88,6 +95,7 @@ impl Builder {
             link_cache_ttl: self.link_cache_ttl,
             namespace_walk_concurrency: self.namespace_walk_concurrency,
             access_time_writer,
+            catalog_indexed: Arc::new(Mutex::new(HashSet::new())),
             _flush_handle: flush_handle,
         }
     }

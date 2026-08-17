@@ -34,6 +34,7 @@ use crate::registry::{
             any_other_namespace_references_blob, namespace_entries_merged, ref_mutation,
             shard::apply_blob_index_operations,
         },
+        link::record::{referrer_set_mutation, revision_set_mutation},
         link::tag::{tag_del_mutation, tag_set_mutation},
     },
     path_builder,
@@ -272,12 +273,26 @@ impl LinkMutations {
     }
 
     /// `Delete` `link`, queue its blob-index `Remove` against `target`, and
-    /// record it among the deleted links.
+    /// record it among the deleted links. A revision or referrer also deletes
+    /// its record key, so the legacy fallback cannot resurrect it.
     fn delete_link(&mut self, namespace: &Namespace, link: &LinkKind, target: &Digest) {
         self.builder = mem::take(&mut self.builder).mutation(Mutation::Delete {
             key: path_builder::link_path(link, namespace),
             expected: None,
         });
+        let record_key = match link {
+            LinkKind::Digest(digest) => Some(path_builder::revision_record_path(namespace, digest)),
+            LinkKind::Referrer { subject, referrer } => Some(path_builder::referrer_record_path(
+                namespace, subject, referrer,
+            )),
+            _ => None,
+        };
+        if let Some(key) = record_key {
+            self.builder = mem::take(&mut self.builder).mutation(Mutation::Delete {
+                key,
+                expected: None,
+            });
+        }
         self.push_blob_op(target, BlobIndexOperation::Remove(link.clone()));
         self.deleted_links.push(link.clone());
     }
@@ -356,6 +371,9 @@ impl MetadataStore {
         }
         for link in &result.deleted_links {
             self.cache_invalidate(namespace, link).await;
+        }
+        if !result.written_links.is_empty() {
+            self.ensure_catalog_index(namespace).await;
         }
 
         Ok(LinksCommit {
@@ -487,11 +505,20 @@ impl MetadataStore {
             let link = match op {
                 LinkOperation::Create { link, .. } | LinkOperation::Delete { link, .. } => link,
             };
-            // A tag resolves from its append-only entries: there is no single
-            // object whose bytes could join the read set, and none is needed,
-            // because concurrent tag writers write disjoint keys.
-            if let LinkKind::Tag(tag) = link {
-                let metadata = match self.resolve_tag(namespace, tag).await {
+            // Tags, revisions, and referrers resolve from their write-once
+            // shapes: there is no single mutable object whose bytes could
+            // join the read set, and none is needed, because concurrent
+            // writers of these kinds write disjoint or identical keys.
+            let resolved = match link {
+                LinkKind::Tag(tag) => Some(self.resolve_tag(namespace, tag).await),
+                LinkKind::Digest(digest) => Some(self.resolve_revision(namespace, digest).await),
+                LinkKind::Referrer { subject, referrer } => {
+                    Some(self.resolve_referrer(namespace, subject, referrer).await)
+                }
+                _ => None,
+            };
+            if let Some(result) = resolved {
+                let metadata = match result {
                     Ok(metadata) => Some(metadata),
                     Err(Error::NotFound) => None,
                     Err(e) => return Err(TxError::Storage(StorageError::Backend(e.to_string()))),
@@ -759,24 +786,51 @@ fn build_create_mutations(
             }
             .or(tx.created_at())
             .unwrap_or_else(Utc::now);
-            if let LinkKind::Tag(tag) = link {
-                // The entry key is the write: the same digest in the same
-                // millisecond is the same key, so a re-push is naturally
-                // idempotent and concurrent writers never contend.
-                let mutation =
-                    tag_set_mutation(namespace, tag, created_at, target, (*media_type).clone())
-                        .map_err(TxError::Serde)?;
-                acc.builder = mem::take(&mut acc.builder).mutation(mutation);
-                let created_at = path_builder::tag_ord_ts(path_builder::tag_ord(Some(created_at)))
-                    .unwrap_or(created_at);
-                let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
-                    .with_media_type((*media_type).clone());
-                acc.written_links.push(((*link).clone(), metadata));
-            } else {
-                let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
-                    .with_media_type((*media_type).clone())
-                    .with_descriptor(descriptor.as_ref().map(|b| b.as_ref().clone()));
-                acc.put_link(namespace, link, metadata)?;
+            match link {
+                LinkKind::Tag(tag) => {
+                    // The entry key is the write: the same digest in the same
+                    // millisecond is the same key, so a re-push is naturally
+                    // idempotent and concurrent writers never contend.
+                    let mutation =
+                        tag_set_mutation(namespace, tag, created_at, target, (*media_type).clone())
+                            .map_err(TxError::Serde)?;
+                    acc.builder = mem::take(&mut acc.builder).mutation(mutation);
+                    let created_at =
+                        path_builder::tag_ord_ts(path_builder::tag_ord(Some(created_at)))
+                            .unwrap_or(created_at);
+                    let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
+                        .with_media_type((*media_type).clone());
+                    acc.written_links.push(((*link).clone(), metadata));
+                }
+                LinkKind::Digest(digest) => {
+                    let mutation = revision_set_mutation(
+                        namespace,
+                        digest,
+                        Some(created_at),
+                        (*media_type).clone(),
+                    )
+                    .map_err(TxError::Serde)?;
+                    acc.builder = mem::take(&mut acc.builder).mutation(mutation);
+                    let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
+                        .with_media_type((*media_type).clone());
+                    acc.written_links.push(((*link).clone(), metadata));
+                }
+                LinkKind::Referrer { subject, referrer } => {
+                    let mutation =
+                        referrer_set_mutation(namespace, subject, referrer, descriptor.as_deref())
+                            .map_err(TxError::Serde)?;
+                    acc.builder = mem::take(&mut acc.builder).mutation(mutation);
+                    let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
+                        .with_media_type((*media_type).clone())
+                        .with_descriptor(descriptor.as_ref().map(|b| b.as_ref().clone()));
+                    acc.written_links.push(((*link).clone(), metadata));
+                }
+                _ => {
+                    let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
+                        .with_media_type((*media_type).clone())
+                        .with_descriptor(descriptor.as_ref().map(|b| b.as_ref().clone()));
+                    acc.put_link(namespace, link, metadata)?;
+                }
             }
         }
     }

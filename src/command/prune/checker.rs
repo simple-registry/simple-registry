@@ -508,10 +508,23 @@ impl RetentionChecker {
         let metadata = if is_protected || has_tags {
             None
         } else {
-            self.metadata_store
+            match self
+                .metadata_store
                 .read_link(namespace, &LinkKind::Digest(digest.clone()))
                 .await
-                .ok()
+            {
+                Ok(mut metadata) => {
+                    // A record-shape revision keeps its last pull in the
+                    // sibling atime key; a legacy link carries it inline.
+                    let atime = self
+                        .metadata_store
+                        .read_revision_access_time(namespace, digest)
+                        .await?;
+                    metadata.accessed_at = metadata.accessed_at.max(atime);
+                    Some(metadata)
+                }
+                Err(_) => None,
+            }
         };
 
         let fate = decide_orphan_fate(

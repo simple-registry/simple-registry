@@ -969,6 +969,93 @@ async fn legacy_tag_link_is_converted_to_an_entry() {
     .await;
 }
 
+/// A legacy revision link is converted into a revision record stamped with
+/// its recorded `created_at`, and the link is reclaimed.
+#[tokio::test]
+async fn legacy_revision_link_is_converted_to_a_record() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/convert-rev").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let store = metadata_store.store().object_store();
+
+        // Rewind to the legacy shape: link present, record absent.
+        let link = LinkKind::Digest(manifest_digest.clone());
+        let created_at = chrono::DateTime::from_timestamp_millis(1_600_000_000_000).unwrap();
+        let metadata = LinkMetadata::from_digest_at(manifest_digest.clone(), created_at);
+        let legacy_path = path_builder::link_path(&link, namespace);
+        store
+            .put(
+                &legacy_path,
+                Bytes::from(serde_json::to_vec(&metadata).unwrap()),
+            )
+            .await
+            .unwrap();
+        let record_path = path_builder::revision_record_path(namespace, &manifest_digest);
+        store.delete(&record_path).await.unwrap();
+
+        scrub_apply(test_case).await;
+
+        store
+            .head(&record_path)
+            .await
+            .expect("the revision record must be written");
+        assert!(
+            store.head(&legacy_path).await.is_err(),
+            "the converted legacy link must be reclaimed"
+        );
+        let resolved = metadata_store
+            .read_link_reference(namespace, &link)
+            .await
+            .unwrap();
+        assert_eq!(resolved.created_at, Some(created_at));
+    })
+    .await;
+}
+
+/// A legacy referrer link whose referrer manifest still exists converts into
+/// a referrer record; the link is reclaimed.
+#[tokio::test]
+async fn legacy_referrer_link_is_converted_to_a_record() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/convert-sub").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let store = metadata_store.store().object_store();
+
+        let subject = Digest::sha256_of_bytes(b"convert-sub-subject");
+        let link = LinkKind::Referrer {
+            subject: subject.clone(),
+            referrer: manifest_digest.clone(),
+        };
+        let metadata = LinkMetadata::from_digest(manifest_digest.clone());
+        let legacy_path = path_builder::link_path(&link, namespace);
+        store
+            .put(
+                &legacy_path,
+                Bytes::from(serde_json::to_vec(&metadata).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        scrub_apply(test_case).await;
+
+        store
+            .head(&path_builder::referrer_record_path(
+                namespace,
+                &subject,
+                &manifest_digest,
+            ))
+            .await
+            .expect("the referrer record must be written");
+        assert!(
+            store.head(&legacy_path).await.is_err(),
+            "the converted legacy referrer link must be reclaimed"
+        );
+    })
+    .await;
+}
+
 /// A legacy shard is converted into reference keys and reclaimed: scrub
 /// emits the conversion, and after apply the shard is gone while its entries
 /// survive as keys.

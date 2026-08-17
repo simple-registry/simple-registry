@@ -8,6 +8,7 @@ mod kind;
 mod metadata;
 mod operation;
 mod ops;
+mod record;
 mod storage;
 mod tag;
 

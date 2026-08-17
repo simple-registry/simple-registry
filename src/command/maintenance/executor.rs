@@ -223,7 +223,10 @@ impl Executor {
         if matches!(link, LinkKind::Blob(_)) {
             return Ok(true);
         }
-        if matches!(link, LinkKind::Tag(_)) {
+        if matches!(
+            link,
+            LinkKind::Tag(_) | LinkKind::Digest(_) | LinkKind::Referrer { .. }
+        ) {
             return match self
                 .metadata_store
                 .read_link_reference(namespace, link)
@@ -281,6 +284,47 @@ impl Executor {
                 Ok(())
             })
             .await
+    }
+
+    /// The migration actions: each converts one legacy shape into its new
+    /// one, or backfills the catalog index. Every conversion is idempotent.
+    async fn apply_migration(&self, action: Action) -> Result<(), Error> {
+        match action {
+            Action::ConvertTagLink { namespace, tag } => self
+                .metadata_store
+                .convert_legacy_tag_link(&namespace, &tag)
+                .await
+                .map_err(Error::from),
+            Action::ConvertRevisionLink { namespace, digest } => self
+                .metadata_store
+                .convert_legacy_revision_link(&namespace, &digest)
+                .await
+                .map_err(Error::from),
+            Action::ConvertReferrerLink {
+                namespace,
+                subject,
+                referrer,
+            } => self
+                .metadata_store
+                .convert_legacy_referrer_link(&namespace, &subject, &referrer)
+                .await
+                .map_err(Error::from),
+            Action::EnsureCatalogIndex { namespace } => {
+                self.metadata_store.ensure_catalog_index(&namespace).await;
+                Ok(())
+            }
+            Action::ConvertBlobIndexShard {
+                key,
+                namespace,
+                blob,
+                links,
+            } => {
+                self.convert_blob_index_shard(key, namespace, blob, links)
+                    .await
+            }
+            // `apply` routes only the arms above here.
+            _ => Ok(()),
+        }
     }
 
     /// Convert one legacy shard into reference keys: every entry is written
@@ -610,20 +654,11 @@ impl ActionSink for Executor {
                 blob,
                 link,
             } => self.grant_blob_index_link(namespace, blob, link).await,
-            Action::ConvertTagLink { namespace, tag } => self
-                .metadata_store
-                .convert_legacy_tag_link(&namespace, &tag)
-                .await
-                .map_err(Error::from),
-            Action::ConvertBlobIndexShard {
-                key,
-                namespace,
-                blob,
-                links,
-            } => {
-                self.convert_blob_index_shard(key, namespace, blob, links)
-                    .await
-            }
+            action @ (Action::ConvertTagLink { .. }
+            | Action::ConvertRevisionLink { .. }
+            | Action::ConvertReferrerLink { .. }
+            | Action::EnsureCatalogIndex { .. }
+            | Action::ConvertBlobIndexShard { .. }) => self.apply_migration(action).await,
             Action::RemoveOrphanBlobGrant { namespace, blob } => {
                 self.remove_orphan_blob_grant(namespace, blob).await
             }

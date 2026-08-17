@@ -176,20 +176,36 @@ v2/
 │               ├── {namespace}!own
 │               └── {namespace}!r/
 │                   └── {entry}
-└── ns/
-    ├── {namespace}!tag/
-    │   └── {tag}!/
-    │       └── {ord}.{set|del}.{algorithm}.{hash}
-    └── {namespace}!atime/
-        └── tag/
-            └── {tag}
+├── ns/
+│   ├── {namespace}!tag/
+│   │   └── {tag}!/
+│   │       └── {ord}.{set|del}.{algorithm}.{hash}
+│   ├── {namespace}!rev/
+│   │   └── {algorithm}/
+│   │       └── {hash_prefix}/
+│   │           └── {hash}
+│   ├── {namespace}!sub/
+│   │   └── {algorithm}/
+│   │       └── {hash_prefix}/
+│   │           └── {hash}/
+│   │               └── {r-algorithm}.{r-hash}
+│   └── {namespace}!atime/
+│       ├── tag/
+│       │   └── {tag}
+│       └── rev/
+│           └── {algorithm}/
+│               └── {hash}
+└── cat/
+    └── {namespace}!
 ```
 
 The two stores split this tree by content: the blob store holds the blob `data` files and the `_uploads/` session directories, while the metadata store holds the rest of the `v2/repositories/` tree (links), the blob-index reference keys under `v2/ref/`, and the tag state under `v2/ns/`. Each reference key is an empty write-once object recording one link through which a namespace references the blob: `{namespace}!own` marks ownership (upload or mount), and each key under `{namespace}!r/` marks one referencing link.
 
-A tag is an ordered set of write-once entries: `{ord}` inverts the author's unix-millisecond timestamp so a listing yields newest first, `set` entries record a push and `del` entries a deletion (still naming the digest the tag held), and the newest entry group decides the tag's current state. Writers only append, so concurrent pushes and replicas never contend; last-writer-wins is a property of the key names. The `!` terminator sorts below every character the name grammars admit, which keeps flat listings in true lexical order. A tag's advisory last-pull timestamp is its own overwritten key under `{namespace}!atime/`, so the entries themselves never mutate.
+A tag is an ordered set of write-once entries: `{ord}` inverts the author's unix-millisecond timestamp so a listing yields newest first, `set` entries record a push and `del` entries a deletion (still naming the digest the tag held), and the newest entry group decides the tag's current state. Writers only append, so concurrent pushes and replicas never contend; last-writer-wins is a property of the key names. The `!` terminator sorts below every character the name grammars admit, which keeps flat listings in true lexical order.
 
-Stores written by earlier versions may still hold per-namespace `refs/{namespace}.json` shards under `v2/blobs/` and per-tag `current/link` files under `_manifests/tags/`; both are read as a fallback and converted to the new shapes by scrub.
+A stored manifest revision is one immutable record under `{namespace}!rev/`: its existence makes the digest resolvable and its body carries the media type and creation time. A referrer is one record per (subject, referrer) under `{namespace}!sub/`, whose body is the referring manifest's descriptor. Advisory last-pull timestamps live in their own overwritten keys under `{namespace}!atime/`, so none of the write-once shapes ever mutate, which is what makes them cacheable without staleness. `v2/cat/` holds one empty key per namespace, written once per namespace per process, so the catalog serves ordered pages straight off its listing; the `!` terminator lets nested repositories such as `a` and `a/b` coexist on FS.
+
+Stores written by earlier versions may still hold per-namespace `refs/{namespace}.json` shards under `v2/blobs/` and per-tag `current/link`, revision, and referrer link files under `v2/repositories/`; all are read as a fallback and converted to the new shapes by scrub.
 
 ### Content Addressing
 
