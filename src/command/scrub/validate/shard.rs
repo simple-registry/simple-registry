@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 
+use chrono::Utc;
 use tracing::{debug, warn};
 
 use angos_oci::{Digest, Namespace};
@@ -114,6 +115,25 @@ impl Validator {
 
         // The blob's own ownership key carries the grant itself.
         if matches!(link, LinkKind::Blob(_)) {
+            return Ok(());
+        }
+        // A key younger than the grace period may belong to a push between
+        // its reference wave and its commit, whose backing does not exist
+        // yet. Same gate as the collector's liveness test: age is the
+        // backend's own timestamp, and a missing timestamp never reads in
+        // favour of removal.
+        let meta = match self.metadata_store.store().object_store().head(key).await {
+            Ok(meta) => meta,
+            Err(StorageError::NotFound) => return Ok(()),
+            Err(e) => return Err(RegistryError::from(e).into()),
+        };
+        let Some(modified) = meta.last_modified else {
+            return Ok(());
+        };
+        let age = Utc::now().signed_duration_since(modified);
+        if age.num_seconds()
+            < i64::try_from(self.metadata_store.gc_grace_secs()).unwrap_or(i64::MAX)
+        {
             return Ok(());
         }
         // Only a confirmed-dead backing justifies removing the key; a

@@ -25,7 +25,7 @@ use crate::{
         metadata_store::{BlobIndexOperation, LinkKind, LinkMetadata, MetadataStore},
         path_builder,
         test_utils::{
-            RegistryTestCase, create_test_registry_with, for_each_backend, media_type,
+            RegistryTestCase, build_store, create_test_registry_with, for_each_backend, media_type,
             put_blob_direct, put_link_raw, upload_blob,
         },
     },
@@ -474,8 +474,10 @@ async fn stale_shard_entry_is_removed() {
         let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // Grant an entry whose link file does not exist.
-        let phantom = LinkKind::Layer(Digest::sha256_of_bytes(b"phantom-layer"));
+        // Grant an entry whose backing tag does not exist. (A `Layer` phantom
+        // would be unrepresentable: its entry key carries no foreign digest,
+        // so it aliases the healthy self-entry and asserts nothing.)
+        let phantom = LinkKind::Tag(Tag::new("phantom-tag").unwrap());
         metadata_store
             .update_blob_index(
                 namespace,
@@ -494,6 +496,48 @@ async fn stale_shard_entry_is_removed() {
         assert!(
             !links.contains(&phantom),
             "an index entry with no link file must be removed"
+        );
+    })
+    .await;
+}
+
+/// A dangling reference younger than the grace period may belong to a push
+/// between its reference wave and its commit, so scrub must leave it alone.
+#[tokio::test]
+async fn young_dangling_ref_entry_is_kept() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/young-entry").unwrap();
+        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let phantom = LinkKind::Tag(Tag::new("phantom-tag").unwrap());
+        metadata_store
+            .update_blob_index(
+                namespace,
+                &layer_digest,
+                BlobIndexOperation::Insert(phantom.clone()),
+            )
+            .await
+            .unwrap();
+
+        // Same stores, but a scrub whose grace period is real.
+        let graced = Arc::new(
+            MetadataStore::builder(build_store(metadata_store.store().object_store().clone()))
+                .gc_grace_secs(300)
+                .build(),
+        );
+        let blob_store = test_case.blob_store();
+        let sink: Arc<dyn ActionSink> =
+            Arc::new(Executor::new_for_test(blob_store.clone(), graced.clone()));
+        run_passes(&blob_store, &graced, sink).await;
+
+        let links = metadata_store
+            .read_blob_index_namespace(namespace, &layer_digest)
+            .await
+            .unwrap();
+        assert!(
+            links.contains(&phantom),
+            "a dangling entry inside the grace period must be kept"
         );
     })
     .await;
