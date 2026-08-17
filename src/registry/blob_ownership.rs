@@ -91,15 +91,24 @@ impl<'a> BlobOwnership<'a> {
     }
 
     pub async fn can_read(&self, namespace: &Namespace, digest: &Digest) -> Result<bool, Error> {
-        match self
-            .metadata_store
-            .read_blob_index_namespace(namespace, digest)
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(Error::NotFound) => Ok(false),
-            Err(error) => Err(error),
+        // Writers never remove reference entries, so a raw entry is not
+        // access: the `_own` key grants directly, anything else only while
+        // its backing link still resolves. A stale manifest reference must
+        // not resurrect a blob the namespace deleted.
+        let links = self.references(namespace, digest).await?;
+        for link in &links {
+            if matches!(link, LinkKind::Blob(link_digest) if link_digest == digest) {
+                return Ok(true);
+            }
+            if self
+                .metadata_store
+                .reference_backed(namespace, link, digest)
+                .await?
+            {
+                return Ok(true);
+            }
         }
+        Ok(false)
     }
 
     pub async fn references(

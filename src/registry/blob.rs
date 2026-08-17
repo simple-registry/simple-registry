@@ -701,6 +701,59 @@ mod tests {
         .await;
     }
 
+    /// The conformance delete flow: a manifest is deleted, then its layer
+    /// blob. Reference entries are never removed by writers, so the stale
+    /// manifest entry must grant neither the delete gate nor read access.
+    #[tokio::test]
+    async fn deleted_blob_is_unreadable_despite_stale_manifest_reference() {
+        for_each_backend(async |test_case| {
+            let registry = test_case.registry();
+            let namespace = &Namespace::new("test-repo").unwrap();
+            let content = b"stale referenced blob";
+            let digest = put_blob_direct(registry.metadata_store.store(), content).await;
+            let ownership = registry.blob_ownership();
+            ownership.grant(namespace, &digest).await.unwrap();
+
+            let link = LinkKind::Config(digest.clone());
+            registry
+                .metadata_store
+                .update_links(
+                    namespace,
+                    &[LinkOperation::create_with_referrer(
+                        link.clone(),
+                        digest.clone(),
+                        Digest::sha256_of_bytes(b"manifest"),
+                    )],
+                )
+                .await
+                .unwrap();
+            registry
+                .metadata_store
+                .update_links(namespace, &[LinkOperation::delete(link)])
+                .await
+                .unwrap();
+
+            registry
+                .delete_blob(DeleteBlobRequest {
+                    namespace: namespace.clone(),
+                    digest: digest.clone(),
+                })
+                .await
+                .unwrap();
+
+            assert!(!ownership.can_read(namespace, &digest).await.unwrap());
+            let head = registry
+                .head_blob(HeadBlobRequest {
+                    namespace: namespace.clone(),
+                    digest: digest.clone(),
+                    accepted_types: Vec::new(),
+                })
+                .await;
+            assert!(matches!(head, Err(Error::BlobUnknown)));
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn delete_blob_rejects_all_metadata_references() {
         for_each_backend(async |test_case| {
