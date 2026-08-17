@@ -20,8 +20,8 @@ use crate::command::maintenance::action::LOST_AND_FOUND_PREFIX;
 use crate::{
     jobs::{JobState, Queue, store::JOBS_ROOT},
     registry::{
-        metadata_store::decode_blob_index_shard_namespace,
-        path_builder::{BLOBS_ROOT, REPOS_ROOT},
+        metadata_store::{LinkKind, decode_blob_index_shard_namespace},
+        path_builder::{BLOBS_ROOT, REF_ROOT, REPOS_ROOT, parse_blob_ref},
     },
 };
 
@@ -32,6 +32,14 @@ pub enum KeyCategory {
     BlobData { digest: Digest },
     /// `v2/blobs/{alg}/{prefix}/{hash}/refs/{encoded-ns}.json` (metadata store).
     BlobIndexShard { digest: Digest, namespace: String },
+    /// `v2/ref/{alg}/{prefix}/{hash}/{ns}!own` or `.../{ns}!r/{entry}`
+    /// (metadata store). The namespace is raw: its validity is a validation
+    /// concern.
+    BlobRef {
+        digest: Digest,
+        namespace: String,
+        link: LinkKind,
+    },
     /// A link file under `v2/repositories/{ns}/...` (metadata store). The
     /// namespace is raw: its validity is a validation concern.
     Link { namespace: String, link: ParsedLink },
@@ -127,6 +135,9 @@ pub fn categorize(key: &str) -> KeyCategory {
     if let Some(rest) = strip_prefix_dir(key, BLOBS_ROOT) {
         return categorize_blob(rest);
     }
+    if let Some(rest) = strip_prefix_dir(key, REF_ROOT) {
+        return categorize_ref(rest);
+    }
     if let Some(rest) = strip_prefix_dir(key, REPOS_ROOT) {
         return categorize_repository(rest);
     }
@@ -165,6 +176,33 @@ fn categorize_blob(rest: &str) -> KeyCategory {
             None => KeyCategory::Unknown,
         },
         _ => KeyCategory::Unknown,
+    }
+}
+
+/// `{alg}/{prefix}/{hash}/{ns}!own` or `{alg}/{prefix}/{hash}/{ns}!r/{entry}`.
+fn categorize_ref(rest: &str) -> KeyCategory {
+    let mut segments = rest.splitn(4, '/');
+    let (Some(algorithm), Some(prefix), Some(hash), Some(tail)) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return KeyCategory::Unknown;
+    };
+    let Some(digest) = parse_digest(algorithm, hash) else {
+        return KeyCategory::Unknown;
+    };
+    if hash.as_bytes().get(..2) != Some(prefix.as_bytes()) {
+        return KeyCategory::Unknown;
+    }
+    match parse_blob_ref(&digest, tail) {
+        Some((namespace, link)) => KeyCategory::BlobRef {
+            digest,
+            namespace,
+            link,
+        },
+        None => KeyCategory::Unknown,
     }
 }
 
@@ -327,8 +365,8 @@ mod tests {
         registry::{
             metadata_store::LinkKind,
             path_builder::{
-                blob_index_shard_path, blob_path, link_path, upload_hash_context_path, upload_path,
-                upload_start_date_path,
+                blob_index_shard_path, blob_path, blob_ref_own_path, blob_ref_path, link_path,
+                upload_hash_context_path, upload_path, upload_start_date_path,
             },
         },
     };
@@ -365,6 +403,58 @@ mod tests {
                 namespace: "org/app".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn blob_ref_paths_round_trip() {
+        let links = [
+            LinkKind::Blob(digest_a()),
+            LinkKind::Digest(digest_a()),
+            LinkKind::Layer(digest_a()),
+            LinkKind::Config(digest_a()),
+            LinkKind::Tag(Tag::new("v1.0").unwrap()),
+            LinkKind::Referrer {
+                subject: digest_b(),
+                referrer: digest_a(),
+            },
+            LinkKind::Manifest {
+                index: digest_b(),
+                child: digest_a(),
+            },
+        ];
+        for link in links {
+            assert_eq!(
+                categorize(&blob_ref_path(&digest_a(), &namespace(), &link)),
+                KeyCategory::BlobRef {
+                    digest: digest_a(),
+                    namespace: "org/app".to_string(),
+                    link: link.clone(),
+                },
+                "reference key for {link:?} must round-trip"
+            );
+        }
+        assert_eq!(
+            categorize(&blob_ref_own_path(&digest_a(), &namespace())),
+            KeyCategory::BlobRef {
+                digest: digest_a(),
+                namespace: "org/app".to_string(),
+                link: LinkKind::Blob(digest_a()),
+            }
+        );
+    }
+
+    #[test]
+    fn adversarial_blob_ref_keys_are_unknown() {
+        let unknown = [
+            format!("v2/ref/sha256/aa/{HASH_A}/ns!r/unknown"),
+            format!("v2/ref/sha256/bb/{HASH_A}/ns!own"),
+            format!("v2/ref/sha256/aa/{HASH_A}/ns"),
+            format!("v2/ref/sha3/aa/{HASH_A}/ns!own"),
+            "v2/ref/sha256/aa".to_string(),
+        ];
+        for key in unknown {
+            assert_eq!(categorize(&key), KeyCategory::Unknown, "key {key:?}");
+        }
     }
 
     #[test]

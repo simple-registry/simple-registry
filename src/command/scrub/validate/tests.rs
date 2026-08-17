@@ -1,4 +1,5 @@
 use std::io::Cursor;
+use std::slice;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -60,6 +61,7 @@ async fn run_passes_with(
     let passes = [
         (Pass::MetadataLinks, "", meta_objects),
         (Pass::MetadataShards, path_builder::BLOBS_ROOT, meta_objects),
+        (Pass::MetadataShards, path_builder::REF_ROOT, meta_objects),
         (Pass::Blob, "", blob_store.object_store()),
     ];
     for (pass, prefix, objects) in passes {
@@ -918,18 +920,106 @@ async fn put_intent_touching(
     log_key
 }
 
+/// A legacy shard is converted into reference keys and reclaimed: scrub
+/// emits the conversion, and after apply the shard is gone while its entries
+/// survive as keys.
+#[tokio::test]
+async fn legacy_shard_is_converted_to_reference_keys() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/convert-shard").unwrap();
+        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let store = metadata_store.store().object_store();
+
+        // Rewind the layer's grant to the legacy shape: shard present, key
+        // absent, as an un-upgraded store would hold it.
+        let layer_link = LinkKind::Layer(layer_digest.clone());
+        let ref_key = path_builder::blob_ref_path(&layer_digest, namespace, &layer_link);
+        store.delete(&ref_key).await.unwrap();
+        let shard_key = path_builder::blob_index_shard_path(&layer_digest, namespace);
+        let shard = serde_json::to_vec(slice::from_ref(&layer_link)).unwrap();
+        store.put(&shard_key, Bytes::from(shard)).await.unwrap();
+
+        let actions = scrub_capture(test_case).await;
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, Action::ConvertBlobIndexShard { key, .. } if *key == shard_key)
+            ),
+            "scrub must plan the shard's conversion"
+        );
+
+        scrub_apply(test_case).await;
+        assert!(
+            store.head(&shard_key).await.is_err(),
+            "the converted shard must be deleted"
+        );
+        let links = metadata_store
+            .read_blob_index_namespace(namespace, &layer_digest)
+            .await
+            .unwrap();
+        assert!(
+            links.contains(&layer_link),
+            "the shard's entry must survive as a reference key"
+        );
+    })
+    .await;
+}
+
+/// A legacy shard entry whose self-digest is not the shard's blob cannot be
+/// expressed as a reference key; conversion drops it rather than aliasing a
+/// real entry, and the shard is still reclaimed.
+#[tokio::test]
+async fn unrepresentable_shard_entries_are_dropped_by_conversion() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/convert-nonsense").unwrap();
+        push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let store = metadata_store.store().object_store();
+
+        let ghost = Digest::sha256_of_bytes(b"nonsense-shard-blob");
+        let mismatched = LinkKind::Layer(Digest::sha256_of_bytes(b"a-different-digest"));
+        let shard_key = path_builder::blob_index_shard_path(&ghost, namespace);
+        let shard = serde_json::to_vec(&[mismatched]).unwrap();
+        store.put(&shard_key, Bytes::from(shard)).await.unwrap();
+
+        scrub_apply(test_case).await;
+
+        assert!(
+            store.head(&shard_key).await.is_err(),
+            "the shard must be reclaimed"
+        );
+        assert!(
+            metadata_store.read_blob_index(&ghost).await.is_err(),
+            "the mismatched entry must not be materialised as a key"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn live_intent_suppresses_shard_entry_removal() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/inflight-entry").unwrap();
-        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        push_healthy_image(test_case, namespace).await;
+        let blob_store = test_case.blob_store();
         let metadata_store = test_case.metadata_store();
 
-        let phantom = LinkKind::Layer(Digest::sha256_of_bytes(b"inflight-layer"));
+        // A blob whose bytes exist and whose grant entry has no backing link
+        // file yet, as if a push's link write were still in flight.
+        let inflight = Digest::sha256_of_bytes(b"inflight-layer");
+        blob_store
+            .object_store()
+            .put(
+                &path_builder::blob_path(&inflight),
+                Bytes::from_static(b"inflight-layer"),
+            )
+            .await
+            .unwrap();
+        let phantom = LinkKind::Layer(inflight.clone());
         metadata_store
             .update_blob_index(
                 namespace,
-                &layer_digest,
+                &inflight,
                 BlobIndexOperation::Insert(phantom.clone()),
             )
             .await
@@ -943,7 +1033,7 @@ async fn live_intent_suppresses_shard_entry_removal() {
 
         scrub_apply(test_case).await;
         let links = metadata_store
-            .read_blob_index_namespace(namespace, &layer_digest)
+            .read_blob_index_namespace(namespace, &inflight)
             .await
             .unwrap();
         assert!(
@@ -959,12 +1049,11 @@ async fn live_intent_suppresses_shard_entry_removal() {
             .await
             .unwrap();
         scrub_apply(test_case).await;
-        let links = metadata_store
-            .read_blob_index_namespace(namespace, &layer_digest)
-            .await
-            .unwrap();
         assert!(
-            !links.contains(&phantom),
+            metadata_store
+                .read_blob_index_namespace(namespace, &inflight)
+                .await
+                .is_err(),
             "the entry must be removed after the intent is gone"
         );
     })
@@ -975,14 +1064,24 @@ async fn live_intent_suppresses_shard_entry_removal() {
 async fn expired_intent_does_not_suppress_repairs() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/expired-intent").unwrap();
-        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        push_healthy_image(test_case, namespace).await;
+        let blob_store = test_case.blob_store();
         let metadata_store = test_case.metadata_store();
 
-        let phantom = LinkKind::Layer(Digest::sha256_of_bytes(b"expired-layer"));
+        let expired = Digest::sha256_of_bytes(b"expired-layer");
+        blob_store
+            .object_store()
+            .put(
+                &path_builder::blob_path(&expired),
+                Bytes::from_static(b"expired-layer"),
+            )
+            .await
+            .unwrap();
+        let phantom = LinkKind::Layer(expired.clone());
         metadata_store
             .update_blob_index(
                 namespace,
-                &layer_digest,
+                &expired,
                 BlobIndexOperation::Insert(phantom.clone()),
             )
             .await
@@ -996,12 +1095,11 @@ async fn expired_intent_does_not_suppress_repairs() {
 
         scrub_apply(test_case).await;
 
-        let links = metadata_store
-            .read_blob_index_namespace(namespace, &layer_digest)
-            .await
-            .unwrap();
         assert!(
-            !links.contains(&phantom),
+            metadata_store
+                .read_blob_index_namespace(namespace, &expired)
+                .await
+                .is_err(),
             "an expired intent is recovery's leftovers, not an in-flight transaction"
         );
     })

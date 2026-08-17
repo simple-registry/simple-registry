@@ -150,20 +150,23 @@ pub async fn sweep_byteless_shards(
         sink,
     };
     let ctx = &ctx;
-    walk::for_each_key(
-        objects,
-        path_builder::BLOBS_ROOT,
-        concurrency,
-        |key| async move {
-            let KeyCategory::BlobIndexShard { digest, namespace } = categorize(&key) else {
+    // Legacy shards live under the blobs root, reference keys under their own.
+    for root in [path_builder::BLOBS_ROOT, path_builder::REF_ROOT] {
+        walk::for_each_key(objects, root, concurrency, |key| async move {
+            let (KeyCategory::BlobIndexShard { digest, namespace }
+            | KeyCategory::BlobRef {
+                digest, namespace, ..
+            }) = categorize(&key)
+            else {
                 return;
             };
             if let Err(e) = sweep_one_shard(ctx, &key, &digest, &namespace).await {
-                error!("prune: failed to check shard '{key}': {e}");
+                error!("prune: failed to check index entry '{key}': {e}");
             }
-        },
-    )
-    .await
+        })
+        .await?;
+    }
+    Ok(())
 }
 
 /// The state a single byteless-shard check shares across the whole sweep.

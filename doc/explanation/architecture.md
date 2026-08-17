@@ -96,7 +96,7 @@ See [Bi-Directional Replication](replication.md) for the full model.
 
 Abstracted storage backends:
 - **Blob Store**: Large binary content (layers, configs, manifest bodies) and in-progress upload sessions
-- **Metadata Store**: Manifest links, tags, blob-index shards
+- **Metadata Store**: Manifest links, tags, blob-index reference keys
 
 Both can use filesystem or S3, independently configured, but it usually makes sense to use
 the same storage backend for both.
@@ -168,16 +168,21 @@ v2/
 │               ├── data
 │               ├── startedat
 │               └── hashstates/
-└── blobs/
+├── blobs/
+│   └── {algorithm}/
+│       └── {hash_prefix}/
+│           └── {hash}/
+│               └── data
+└── ref/
     └── {algorithm}/
         └── {hash_prefix}/
             └── {hash}/
-                ├── data
-                └── refs/
-                    └── {namespace}.json
+                ├── {namespace}!own
+                └── {namespace}!r/
+                    └── {entry}
 ```
 
-The two stores split this tree by content, not strictly by prefix: the blob store holds the blob `data` files and the `_uploads/` session directories, while the metadata store holds the rest of the `v2/repositories/` tree (links and tags) plus the `refs/` directories under `v2/blobs/`. Each `refs/{namespace}.json` file is a blob-index shard listing the links through which that namespace references the blob.
+The two stores split this tree by content: the blob store holds the blob `data` files and the `_uploads/` session directories, while the metadata store holds the rest of the `v2/repositories/` tree (links and tags) plus the blob-index reference keys under `v2/ref/`. Each reference key is an empty write-once object recording one link through which a namespace references the blob: `{namespace}!own` marks ownership (upload or mount), and each key under `{namespace}!r/` marks one referencing link. Stores written by earlier versions may still hold per-namespace `refs/{namespace}.json` shards under `v2/blobs/`; they are read as a fallback and converted to reference keys by scrub.
 
 ### Content Addressing
 

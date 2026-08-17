@@ -49,6 +49,15 @@ pub enum Action {
         blob: Digest,
         link: LinkKind,
     },
+    /// Convert one legacy blob-index shard into per-link reference keys and
+    /// delete it, keys first, so an interrupted conversion duplicates rather
+    /// than loses.
+    ConvertBlobIndexShard {
+        key: String,
+        namespace: Namespace,
+        blob: Digest,
+        links: Vec<LinkKind>,
+    },
     /// Revoke a namespace's orphaned blob-ownership grant (no manifest in the
     /// namespace references the blob), reclaiming the bytes when it was the last
     /// reference anywhere.
@@ -178,6 +187,18 @@ impl fmt::Display for Action {
                 write!(
                     f,
                     "grant missing blob-index entry '{namespace}/{blob}': '{link}'"
+                )
+            }
+            Action::ConvertBlobIndexShard {
+                key,
+                namespace,
+                blob,
+                links,
+            } => {
+                write!(
+                    f,
+                    "convert legacy blob-index shard '{key}' ({namespace}/{blob}, {} links) to reference keys",
+                    links.len()
                 )
             }
             Action::RemoveOrphanBlobGrant { namespace, blob } => {

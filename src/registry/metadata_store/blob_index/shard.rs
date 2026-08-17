@@ -1,28 +1,19 @@
-//! Blob-index shard operations in two layers: a pure in-memory layer
-//! (`apply_blob_index_operations` and friends, no I/O) and a store
-//! read-modify-write layer that turns applied [`BlobIndexOperation`]s into
-//! transaction reads + mutations. Both the link-transaction planner and the
-//! standalone shard writers in [`super`] build on these.
+//! Legacy blob-index shard support. Nothing writes shards any more: readers
+//! merge them in as a fallback and scrub converts each one into reference
+//! keys, so everything here is read-side and disappears with the last shard.
 
 use std::collections::HashSet;
 
 use bytes::Bytes;
-use serde_json::Value;
 
 use angos_oci::{Digest, Namespace};
-use angos_tx_engine::{
-    StorageError,
-    store::Store,
-    transaction::{Mutation, TransactionBuilder},
-};
+use angos_tx_engine::{StorageError, store::Store};
 
 use crate::registry::{
     Error,
     metadata_store::{BlobIndexOperation, LinkKind},
     path_builder,
 };
-
-// Pure shard operations (in-memory; no I/O)
 
 pub const SHARD_READ_CONCURRENCY: usize = 10;
 
@@ -58,8 +49,6 @@ pub fn non_empty_links_or_not_found(links: HashSet<LinkKind>) -> Result<HashSet<
     }
 }
 
-// Store read-modify-write
-
 /// Read one per-namespace shard: its raw bytes plus parsed links, or `None`
 /// when absent. A present shard that fails to parse is an error, never an
 /// empty set: the reclaim decisions built on this read must fail closed.
@@ -79,95 +68,14 @@ pub async fn read_shard(
     }
 }
 
-/// Fold `ops` into the disjoint `(add, remove)` link sets a [`Mutation::MergeSet`]
-/// carries, applying last-op-wins per link so the result matches an ordered
-/// [`apply_blob_index_operations`] over the same ops.
-fn ops_to_merge_delta(
-    ops: &[BlobIndexOperation],
-) -> Result<(Vec<Value>, Vec<Value>), serde_json::Error> {
-    let mut add: Vec<LinkKind> = Vec::new();
-    let mut remove: Vec<LinkKind> = Vec::new();
-    for op in ops {
-        match op {
-            BlobIndexOperation::Insert(link) => {
-                remove.retain(|existing| existing != link);
-                if !add.contains(link) {
-                    add.push(link.clone());
-                }
-            }
-            BlobIndexOperation::Remove(link) => {
-                add.retain(|existing| existing != link);
-                if !remove.contains(link) {
-                    remove.push(link.clone());
-                }
-            }
-        }
-    }
-    let add = add
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<Result<_, _>>()?;
-    let remove = remove
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<Result<_, _>>()?;
-    Ok((add, remove))
-}
-
-/// Append the shard mutation for `ops` to `builder` as an idempotent
-/// [`Mutation::MergeSet`], or leave `builder` untouched when `ops` net to
-/// nothing.
-///
-/// A present shard is joined to the read set: its fingerprint lets the executor
-/// catch a concurrent shard write at prepare and retry the whole transaction
-/// cleanly, so the healthy path settles fast. If a write still slips in after
-/// the commit point, the carried delta lets the merge reconcile against live
-/// state on replay rather than stranding a partial commit.
-pub fn append_shard_ops(
-    shard_path: String,
-    existing: Option<Bytes>,
-    ops: &[BlobIndexOperation],
-    builder: TransactionBuilder,
-) -> Result<TransactionBuilder, serde_json::Error> {
-    let (add, remove) = ops_to_merge_delta(ops)?;
-    if add.is_empty() && remove.is_empty() {
-        return Ok(builder);
-    }
-    let builder = match existing {
-        Some(raw) => builder.read(shard_path.clone(), raw),
-        None => builder,
-    };
-    Ok(builder.mutation(Mutation::MergeSet {
-        key: shard_path,
-        add,
-        remove,
-    }))
-}
-
-/// Read the current shard for `digest`/`namespace` and append its merge mutation
-/// to `builder`.
-pub async fn append_shard_for_digest(
-    store: &Store,
-    namespace: &Namespace,
-    digest: &Digest,
-    ops: &[BlobIndexOperation],
-    builder: TransactionBuilder,
-) -> Result<TransactionBuilder, Error> {
-    let shard_path = path_builder::blob_index_shard_path(digest, namespace);
-    let existing = match store.object_store().get(&shard_path).await {
-        Ok(data) => Some(Bytes::from(data)),
-        Err(StorageError::NotFound) => None,
-        Err(e) => return Err(Error::from(e)),
-    };
-    append_shard_ops(shard_path, existing, ops, builder).map_err(Error::from)
-}
-
 /// Return `true` when any namespace other than `our_namespace` has a live
-/// shard entry in the refs directory. A shard holding an empty link set is not
-/// a reference, matching [`MetadataStore::has_blob_references`]: emptying a
-/// shard deletes it, so an empty one is a legacy or corrupt artifact and must
-/// not pin the blob forever.
-pub async fn any_other_namespace_references_blob(
+/// legacy shard entry in the refs directory. A shard holding an empty link
+/// set is not a reference, matching [`MetadataStore::has_blob_references`]:
+/// the old write path deleted a shard when its set emptied, so an empty one
+/// is a leftover or corrupt artifact and must not pin the blob forever.
+///
+/// [`MetadataStore::has_blob_references`]: crate::registry::metadata_store::MetadataStore::has_blob_references
+pub async fn any_other_namespace_shard_references_blob(
     store: &Store,
     our_namespace: &Namespace,
     digest: &Digest,

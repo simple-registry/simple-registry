@@ -1,12 +1,15 @@
 //! The blob-index domain: cross-namespace blob reference tracking.
 //!
-//! Holds the [`BlobIndex`] / [`BlobIndexOperation`] value types, the read/write
-//! methods over the per-namespace shards, and the shard operations ([`shard`]):
-//! both the pure in-memory layer and the store read-modify-write.
+//! One write-once, empty reference key per (namespace, link) under
+//! [`path_builder::blob_ref_dir`] records that a namespace references a blob.
+//! Writers only touch these keys; the legacy per-namespace JSON shards under
+//! `v2/blobs/.../refs/` are still merged into every read as a fallback until
+//! scrub finishes converting them ([`shard`]).
 
 use std::collections::{HashMap, HashSet};
 use std::pin::pin;
 
+use bytes::Bytes;
 use futures_util::{Stream, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -15,9 +18,9 @@ use angos_oci::{Digest, Namespace};
 use angos_storage::paginated;
 use angos_tx_engine::{
     StorageError,
-    error::Error as TxError,
     executor::{DEFAULT_RETRY_BUDGET, execute_with_retry},
-    transaction::Transaction,
+    store::Store,
+    transaction::{Mutation, Transaction},
 };
 
 use crate::registry::{
@@ -29,9 +32,12 @@ use crate::registry::{
 pub mod shard;
 
 use self::shard::{
-    SHARD_READ_CONCURRENCY, append_shard_for_digest, decode_blob_index_shard_namespace,
-    non_empty_links_or_not_found,
+    SHARD_READ_CONCURRENCY, decode_blob_index_shard_namespace, non_empty_links_or_not_found,
+    read_shard,
 };
+
+/// Keys fetched per page when listing a blob's reference directory.
+const REF_LIST_PAGE: u16 = 1000;
 
 // Domain types
 
@@ -46,13 +52,137 @@ pub enum BlobIndexOperation {
     Remove(LinkKind),
 }
 
-// Engine-backed write methods
+/// The mutation one blob-index operation compiles to. Reference keys are
+/// write-once and empty, so an insert is an unconditional put and a removal
+/// an unconditional delete; nothing is read first.
+pub fn ref_mutation(
+    namespace: &Namespace,
+    digest: &Digest,
+    operation: &BlobIndexOperation,
+) -> Mutation {
+    match operation {
+        BlobIndexOperation::Insert(link) => Mutation::Put {
+            key: path_builder::blob_ref_path(digest, namespace, link),
+            body: Bytes::new(),
+            expected: None,
+        },
+        BlobIndexOperation::Remove(link) => Mutation::Delete {
+            key: path_builder::blob_ref_path(digest, namespace, link),
+            expected: None,
+        },
+    }
+}
+
+/// `namespace`'s reference entries for `digest` under the new key shape: the
+/// `!own` leaf plus the `!r/` subtree.
+pub async fn namespace_ref_entries(
+    store: &Store,
+    namespace: &Namespace,
+    digest: &Digest,
+) -> Result<HashSet<LinkKind>, Error> {
+    let mut links = HashSet::new();
+    let own = path_builder::blob_ref_own_path(digest, namespace);
+    match store.object_store().head(&own).await {
+        Ok(_) => {
+            links.insert(LinkKind::Blob(digest.clone()));
+        }
+        Err(StorageError::NotFound) => {}
+        Err(e) => return Err(e.into()),
+    }
+    let dir = path_builder::blob_ref_namespace_dir(digest, namespace);
+    let mut token = None;
+    loop {
+        let page = store
+            .object_store()
+            .list(&dir, REF_LIST_PAGE, token)
+            .await?;
+        links.extend(
+            page.items
+                .iter()
+                .filter_map(|entry| path_builder::parse_blob_ref_entry(digest, entry)),
+        );
+        token = page.next_token;
+        if token.is_none() {
+            break;
+        }
+    }
+    Ok(links)
+}
+
+/// `namespace`'s merged entries: the new reference keys plus its legacy
+/// shard. A corrupt shard fails the read rather than parsing as empty, since
+/// reclaim decisions built on this must fail closed.
+pub async fn namespace_entries_merged(
+    store: &Store,
+    namespace: &Namespace,
+    digest: &Digest,
+) -> Result<HashSet<LinkKind>, Error> {
+    let mut links = namespace_ref_entries(store, namespace, digest).await?;
+    let shard_path = path_builder::blob_index_shard_path(digest, namespace);
+    if let Some((_, legacy)) = read_shard(store, &shard_path).await.map_err(Error::from)? {
+        links.extend(legacy);
+    }
+    Ok(links)
+}
+
+/// Whether any namespace records a reference entry for `digest` under the new
+/// key shape.
+async fn any_ref_entry(store: &Store, digest: &Digest) -> Result<bool, Error> {
+    let dir = path_builder::blob_ref_dir(digest);
+    let mut token = None;
+    loop {
+        let page = store
+            .object_store()
+            .list(&dir, REF_LIST_PAGE, token)
+            .await?;
+        if page
+            .items
+            .iter()
+            .any(|key| path_builder::parse_blob_ref(digest, key).is_some())
+        {
+            return Ok(true);
+        }
+        token = page.next_token;
+        if token.is_none() {
+            return Ok(false);
+        }
+    }
+}
+
+/// `true` when any namespace other than `our_namespace` records a reference
+/// to `digest`: the new reference keys first, the legacy shards second.
+pub async fn any_other_namespace_references_blob(
+    store: &Store,
+    our_namespace: &Namespace,
+    digest: &Digest,
+) -> Result<bool, Error> {
+    let dir = path_builder::blob_ref_dir(digest);
+    let mut token = None;
+    loop {
+        let page = store
+            .object_store()
+            .list(&dir, REF_LIST_PAGE, token)
+            .await?;
+        for key in &page.items {
+            if let Some((namespace, _)) = path_builder::parse_blob_ref(digest, key)
+                && namespace != our_namespace.as_ref()
+            {
+                return Ok(true);
+            }
+        }
+        token = page.next_token;
+        if token.is_none() {
+            break;
+        }
+    }
+    shard::any_other_namespace_shard_references_blob(store, our_namespace, digest).await
+}
+
+// Store-backed methods
 
 impl MetadataStore {
-    /// Update the blob-index shard for `digest` in `namespace`.
-    ///
-    /// Reads the current shard, applies `operation`, and submits a `Transaction`,
-    /// retrying on `Conflict`/`Precondition` up to [`DEFAULT_RETRY_BUDGET`] times.
+    /// Write the reference key for `digest` in `namespace` (insert), or
+    /// remove it. Idempotent: the key's existence is the whole record.
     #[instrument(skip(self))]
     pub async fn update_blob_index(
         &self,
@@ -60,20 +190,12 @@ impl MetadataStore {
         digest: &Digest,
         operation: BlobIndexOperation,
     ) -> Result<(), Error> {
-        let operations = [operation];
+        let mutation = ref_mutation(namespace, digest, &operation);
         execute_with_retry(
             self.store().executor().as_ref(),
-            || async {
-                let builder = append_shard_for_digest(
-                    self.store_arc().as_ref(),
-                    namespace,
-                    digest,
-                    &operations,
-                    Transaction::builder(),
-                )
-                .await
-                .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
-                Ok(builder.build())
+            || {
+                let mutation = mutation.clone();
+                async move { Ok(Transaction::builder().mutation(mutation).build()) }
             },
             DEFAULT_RETRY_BUDGET,
         )
@@ -131,12 +253,35 @@ impl MetadataStore {
 
     #[instrument(skip(self))]
     pub async fn read_blob_index(&self, digest: &Digest) -> Result<BlobIndex, Error> {
-        let refs_dir = path_builder::blob_index_refs_dir(digest);
         let mut index = BlobIndex::default();
+        let dir = path_builder::blob_ref_dir(digest);
+        let mut token = None;
+        loop {
+            let page = self
+                .store()
+                .object_store()
+                .list(&dir, REF_LIST_PAGE, token)
+                .await?;
+            for key in &page.items {
+                // Foreign key shapes and invalid namespaces are skipped, the
+                // way undecodable shard names always were.
+                let Some((raw, link)) = path_builder::parse_blob_ref(digest, key) else {
+                    continue;
+                };
+                let Ok(namespace) = Namespace::new(&raw) else {
+                    continue;
+                };
+                index.namespace.entry(namespace).or_default().insert(link);
+            }
+            token = page.next_token;
+            if token.is_none() {
+                break;
+            }
+        }
+
+        let refs_dir = path_builder::blob_index_refs_dir(digest);
         let mut shards = pin!(self.stream_shards(&refs_dir));
         while let Some((obj, data)) = shards.try_next().await? {
-            // The shard filename was written from a validated `Namespace`; an
-            // undecodable name or unparseable body is skipped.
             let (Ok(links), Ok(namespace)) = (
                 serde_json::from_slice::<HashSet<LinkKind>>(&data),
                 Namespace::new(&decode_blob_index_shard_namespace(&obj)),
@@ -144,7 +289,7 @@ impl MetadataStore {
                 continue;
             };
             if !links.is_empty() {
-                index.namespace.insert(namespace, links);
+                index.namespace.entry(namespace).or_default().extend(links);
             }
         }
 
@@ -156,10 +301,12 @@ impl MetadataStore {
 
     #[instrument(skip(self))]
     pub async fn has_blob_references(&self, digest: &Digest) -> Result<bool, Error> {
-        let refs_dir = path_builder::blob_index_refs_dir(digest);
+        if any_ref_entry(self.store(), digest).await? {
+            return Ok(true);
+        }
 
-        // Short-circuit on the first non-empty shard; the single-shard common
-        // case stays one list plus one get.
+        // Legacy shards: short-circuit on the first non-empty one.
+        let refs_dir = path_builder::blob_index_refs_dir(digest);
         let mut shards = pin!(self.stream_shards(&refs_dir));
         while let Some((_, data)) = shards.try_next().await? {
             let links = serde_json::from_slice::<HashSet<LinkKind>>(&data)?;
@@ -177,14 +324,7 @@ impl MetadataStore {
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<HashSet<LinkKind>, Error> {
-        let shard_path = path_builder::blob_index_shard_path(digest, namespace);
-        match self.store().object_store().get(&shard_path).await {
-            Ok(data) => {
-                let links = serde_json::from_slice::<HashSet<LinkKind>>(&data)?;
-                non_empty_links_or_not_found(links)
-            }
-            Err(StorageError::NotFound) => Err(Error::NotFound),
-            Err(e) => Err(e.into()),
-        }
+        let links = namespace_entries_merged(self.store(), namespace, digest).await?;
+        non_empty_links_or_not_found(links)
     }
 }

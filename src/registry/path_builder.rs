@@ -1,9 +1,12 @@
-use angos_oci::{Digest, Namespace, UploadSessionId};
+use std::str::FromStr;
+
+use angos_oci::{Algorithm, Digest, Namespace, Tag, UploadSessionId};
 
 use crate::registry::metadata_store::LinkKind;
 
 pub const BLOBS_ROOT: &str = "v2/blobs";
 pub const REPOS_ROOT: &str = "v2/repositories";
+pub const REF_ROOT: &str = "v2/ref";
 
 /// Root directory and namespace-name prefix for a namespace tree walk. `None`
 /// walks the whole repositories tree; `Some(repository)` restricts the walk to
@@ -49,6 +52,103 @@ pub fn blob_path(digest: &Digest) -> String {
 
 pub fn blob_index_refs_dir(digest: &Digest) -> String {
     format!("{}/refs", blob_dir(digest))
+}
+
+/// Directory holding every reference key for `digest`, one key per
+/// (namespace, link). Lives under its own `v2/ref/` root so metadata keys no
+/// longer interleave with the blob store's `v2/blobs/` tree.
+pub fn blob_ref_dir(digest: &Digest) -> String {
+    format!(
+        "{REF_ROOT}/{}/{}/{}",
+        digest.algorithm(),
+        digest.hash_prefix(),
+        digest.hash()
+    )
+}
+
+/// One namespace's reference key for `digest`: ownership is the `<ns>!own`
+/// leaf, every other link kind is a leaf under the `<ns>!r/` subtree. `!`
+/// terminates the namespace: it is outside the namespace grammar so the name
+/// always parses back out, and it keeps namespace `a`'s leaves from colliding
+/// with namespace `a/b`'s directories on FS.
+pub fn blob_ref_path(digest: &Digest, namespace: &Namespace, link: &LinkKind) -> String {
+    format!("{}/{namespace}!{}", blob_ref_dir(digest), ref_entry(link))
+}
+
+pub fn blob_ref_own_path(digest: &Digest, namespace: &Namespace) -> String {
+    format!("{}/{namespace}!own", blob_ref_dir(digest))
+}
+
+/// Directory holding `namespace`'s non-ownership reference keys for `digest`.
+/// A directory boundary on both backends, so it lists without partial-name
+/// prefix support.
+pub fn blob_ref_namespace_dir(digest: &Digest, namespace: &Namespace) -> String {
+    format!("{}/{namespace}!r", blob_ref_dir(digest))
+}
+
+/// The key tail after `<ns>!`. The digest-bearing kinds omit digests equal to
+/// the blob's own (which is what their insertion always targets) and spell
+/// out only the foreign one: a referrer entry names its subject, an index
+/// child entry names its index.
+fn ref_entry(link: &LinkKind) -> String {
+    match link {
+        LinkKind::Blob(_) => "own".to_string(),
+        LinkKind::Digest(_) => "r/rev".to_string(),
+        LinkKind::Layer(_) => "r/layer".to_string(),
+        LinkKind::Config(_) => "r/config".to_string(),
+        LinkKind::Tag(tag) => format!("r/tag.{tag}"),
+        LinkKind::Referrer { subject, .. } => {
+            format!("r/sub.{}.{}", subject.algorithm(), subject.hash())
+        }
+        LinkKind::Manifest { index, .. } => {
+            format!("r/idx.{}.{}", index.algorithm(), index.hash())
+        }
+    }
+}
+
+/// Decode one key of [`blob_ref_dir`] (relative to that directory) back into
+/// its raw namespace (validity is the caller's concern) and the link it
+/// records. `None` means the key is not a shape this version writes.
+pub fn parse_blob_ref(digest: &Digest, key: &str) -> Option<(String, LinkKind)> {
+    let (namespace, entry) = key.split_once('!')?;
+    let link = match entry.strip_prefix("r/") {
+        None => (entry == "own").then(|| LinkKind::Blob(digest.clone()))?,
+        Some(entry) => parse_blob_ref_entry(digest, entry)?,
+    };
+    Some((namespace.to_string(), link))
+}
+
+/// Decode one key of [`blob_ref_namespace_dir`] (relative to that directory).
+pub fn parse_blob_ref_entry(digest: &Digest, entry: &str) -> Option<LinkKind> {
+    match entry {
+        "rev" => Some(LinkKind::Digest(digest.clone())),
+        "layer" => Some(LinkKind::Layer(digest.clone())),
+        "config" => Some(LinkKind::Config(digest.clone())),
+        _ => {
+            if let Some(tag) = entry.strip_prefix("tag.") {
+                Some(LinkKind::Tag(Tag::new(tag).ok()?))
+            } else if let Some(subject) = entry.strip_prefix("sub.") {
+                Some(LinkKind::Referrer {
+                    subject: parse_ref_digest(subject)?,
+                    referrer: digest.clone(),
+                })
+            } else if let Some(index) = entry.strip_prefix("idx.") {
+                Some(LinkKind::Manifest {
+                    index: parse_ref_digest(index)?,
+                    child: digest.clone(),
+                })
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// `<algo>.<hash>` inside a reference-key entry. `.` separates unambiguously:
+/// algorithm names never contain it.
+fn parse_ref_digest(s: &str) -> Option<Digest> {
+    let (algorithm, hash) = s.split_once('.')?;
+    Digest::with_algorithm(Algorithm::from_str(algorithm).ok()?, hash).ok()
 }
 
 pub fn blob_index_shard_path(digest: &Digest, namespace: &Namespace) -> String {
@@ -262,6 +362,71 @@ mod tests {
             manifest_referrers_dir(&ns, &subject),
             format!("v2/repositories/ns/_manifests/referrers/sha256/{HASH_A}")
         );
+    }
+
+    /// Every link kind's reference key must decode back to the namespace and
+    /// link it was built from, digest-bearing kinds included.
+    #[test]
+    fn blob_ref_paths_round_trip() {
+        let ns = Namespace::new("org/app").unwrap();
+        let digest = Digest::sha256(HASH_A).unwrap();
+        let other = Digest::sha256(HASH_B).unwrap();
+        let links = [
+            LinkKind::Blob(digest.clone()),
+            LinkKind::Digest(digest.clone()),
+            LinkKind::Layer(digest.clone()),
+            LinkKind::Config(digest.clone()),
+            LinkKind::Tag(Tag::new("v1.2-rc.1_x").unwrap()),
+            LinkKind::Referrer {
+                subject: other.clone(),
+                referrer: digest.clone(),
+            },
+            LinkKind::Manifest {
+                index: other.clone(),
+                child: digest.clone(),
+            },
+        ];
+        let dir = blob_ref_dir(&digest);
+        for link in links {
+            let key = blob_ref_path(&digest, &ns, &link);
+            let relative = key.strip_prefix(&format!("{dir}/")).unwrap();
+            assert_eq!(
+                parse_blob_ref(&digest, relative),
+                Some(("org/app".to_string(), link.clone())),
+                "{link} must round-trip through its reference key"
+            );
+        }
+    }
+
+    #[test]
+    fn blob_ref_own_and_namespace_dirs_agree_with_the_full_paths() {
+        let ns = Namespace::new("org/app").unwrap();
+        let digest = Digest::sha256(HASH_A).unwrap();
+        assert_eq!(
+            blob_ref_own_path(&digest, &ns),
+            blob_ref_path(&digest, &ns, &LinkKind::Blob(digest.clone()))
+        );
+        let layer_key = blob_ref_path(&digest, &ns, &LinkKind::Layer(digest.clone()));
+        assert_eq!(
+            layer_key,
+            format!("{}/layer", blob_ref_namespace_dir(&digest, &ns))
+        );
+    }
+
+    #[test]
+    fn foreign_ref_shapes_do_not_parse() {
+        let digest = Digest::sha256(HASH_A).unwrap();
+        for key in [
+            "ns",
+            "ns!x",
+            "ns!r/unknown",
+            "ns!r/tag.",
+            "ns!r/sub.sha256",
+            "ns!r/sub.sha3.abcd",
+            &format!("ns!r/idx.sha256.{}", "z".repeat(64)),
+        ] {
+            assert_eq!(parse_blob_ref(&digest, key), None, "key {key:?}");
+        }
     }
 
     #[test]

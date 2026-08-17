@@ -10,7 +10,7 @@ use crate::registry::{
     Error,
     metadata_store::{
         BlobIndexOperation, LinkKind, LinkOperation,
-        blob_index::shard::{any_other_namespace_references_blob, read_shard},
+        blob_index::{any_other_namespace_references_blob, shard::read_shard},
     },
     path_builder,
     test_utils::fs_test_stack,
@@ -272,6 +272,93 @@ async fn test_mixed_creates_and_deletes_across_digests() {
         .await
         .unwrap();
     assert_eq!(new_meta.target, digest_add);
+}
+
+/// Writers only produce the reference-key shape: a link write lands as one
+/// key under `v2/ref/` and leaves the legacy shard directory empty.
+#[tokio::test]
+async fn writes_land_as_reference_keys_not_shards() {
+    let config = test_config();
+    let backend = config.to_backend(false, None).unwrap();
+    let namespace = Namespace::new("ref-key-shape-test").unwrap();
+    let digest =
+        Digest::from_str("sha256:abab000000000000000000000000000000000000000000000000000000000000")
+            .unwrap();
+
+    let link = LinkKind::Tag(Tag::new("v1").unwrap());
+    let ops = [LinkOperation::Create {
+        link: link.clone(),
+        target: digest.clone(),
+        referrer: None,
+        media_type: None,
+        descriptor: None,
+    }];
+    backend.update_links(&namespace, &ops).await.unwrap();
+
+    backend
+        .store()
+        .object_store()
+        .head(&path_builder::blob_ref_path(&digest, &namespace, &link))
+        .await
+        .expect("the tag's reference key must exist");
+    let shards = backend
+        .store()
+        .object_store()
+        .list(&path_builder::blob_index_refs_dir(&digest), 10, None)
+        .await
+        .unwrap();
+    assert!(shards.items.is_empty(), "a push must write no legacy shard");
+}
+
+/// Until scrub converts them, legacy shards must keep answering every read
+/// alongside the new keys: the whole-index read, the per-namespace read, the
+/// liveness check, and the cross-namespace check.
+#[tokio::test]
+async fn legacy_shards_merge_into_every_read() {
+    let config = test_config();
+    let backend = config.to_backend(false, None).unwrap();
+    let legacy_ns = Namespace::new("legacy-merge-old").unwrap();
+    let new_ns = Namespace::new("legacy-merge-new").unwrap();
+    let digest =
+        Digest::from_str("sha256:cdcd000000000000000000000000000000000000000000000000000000000000")
+            .unwrap();
+
+    let shard = serde_json::to_vec(&[LinkKind::Blob(digest.clone())]).unwrap();
+    backend
+        .store()
+        .object_store()
+        .put(
+            &path_builder::blob_index_shard_path(&digest, &legacy_ns),
+            Bytes::from(shard),
+        )
+        .await
+        .unwrap();
+    backend
+        .update_blob_index(
+            &new_ns,
+            &digest,
+            BlobIndexOperation::Insert(LinkKind::Blob(digest.clone())),
+        )
+        .await
+        .unwrap();
+
+    let index = backend.read_blob_index(&digest).await.unwrap();
+    assert!(index.namespace.contains_key(&legacy_ns));
+    assert!(index.namespace.contains_key(&new_ns));
+
+    let links = backend
+        .read_blob_index_namespace(&legacy_ns, &digest)
+        .await
+        .unwrap();
+    assert!(links.contains(&LinkKind::Blob(digest.clone())));
+
+    assert!(backend.has_blob_references(&digest).await.unwrap());
+    assert!(
+        any_other_namespace_references_blob(backend.store(), &new_ns, &digest)
+            .await
+            .unwrap(),
+        "the legacy shard must count from the new namespace's view"
+    );
 }
 
 /// A shard holding an empty link set must not keep blob data alive. Removing

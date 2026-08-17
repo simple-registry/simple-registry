@@ -134,7 +134,12 @@ impl Command {
         }
 
         self.walk_pass(Pass::MetadataLinks, "").await?;
+        // Legacy shards first (each converts into reference keys), then the
+        // reference keys, so a converted shard's keys are validated in the
+        // same run.
         self.walk_pass(Pass::MetadataShards, path_builder::BLOBS_ROOT)
+            .await?;
+        self.walk_pass(Pass::MetadataShards, path_builder::REF_ROOT)
             .await?;
         self.walk_pass(Pass::Blob, "").await?;
 

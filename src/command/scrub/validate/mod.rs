@@ -64,7 +64,8 @@ pub enum Pass {
     /// Metadata store, everything except the `v2/blobs/` subtree: links and
     /// job records.
     MetadataLinks,
-    /// Metadata store, `v2/blobs/` subtree: blob-index shards.
+    /// Metadata store, `v2/blobs/` and `v2/ref/` subtrees: legacy blob-index
+    /// shards (converted to reference keys) and the reference keys themselves.
     MetadataShards,
     /// Blob store: blob data and upload artifacts.
     Blob,
@@ -151,6 +152,14 @@ impl Validator {
             (Pass::MetadataShards, KeyCategory::BlobIndexShard { digest, namespace }) => {
                 self.validate_shard(key, &digest, &namespace).await
             }
+            (
+                Pass::MetadataShards,
+                KeyCategory::BlobRef {
+                    digest,
+                    namespace,
+                    link,
+                },
+            ) => self.validate_ref(key, &digest, &namespace, link).await,
             (Pass::Blob, KeyCategory::BlobData { digest }) => self.validate_blob(&digest).await,
             (
                 Pass::Blob,

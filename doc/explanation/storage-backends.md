@@ -65,7 +65,7 @@ Angos separates storage into two logical stores:
 | Store              | Contents                                | Size       | Access Pattern          |
 |--------------------|-----------------------------------------|------------|-------------------------|
 | **Blob Store**     | Layers, configs, manifest bodies        | Large (GB) | Sequential read/write   |
-| **Metadata Store** | Manifest links, tags, blob-index shards | Small (KB) | Random access, frequent |
+| **Metadata Store** | Manifest links, tags, blob-index reference keys | Small (KB) | Random access, frequent |
 
 By default, both use the same backend. You can configure them independently:
 
@@ -500,24 +500,23 @@ On lock-coordinated deployments (no CAS), **never set `access_time_debounce_secs
 
 **Note on `lock_strategy = "redis"`:** Redis coordinates access-time writes only when the provider's conditional operations are unavailable or disabled (`conditional_operations = false`); with CAS available, access times stamp inline through conditional writes regardless of the lock strategy. `lock_strategy = "redis"` remains the right choice when running multi-replica on a provider that lacks conditional writes, or when Redis is already deployed for other reasons.
 
-#### Blob Index Sharding
+#### Blob Index Reference Keys
 
-Blob indexes track which namespaces reference each blob and are critical for garbage collection. Rather than storing a single `index.json` per blob (which becomes a contention point under concurrent access), Angos uses a **sharded approach**:
-
-Each blob's index is stored as multiple per-namespace files at:
+Blob indexes track which namespaces reference each blob and are critical for garbage collection. Each reference is its own empty, write-once key, so no index object is ever read, merged, or rewritten:
 
 ```
-v2/blobs/{algorithm}/{hash_prefix}/{hash}/refs/{namespace}.json
+v2/ref/{algorithm}/{hash_prefix}/{hash}/{namespace}!own
+v2/ref/{algorithm}/{hash_prefix}/{hash}/{namespace}!r/{entry}
 ```
 
-For example, a blob referenced by namespaces `myapp` and `team/backend` stores:
+`{namespace}!own` records ownership (an upload or a cross-repository mount); each key under `{namespace}!r/` records one link through which the namespace references the blob (a layer, a config, a tag, a revision, a referrer, or an index child). `!` terminates the namespace: it is outside the namespace grammar, so the name always parses back out of the key.
+
+For example, a blob owned by namespaces `myapp` and `team/backend` stores:
 
 ```
-v2/blobs/sha256/ab/cdef.../refs/myapp.json
-v2/blobs/sha256/ab/cdef.../refs/team%2Fbackend.json
+v2/ref/sha256/ab/cdef.../myapp!own
+v2/ref/sha256/ab/cdef.../team/backend!own
 ```
-
-The namespace is percent-encoded in the filename (`/` → `%2F`, `%` → `%25`) to avoid ambiguity.
 
 Blob indexes separate metadata cleanup from blob data deletion. Manifest deletion removes manifest
 links and may reclaim the manifest body itself, but config and layer blobs are retained while they
@@ -526,8 +525,8 @@ manifests; once the remaining references are gone, the final delete removes the 
 
 **Benefits:**
 
-- **Reduced contention**: Multiple namespaces can update their blob references concurrently without serializing on a single file.
-- **Faster updates**: Each shard is small, making updates quicker.
+- **No contention**: Concurrent writers touch disjoint keys, or the same key with the same (empty) content; nothing is read before writing.
+- **Idempotent writes**: A retry or a concurrent duplicate is a no-op.
 - **Scalability**: Performance doesn't degrade as the number of namespaces grows.
 
 #### Namespace Catalog
@@ -538,27 +537,26 @@ This makes the catalog **deterministic and strongly consistent**: a namespace ap
 
 #### Legacy Layouts
 
-Blob references live only in the sharded `refs/{namespace}.json` layout; the pre-1.2.0 single-file `index.json` is no longer read (see the [upgrade guide](../how-to/upgrade.md) for the required pre-upgrade migration).
+Blob references written by earlier versions as per-namespace `v2/blobs/.../refs/{namespace}.json` shards are still merged into every read as a fallback; `angos scrub` converts each shard into reference keys and deletes it, so the fallback cost disappears with the last shard. The pre-1.2.0 single-file `index.json` is no longer read (see the [upgrade guide](../how-to/upgrade.md) for the required pre-upgrade migration).
 
 Pre-existing namespace-registry index objects (`_registry/namespaces.json` and `_registry/ns/*.json`) written by earlier versions are no longer read or written; the catalog is now derived directly from stored content. These objects become unused after upgrade and can be left in place or deleted manually; no migration step is required.
 
 #### Blob Index Convergence
 
 The blob index is the cross-namespace map of which namespaces reference each
-blob. It is stored per-blob, sharded by namespace under
-`v2/blobs/<algo>/<prefix>/<hash>/refs/<safe_ns>.json`.
+blob. It is stored per-blob as one reference key per (namespace, link) under
+`v2/ref/<algo>/<prefix>/<hash>/`.
 
 The write path adds entries on push and removes them on successful delete.
 Mid-flight failures or out-of-band edits can leave stale entries pointing to
 namespaces that no longer exist.
 
-Periodic `angos scrub` probes every blob-index entry against its raw link key
+Periodic `angos scrub` probes every reference key against its raw link key
 in the metadata store, bypassing the link cache so a stale cache entry cannot
-mask a repair. Entries whose link file is confirmed missing are removed, and a
-shard whose entries all disappear is itself deleted. This convergence is part
-of every scrub run. Entries that reference a blob whose backing bytes are
-absent are left alone: they usually belong to an in-flight upload or a
-lazily filled pull-through cache entry.
+mask a repair. Keys whose link file is confirmed missing are removed. This
+convergence is part of every scrub run. Entries that reference a blob whose
+backing bytes are absent are left alone: they usually belong to an in-flight
+upload or a lazily filled pull-through cache entry.
 
 Blob ownership markers (`LinkKind::Blob`) are intentionally retained until the
 client issues an explicit `DELETE /v2/<name>/blobs/<digest>`. They are not

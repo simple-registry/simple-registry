@@ -30,9 +30,9 @@ use crate::registry::{
     Error,
     metadata_store::{
         BlobIndexOperation, LinkKind, LinkMetadata, LinkOperation, MetadataStore, ReferencePolicy,
-        blob_index::shard::{
-            any_other_namespace_references_blob, append_shard_for_digest, append_shard_ops,
-            apply_blob_index_operations, read_shard,
+        blob_index::{
+            any_other_namespace_references_blob, namespace_entries_merged, ref_mutation,
+            shard::apply_blob_index_operations,
         },
     },
     path_builder,
@@ -58,15 +58,16 @@ pub enum LinksTx<'a> {
     /// passes the author's `source_ts` for LWW. `reference_policy` governs
     /// newly-referenced digests the namespace does not own: Strict rejects the
     /// push, Permissive drops the unowned link, Trusted grants blindly. The
-    /// ownership read happens here, inside the transaction, so it cannot race
+    /// caller's `blob-data:{digest}` lock keeps the ownership read from racing
     /// a concurrent reclaim.
     StoreManifest {
         created_at: Option<DateTime<Utc>>,
         reference_policy: ReferencePolicy,
     },
     /// `delete_manifest`: removes the links and reports via `reclaim_blob`
-    /// whether the blob became unreferenced (the shard is empty and no other
-    /// namespace references it), leaving the blob-data reclaim to the caller.
+    /// whether the blob became unreferenced (the namespace's entries empty out
+    /// and no other namespace references it), leaving the blob-data reclaim to
+    /// the caller.
     /// `source_ts` gates each deleted tag via LWW; the caller's
     /// `blob-data:{digest}` lock keeps the unreferenced-check from racing a
     /// concurrent grant.
@@ -74,7 +75,7 @@ pub enum LinksTx<'a> {
         blob: &'a Digest,
         source_ts: Option<DateTime<Utc>>,
     },
-    /// `revoke_blob_ownership`: removes `namespace`'s shard ownership entry and
+    /// `revoke_blob_ownership`: removes `namespace`'s ownership entry and
     /// reports via `reclaim_blob` whether the blob became unreferenced. The
     /// caller holds the `blob-data:{digest}` lock across the call and reclaims
     /// the blob-data from the blob store.
@@ -95,7 +96,7 @@ impl<'a> LinksTx<'a> {
         }
     }
 
-    /// Direct blob-index shard ops applied alongside the link-derived ops.
+    /// Direct blob-index ops applied alongside the link-derived ops.
     fn blob_index_ops(&self) -> Option<(&'a Digest, &[BlobIndexOperation])> {
         match self {
             LinksTx::RevokeBlobOwnership { blob, ops } => Some((*blob, ops.as_slice())),
@@ -155,9 +156,9 @@ struct LinksTxCaptured {
     /// write; the attempt committed an empty transaction and the caller maps
     /// this to [`Error::ReplicationSuperseded`].
     superseded: Option<String>,
-    /// `Some(digest)` when a strict push referenced a digest whose shard held
-    /// no entry at plan time; the attempt committed an empty transaction and
-    /// the caller maps this to [`Error::ManifestBlobUnknown`].
+    /// `Some(digest)` when a strict push referenced a digest the namespace
+    /// held no entry for at plan time; the attempt committed an empty
+    /// transaction and the caller maps this to [`Error::ManifestBlobUnknown`].
     missing_reference: Option<Digest>,
     /// Whether this transaction left the manifest blob unreferenced, so the
     /// caller should reclaim its blob-data from the blob store under the
@@ -227,12 +228,9 @@ struct LinksSnapshot<'a> {
     reads: Vec<(String, Option<Bytes>)>,
 }
 
-/// The link-derived part of a transaction: the in-progress builder plus the
-/// blob-index ops, written links and deleted links the later phases consume.
-/// Shard state pre-read for each newly-referenced digest of a policy-checked
-/// push: the raw bytes (reused by the shard merge, so the read joins the read
-/// set) plus the parsed links; `None` = the shard is absent.
-type ReferenceShards = HashMap<Digest, Option<(Bytes, HashSet<LinkKind>)>>;
+/// Whether the pushing namespace already holds any reference entry for each
+/// newly-referenced digest of a policy-checked push, read before planning.
+type ReferenceOwnership = HashMap<Digest, bool>;
 
 struct LinkMutations {
     builder: TransactionBuilder,
@@ -403,12 +401,11 @@ impl MetadataStore {
             reads,
         } = snapshot;
 
-        // Ownership pre-read: one shard read per newly-referenced digest of a
-        // policy-checked push, shared with the shard merge below so the
-        // ownership decision is commit-validated.
+        // Ownership pre-read: one reference lookup per newly-referenced digest
+        // of a policy-checked push. Races with a concurrent reclaim are
+        // serialised by the `blob-data:{digest}` lock both sides hold.
         let store = self.store_arc();
-        let reference_shards =
-            preread_reference_shards(store.as_ref(), namespace, &ops, tx).await?;
+        let ownership = preread_reference_ownership(store.as_ref(), namespace, &ops, tx).await?;
 
         // Plan: build the link mutations over the snapshot state.
         let LinkMutations {
@@ -417,14 +414,7 @@ impl MetadataStore {
             written_links,
             deleted_links,
             missing_reference,
-        } = build_link_mutations(
-            namespace,
-            &ops,
-            &mut link_cache,
-            tx,
-            reads,
-            &reference_shards,
-        )?;
+        } = build_link_mutations(namespace, &ops, &mut link_cache, tx, reads, &ownership)?;
 
         if let Some(digest) = missing_reference {
             return Ok((
@@ -436,16 +426,16 @@ impl MetadataStore {
             ));
         }
 
-        // Shard merges plus the reclaim decision, sharing one read per shard so
-        // both the ownership and the reclaim decisions are validated at commit.
+        // Reference-key mutations plus the reclaim decision. The decision is
+        // not commit-validated: the caller's `blob-data:{digest}` lock is what
+        // keeps it from racing a concurrent grant.
         let reclaim_digest = tx
             .blob_data_delete_if_unreferenced()
             .filter(|digest| pending_blob_ops.contains_key(*digest));
-        let (builder, reclaim_blob) = append_shard_merges(
+        let (builder, reclaim_blob) = append_ref_mutations(
             store.as_ref(),
             namespace,
             &pending_blob_ops,
-            &reference_shards,
             reclaim_digest,
             builder,
         )
@@ -634,7 +624,7 @@ fn build_link_mutations(
     link_cache: &mut HashMap<LinkKind, LinkMetadata>,
     tx: &LinksTx<'_>,
     reads: Vec<(String, Option<Bytes>)>,
-    reference_shards: &ReferenceShards,
+    ownership: &ReferenceOwnership,
 ) -> Result<LinkMutations, TxError> {
     let mut builder = Transaction::builder();
     for (key, body) in reads {
@@ -662,7 +652,7 @@ fn build_link_mutations(
         deleted_links: Vec::new(),
         missing_reference: None,
     };
-    let acc = build_create_mutations(namespace, ops, link_cache, tx, reference_shards, acc)?;
+    let acc = build_create_mutations(namespace, ops, link_cache, tx, ownership, acc)?;
     if acc.missing_reference.is_some() {
         return Ok(acc);
     }
@@ -678,7 +668,7 @@ fn build_create_mutations(
     ops: &[OpSnapshot<'_>],
     link_cache: &mut HashMap<LinkKind, LinkMetadata>,
     tx: &LinksTx<'_>,
-    reference_shards: &ReferenceShards,
+    ownership: &ReferenceOwnership,
     mut acc: LinkMutations,
 ) -> Result<LinkMutations, TxError> {
     for op in ops {
@@ -696,12 +686,9 @@ fn build_create_mutations(
 
         if link.is_tracked() && referrer.is_some() {
             // Ownership gate: a newly-referenced digest must already hold a
-            // shard entry. Strict rejects the push, Permissive drops the link
-            // so the namespace gains no access it did not have.
-            if old_target.is_none()
-                && let Some(state) = reference_shards.get(*target)
-                && state.as_ref().is_none_or(|(_, links)| links.is_empty())
-            {
+            // reference entry. Strict rejects the push, Permissive drops the
+            // link so the namespace gains no access it did not have.
+            if old_target.is_none() && ownership.get(*target) == Some(&false) {
                 if tx.reference_policy() == Some(ReferencePolicy::Strict) {
                     acc.missing_reference = Some((*target).clone());
                     return Ok(acc);
@@ -798,23 +785,22 @@ fn build_delete_mutations(
     Ok(acc)
 }
 
-/// The ownership pre-read: one shard read per newly-referenced digest (a
-/// tracked Create whose link does not exist yet) of a policy-checked push.
-/// [`build_create_mutations`] decides ownership on this state and
-/// [`append_shard_merges`] reuses the same bytes for the merge, so the decision
-/// joins the read set and a racing reclaim fails the commit's prepare.
-async fn preread_reference_shards(
+/// The ownership pre-read: one reference lookup per newly-referenced digest
+/// (a tracked Create whose link does not exist yet) of a policy-checked push.
+/// A namespace owns a digest when it holds any reference entry for it, new
+/// keys or legacy shard alike.
+async fn preread_reference_ownership(
     store: &Store,
     namespace: &Namespace,
     ops: &[OpSnapshot<'_>],
     tx: &LinksTx<'_>,
-) -> Result<ReferenceShards, TxError> {
-    let mut shards = ReferenceShards::new();
+) -> Result<ReferenceOwnership, TxError> {
+    let mut ownership = ReferenceOwnership::new();
     if !matches!(
         tx.reference_policy(),
         Some(ReferencePolicy::Strict | ReferencePolicy::Permissive)
     ) {
-        return Ok(shards);
+        return Ok(ownership);
     }
 
     for op in ops {
@@ -831,68 +817,63 @@ async fn preread_reference_shards(
         if !link.is_tracked()
             || referrer.is_none()
             || old_target.is_some()
-            || shards.contains_key(*target)
+            || ownership.contains_key(*target)
         {
             continue;
         }
-        let shard_path = path_builder::blob_index_shard_path(target, namespace);
-        let existing = read_shard(store, &shard_path)
+        let entries = namespace_entries_merged(store, namespace, target)
             .await
-            .map_err(TxError::Storage)?;
-        shards.insert((*target).clone(), existing);
+            .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
+        ownership.insert((*target).clone(), !entries.is_empty());
     }
-    Ok(shards)
+    Ok(ownership)
 }
 
-/// The shard-merge step plus the reclaim decision: append each pending
-/// digest's blob-index shard mutation, reusing the pre-read state for digests
-/// in `reference_shards` so the ownership decision's read is the one the
-/// commit validates, and deciding for `reclaim_digest` on the same read
-/// whether this transaction leaves the blob unreferenced (its shard empties
-/// and no other namespace references it). Sharing each read with the merge
-/// joins the decisions to the transaction read set, so a racing write fails
-/// prepare instead of being green-lit away. The reclaimed blob's existence is
-/// not probed here (the reclaim is an idempotent blob-store delete).
-async fn append_shard_merges(
+/// Fold `ops` to one final operation per link (last op wins), so the
+/// transaction carries at most one mutation per reference key.
+fn fold_ref_ops(ops: &[BlobIndexOperation]) -> Vec<BlobIndexOperation> {
+    let mut folded: Vec<BlobIndexOperation> = Vec::new();
+    for op in ops {
+        let (BlobIndexOperation::Insert(link) | BlobIndexOperation::Remove(link)) = op;
+        folded.retain(|existing| {
+            let (BlobIndexOperation::Insert(kept) | BlobIndexOperation::Remove(kept)) = existing;
+            kept != link
+        });
+        folded.push(op.clone());
+    }
+    folded
+}
+
+/// The reference-key step plus the reclaim decision: append one put or delete
+/// per pending (digest, link), and decide for `reclaim_digest` whether this
+/// transaction leaves the blob unreferenced (the namespace's merged entries
+/// empty out and no other namespace references it). The decision reads are
+/// plain reads, not commit-validated: the caller's `blob-data:{digest}` lock
+/// is what serialises them against a concurrent grant. The reclaimed blob's
+/// existence is not probed here (the reclaim is an idempotent blob-store
+/// delete).
+async fn append_ref_mutations(
     store: &Store,
     namespace: &Namespace,
     pending_blob_ops: &HashMap<Digest, Vec<BlobIndexOperation>>,
-    reference_shards: &ReferenceShards,
     reclaim_digest: Option<&Digest>,
     mut builder: TransactionBuilder,
 ) -> Result<(TransactionBuilder, bool), TxError> {
     let mut reclaim_blob = false;
-    for (digest, shard_ops) in pending_blob_ops {
+    for (digest, ops) in pending_blob_ops {
         if reclaim_digest == Some(digest) {
-            let shard_path = path_builder::blob_index_shard_path(digest, namespace);
-            let existing = read_shard(store, &shard_path)
+            let mut links = namespace_entries_merged(store, namespace, digest)
                 .await
-                .map_err(TxError::Storage)?;
-            let mut links = existing
-                .as_ref()
-                .map(|(_, links)| links.clone())
-                .unwrap_or_default();
-            apply_blob_index_operations(&mut links, shard_ops);
+                .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
+            apply_blob_index_operations(&mut links, ops);
             if links.is_empty() {
                 reclaim_blob = !any_other_namespace_references_blob(store, namespace, digest)
                     .await
                     .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
             }
-            builder =
-                append_shard_ops(shard_path, existing.map(|(raw, _)| raw), shard_ops, builder)
-                    .map_err(TxError::Serde)?;
-        } else {
-            builder = match reference_shards.get(digest) {
-                Some(state) => {
-                    let shard_path = path_builder::blob_index_shard_path(digest, namespace);
-                    let existing = state.as_ref().map(|(raw, _)| raw.clone());
-                    append_shard_ops(shard_path, existing, shard_ops, builder)
-                        .map_err(TxError::Serde)?
-                }
-                None => append_shard_for_digest(store, namespace, digest, shard_ops, builder)
-                    .await
-                    .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?,
-            };
+        }
+        for op in fold_ref_ops(ops) {
+            builder = builder.mutation(ref_mutation(namespace, digest, &op));
         }
     }
     Ok((builder, reclaim_blob))
@@ -914,15 +895,15 @@ fn capture_prior_targets(ops: &[OpSnapshot<'_>]) -> Vec<(LinkKind, Option<Digest
 // store_manifest / delete_manifest: thin wrappers over the planner above.
 
 impl MetadataStore {
-    /// Persist a manifest's link metadata and blob-index shard updates as a
+    /// Persist a manifest's link metadata and blob-index reference keys as a
     /// single atomic transaction. The manifest blob-data itself is content and
     /// is written separately to the blob store by the caller. Returns the
     /// [`LinksCommit`] carrying each created link's commit-validated prior
     /// target.
     ///
     /// `reference_policy` governs newly-referenced digests the namespace does
-    /// not own, checked inside the transaction so the decision cannot race a
-    /// concurrent reclaim: Strict fails the push with
+    /// not own, checked under the caller's `blob-data:{digest}` lock so the
+    /// decision cannot race a concurrent reclaim: Strict fails the push with
     /// [`Error::ManifestBlobUnknown`], Permissive drops the unowned link,
     /// Trusted grants blindly.
     pub async fn store_manifest(
@@ -939,7 +920,7 @@ impl MetadataStore {
         self.execute_links_tx(namespace, operations, tx).await
     }
 
-    /// Delete a manifest: removes link metadata and cleans up blob-index shards
+    /// Delete a manifest: removes link metadata and blob-index reference keys
     /// as a single atomic transaction. Returns whether the manifest blob became
     /// unreferenced, so the caller reclaims its blob-data from the blob store
     /// under the blob-data lock it must hold across this call (so a concurrent
