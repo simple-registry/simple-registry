@@ -48,8 +48,9 @@ impl Validator {
                     .await
             }
             // The ownership grant is still written and is its own record, so
-            // there is nothing here to repair or reclaim.
-            ParsedLink::Blob(_) => Ok(()),
+            // it is neither migrated nor reclaimed. It is still read, because
+            // that is what deletes one whose content no longer parses.
+            ParsedLink::Blob(_) => self.read_link_body(key).await.map(|_| ()),
             ParsedLink::Layer(digest) | ParsedLink::Config(digest) => {
                 self.migrate_superseded_link(key, &namespace, &digest).await
             }

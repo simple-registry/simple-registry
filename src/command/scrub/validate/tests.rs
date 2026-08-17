@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use angos_oci::request::PutManifestRequest;
 use angos_oci::{Digest, Namespace, Reference, Tag};
+use angos_tx_engine::StorageError;
 use angos_tx_engine::intent::{IntentRecord, MutationProgress, MutationRecord, PlannedMutation};
 
 use crate::{
@@ -1008,6 +1009,49 @@ async fn expired_intent_does_not_suppress_repairs() {
             !links.contains(&phantom),
             "an expired intent is recovery's leftovers, not an in-flight transaction"
         );
+    })
+    .await;
+}
+
+/// Every link file whose body no longer parses is deleted, whatever its kind.
+/// A blob ownership grant is neither migrated nor reclaimed, so it is the one
+/// that stops being read if the dispatch skips it outright, and a corrupt one
+/// then survives a scrub that reports the store clean.
+#[tokio::test]
+async fn a_corrupt_link_of_any_kind_is_deleted() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/corrupt-links").unwrap();
+        let (_, config_digest, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let blob_digest = put_blob_direct(metadata_store.store(), b"owned but unreferenced").await;
+
+        let corrupt = [
+            LinkKind::Blob(blob_digest),
+            LinkKind::Layer(layer_digest),
+            LinkKind::Config(config_digest),
+        ];
+        for link in &corrupt {
+            put_link_raw(
+                metadata_store.store(),
+                namespace,
+                link,
+                b"not link metadata",
+            )
+            .await;
+        }
+
+        scrub_apply(test_case).await;
+
+        for link in &corrupt {
+            let key = path_builder::link_path(link, namespace);
+            assert!(
+                matches!(
+                    metadata_store.store().object_store().get(&key).await,
+                    Err(StorageError::NotFound)
+                ),
+                "a corrupt {link} must be deleted"
+            );
+        }
     })
     .await;
 }
