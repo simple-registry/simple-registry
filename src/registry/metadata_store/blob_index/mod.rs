@@ -29,7 +29,7 @@ use crate::registry::{
 pub mod shard;
 
 use self::shard::{
-    SHARD_READ_CONCURRENCY, append_shard_for_digest, decode_blob_index_shard_namespace,
+    SHARD_READ_CONCURRENCY, append_shard_merge, decode_blob_index_shard_namespace,
     non_empty_links_or_not_found,
 };
 
@@ -64,15 +64,9 @@ impl MetadataStore {
         execute_with_retry(
             self.store().executor().as_ref(),
             || async {
-                let builder = append_shard_for_digest(
-                    self.store_arc().as_ref(),
-                    namespace,
-                    digest,
-                    &operations,
-                    Transaction::builder(),
-                )
-                .await
-                .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
+                let builder =
+                    append_shard_merge(namespace, digest, &operations, Transaction::builder())
+                        .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
                 Ok(builder.build())
             },
             DEFAULT_RETRY_BUDGET,

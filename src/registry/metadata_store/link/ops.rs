@@ -31,7 +31,7 @@ use crate::registry::{
     metadata_store::{
         BlobIndexOperation, LinkKind, LinkMetadata, LinkOperation, MetadataStore, ReferencePolicy,
         blob_index::shard::{
-            any_other_namespace_references_blob, append_shard_for_digest, append_shard_ops,
+            any_other_namespace_references_blob, append_shard_merge, append_shard_ops,
             apply_blob_index_operations, read_shard,
         },
     },
@@ -889,8 +889,7 @@ async fn append_shard_merges(
                     append_shard_ops(shard_path, existing, shard_ops, builder)
                         .map_err(TxError::Serde)?
                 }
-                None => append_shard_for_digest(store, namespace, digest, shard_ops, builder)
-                    .await
+                None => append_shard_merge(namespace, digest, shard_ops, builder)
                     .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?,
             };
         }

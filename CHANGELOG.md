@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A manifest push commits its metadata in about half the storage requests it used to, and no longer serialises them one per key.
 - Requests of one instance contending for the same metadata key queue instead of racing, so a loser retries without having written anything and concurrent pushes stop amplifying each other's storage traffic.
+- Two pushes no longer conflict over the base layers their images share: a blob-index merge carries its delta alone, so it neither reads its shard up front nor aborts the transaction when another push writes the same one.
 
 ### Fixed
 
