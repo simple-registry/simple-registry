@@ -1,6 +1,8 @@
 //! The namespace / tag / revision / referrer catalog: the content-derived
 //! enumeration endpoints and the namespace tree-walk they build on.
 
+use std::collections::{BTreeSet, HashMap, HashSet};
+
 use futures_util::stream::{self, Stream, StreamExt, TryStreamExt};
 use tracing::{debug, instrument};
 
@@ -15,6 +17,48 @@ use crate::registry::{
 
 /// Fan-out for the tag link reads behind [`MetadataStore::find_tags_pointing_at`].
 const TAG_LINK_READ_CONCURRENCY: usize = 20;
+
+/// Folds a sorted stream of (group, entry-file) pairs into each group's
+/// winner: `Some(digest)` live, `None` tombstoned. A sorted listing delivers
+/// each group's entries contiguously with the newest ordinal first, so every
+/// group resolves from its complete lowest-ordinal set by the same rule as a
+/// point read: highest digest wins the same-millisecond tie, and a `set`
+/// beats a `del` of the same digest.
+#[derive(Default)]
+struct WinnerFold {
+    states: HashMap<String, Option<Digest>>,
+    current: Option<(String, u64, Digest, bool)>,
+}
+
+impl WinnerFold {
+    fn push(&mut self, group: &str, file: &str) {
+        let Some((ord, deletion, digest)) = path_builder::parse_tag_entry(file) else {
+            return;
+        };
+        self.current = Some(match self.current.take() {
+            Some((cur, cur_ord, cur_digest, cur_del)) if cur == group => {
+                if ord == cur_ord && (digest > cur_digest || (digest == cur_digest && cur_del)) {
+                    (cur, cur_ord, digest, deletion)
+                } else {
+                    (cur, cur_ord, cur_digest, cur_del)
+                }
+            }
+            previous => {
+                if let Some((done, _, digest, deletion)) = previous {
+                    self.states.insert(done, (!deletion).then_some(digest));
+                }
+                (group.to_string(), ord, digest, deletion)
+            }
+        });
+    }
+
+    fn finish(mut self) -> HashMap<String, Option<Digest>> {
+        if let Some((done, _, digest, deletion)) = self.current {
+            self.states.insert(done, (!deletion).then_some(digest));
+        }
+        self.states
+    }
+}
 
 impl MetadataStore {
     /// Lists the namespaces holding manifest content (a `_manifests` child);
@@ -41,7 +85,7 @@ impl MetadataStore {
     pub async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<Namespace>, Error> {
         let (root, prefix) = path_builder::namespace_walk_root(scope);
 
-        pagination::collect_namespaces_with_marker(
+        let mut namespaces = pagination::collect_namespaces_with_marker(
             &root,
             &prefix,
             "_manifests",
@@ -53,10 +97,62 @@ impl MetadataStore {
                     .list_all_children(&path)
                     .await?
                     .sub_prefixes;
-                Ok(sub_prefixes)
+                Ok::<_, Error>(sub_prefixes)
             },
         )
-        .await
+        .await?;
+
+        // A namespace whose tags live as entries under `v2/ns/` may hold no
+        // `_manifests` marker of its own; merge those in from one flat
+        // listing, resolving each tag's winner so a namespace holding only
+        // tombstones does not resurface.
+        let mut fold = WinnerFold::default();
+        let mut token = None;
+        loop {
+            let page = self
+                .store()
+                .object_store()
+                .list(path_builder::NS_ROOT, 1000, token)
+                .await?;
+            for key in &page.items {
+                let Some((name, marker)) = key.split_once('!') else {
+                    continue;
+                };
+                if !marker.starts_with("tag/") {
+                    continue;
+                }
+                if let Some(scope) = scope
+                    && name != scope
+                    && !name.starts_with(&format!("{scope}/"))
+                {
+                    continue;
+                }
+                let Some((group, file)) = key.rsplit_once('/') else {
+                    continue;
+                };
+                fold.push(group, file);
+            }
+            token = page.next_token;
+            if token.is_none() {
+                break;
+            }
+        }
+        let mut seen: HashSet<Namespace> = namespaces.iter().cloned().collect();
+        for (group, state) in fold.finish() {
+            if state.is_none() {
+                continue;
+            }
+            let Some((name, _)) = group.split_once('!') else {
+                continue;
+            };
+            let Ok(namespace) = Namespace::new(name) else {
+                continue;
+            };
+            if seen.insert(namespace.clone()) {
+                namespaces.push(namespace);
+            }
+        }
+        Ok(namespaces)
     }
 
     #[instrument(skip(self))]
@@ -74,17 +170,17 @@ impl MetadataStore {
         Ok(pagination::paginate_sorted(&tags, n, last.as_deref()))
     }
 
-    /// Streams every valid tag in `namespace`, unsorted, sourced from the
-    /// backend's complete children enumeration (one directory read on FS,
-    /// concurrent name-range scans on S3). Tags are validated on write; a
-    /// malformed directory name here is defensive and is dropped rather than
-    /// surfaced as a tag (scrub reports and removes such directories, so the
-    /// drop is silent).
+    /// Streams every live tag in `namespace`: the tag-entry states merged
+    /// with the legacy tag directories, entries shadowing legacy per name (a
+    /// tombstone winner drops the tag even when its legacy link remains).
+    /// Malformed names are dropped rather than surfaced as tags (scrub
+    /// reports and removes them, so the drop is silent).
     pub fn stream_tags(
         &self,
         namespace: &Namespace,
     ) -> impl Stream<Item = Result<Tag, Error>> + Send + '_ {
         let tags_dir = path_builder::manifest_tags_dir(namespace);
+        let namespace = namespace.clone();
         stream::once(async move {
             let tag_dirs = self
                 .store()
@@ -92,14 +188,56 @@ impl MetadataStore {
                 .list_all_children(&tags_dir)
                 .await?
                 .sub_prefixes;
-            Ok::<_, Error>(stream::iter(
-                tag_dirs
-                    .into_iter()
-                    .filter_map(|name| Tag::try_from(name).ok())
-                    .map(Ok),
-            ))
+            let mut names: BTreeSet<Tag> = tag_dirs
+                .into_iter()
+                .filter_map(|name| Tag::try_from(name).ok())
+                .collect();
+            for (tag, state) in self.collect_entry_tag_states(&namespace).await? {
+                match state {
+                    Some(_) => {
+                        names.insert(tag);
+                    }
+                    None => {
+                        names.remove(&tag);
+                    }
+                }
+            }
+            Ok::<_, Error>(stream::iter(names.into_iter().map(Ok)))
         })
         .try_flatten()
+    }
+
+    /// Every new-shape tag with its resolved liveness: `Some(target)` for a
+    /// live tag, `None` for a tombstoned one. One flat listing over the
+    /// namespace's tag entries; bodies are never read.
+    async fn collect_entry_tag_states(
+        &self,
+        namespace: &Namespace,
+    ) -> Result<HashMap<Tag, Option<Digest>>, Error> {
+        let root = path_builder::tag_entries_root(namespace);
+        let mut fold = WinnerFold::default();
+        let mut token = None;
+        loop {
+            let page = self.store().object_store().list(&root, 1000, token).await?;
+            for key in &page.items {
+                let Some((group, file)) = key.split_once('/') else {
+                    continue;
+                };
+                fold.push(group, file);
+            }
+            token = page.next_token;
+            if token.is_none() {
+                break;
+            }
+        }
+        Ok(fold
+            .finish()
+            .into_iter()
+            .filter_map(|(group, state)| {
+                let tag = Tag::new(group.strip_suffix('!')?).ok()?;
+                Some((tag, state))
+            })
+            .collect())
     }
 
     /// Lists the RAW tag directory names in `namespace` with NO `Tag`
@@ -144,10 +282,29 @@ impl MetadataStore {
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<Vec<LinkKind>, Error> {
-        // Tags stream off the listing straight into the link reads; a tag
-        // whose read fails is skipped rather than matched.
-        self.stream_tags(namespace)
-            .map_ok(|tag| async move {
+        // New-shape tags answer from one flat listing; only tags that exist
+        // solely as unconverted legacy links still need a link read each. A
+        // legacy tag whose read fails is skipped rather than matched.
+        let states = self.collect_entry_tag_states(namespace).await?;
+        let mut tags: Vec<LinkKind> = states
+            .iter()
+            .filter(|(_, state)| state.as_ref() == Some(digest))
+            .map(|(tag, _)| LinkKind::Tag(tag.clone()))
+            .collect();
+
+        let tags_dir = path_builder::manifest_tags_dir(namespace);
+        let legacy_only: Vec<Tag> = self
+            .store()
+            .object_store()
+            .list_all_children(&tags_dir)
+            .await?
+            .sub_prefixes
+            .into_iter()
+            .filter_map(|name| Tag::try_from(name).ok())
+            .filter(|tag| !states.contains_key(tag))
+            .collect();
+        let legacy_matches: Vec<LinkKind> = stream::iter(legacy_only.into_iter().map(Ok))
+            .map_ok(|tag: Tag| async move {
                 let result = self
                     .read_link_reference(namespace, &LinkKind::Tag(tag.clone()))
                     .await;
@@ -161,7 +318,9 @@ impl MetadataStore {
                 })
             })
             .try_collect()
-            .await
+            .await?;
+        tags.extend(legacy_matches);
+        Ok(tags)
     }
 
     /// Streams the candidate referrer manifest digests recorded under
@@ -216,7 +375,19 @@ impl MetadataStore {
             .object_store()
             .list_children(&tags_dir, 1, None, None)
             .await?;
+        if !page.sub_prefixes.is_empty() {
+            return Ok(true);
+        }
 
+        // New-shape tags: any entry directory counts. A namespace holding
+        // only tombstoned tags over-reports here, but every tombstone stems
+        // from a push whose revision link the check above already covers.
+        let entries_root = path_builder::tag_entries_root(namespace);
+        let page = self
+            .store()
+            .object_store()
+            .list_children(&entries_root, 1, None, None)
+            .await?;
         Ok(!page.sub_prefixes.is_empty())
     }
 
@@ -298,16 +469,20 @@ impl MetadataStore {
             .map_err(Error::from)
     }
 
-    /// Delete a namespace's entire repository subtree by raw on-disk name. Used
-    /// by scrub to reclaim a directory whose name fails `Namespace` validation
+    /// Delete a namespace's entire repository subtree by raw on-disk name,
+    /// along with its tag entries and atime keys under `v2/ns/`. Used by
+    /// scrub to reclaim a directory whose name fails `Namespace` validation
     /// and so cannot form typed links for a per-link delete.
     pub async fn delete_namespace_directory(&self, name: &str) -> Result<(), Error> {
         let prefix = path_builder::namespace_dir(name)
             .ok_or_else(|| Error::Internal(format!("unsafe namespace directory name: '{name}'")))?;
-        self.store()
-            .object_store()
-            .delete_prefix(&prefix)
-            .await
-            .map_err(Error::from)
+        self.store().object_store().delete_prefix(&prefix).await?;
+        for prefix in [
+            format!("{}/{name}!tag", path_builder::NS_ROOT),
+            format!("{}/{name}!atime", path_builder::NS_ROOT),
+        ] {
+            self.store().object_store().delete_prefix(&prefix).await?;
+        }
+        Ok(())
     }
 }

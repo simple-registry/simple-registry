@@ -197,7 +197,7 @@ impl Executor {
                     Err(RegistryError::BlobUnknown | RegistryError::NotFound) => false,
                     Err(e) => return Err(Error::from(e)),
                 };
-                if bytes_exist && self.entry_still_backed(&namespace, &link).await? {
+                if bytes_exist && self.entry_still_backed(&namespace, &link, &blob).await? {
                     info!(
                         "skipping blob-index removal: entry for '{namespace}/{blob}' is live again"
                     );
@@ -212,15 +212,27 @@ impl Executor {
     }
 
     /// Whether the reference entry for `link` is still backed: a blob
-    /// self-grant is its own record, every other kind is backed by its link
-    /// file.
+    /// self-grant is its own record, a tag is backed while it resolves to
+    /// `blob`, every other kind is backed by its link file.
     async fn entry_still_backed(
         &self,
         namespace: &Namespace,
         link: &LinkKind,
+        blob: &Digest,
     ) -> Result<bool, Error> {
         if matches!(link, LinkKind::Blob(_)) {
             return Ok(true);
+        }
+        if matches!(link, LinkKind::Tag(_)) {
+            return match self
+                .metadata_store
+                .read_link_reference(namespace, link)
+                .await
+            {
+                Ok(metadata) => Ok(&metadata.target == blob),
+                Err(RegistryError::NotFound) => Ok(false),
+                Err(e) => Err(Error::from(e)),
+            };
         }
         let link_key = path_builder::link_path(link, namespace);
         match self
@@ -598,6 +610,11 @@ impl ActionSink for Executor {
                 blob,
                 link,
             } => self.grant_blob_index_link(namespace, blob, link).await,
+            Action::ConvertTagLink { namespace, tag } => self
+                .metadata_store
+                .convert_legacy_tag_link(&namespace, &tag)
+                .await
+                .map_err(Error::from),
             Action::ConvertBlobIndexShard {
                 key,
                 namespace,

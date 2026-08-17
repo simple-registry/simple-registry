@@ -34,6 +34,7 @@ use crate::registry::{
             any_other_namespace_references_blob, namespace_entries_merged, ref_mutation,
             shard::apply_blob_index_operations,
         },
+        link::tag::{tag_del_mutation, tag_set_mutation},
     },
     path_builder,
 };
@@ -486,9 +487,24 @@ impl MetadataStore {
             let link = match op {
                 LinkOperation::Create { link, .. } | LinkOperation::Delete { link, .. } => link,
             };
+            // A tag resolves from its append-only entries: there is no single
+            // object whose bytes could join the read set, and none is needed,
+            // because concurrent tag writers write disjoint keys.
+            if let LinkKind::Tag(tag) = link {
+                let metadata = match self.resolve_tag(namespace, tag).await {
+                    Ok(metadata) => Some(metadata),
+                    Err(Error::NotFound) => None,
+                    Err(e) => return Err(TxError::Storage(StorageError::Backend(e.to_string()))),
+                };
+                return Ok((op, None, metadata));
+            }
             let link_path = path_builder::link_path(link, namespace);
             let found = self.read_link_raw(&link_path).await?;
-            Ok::<_, TxError>((op, link_path, found))
+            let (bytes, metadata) = match found {
+                Some((bytes, metadata)) => (Some(bytes), Some(metadata)),
+                None => (None, None),
+            };
+            Ok::<_, TxError>((op, Some((link_path, bytes)), metadata))
         }))
         .await;
 
@@ -499,12 +515,12 @@ impl MetadataStore {
         };
         let mut seen_paths = HashSet::new();
         for result in results {
-            let (op, link_path, found) = result?;
-            if seen_paths.insert(link_path.clone()) {
-                let bytes = found.as_ref().map(|(bytes, _)| bytes.clone());
+            let (op, read, metadata) = result?;
+            if let Some((link_path, bytes)) = read
+                && seen_paths.insert(link_path.clone())
+            {
                 snapshot.reads.push((link_path, bytes));
             }
-            let metadata = found.map(|(_, metadata)| metadata);
             snapshot.ops.push(match op {
                 LinkOperation::Create {
                     link,
@@ -563,15 +579,21 @@ impl MetadataStore {
 /// snapshot the read set validates, so a racing tag write aborts the commit
 /// rather than gating LWW on stale state.
 fn lww_superseded(snapshot: &LinksSnapshot<'_>, tx: &LinksTx<'_>) -> Option<String> {
+    // A stored tag timestamp carries millisecond precision (the entry
+    // ordinal), so the incoming side is compared at the same precision or an
+    // exact-equality tie would silently read as strictly newer.
+    let entry_ms =
+        |ts: DateTime<Utc>| path_builder::tag_ord_ts(path_builder::tag_ord(Some(ts))).unwrap_or(ts);
     for op in &snapshot.ops {
         match op {
             OpSnapshot::Create { link, target, .. } => {
                 if !matches!(link, LinkKind::Tag(_)) {
                     continue;
                 }
-                if let (Some(source_ts), Some(metadata)) =
-                    (tx.created_at(), snapshot.link_cache.get(*link))
-                    && let Some(created_at) = metadata.supersedes(source_ts, Some(target))
+                if let (Some(source_ts), Some(metadata)) = (
+                    tx.created_at().map(entry_ms),
+                    snapshot.link_cache.get(*link),
+                ) && let Some(created_at) = metadata.supersedes(source_ts, Some(target))
                 {
                     return Some(format!(
                         "local {link} (created {created_at}) is newer \
@@ -587,7 +609,7 @@ fn lww_superseded(snapshot: &LinksSnapshot<'_>, tx: &LinksTx<'_>) -> Option<Stri
                 if !matches!(link, LinkKind::Tag(_)) {
                     continue;
                 }
-                if let Some(source_ts) = tx.delete_source_ts()
+                if let Some(source_ts) = tx.delete_source_ts().map(entry_ms)
                     && let Some(created_at) = metadata.supersedes(source_ts, None)
                 {
                     return Some(format!(
@@ -656,7 +678,7 @@ fn build_link_mutations(
     if acc.missing_reference.is_some() {
         return Ok(acc);
     }
-    let acc = build_delete_mutations(namespace, ops, acc)?;
+    let acc = build_delete_mutations(namespace, ops, tx, acc)?;
     Ok(acc)
 }
 
@@ -737,10 +759,25 @@ fn build_create_mutations(
             }
             .or(tx.created_at())
             .unwrap_or_else(Utc::now);
-            let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
-                .with_media_type((*media_type).clone())
-                .with_descriptor(descriptor.as_ref().map(|b| b.as_ref().clone()));
-            acc.put_link(namespace, link, metadata)?;
+            if let LinkKind::Tag(tag) = link {
+                // The entry key is the write: the same digest in the same
+                // millisecond is the same key, so a re-push is naturally
+                // idempotent and concurrent writers never contend.
+                let mutation =
+                    tag_set_mutation(namespace, tag, created_at, target, (*media_type).clone())
+                        .map_err(TxError::Serde)?;
+                acc.builder = mem::take(&mut acc.builder).mutation(mutation);
+                let created_at = path_builder::tag_ord_ts(path_builder::tag_ord(Some(created_at)))
+                    .unwrap_or(created_at);
+                let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
+                    .with_media_type((*media_type).clone());
+                acc.written_links.push(((*link).clone(), metadata));
+            } else {
+                let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
+                    .with_media_type((*media_type).clone())
+                    .with_descriptor(descriptor.as_ref().map(|b| b.as_ref().clone()));
+                acc.put_link(namespace, link, metadata)?;
+            }
         }
     }
     Ok(acc)
@@ -748,11 +785,12 @@ fn build_create_mutations(
 
 /// The delete half of mutation planning: for each `Delete` op whose link
 /// exists, either prune one referrer (a tracked link with references left
-/// becomes a `Put`) or remove the link outright (a `Delete` plus the
-/// blob-index `Remove`).
+/// becomes a `Put`), append a tag tombstone, or remove the link outright (a
+/// `Delete` plus the blob-index `Remove`).
 fn build_delete_mutations(
     namespace: &Namespace,
     ops: &[OpSnapshot<'_>],
+    tx: &LinksTx<'_>,
     mut acc: LinkMutations,
 ) -> Result<LinkMutations, TxError> {
     for op in ops {
@@ -764,6 +802,28 @@ fn build_delete_mutations(
         else {
             continue;
         };
+
+        if let LinkKind::Tag(tag) = link {
+            // A tombstone entry, never a delete: it names the digest the tag
+            // held (tag history requires it) and its timestamp orders it
+            // against any concurrent push by key name alone.
+            let created_at = tx.delete_source_ts().unwrap_or_else(Utc::now);
+            let mutation = tag_del_mutation(
+                namespace,
+                tag,
+                created_at,
+                &metadata.target,
+                metadata.media_type.clone(),
+            )
+            .map_err(TxError::Serde)?;
+            acc.builder = mem::take(&mut acc.builder).mutation(mutation);
+            acc.push_blob_op(
+                &metadata.target,
+                BlobIndexOperation::Remove((*link).clone()),
+            );
+            acc.deleted_links.push((*link).clone());
+            continue;
+        }
 
         if link.is_tracked() && referrer.is_some() {
             let mut pruned = (**metadata).clone();

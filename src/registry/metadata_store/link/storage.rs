@@ -16,12 +16,17 @@ use crate::registry::{
 };
 
 impl MetadataStore {
-    /// Read the stored [`LinkMetadata`] for `link` within `namespace`.
+    /// Read the stored [`LinkMetadata`] for `link` within `namespace`. A tag
+    /// resolves from its ordered entries (with the legacy-link fallback);
+    /// every other kind is one link-file read.
     pub async fn read_link_reference(
         &self,
         namespace: &Namespace,
         link: &LinkKind,
     ) -> Result<LinkMetadata, Error> {
+        if let LinkKind::Tag(tag) = link {
+            return self.resolve_tag(namespace, tag).await;
+        }
         let link_path = path_builder::link_path(link, namespace);
         match self.store().object_store().get(&link_path).await {
             Ok(data) => serde_json::from_slice(&data).map_err(|e| Error::Internal(e.to_string())),
@@ -47,7 +52,8 @@ impl MetadataStore {
     }
 
     /// Persist `metadata` for `link` within `namespace`. Used by tests to set up
-    /// initial state; production code goes through `update_links`.
+    /// initial state; production code goes through `update_links`. A tag lands
+    /// as an entry, the shape the write path produces.
     #[cfg(test)]
     pub async fn write_link_reference(
         &self,
@@ -55,6 +61,9 @@ impl MetadataStore {
         link: &LinkKind,
         metadata: &LinkMetadata,
     ) -> Result<(), Error> {
+        if let LinkKind::Tag(tag) = link {
+            return self.write_tag_state(namespace, tag, metadata).await;
+        }
         let link_path = path_builder::link_path(link, namespace);
         let serialized = Bytes::from(serde_json::to_vec(metadata)?);
         self.store()

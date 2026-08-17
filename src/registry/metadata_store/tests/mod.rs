@@ -2,6 +2,7 @@ mod access_time;
 mod blob_index;
 mod cache;
 mod list_namespaces;
+mod tag_entries;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -273,9 +274,11 @@ pub async fn test_datastore_list_tag_names_includes_malformed(m: Arc<MetadataSto
         .await
         .unwrap();
 
+    // The raw listing covers legacy tag directories only; a tag written
+    // through the normal path lands as entries and is absent here.
     let raw_names = m.list_tag_names(namespace, 10, None).await.unwrap().items;
     assert!(raw_names.contains(&"-bad".to_string()));
-    assert!(raw_names.contains(&"v1.0".to_string()));
+    assert!(!raw_names.contains(&"v1.0".to_string()));
 
     let tags = m.list_tags(namespace, 10, None).await.unwrap().items;
     assert!(tags.contains(&Tag::new("v1.0").unwrap()));
@@ -864,11 +867,14 @@ pub async fn test_datastore_read_link_access_time_update(m: Arc<MetadataStore>) 
         "accessed_at should be within 2 seconds of now"
     );
 
-    // A plain read still returns the persisted accessed_at.
-    let meta_readonly = m.read_link(namespace, &tag_link).await.unwrap();
+    // The stamp is persisted in the tag's sibling atime key.
+    let stored = m
+        .read_tag_access_time(namespace, &Tag::new("latest").unwrap())
+        .await
+        .unwrap();
     assert!(
-        meta_readonly.accessed_at.is_some(),
-        "accessed_at should still be persisted after read-only read"
+        stored.is_some(),
+        "accessed_at should still be persisted after the recording read"
     );
 }
 

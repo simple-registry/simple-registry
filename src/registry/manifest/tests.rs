@@ -2417,6 +2417,12 @@ async fn seed_tag(registry: &Registry, namespace: &Namespace, tag: &str) -> (Vec
     (content, media_type)
 }
 
+/// Tag state persists its timestamp at millisecond precision (the entry
+/// ordinal), so exact round-trip assertions feed ms-precision inputs.
+fn entry_ms(ts: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp_millis(ts.timestamp_millis()).unwrap()
+}
+
 async fn local_created_at(
     registry: &Registry,
     namespace: &Namespace,
@@ -2440,7 +2446,7 @@ async fn accept_put_manifest_stamps_created_at_from_source_ts() {
     let tag = "latest";
 
     let (content, media_type) = create_test_manifest(registry, namespace).await;
-    let source_ts = chrono::Utc::now() - chrono::Duration::hours(3);
+    let source_ts = entry_ms(chrono::Utc::now() - chrono::Duration::hours(3));
 
     registry
         .accept_put_manifest(
@@ -2796,9 +2802,13 @@ async fn find_tags_pointing_at_bypasses_the_link_cache() {
         "seed write must warm the link cache",
     );
 
-    // A sibling replica re-points the tag at new_digest behind this cache.
+    // A sibling replica re-points the tag at new_digest behind this cache,
+    // one millisecond later so its entry wins resolution outright.
     let mut sibling = store.read_link_reference(&namespace, &link).await.unwrap();
     sibling.target = new_digest.clone();
+    sibling.created_at = sibling
+        .created_at
+        .map(|ts| ts + chrono::Duration::milliseconds(1));
     store
         .write_link_reference(&namespace, &link, &sibling)
         .await
@@ -2834,7 +2844,7 @@ async fn store_manifest_enforces_lww_inside_the_link_transaction() {
 
     let newer_body = br#"{"newer":true}"#.to_vec();
     let newer_digest = Digest::sha256_of_bytes(&newer_body);
-    let newer_ts = chrono::Utc::now();
+    let newer_ts = entry_ms(chrono::Utc::now());
     store
         .store_manifest(
             &namespace,
@@ -3029,7 +3039,7 @@ async fn delete_links_enforces_lww_inside_the_link_transaction() {
 
     let body = br#"{"winner":true}"#.to_vec();
     let digest = Digest::sha256_of_bytes(&body);
-    let newer_ts = chrono::Utc::now();
+    let newer_ts = entry_ms(chrono::Utc::now());
     store
         .store_manifest(
             &namespace,

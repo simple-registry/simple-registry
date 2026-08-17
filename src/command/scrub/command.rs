@@ -116,11 +116,11 @@ impl Command {
         })
     }
 
-    /// The three passes, each internally concurrent. Ordering matters: links
-    /// are healed and grants reconciled before shard entries are pruned
-    /// against them, and the index is healed before blob GC reads it. A
-    /// listing failure aborts the run, since the later passes' deletions rely
-    /// on the earlier repairs.
+    /// The passes, each internally concurrent. Ordering matters: links are
+    /// healed and grants reconciled before index entries are pruned against
+    /// them, and the index is healed before blob GC reads it. A listing
+    /// failure aborts the run, since the later passes' deletions rely on the
+    /// earlier repairs.
     pub async fn run(&mut self) -> Result<(), Error> {
         // Engine housekeeping first: reclaim orphaned transaction staging
         // bodies and expired lock objects through the engine's own janitors
@@ -295,6 +295,19 @@ mod tests {
 
     /// The same seeded defects converge to the same state regardless of the
     /// concurrency level.
+    /// A tag entry's name carries the write's millisecond ordinal, which
+    /// differs between the two seedings; normalise it before comparing.
+    fn normalized(keys: &[String]) -> Vec<String> {
+        keys.iter()
+            .map(|key| match key.rsplit_once('/') {
+                Some((dir, file)) if dir.contains("!tag/") && file.len() > 16 => {
+                    format!("{dir}/ord{}", &file[16..])
+                }
+                _ => key.clone(),
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn concurrency_level_does_not_change_the_outcome() {
         let mut roots = Vec::new();
@@ -341,6 +354,7 @@ mod tests {
 
         let (_, keys_serial, _dir_a) = &roots[0];
         let (_, keys_concurrent, _dir_b) = &roots[1];
+        let (keys_serial, keys_concurrent) = (normalized(keys_serial), normalized(keys_concurrent));
         assert_eq!(
             keys_serial, keys_concurrent,
             "concurrency 1 and 8 must converge to the same key set"

@@ -542,6 +542,9 @@ async fn execute_push_resolves_tag_past_the_link_cache() {
         .await
         .unwrap();
     sibling.target = current_digest.clone();
+    sibling.created_at = sibling
+        .created_at
+        .map(|ts| ts + chrono::Duration::milliseconds(1));
     metadata_store
         .write_link_reference(&namespace, &link, &sibling)
         .await

@@ -49,6 +49,13 @@ pub enum Action {
         blob: Digest,
         link: LinkKind,
     },
+    /// Convert one legacy tag `current/link` into a `set` entry stamped with
+    /// its recorded `created_at`, then delete the link. Entry first, so an
+    /// interrupted conversion duplicates rather than loses.
+    ConvertTagLink {
+        namespace: Namespace,
+        tag: Tag,
+    },
     /// Convert one legacy blob-index shard into per-link reference keys and
     /// delete it, keys first, so an interrupted conversion duplicates rather
     /// than loses.
@@ -187,6 +194,12 @@ impl fmt::Display for Action {
                 write!(
                     f,
                     "grant missing blob-index entry '{namespace}/{blob}': '{link}'"
+                )
+            }
+            Action::ConvertTagLink { namespace, tag } => {
+                write!(
+                    f,
+                    "convert legacy tag link '{namespace}:{tag}' to a tag entry"
                 )
             }
             Action::ConvertBlobIndexShard {

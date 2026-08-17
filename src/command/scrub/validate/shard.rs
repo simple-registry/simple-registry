@@ -116,10 +116,48 @@ impl Validator {
         if matches!(link, LinkKind::Blob(_)) {
             return Ok(());
         }
-        // Only a confirmed-missing link file justifies removing the key; a
-        // transient read error must not. The read is raw so the metadata
+        // Only a confirmed-dead backing justifies removing the key; a
+        // transient read error must not. The reads are raw so the metadata
         // cache cannot mask this run's repairs.
-        let link_key = path_builder::link_path(&link, &namespace);
+        if self.ref_backed(&namespace, &link, digest).await? {
+            return Ok(());
+        }
+        let evidence = [key.to_string(), path_builder::link_path(&link, &namespace)];
+        let namespace_ref = &namespace;
+        let link_ref = &link;
+        let reverify = move || self.ref_still_dangling(key, namespace_ref, link_ref, digest);
+        if !self.confirm_repair(&evidence, reverify).await? {
+            return Ok(());
+        }
+        self.emit(Action::RemoveBlobIndexLink {
+            namespace,
+            blob: digest.clone(),
+            link,
+        })
+        .await
+    }
+
+    /// Whether the link behind a reference key still backs it: a tag backs
+    /// its key while it resolves to the blob, every other kind while its link
+    /// file exists.
+    async fn ref_backed(
+        &self,
+        namespace: &Namespace,
+        link: &LinkKind,
+        blob: &Digest,
+    ) -> Result<bool, Error> {
+        if matches!(link, LinkKind::Tag(_)) {
+            return match self
+                .metadata_store
+                .read_link_reference(namespace, link)
+                .await
+            {
+                Ok(metadata) => Ok(&metadata.target == blob),
+                Err(RegistryError::NotFound) => Ok(false),
+                Err(e) => Err(e.into()),
+            };
+        }
+        let link_key = path_builder::link_path(link, namespace);
         match self
             .metadata_store
             .store()
@@ -127,39 +165,27 @@ impl Validator {
             .head(&link_key)
             .await
         {
-            Ok(_) => Ok(()),
-            Err(StorageError::NotFound) => {
-                let evidence = [key.to_string(), link_key.clone()];
-                let link_key = &link_key;
-                let reverify = move || self.ref_still_dangling(key, link_key);
-                if !self.confirm_repair(&evidence, reverify).await? {
-                    return Ok(());
-                }
-                self.emit(Action::RemoveBlobIndexLink {
-                    namespace,
-                    blob: digest.clone(),
-                    link,
-                })
-                .await
-            }
+            Ok(_) => Ok(true),
+            Err(StorageError::NotFound) => Ok(false),
             Err(e) => Err(RegistryError::from(e).into()),
         }
     }
 
-    /// Re-observe a dangling reference key: it still exists while its link
-    /// file is still missing.
-    async fn ref_still_dangling(&self, key: &str, link_key: &str) -> Result<bool, Error> {
-        let store = self.metadata_store.store().object_store();
-        match store.head(key).await {
+    /// Re-observe a dangling reference key: it still exists while its backing
+    /// is still dead.
+    async fn ref_still_dangling(
+        &self,
+        key: &str,
+        namespace: &Namespace,
+        link: &LinkKind,
+        blob: &Digest,
+    ) -> Result<bool, Error> {
+        match self.metadata_store.store().object_store().head(key).await {
             Ok(_) => {}
             Err(StorageError::NotFound) => return Ok(false),
             Err(e) => return Err(RegistryError::from(e).into()),
         }
-        match store.get(link_key).await {
-            Ok(_) => Ok(false),
-            Err(StorageError::NotFound) => Ok(true),
-            Err(e) => Err(RegistryError::from(e).into()),
-        }
+        Ok(!self.ref_backed(namespace, link, blob).await?)
     }
 }
 

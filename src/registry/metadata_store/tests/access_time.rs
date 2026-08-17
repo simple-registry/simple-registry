@@ -7,14 +7,28 @@ use std::{
 use angos_oci::{Digest, Namespace, Tag};
 
 use crate::registry::metadata_store::tests::{test_backend_with_debounce, test_config};
+use chrono::{DateTime, Utc};
+
 use crate::{
     cache::Cache as CacheEnum,
     cache::memory::Backend as CacheMemoryBackend,
     registry::{
-        metadata_store::{LinkKind, LinkOperation},
+        metadata_store::{LinkKind, LinkOperation, MetadataStore},
         path_builder,
     },
 };
+
+/// The tag's stored access time under the entry shape: the sibling atime key.
+async fn stored_atime(
+    backend: &MetadataStore,
+    namespace: &Namespace,
+    link: &LinkKind,
+) -> Option<DateTime<Utc>> {
+    let LinkKind::Tag(tag) = link else {
+        panic!("stored_atime expects a tag link");
+    };
+    backend.read_tag_access_time(namespace, tag).await.unwrap()
+}
 
 #[tokio::test]
 async fn test_deferred_access_time_returns_data_immediately() {
@@ -41,9 +55,9 @@ async fn test_deferred_access_time_returns_data_immediately() {
         .unwrap();
     assert_eq!(meta.target, digest);
 
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
+    let raw = stored_atime(&backend, &namespace, &tag).await;
     assert!(
-        raw.accessed_at.is_none(),
+        raw.is_none(),
         "accessed_at should still be None in storage because the write was deferred"
     );
 }
@@ -74,9 +88,9 @@ async fn test_deferred_access_time_writes_eventually() {
 
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
+    let raw = stored_atime(&backend, &namespace, &tag).await;
     assert!(
-        raw.accessed_at.is_some(),
+        raw.is_some(),
         "accessed_at should be set in storage after background flush"
     );
 }
@@ -117,11 +131,8 @@ async fn test_deferred_access_time_coalesces_writes() {
 
     backend.flush_access_times().await;
 
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
-    assert!(
-        raw.accessed_at.is_some(),
-        "accessed_at should be set after flush"
-    );
+    let raw = stored_atime(&backend, &namespace, &tag).await;
+    assert!(raw.is_some(), "accessed_at should be set after flush");
 }
 
 #[tokio::test]
@@ -167,22 +178,10 @@ async fn test_deferred_access_time_different_links_independent() {
 
     backend.flush_access_times().await;
 
-    let raw1 = backend
-        .read_link_reference(&namespace, &tag1)
-        .await
-        .unwrap();
-    let raw2 = backend
-        .read_link_reference(&namespace, &tag2)
-        .await
-        .unwrap();
-    assert!(
-        raw1.accessed_at.is_some(),
-        "tag1 accessed_at should be set after flush"
-    );
-    assert!(
-        raw2.accessed_at.is_some(),
-        "tag2 accessed_at should be set after flush"
-    );
+    let raw1 = stored_atime(&backend, &namespace, &tag1).await;
+    let raw2 = stored_atime(&backend, &namespace, &tag2).await;
+    assert!(raw1.is_some(), "tag1 accessed_at should be set after flush");
+    assert!(raw2.is_some(), "tag2 accessed_at should be set after flush");
 }
 
 #[tokio::test]
@@ -211,9 +210,9 @@ async fn test_deferred_access_time_flush_on_explicit_call() {
 
     backend.flush_access_times().await;
 
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
+    let raw = stored_atime(&backend, &namespace, &tag).await;
     assert!(
-        raw.accessed_at.is_some(),
+        raw.is_some(),
         "accessed_at should be set in storage after explicit flush"
     );
 }
@@ -242,9 +241,9 @@ async fn test_deferred_access_time_zero_debounce_writes_synchronously() {
         .await
         .unwrap();
 
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
+    let raw = stored_atime(&backend, &namespace, &tag).await;
     assert!(
-        raw.accessed_at.is_some(),
+        raw.is_some(),
         "accessed_at should be set immediately when debounce is 0 (synchronous mode)"
     );
 }
@@ -330,9 +329,9 @@ async fn test_flush_processes_entries_concurrently() {
     let elapsed = start.elapsed();
 
     for tag in &tags {
-        let raw = backend.read_link_reference(&namespace, tag).await.unwrap();
+        let raw = stored_atime(&backend, &namespace, tag).await;
         assert!(
-            raw.accessed_at.is_some(),
+            raw.is_some(),
             "accessed_at should be set for {tag} after concurrent flush"
         );
     }
@@ -398,20 +397,14 @@ async fn test_flush_errors_do_not_prevent_other_entries() {
 
     backend.flush_access_times().await;
 
-    let raw1 = backend
-        .read_link_reference(&namespace, &tag1)
-        .await
-        .unwrap();
-    let raw2 = backend
-        .read_link_reference(&namespace, &tag2)
-        .await
-        .unwrap();
+    let raw1 = stored_atime(&backend, &namespace, &tag1).await;
+    let raw2 = stored_atime(&backend, &namespace, &tag2).await;
     assert!(
-        raw1.accessed_at.is_some(),
+        raw1.is_some(),
         "tag1 accessed_at should be set despite another entry failing"
     );
     assert!(
-        raw2.accessed_at.is_some(),
+        raw2.is_some(),
         "tag2 accessed_at should be set despite another entry failing"
     );
 }
@@ -506,9 +499,9 @@ async fn test_cas_inline_stamp_writes_immediately() {
         "the returned metadata should carry the fresh stamp"
     );
 
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
+    let raw = stored_atime(&backend, &namespace, &tag).await;
     assert!(
-        raw.accessed_at.is_some(),
+        raw.is_some(),
         "the stamp must be visible in storage immediately, without any flush"
     );
 }
@@ -546,16 +539,16 @@ async fn test_cas_debounce_defers_stamp() {
         .read_link_recording_access(&namespace, &tag)
         .await
         .unwrap();
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
+    let raw = stored_atime(&backend, &namespace, &tag).await;
     assert!(
-        raw.accessed_at.is_none(),
+        raw.is_none(),
         "the stamp is buffered, not yet flushed to storage"
     );
 
     backend.flush_access_times().await;
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
+    let raw = stored_atime(&backend, &namespace, &tag).await;
     assert!(
-        raw.accessed_at.is_some(),
+        raw.is_some(),
         "an explicit flush persists the buffered stamp"
     );
 }
@@ -595,9 +588,6 @@ async fn test_cas_concurrent_stamps_lose_races_silently() {
         assert_eq!(meta.target, digest);
     }
 
-    let raw = backend.read_link_reference(&namespace, &tag).await.unwrap();
-    assert!(
-        raw.accessed_at.is_some(),
-        "at least one racing stamp must have landed"
-    );
+    let raw = stored_atime(&backend, &namespace, &tag).await;
+    assert!(raw.is_some(), "at least one racing stamp must have landed");
 }

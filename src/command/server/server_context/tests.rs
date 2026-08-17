@@ -770,9 +770,13 @@ async fn test_shutdown_flushes_pending_access_times() {
         .await
         .unwrap();
 
-    let before = metadata_store.read_link(&namespace, &tag).await.unwrap();
+    let tag_name = Tag::new("v1.0.0").unwrap();
+    let before = metadata_store
+        .read_tag_access_time(&namespace, &tag_name)
+        .await
+        .unwrap();
     assert!(
-        before.accessed_at.is_none(),
+        before.is_none(),
         "accessed_at should not be written yet (debounce is 3600s)"
     );
 
@@ -782,9 +786,12 @@ async fn test_shutdown_flushes_pending_access_times() {
     let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
     context.shutdown().await;
 
-    let after = metadata_store.read_link(&namespace, &tag).await.unwrap();
+    let after = metadata_store
+        .read_tag_access_time(&namespace, &tag_name)
+        .await
+        .unwrap();
     assert!(
-        after.accessed_at.is_some(),
+        after.is_some(),
         "shutdown() must flush pending access times to S3"
     );
 }

@@ -82,6 +82,7 @@ impl Validator {
 
     /// A tag link: an invalid directory name is deleted; a valid one must
     /// parse, target existing blob bytes, and have its digest revision link.
+    /// A healthy link is converted into a tag entry and reclaimed.
     async fn validate_tag_link(
         &self,
         key: &str,
@@ -99,12 +100,64 @@ impl Validator {
         let Some(metadata) = self.read_link_body(key).await? else {
             return Ok(());
         };
-        let target = metadata.target;
+        if self
+            .validate_tag_target(namespace, &tag, metadata.target)
+            .await?
+        {
+            // A concurrent tag write appends a fresher entry that wins
+            // resolution regardless, so the conversion cannot race one.
+            self.emit(Action::ConvertTagLink {
+                namespace: namespace.clone(),
+                tag,
+            })
+            .await?;
+        }
+        Ok(())
+    }
 
+    /// One tag's entry directory, validated once per (namespace, tag): the
+    /// resolved winner must satisfy the same checks as a legacy tag link.
+    /// Both names already passed their grammars at categorization.
+    pub async fn validate_tag_entries(
+        &self,
+        namespace_raw: &str,
+        tag_raw: &str,
+    ) -> Result<(), Error> {
+        if !self.claim(format!("tag-entries:{namespace_raw}:{tag_raw}")) {
+            return Ok(());
+        }
+        let (Ok(namespace), Ok(tag)) = (Namespace::new(namespace_raw), Tag::new(tag_raw)) else {
+            return Ok(());
+        };
+        let metadata = match self
+            .metadata_store
+            .read_link_reference(&namespace, &LinkKind::Tag(tag.clone()))
+            .await
+        {
+            Ok(metadata) => metadata,
+            // Tombstoned: entries are history, nothing to check.
+            Err(RegistryError::NotFound) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        self.validate_tag_target(&namespace, &tag, metadata.target)
+            .await?;
+        Ok(())
+    }
+
+    /// The shared tail of both tag shapes: the current target must have blob
+    /// bytes (else the orphan manifest is removed) and its digest revision
+    /// link (re-issued when missing). `true` means the target was healthy.
+    async fn validate_tag_target(
+        &self,
+        namespace: &Namespace,
+        tag: &Tag,
+        target: Digest,
+    ) -> Result<bool, Error> {
         match self.blob_store.size(&target).await {
             Ok(_) => {
                 self.ensure_link(namespace, &LinkKind::Digest(target.clone()), &target)
-                    .await
+                    .await?;
+                Ok(true)
             }
             Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
                 warn!("scrub: tag '{namespace}:{tag}' targets missing blob '{target}'; removing");
@@ -112,7 +165,8 @@ impl Validator {
                     namespace: namespace.clone(),
                     digest: target,
                 })
-                .await
+                .await?;
+                Ok(false)
             }
             Err(e) => Err(e.into()),
         }

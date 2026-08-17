@@ -16,6 +16,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use chrono::Utc;
 use futures_util::stream::{self, StreamExt};
 use tokio::{spawn, sync::Mutex, time::sleep};
 use tracing::{instrument, warn};
@@ -88,7 +89,10 @@ impl AccessTimeWriter {
     }
 
     pub async fn record(&self, namespace: &Namespace, link: &LinkKind) {
-        let key = path_builder::link_path(link, namespace);
+        let key = match link {
+            LinkKind::Tag(tag) => path_builder::tag_atime_path(namespace, tag),
+            _ => path_builder::link_path(link, namespace),
+        };
         self.pending
             .lock()
             .await
@@ -103,7 +107,20 @@ impl AccessTimeWriter {
 
         stream::iter(entries)
             .for_each_concurrent(10, |(namespace, link)| async move {
-                if let Err(e) = flush_one_access_time(store, &namespace, &link).await {
+                let result = match &link {
+                    // A tag's atime is its own overwritten key: the newest
+                    // arriving timestamp is the correct value, no transaction.
+                    LinkKind::Tag(tag) => store
+                        .object_store()
+                        .put(
+                            &path_builder::tag_atime_path(&namespace, tag),
+                            Bytes::from(Utc::now().to_rfc3339()),
+                        )
+                        .await
+                        .map_err(Error::from),
+                    _ => flush_one_access_time(store, &namespace, &link).await,
+                };
+                if let Err(e) = result {
                     warn!("Failed to flush access time for {namespace}:{link}: {e}");
                 }
             })
@@ -156,14 +173,22 @@ impl MetadataStore {
         }
     }
 
-    /// Stamp the access time inline through the store's advisory update, which
-    /// picks a conditional write or a read-modify-write transaction. Access
-    /// times are advisory, so a lost race is dropped as a no-op.
+    /// Stamp the access time inline. A tag stamps its own atime key with a
+    /// plain overwrite; every other kind goes through the store's advisory
+    /// update, which picks a conditional write or a read-modify-write
+    /// transaction. Access times are advisory, so a lost race is dropped as a
+    /// no-op.
     async fn stamp_link_access_time(
         &self,
         namespace: &Namespace,
         link: &LinkKind,
     ) -> Result<LinkMetadata, Error> {
+        if let LinkKind::Tag(tag) = link {
+            let mut metadata = self.read_link_reference(namespace, link).await?;
+            self.write_tag_access_time(namespace, tag).await?;
+            metadata.accessed_at = Some(Utc::now());
+            return Ok(metadata);
+        }
         let link_path = path_builder::link_path(link, namespace);
         self.store()
             .update_advisory(&link_path, |body| {

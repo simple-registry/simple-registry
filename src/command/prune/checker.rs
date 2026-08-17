@@ -298,10 +298,17 @@ impl RetentionChecker {
             .stream_tags(namespace)
             .err_into::<Error>()
             .map_ok(|tag| async move {
-                let metadata = self
+                let mut metadata = self
                     .metadata_store
                     .read_link(namespace, &LinkKind::Tag(tag.clone()))
                     .await?;
+                // A new-shape tag's last pull lives in its sibling atime key;
+                // a legacy link carries it inline. Take the freshest.
+                let atime = self
+                    .metadata_store
+                    .read_tag_access_time(namespace, &tag)
+                    .await?;
+                metadata.accessed_at = metadata.accessed_at.max(atime);
                 Ok(TagWithMetadata {
                     name: tag,
                     metadata,
@@ -1703,7 +1710,7 @@ mod tests {
             let StoreOp::Get { key } = op else {
                 return Ok(());
             };
-            if !key.contains("/_manifests/tags/") {
+            if !(key.contains("!tag/") || key.contains("!atime/")) {
                 return Ok(());
             }
             let overlapping = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;

@@ -920,6 +920,55 @@ async fn put_intent_touching(
     log_key
 }
 
+/// A legacy tag `current/link` is converted into a `set` entry stamped with
+/// its recorded `created_at`, and the link is reclaimed.
+#[tokio::test]
+async fn legacy_tag_link_is_converted_to_an_entry() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/convert-tag").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let tag = Tag::new("legacy").unwrap();
+        let link = LinkKind::Tag(tag.clone());
+        let created_at = chrono::DateTime::from_timestamp_millis(1_600_000_000_000).unwrap();
+        let metadata = LinkMetadata::from_digest_at(manifest_digest.clone(), created_at);
+        let legacy_path = path_builder::link_path(&link, namespace);
+        metadata_store
+            .store()
+            .object_store()
+            .put(
+                &legacy_path,
+                Bytes::from(serde_json::to_vec(&metadata).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        scrub_apply(test_case).await;
+
+        assert!(
+            metadata_store
+                .store()
+                .object_store()
+                .head(&legacy_path)
+                .await
+                .is_err(),
+            "the converted legacy link must be reclaimed"
+        );
+        let resolved = metadata_store
+            .read_link_reference(namespace, &link)
+            .await
+            .unwrap();
+        assert_eq!(resolved.target, manifest_digest);
+        assert_eq!(
+            resolved.created_at,
+            Some(created_at),
+            "the entry must keep the link's recorded created_at"
+        );
+    })
+    .await;
+}
+
 /// A legacy shard is converted into reference keys and reclaimed: scrub
 /// emits the conversion, and after apply the shard is gone while its entries
 /// survive as keys.

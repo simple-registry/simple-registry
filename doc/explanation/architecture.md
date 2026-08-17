@@ -151,13 +151,9 @@ v2/
 ├── repositories/
 │   └── {namespace}/
 │       ├── _manifests/
-│       │   ├── revisions/
-│       │   │   └── {algorithm}/
-│       │   │       └── {hash}/
-│       │   │           └── link
-│       │   └── tags/
-│       │       └── {tag}/
-│       │           └── current/
+│       │   └── revisions/
+│       │       └── {algorithm}/
+│       │           └── {hash}/
 │       │               └── link
 │       ├── _layers/
 │       │   └── {algorithm}/
@@ -173,23 +169,34 @@ v2/
 │       └── {hash_prefix}/
 │           └── {hash}/
 │               └── data
-└── ref/
-    └── {algorithm}/
-        └── {hash_prefix}/
-            └── {hash}/
-                ├── {namespace}!own
-                └── {namespace}!r/
-                    └── {entry}
+├── ref/
+│   └── {algorithm}/
+│       └── {hash_prefix}/
+│           └── {hash}/
+│               ├── {namespace}!own
+│               └── {namespace}!r/
+│                   └── {entry}
+└── ns/
+    ├── {namespace}!tag/
+    │   └── {tag}!/
+    │       └── {ord}.{set|del}.{algorithm}.{hash}
+    └── {namespace}!atime/
+        └── tag/
+            └── {tag}
 ```
 
-The two stores split this tree by content: the blob store holds the blob `data` files and the `_uploads/` session directories, while the metadata store holds the rest of the `v2/repositories/` tree (links and tags) plus the blob-index reference keys under `v2/ref/`. Each reference key is an empty write-once object recording one link through which a namespace references the blob: `{namespace}!own` marks ownership (upload or mount), and each key under `{namespace}!r/` marks one referencing link. Stores written by earlier versions may still hold per-namespace `refs/{namespace}.json` shards under `v2/blobs/`; they are read as a fallback and converted to reference keys by scrub.
+The two stores split this tree by content: the blob store holds the blob `data` files and the `_uploads/` session directories, while the metadata store holds the rest of the `v2/repositories/` tree (links), the blob-index reference keys under `v2/ref/`, and the tag state under `v2/ns/`. Each reference key is an empty write-once object recording one link through which a namespace references the blob: `{namespace}!own` marks ownership (upload or mount), and each key under `{namespace}!r/` marks one referencing link.
+
+A tag is an ordered set of write-once entries: `{ord}` inverts the author's unix-millisecond timestamp so a listing yields newest first, `set` entries record a push and `del` entries a deletion (still naming the digest the tag held), and the newest entry group decides the tag's current state. Writers only append, so concurrent pushes and replicas never contend; last-writer-wins is a property of the key names. The `!` terminator sorts below every character the name grammars admit, which keeps flat listings in true lexical order. A tag's advisory last-pull timestamp is its own overwritten key under `{namespace}!atime/`, so the entries themselves never mutate.
+
+Stores written by earlier versions may still hold per-namespace `refs/{namespace}.json` shards under `v2/blobs/` and per-tag `current/link` files under `_manifests/tags/`; both are read as a fallback and converted to the new shapes by scrub.
 
 ### Content Addressing
 
 All content is addressed by digest (SHA-256 or SHA-512):
 - Manifests: `sha256:<hash>` or `sha512:<hash>`
 - Blobs: `sha256:<hash>` or `sha512:<hash>`
-- Tags: JSON link files (`LinkMetadata`) recording the manifest digest
+- Tags: ordered write-once entries recording the manifest digest per event
 
 ---
 

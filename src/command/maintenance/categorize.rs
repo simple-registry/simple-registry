@@ -11,7 +11,7 @@
 
 use std::str::FromStr;
 
-use angos_oci::{Algorithm, Digest, UploadSessionId};
+use angos_oci::{Algorithm, Digest, Namespace, Tag, UploadSessionId};
 use angos_tx_engine::{
     INTENT_BODIES_PREFIX, INTENT_LOG_PREFIX, LOCK_OBJECTS_PREFIX, PROBE_KEY_PREFIX,
 };
@@ -21,7 +21,9 @@ use crate::{
     jobs::{JobState, Queue, store::JOBS_ROOT},
     registry::{
         metadata_store::{LinkKind, decode_blob_index_shard_namespace},
-        path_builder::{BLOBS_ROOT, REF_ROOT, REPOS_ROOT, parse_blob_ref},
+        path_builder::{
+            BLOBS_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT, parse_blob_ref, parse_tag_entry,
+        },
     },
 };
 
@@ -40,6 +42,13 @@ pub enum KeyCategory {
         namespace: String,
         link: LinkKind,
     },
+    /// `v2/ns/{ns}!tag/{tag}!/{ord}.{kind}.{alg}.{hash}` (metadata store): one
+    /// write-once tag event. Grammars are checked at categorization, so both
+    /// names are known valid.
+    TagEntry { namespace: String, tag: String },
+    /// `v2/ns/{ns}!atime/tag/{tag}` (metadata store): a tag's advisory
+    /// last-pull timestamp, overwritten in place.
+    TagAccessTime,
     /// A link file under `v2/repositories/{ns}/...` (metadata store). The
     /// namespace is raw: its validity is a validation concern.
     Link { namespace: String, link: ParsedLink },
@@ -138,6 +147,9 @@ pub fn categorize(key: &str) -> KeyCategory {
     if let Some(rest) = strip_prefix_dir(key, REF_ROOT) {
         return categorize_ref(rest);
     }
+    if let Some(rest) = strip_prefix_dir(key, NS_ROOT) {
+        return categorize_ns(rest);
+    }
     if let Some(rest) = strip_prefix_dir(key, REPOS_ROOT) {
         return categorize_repository(rest);
     }
@@ -204,6 +216,36 @@ fn categorize_ref(rest: &str) -> KeyCategory {
         },
         None => KeyCategory::Unknown,
     }
+}
+
+/// `{ns}!tag/{tag}!/{ord}.{kind}.{alg}.{hash}` or `{ns}!atime/tag/{tag}`.
+/// Grammars are checked here: a shape no angos writer can produce is unknown
+/// and gets quarantined rather than trusted.
+fn categorize_ns(rest: &str) -> KeyCategory {
+    let Some((namespace, marker)) = rest.split_once('!') else {
+        return KeyCategory::Unknown;
+    };
+    if Namespace::new(namespace).is_err() {
+        return KeyCategory::Unknown;
+    }
+    if let Some(tag_rest) = marker.strip_prefix("tag/") {
+        let Some((tag, entry)) = tag_rest.split_once("!/") else {
+            return KeyCategory::Unknown;
+        };
+        if Tag::new(tag).is_ok() && parse_tag_entry(entry).is_some() {
+            return KeyCategory::TagEntry {
+                namespace: namespace.to_string(),
+                tag: tag.to_string(),
+            };
+        }
+        return KeyCategory::Unknown;
+    }
+    if let Some(tag) = marker.strip_prefix("atime/tag/")
+        && Tag::new(tag).is_ok()
+    {
+        return KeyCategory::TagAccessTime;
+    }
+    KeyCategory::Unknown
 }
 
 /// `pending/{queue}/{stem}.json`, `failed/{queue}/{stem}.json`, or
@@ -366,7 +408,8 @@ mod tests {
             metadata_store::LinkKind,
             path_builder::{
                 blob_index_shard_path, blob_path, blob_ref_own_path, blob_ref_path, link_path,
-                upload_hash_context_path, upload_path, upload_start_date_path,
+                tag_atime_path, tag_entry_path, upload_hash_context_path, upload_path,
+                upload_start_date_path,
             },
         },
     };
@@ -441,6 +484,40 @@ mod tests {
                 link: LinkKind::Blob(digest_a()),
             }
         );
+    }
+
+    #[test]
+    fn tag_entry_and_atime_paths_round_trip() {
+        let ns = Namespace::new("org/app").unwrap();
+        let tag = Tag::new("v1.0").unwrap();
+        let key = tag_entry_path(&ns, &tag, u64::MAX - 1, false, &digest_a());
+        assert_eq!(
+            categorize(&key),
+            KeyCategory::TagEntry {
+                namespace: "org/app".to_string(),
+                tag: "v1.0".to_string(),
+            }
+        );
+        assert_eq!(
+            categorize(&tag_atime_path(&ns, &tag)),
+            KeyCategory::TagAccessTime
+        );
+    }
+
+    #[test]
+    fn adversarial_tag_keys_are_unknown() {
+        let unknown = [
+            "v2/ns/org/app".to_string(),
+            "v2/ns/org/app!tag/v1.0".to_string(),
+            format!("v2/ns/org/app!tag/-bad!/{:016x}.set.sha256.{HASH_A}", 1),
+            format!("v2/ns/org/app!tag/v1!/{:016x}.mov.sha256.{HASH_A}", 1),
+            format!("v2/ns/BAD!tag/v1!/{:016x}.set.sha256.{HASH_A}", 1),
+            "v2/ns/org/app!atime/tag/-bad".to_string(),
+            "v2/ns/org/app!other/x".to_string(),
+        ];
+        for key in unknown {
+            assert_eq!(categorize(&key), KeyCategory::Unknown, "key {key:?}");
+        }
     }
 
     #[test]

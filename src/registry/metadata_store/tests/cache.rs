@@ -289,18 +289,18 @@ async fn test_cache_disabled_when_ttl_zero() {
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
     assert_eq!(meta.target, digest);
 
-    let link_path = path_builder::link_path(&tag, &namespace);
+    let entry_dir = path_builder::tag_entry_dir(&namespace, &Tag::new("latest").unwrap());
     backend
         .store()
         .object_store()
-        .delete(&link_path)
+        .delete_prefix(&entry_dir)
         .await
         .unwrap();
 
     let result = backend.read_link(&namespace, &tag).await;
     assert!(
         matches!(result, Err(Error::NotFound)),
-        "Should get ReferenceNotFound when cache is disabled and storage object is deleted"
+        "Should get ReferenceNotFound when cache is disabled and storage state is deleted"
     );
 }
 

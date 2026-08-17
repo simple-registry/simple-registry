@@ -143,6 +143,9 @@ impl Validator {
             (Pass::MetadataLinks, KeyCategory::Link { namespace, link }) => {
                 self.validate_link(key, &namespace, link).await
             }
+            (Pass::MetadataLinks, KeyCategory::TagEntry { namespace, tag }) => {
+                self.validate_tag_entries(&namespace, &tag).await
+            }
             (Pass::MetadataLinks, KeyCategory::JobRecord { queue, state }) => {
                 self.validate_job_record(key, queue, state).await
             }

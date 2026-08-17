@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - Blob references are stored as one write-once key per (namespace, link) under `v2/ref/`, replacing the per-namespace shard JSON and its read-modify-write; legacy shards keep answering reads until `angos scrub` converts them, so no migration step is required.
+- Tags are stored as ordered write-once entries under `v2/ns/`, replacing the mutable `current/link` and its read-modify-write: concurrent same-tag pushes and replicas never contend, and a tag's last-pull timestamp moves to its own advisory key. Legacy links keep answering reads until `angos scrub` converts them; tag timestamps now carry millisecond precision.
 
 ## 1.5.0
 

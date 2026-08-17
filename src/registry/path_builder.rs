@@ -1,5 +1,7 @@
 use std::str::FromStr;
 
+use chrono::{DateTime, Utc};
+
 use angos_oci::{Algorithm, Digest, Namespace, Tag, UploadSessionId};
 
 use crate::registry::metadata_store::LinkKind;
@@ -7,6 +9,7 @@ use crate::registry::metadata_store::LinkKind;
 pub const BLOBS_ROOT: &str = "v2/blobs";
 pub const REPOS_ROOT: &str = "v2/repositories";
 pub const REF_ROOT: &str = "v2/ref";
+pub const NS_ROOT: &str = "v2/ns";
 
 /// Root directory and namespace-name prefix for a namespace tree walk. `None`
 /// walks the whole repositories tree; `Some(repository)` restricts the walk to
@@ -149,6 +152,86 @@ pub fn parse_blob_ref_entry(digest: &Digest, entry: &str) -> Option<LinkKind> {
 fn parse_ref_digest(s: &str) -> Option<Digest> {
     let (algorithm, hash) = s.split_once('.')?;
     Digest::with_algorithm(Algorithm::from_str(algorithm).ok()?, hash).ok()
+}
+
+/// Directory holding every tag-entry directory of `namespace`. `!` terminates
+/// the namespace for the same reasons as the reference keys.
+pub fn tag_entries_root(namespace: &Namespace) -> String {
+    format!("{NS_ROOT}/{namespace}!tag")
+}
+
+/// Directory holding one tag's ordered entries. The `!` suffix keeps a name
+/// that is a prefix of another (`v1`, `v1.1`) sorting first in a flat listing,
+/// which is what lets the tag list serve lexical order straight off it.
+pub fn tag_entry_dir(namespace: &Namespace, tag: &Tag) -> String {
+    format!("{}/{tag}!", tag_entries_root(namespace))
+}
+
+/// One tag event: `<ord>.<kind>.<algo>.<hash>`, where `<ord>` inverts the
+/// author's unix-millisecond timestamp so entries list newest first, and
+/// `<kind>` is `set` or `del` (a deletion still names the digest the tag
+/// held, which tag history requires).
+pub fn tag_entry_path(
+    namespace: &Namespace,
+    tag: &Tag,
+    ord: u64,
+    deletion: bool,
+    digest: &Digest,
+) -> String {
+    let kind = if deletion { "del" } else { "set" };
+    format!(
+        "{}/{ord:016x}.{kind}.{}.{}",
+        tag_entry_dir(namespace, tag),
+        digest.algorithm(),
+        digest.hash()
+    )
+}
+
+/// Advisory last-pull timestamp for a tag, overwritten in place. Kept apart
+/// from the write-once entries so those never mutate.
+pub fn tag_atime_path(namespace: &Namespace, tag: &Tag) -> String {
+    format!("{NS_ROOT}/{namespace}!atime/tag/{tag}")
+}
+
+/// The inverted-timestamp ordinal of `ts`: entries sort newest first.
+/// `u64::MAX` is reserved for a missing timestamp: it sorts last and never
+/// wins resolution, mirroring how a link without `created_at` never won
+/// last-writer-wins, and stays distinct from a real epoch timestamp.
+pub fn tag_ord(ts: Option<DateTime<Utc>>) -> u64 {
+    match ts {
+        None => u64::MAX,
+        Some(ts) => u64::MAX - 1 - ts.timestamp_millis().max(0).unsigned_abs(),
+    }
+}
+
+/// The author timestamp `ord` encodes; `None` for the never-wins ordinal.
+pub fn tag_ord_ts(ord: u64) -> Option<DateTime<Utc>> {
+    if ord == u64::MAX {
+        return None;
+    }
+    DateTime::from_timestamp_millis(i64::try_from(u64::MAX - 1 - ord).ok()?)
+}
+
+/// Decode one entry filename of [`tag_entry_dir`] back into
+/// `(ord, deletion, digest)`. `None` = not a shape this version writes.
+pub fn parse_tag_entry(name: &str) -> Option<(u64, bool, Digest)> {
+    let mut parts = name.splitn(4, '.');
+    let (Some(ord), Some(kind), Some(algorithm), Some(hash)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    if ord.len() != 16 {
+        return None;
+    }
+    let ord = u64::from_str_radix(ord, 16).ok()?;
+    let deletion = match kind {
+        "set" => false,
+        "del" => true,
+        _ => return None,
+    };
+    let digest = Digest::with_algorithm(Algorithm::from_str(algorithm).ok()?, hash).ok()?;
+    Some((ord, deletion, digest))
 }
 
 pub fn blob_index_shard_path(digest: &Digest, namespace: &Namespace) -> String {
@@ -361,6 +444,51 @@ mod tests {
         assert_eq!(
             manifest_referrers_dir(&ns, &subject),
             format!("v2/repositories/ns/_manifests/referrers/sha256/{HASH_A}")
+        );
+    }
+
+    /// The whole listing story rests on `!` sorting below every byte a
+    /// namespace or tag can contain, so a name that is a prefix of another
+    /// sorts first and flat listings yield true lexical order. A grammar
+    /// relaxation admitting a lower byte would break tag ordering silently.
+    #[test]
+    fn the_separator_sorts_below_both_grammars() {
+        let namespace_alphabet = "abcdefghijklmnopqrstuvwxyz0123456789._-/";
+        let tag_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-";
+        for byte in namespace_alphabet.bytes().chain(tag_alphabet.bytes()) {
+            assert!(
+                b'!' < byte,
+                "'!' must sort below {:?} or listings lose lexical order",
+                byte as char
+            );
+        }
+    }
+
+    #[test]
+    fn tag_entries_round_trip_and_sort_newest_first() {
+        let ns = Namespace::new("org/app").unwrap();
+        let tag = Tag::new("v1").unwrap();
+        let digest = Digest::sha256(HASH_A).unwrap();
+        let older = DateTime::from_timestamp_millis(1_000_000).unwrap();
+        let newer = DateTime::from_timestamp_millis(2_000_000).unwrap();
+
+        let older_key = tag_entry_path(&ns, &tag, tag_ord(Some(older)), false, &digest);
+        let newer_key = tag_entry_path(&ns, &tag, tag_ord(Some(newer)), true, &digest);
+        assert!(
+            newer_key < older_key,
+            "a newer entry must sort before an older one"
+        );
+
+        let file = newer_key.rsplit_once('/').unwrap().1;
+        assert_eq!(
+            parse_tag_entry(file),
+            Some((tag_ord(Some(newer)), true, digest.clone()))
+        );
+        assert_eq!(tag_ord_ts(tag_ord(Some(newer))), Some(newer));
+        assert_eq!(tag_ord_ts(tag_ord(None)), None, "the never-wins ordinal");
+        assert!(
+            tag_ord(None) > tag_ord(Some(DateTime::from_timestamp_millis(0).unwrap())),
+            "a missing timestamp must sort after a real epoch one"
         );
     }
 
