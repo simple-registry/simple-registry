@@ -362,6 +362,16 @@ impl ObjectStore for Backend {
         Ok(self.client.put_object(key, data).await?)
     }
 
+    async fn create_if_absent(&self, key: &str, data: Bytes) -> Result<bool, Error> {
+        match self.client.put_object_if_not_exists(key, data).await {
+            Ok(_) => Ok(true),
+            Err(e) => match Error::from(e) {
+                Error::PreconditionFailed => Ok(false),
+                e => Err(e),
+            },
+        }
+    }
+
     async fn delete(&self, key: &str) -> Result<(), Error> {
         // S3 DELETE on a missing key returns 204, mapped to Ok by the client.
         Ok(self.client.delete_object(key).await?)

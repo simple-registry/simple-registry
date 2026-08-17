@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use angos_oci::{Digest, Namespace, Reference, Tag};
-use angos_tx_engine::transaction::Transaction;
 
 use crate::{
     jobs::Queue,
@@ -448,7 +447,7 @@ impl ReplicationJobHandler {
 
 #[async_trait]
 impl JobHandler for ReplicationJobHandler {
-    async fn execute(&self, envelope: &JobEnvelope) -> Result<Transaction, Error> {
+    async fn execute(&self, envelope: &JobEnvelope) -> Result<(), Error> {
         if envelope.kind != REPLICATION_PUSH_MANIFEST_KIND
             && envelope.kind != REPLICATION_DELETE_MANIFEST_KIND
         {
@@ -476,7 +475,7 @@ impl JobHandler for ReplicationJobHandler {
             .inspect_err(|_| Self::record_failure(&job.target().downstream))?;
 
         // Empty transaction: the HTTP push is the side effect.
-        Ok(Transaction::builder().build())
+        Ok(())
     }
 }
 

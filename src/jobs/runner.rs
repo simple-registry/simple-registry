@@ -14,7 +14,7 @@ use crate::{
 /// branch.
 pub async fn execute_one(consumer: &JobStore, handler: &dyn JobHandler, claimed: ClaimedJob) {
     let lock_key = claimed.envelope.lock_key.to_string();
-    let lock_lost = claimed.session.cancellation();
+    let lock_lost = claimed.lock_lost();
 
     let handler_result = select! {
         result = handler.execute(&claimed.envelope) => Some(result),
@@ -23,7 +23,7 @@ pub async fn execute_one(consumer: &JobStore, handler: &dyn JobHandler, claimed:
 
     match handler_result {
         None => warn!(lock_key, "Lock lost during execution; aborting"),
-        Some(Ok(tx)) => match consumer.complete(claimed, tx).await {
+        Some(Ok(())) => match consumer.complete(claimed).await {
             Ok(CompleteOutcome::Completed) => info!(lock_key, "Job completed successfully"),
             Ok(CompleteOutcome::FailedOver(FailOutcome::Retried { next_at })) => {
                 warn!(lock_key, %next_at, "Commit failed; job scheduled for retry");
@@ -89,11 +89,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use angos_storage::{ObjectStore, fs::Backend as StorageFsBackend};
-    use angos_tx_engine::{
-        lock::{LockSession, LockStrategy},
-        store::Store,
-        transaction::Transaction,
-    };
+    use angos_tx_engine::{lock::LockStrategy, store::Store};
 
     use crate::{
         jobs::Queue,
@@ -108,8 +104,8 @@ mod tests {
 
     #[async_trait]
     impl JobHandler for OkHandler {
-        async fn execute(&self, _envelope: &JobEnvelope) -> Result<Transaction, Error> {
-            Ok(Transaction::builder().build())
+        async fn execute(&self, _envelope: &JobEnvelope) -> Result<(), Error> {
+            Ok(())
         }
     }
 
@@ -164,7 +160,7 @@ mod tests {
 
     #[async_trait]
     impl JobHandler for TerminalHandler {
-        async fn execute(&self, _envelope: &JobEnvelope) -> Result<Transaction, Error> {
+        async fn execute(&self, _envelope: &JobEnvelope) -> Result<(), Error> {
             Err(Error::Terminal("downstream forbade the push".to_string()))
         }
     }
@@ -220,10 +216,10 @@ mod tests {
 
     #[async_trait]
     impl JobHandler for SleepyHandler {
-        async fn execute(&self, _envelope: &JobEnvelope) -> Result<Transaction, Error> {
+        async fn execute(&self, _envelope: &JobEnvelope) -> Result<(), Error> {
             sleep(self.duration).await;
             self.completed.store(true, Ordering::Release);
-            Ok(Transaction::builder().build())
+            Ok(())
         }
     }
 
@@ -241,17 +237,12 @@ mod tests {
 
         let lost = CancellationToken::new();
         let lost_clone = lost.clone();
-        let session = LockSession::with_async_release_and_heartbeat(
-            || Box::pin(async {}),
-            lost,
-            tokio::spawn(async {}),
-        );
-        let claimed = ClaimedJob {
-            envelope: JobEnvelope::new(Queue::Cache, "test.sleep", "cache.ns:sha256:lost", &())
+        let claimed = ClaimedJob::for_test(
+            JobEnvelope::new(Queue::Cache, "test.sleep", "cache.ns:sha256:lost", &())
                 .expect("envelope"),
-            storage_key: "00000000-0000-0000-0000-000000000000".to_string(),
-            session,
-        };
+            "00000000-0000-0000-0000-000000000000".to_string(),
+            lost,
+        );
 
         let completed = Arc::new(AtomicBool::new(false));
         let handler = SleepyHandler {

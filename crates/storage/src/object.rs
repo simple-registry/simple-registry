@@ -115,6 +115,13 @@ pub trait ObjectStore: Send + Sync {
         token: Option<String>,
     ) -> Result<Page<String>, Error>;
 
+    /// Create the object only when the key is absent. `false` means it
+    /// already exists (any content). The check and the write are one atomic
+    /// step on every backend: `link(2)` on FS, `If-None-Match: *` on S3. A
+    /// provider that cannot honour that atomically must error rather than
+    /// overwrite.
+    async fn create_if_absent(&self, key: &str, data: Bytes) -> Result<bool, Error>;
+
     /// Like [`Self::list`], but the enumeration starts strictly after the
     /// relative key `start_after` on a chain's first page (`token` wins when
     /// both are set). This is what serves a `last`-cursor page straight off

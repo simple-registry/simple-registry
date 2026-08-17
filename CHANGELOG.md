@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Tags are stored as ordered write-once entries under `v2/ns/`, replacing the mutable `current/link` and its read-modify-write: concurrent same-tag pushes and replicas never contend, and a tag's last-pull timestamp moves to its own advisory key. Legacy links keep answering reads until `angos scrub` converts them; tag timestamps now carry millisecond precision.
 - Manifest revisions and referrers are stored as immutable records under `v2/ns/`, and `v2/cat/` gains one index key per namespace so the catalog serves ordered pages straight off a listing; legacy links keep answering reads until `angos scrub` converts them.
 - Registry pushes and deletes are ordered waves of unconditional writes: the metadata transaction and the `blob-data` lock are gone, blob reclamation moves entirely to `angos scrub` fenced by a `v2/gc/` run-marker protocol, and deletes answer `202 Accepted` while the bytes wait for the sweep.
+- The durable job queue serialises workers with leased claim keys under `_jobs/claims/` (atomic create-if-absent on every backend, `link(2)` on FS) instead of distributed locks and transactions; `[global.job_queue]` now requires a backend whose create-if-absent is honest, probed once at startup.
 
 ## 1.5.0
 

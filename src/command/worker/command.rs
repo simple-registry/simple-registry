@@ -252,7 +252,7 @@ impl WorkerContext {
         // Share the metadata store's engine façade instead of wiring (and
         // probing) a second store over the same backend.
         let storage = metadata_store.store_arc();
-        job_store::ensure_shared_lock(&storage)?;
+        job_store::ensure_claim_support(&storage).await?;
         let registry = bootstrap::registry(
             config,
             blob_store.clone(),

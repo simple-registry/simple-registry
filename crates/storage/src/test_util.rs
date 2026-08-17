@@ -168,6 +168,11 @@ macro_rules! delegate_object_store {
                 self.inner.get_stream(key, offset).await
             }
 
+            async fn create_if_absent(&self, key: &str, data: Bytes) -> Result<bool, Error> {
+                self.hook.before(StoreOp::Put { key, data: &data }).await?;
+                self.inner.create_if_absent(key, data).await
+            }
+
             async fn put(&self, key: &str, data: Bytes) -> Result<(), Error> {
                 self.hook.before(StoreOp::Put { key, data: &data }).await?;
                 self.inner.put(key, data).await

@@ -75,6 +75,8 @@ pub enum KeyCategory {
     JobRecord { queue: Queue, state: JobState },
     /// A `lock_key` dedup index entry (metadata store).
     JobIndex { queue: Queue },
+    /// A worker's leased claim key under `_jobs/claims/` (metadata store).
+    JobClaim,
     /// Transaction-engine state (`.tx-log/`, `.tx-bodies/`, `.tx-locks/`).
     /// Engine-owned: the walk never touches these keys directly; scrub
     /// reclaims their garbage only through the engine's own janitor sweep.
@@ -317,9 +319,16 @@ fn categorize_ns(rest: &str) -> KeyCategory {
     KeyCategory::Unknown
 }
 
-/// `pending/{queue}/{stem}.json`, `failed/{queue}/{stem}.json`, or
-/// `index/{queue}/{encoded}.json`.
+/// `pending/{queue}/{stem}.json`, `failed/{queue}/{stem}.json`,
+/// `index/{queue}/{encoded}.json`, or `claims/{encoded}.json`.
 fn categorize_job(rest: &str) -> KeyCategory {
+    // Claim keys are leases the workers own; the walk recognizes and never
+    // touches them (a lapsed one is taken over by the next claimant).
+    if let Some(file) = rest.strip_prefix("claims/")
+        && !file.contains('/')
+    {
+        return KeyCategory::JobClaim;
+    }
     let segments: Vec<&str> = rest.split('/').collect();
     let [partition, queue, file] = segments.as_slice() else {
         return KeyCategory::Unknown;

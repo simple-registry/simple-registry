@@ -3549,7 +3549,6 @@ mod noop_suppression_tests {
 
     use angos_oci::request::PutManifestRequest;
     use angos_oci::{Digest, MediaType, Namespace, Reference, Tag};
-    use angos_tx_engine::transaction::Transaction;
 
     use crate::registry::manifest::tests::{create_test_manifest, manifest_with_references};
     use crate::{
@@ -3611,10 +3610,7 @@ mod noop_suppression_tests {
             .unwrap()
             .claimed
             .expect("expected one claimable job");
-        job_store
-            .complete(claimed, Transaction::builder().build())
-            .await
-            .unwrap();
+        job_store.complete(claimed).await.unwrap();
     }
 
     /// Builds a second, distinct manifest, pre-uploading its blobs so the push

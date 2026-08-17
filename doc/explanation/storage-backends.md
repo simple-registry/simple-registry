@@ -249,11 +249,10 @@ key_prefix = "angos"
 
 ## Locking Behavior
 
-Registry reads and writes are lock-free: metadata is write-once and ordered
-(see Write Coordination below), and blob reclamation is fenced by the
-`v2/gc/` marker protocol. Locks coordinate only the durable job queue
-(replication and cache jobs), whose claim/release cycle runs on the metadata
-store's engine.
+Reads and writes are lock-free everywhere: registry metadata is write-once
+and ordered (see Write Coordination below), blob reclamation is fenced by
+the `v2/gc/` marker protocol, and the job queue serialises workers with
+leased claim keys created atomically (see Write Coordination).
 
 ### In-Memory Locking
 
@@ -641,9 +640,13 @@ pushes skip any coordination for new bytes. Deletes only remove records and
 ownership keys; the bytes wait for a collector sweep (`angos scrub`), which
 both delete endpoints' `202 Accepted` licenses.
 
-The transactional engine still runs on the metadata store's `Store` for the
-job store's enqueue/complete/fail paths, which commit atomically with their
-lock release. Blob upload sessions persist as per-file artifacts under
+The durable job queue serialises workers with leased claim keys under
+`_jobs/claims/`: an atomic create-if-absent (`link(2)` on FS,
+`If-None-Match: *` on S3) takes the key, the holder's refresh task keeps the
+lease alive, and a lapsed lease is taken over by the next claimant. Enqueue,
+complete, and fail are ordered idempotent writes with no transaction; a
+startup probe verifies the backend's create-if-absent is honest before
+`[global.job_queue]` is served. Blob upload sessions persist as per-file artifacts under
 `v2/repositories/<namespace>/_uploads/<uuid>/`; `complete` moves the staged
 blob to its content-addressed key as an idempotent effect, and a crash
 mid-promotion leaves a re-drivable state that the caller's retry or scrub

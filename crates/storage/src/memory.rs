@@ -162,6 +162,16 @@ impl ObjectStore for MemoryObjectStore {
         Ok(())
     }
 
+    async fn create_if_absent(&self, key: &str, data: Bytes) -> Result<bool, Error> {
+        let etag = self.next_etag();
+        let mut guard = self.lock();
+        if guard.data.contains_key(key) {
+            return Ok(false);
+        }
+        guard.data.insert(key.to_string(), (data, etag, Utc::now()));
+        Ok(true)
+    }
+
     async fn delete(&self, key: &str) -> Result<(), Error> {
         self.lock().data.remove(key);
         Ok(())

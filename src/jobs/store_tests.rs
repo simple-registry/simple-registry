@@ -13,12 +13,11 @@ use angos_storage::{
     fs::Backend as StorageFsBackend,
     test_util::{HookedStore, StoreHook, StoreOp},
 };
-use angos_tx_engine::transaction::{Mutation, Transaction};
 
 use crate::jobs::store::{
-    CompleteOutcome, FailOutcome, JobEnvelope, JobQueueConfig, JobRetryPolicy, JobState, JobStore,
-    LockKey, MAX_REPORTED_PENDING, Queue, STORAGE_KEY_PREFIX_LEN, make_storage_key,
-    parse_lock_key_index, parse_not_before, serialize_dead_letter, serialize_lock_key_index,
+    FailOutcome, JobEnvelope, JobQueueConfig, JobRetryPolicy, JobState, JobStore, LockKey,
+    MAX_REPORTED_PENDING, Queue, STORAGE_KEY_PREFIX_LEN, make_storage_key, parse_lock_key_index,
+    parse_not_before, serialize_dead_letter, serialize_lock_key_index,
 };
 use crate::metrics_provider;
 use crate::registry::test_utils::build_store;
@@ -90,10 +89,7 @@ async fn run_enqueue_then_claim_succeeds(h: Harness) {
         .claimed
         .expect("Some");
     assert_eq!(claimed.envelope.lock_key, lock_key("cache.ns:sha256:aaa"));
-    h.store
-        .complete(claimed, Transaction::builder().build())
-        .await
-        .expect("complete");
+    h.store.complete(claimed).await.expect("complete");
     assert!(
         h.store
             .claim_one(Queue::Cache)
@@ -397,10 +393,7 @@ async fn run_enqueue_after_claim_creates_second_pending(h: Harness) {
             .is_none(),
         "second job must wait on the execution lock",
     );
-    h.store
-        .complete(claimed, Transaction::builder().build())
-        .await
-        .expect("complete 1");
+    h.store.complete(claimed).await.expect("complete 1");
 
     let second = h
         .store
@@ -410,10 +403,7 @@ async fn run_enqueue_after_claim_creates_second_pending(h: Harness) {
         .claimed
         .expect("second job claimable after the first completes");
     assert_eq!(second.envelope.lock_key, lock_key);
-    h.store
-        .complete(second, Transaction::builder().build())
-        .await
-        .expect("complete 2");
+    h.store.complete(second).await.expect("complete 2");
     assert!(
         h.store
             .claim_one(Queue::Cache)
@@ -721,76 +711,39 @@ async fn concurrent_enqueue_dedup() {
 // complete() commit-failure fail-over (no hot loop)
 // =========================================================================
 
-/// When the work-product commit fails, `complete` must fail the job over
-/// (retry/dead-letter) rather than returning an error that leaves the pending
-/// file re-claimable forever. Regression test for the in-process cache-fill
-/// hot loop (doc/reviews/20260603-in-process-cache-fill-broken.md).
-async fn run_complete_commit_failure_fails_job_over(h: Harness) {
+/// The claim key serialises a `lock_key` across workers: while one holds it,
+/// a second scan finds the pending job but cannot claim it, and a release
+/// (here via `complete`) frees the key for the next claimant.
+async fn run_a_held_claim_blocks_a_second_claimant(h: Harness) {
     h.store
-        .enqueue(dummy_envelope("cache.ns:sha256:commitfail"))
+        .enqueue(dummy_envelope("cache.ns:sha256:claimed-once"))
         .await
         .expect("enqueue");
-    let claimed = h
+    let first = h
         .store
         .claim_one(Queue::Cache)
         .await
-        .expect("claim")
+        .expect("first claim")
         .claimed
         .expect("Some");
-    let original_key = claimed.storage_key.clone();
 
-    // Seed a key, then hand `complete` a work-product transaction whose
-    // `PutIfAbsent` on that key is guaranteed to fail (the key already exists),
-    // forcing the merged commit to abort.
-    let collide_key = "collide-key";
-    h.raw
-        .put(collide_key, Bytes::from_static(b"x"))
-        .await
-        .expect("seed collide key");
-    let handler_tx = Transaction::builder()
-        .mutation(Mutation::PutIfAbsent {
-            key: collide_key.to_string(),
-            body: Bytes::from_static(b"y"),
-        })
-        .build();
-
-    let outcome = h
-        .store
-        .complete(claimed, handler_tx)
-        .await
-        .expect("complete returns an outcome, not an error");
+    let second = h.store.claim_one(Queue::Cache).await.expect("second claim");
     assert!(
-        matches!(
-            outcome,
-            CompleteOutcome::FailedOver(FailOutcome::Retried { .. })
-        ),
-        "a commit failure must fail the job over to a backed-off retry",
+        second.claimed.is_none(),
+        "a held claim key must block a second claimant of the same lock_key"
     );
 
-    // The job is re-queued (with backoff and a bumped attempt count) under a new
-    // storage key, not deleted, and not left at the original key to be
-    // re-claimed immediately.
-    let pending = h.store.list_pending(Queue::Cache, 10).await.expect("list");
-    assert_eq!(
-        pending.len(),
-        1,
-        "job must be re-queued after commit failure"
+    h.store.complete(first).await.expect("complete");
+    let after = h.store.claim_one(Queue::Cache).await.expect("after");
+    assert!(
+        after.claimed.is_none(),
+        "the completed job must be gone from pending"
     );
-    assert_ne!(
-        pending[0], original_key,
-        "retry must use a new backed-off storage key",
-    );
-    let env = h
-        .store
-        .read_pending(Queue::Cache, &pending[0])
-        .await
-        .expect("read requeued envelope");
-    assert_eq!(env.attempts, 1, "attempt count bumped on fail-over");
 }
 
 #[tokio::test]
-async fn complete_commit_failure_fails_job_over() {
-    for_each_job_backend(run_complete_commit_failure_fails_job_over).await;
+async fn a_held_claim_blocks_a_second_claimant() {
+    for_each_job_backend(run_a_held_claim_blocks_a_second_claimant).await;
 }
 
 // =========================================================================

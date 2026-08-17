@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use angos_oci::{Digest, Namespace};
-use angos_tx_engine::transaction::Transaction;
 
 use crate::{
     event_webhook::{
@@ -176,7 +175,7 @@ impl CacheFillJobHandler {
 
 #[async_trait]
 impl JobHandler for CacheFillJobHandler {
-    async fn execute(&self, envelope: &JobEnvelope) -> Result<Transaction, Error> {
+    async fn execute(&self, envelope: &JobEnvelope) -> Result<(), Error> {
         if envelope.kind != CACHE_FETCH_BLOB_KIND {
             return Err(Error::Execution(format!(
                 "unsupported job kind '{}'; expected '{CACHE_FETCH_BLOB_KIND}'",
@@ -195,7 +194,7 @@ impl JobHandler for CacheFillJobHandler {
             .await
             .map_err(job_error)?;
 
-        Ok(Transaction::builder().build())
+        Ok(())
     }
 }
 

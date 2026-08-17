@@ -301,6 +301,9 @@ mod tests {
         ) -> Result<Page<String>, StorageError> {
             unimplemented!("not reached by orphan listing")
         }
+        async fn create_if_absent(&self, _key: &str, _data: Bytes) -> Result<bool, StorageError> {
+            unimplemented!("not reached by orphan listing")
+        }
         async fn list_after(
             &self,
             _prefix: &str,

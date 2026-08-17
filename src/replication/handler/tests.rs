@@ -309,8 +309,7 @@ async fn execute_errors_on_removed_downstream() {
         result
             .as_ref()
             .is_err_and(|e| e.to_string().contains("no downstream 'removed-region'")),
-        "a job for a de-configured downstream must error, got: {:?}",
-        result.map(|_| ())
+        "a job for a de-configured downstream must error, got: {result:?}",
     );
 }
 
@@ -350,8 +349,8 @@ async fn execute_pushes_manifest_with_head_before_put() {
     let handler = ReplicationJobHandler::new(resolver, blob_store, metadata_store);
 
     let envelope = build_envelope(&sample_payload()).unwrap();
-    let tx = handler.execute(&envelope).await.unwrap();
-    assert!(tx.mutations.is_empty(), "push returns an empty transaction");
+    handler.execute(&envelope).await.unwrap();
+
     // wiremock `.expect(...)` assertions are verified on MockServer drop.
     drop(mock_server);
 }
@@ -453,8 +452,8 @@ async fn execute_pushes_prefixed_downstream_to_mapped_namespace() {
         },
     };
     let envelope = build_envelope(&payload).unwrap();
-    let tx = handler.execute(&envelope).await.unwrap();
-    assert!(tx.mutations.is_empty(), "push returns an empty transaction");
+    handler.execute(&envelope).await.unwrap();
+
     // wiremock `.expect(...)` assertions are verified on MockServer drop.
     drop(mock_server);
 }
@@ -826,14 +825,10 @@ async fn execute_push_treats_superseded_409_as_success() {
     let handler = ReplicationJobHandler::new(resolver, blob_store, metadata_store);
 
     let envelope = build_envelope(&sample_payload()).unwrap();
-    let tx = handler
+    handler
         .execute(&envelope)
         .await
         .expect("a superseded 409 is convergence, not failure -> Ok so the job drops");
-    assert!(
-        tx.mutations.is_empty(),
-        "a superseded push returns an empty transaction"
-    );
 }
 
 #[tokio::test]
@@ -1070,14 +1065,10 @@ async fn execute_push_with_deleted_tag_is_noop_success_records_no_failed() {
         },
     };
     let envelope = build_envelope(&payload).unwrap();
-    let tx = handler
+    handler
         .execute(&envelope)
         .await
         .expect("a deleted-tag push must be a converged no-op success");
-    assert!(
-        tx.mutations.is_empty(),
-        "a no-op push returns an empty transaction"
-    );
     assert_eq!(
         push_total(downstream, "failed"),
         failed_before,
@@ -1122,14 +1113,10 @@ async fn execute_tagless_push_with_deleted_revision_is_noop_success() {
         },
     };
     let envelope = build_envelope(&payload).unwrap();
-    let tx = handler
+    handler
         .execute(&envelope)
         .await
         .expect("a deleted-revision by-digest push must be a converged no-op success");
-    assert!(
-        tx.mutations.is_empty(),
-        "a no-op push returns an empty transaction"
-    );
     assert_eq!(
         push_total(downstream, "failed"),
         failed_before,

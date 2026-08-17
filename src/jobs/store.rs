@@ -34,13 +34,7 @@ use uuid::Uuid;
 
 use angos_backoff::Backoff;
 use angos_storage::Page;
-use angos_tx_engine::{
-    StorageError,
-    error::Error as TxError,
-    lock::{Error as LockError, LockSession},
-    store::Store,
-    transaction::{Mutation, Read, Transaction},
-};
+use angos_tx_engine::{StorageError, store::Store};
 
 use crate::{
     jobs::{JobState, Queue},
@@ -72,6 +66,13 @@ pub fn job_failed_path(queue: &str, id: &str) -> String {
 /// reads it for an O(1) lookup instead of scanning all pending bodies.
 pub fn job_lock_key_index_path(queue: &str, lock_key: &LockKey) -> String {
     format!("{JOBS_ROOT}/index/{queue}/{}.json", lock_key.encode())
+}
+
+/// Path of the claim key serialising execution of one `lock_key` across
+/// workers. Created with `put_if_absent`, leased, refreshed by the holder,
+/// and deleted on release; a lapsed lease is taken over by deletion.
+pub fn job_claim_path(lock_key: &LockKey) -> String {
+    format!("{JOBS_ROOT}/claims/{}.json", lock_key.encode())
 }
 
 /// A job's per-key serialization token: at most one worker executes a given
@@ -183,29 +184,33 @@ impl From<StorageError> for Error {
     }
 }
 
-impl From<LockError> for Error {
-    fn from(err: LockError) -> Self {
-        Error::Storage(err.to_string())
-    }
-}
-
-/// Precondition for `[global.job_queue]`: the durable queue is drained by
-/// separate processes, so the engine lock that serializes job claims must
-/// coordinate across processes. Config validation rejects strategies that are
-/// statically in-process; this catches an unset S3 lock strategy that fell back
-/// to the in-process lock because the probe found no conditional-write support.
-pub fn ensure_shared_lock(store: &Store) -> Result<(), Error> {
-    if !store.lock_is_process_shared() {
-        return Err(Error::Initialization(
-            "[global.job_queue] needs a shared lock strategy so workers serialize on the \
-             same jobs across processes, but the metadata store's lock resolved to the \
-             in-process 'memory' backend because the S3 provider lacks conditional-write \
-             support. Set the metadata store's lock_strategy to \"redis\", or remove \
-             [global.job_queue] to use the in-process queue."
+/// Precondition for `[global.job_queue]`: workers in separate processes
+/// serialise on claim keys, which requires an honest atomic `put_if_absent`
+/// from the backend. Probed once at startup with a scratch key: the second
+/// create of the same key must fail, or the provider would let two workers
+/// hold one claim.
+pub async fn ensure_claim_support(store: &Store) -> Result<(), Error> {
+    let key = format!("{JOBS_ROOT}/claims/.probe-{}", Uuid::new_v4());
+    let objects = store.object_store();
+    let first = objects
+        .create_if_absent(&key, Bytes::from_static(b"probe"))
+        .await;
+    let second = objects
+        .create_if_absent(&key, Bytes::from_static(b"probe"))
+        .await;
+    let _ = objects.delete(&key).await;
+    match (first, second) {
+        (Ok(true), Ok(false)) => Ok(()),
+        (Ok(_), Ok(_)) => Err(Error::Storage(
+            "[global.job_queue] needs atomic create-if-absent so workers serialize \
+             claims across processes, but the metadata store's backend did not \
+             enforce it; use a backend with conditional-write support"
                 .to_string(),
-        ));
+        )),
+        (Err(e), _) | (_, Err(e)) => Err(Error::Storage(format!(
+            "[global.job_queue] claim-support probe failed: {e}"
+        ))),
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -507,7 +512,7 @@ pub fn serialize_dead_letter(envelope: &JobEnvelope, last_error: &str) -> Result
 /// and commit, bounded by the execution-lock TTL.
 #[async_trait]
 pub trait JobHandler: Send + Sync {
-    async fn execute(&self, envelope: &JobEnvelope) -> Result<Transaction, Error>;
+    async fn execute(&self, envelope: &JobEnvelope) -> Result<(), Error>;
 }
 
 // ---------------------------------------------------------------------------
@@ -530,22 +535,82 @@ pub const MAX_REPORTED_PENDING: u64 = 10_000;
 // Consumer types
 // ---------------------------------------------------------------------------
 
-/// Lock key used to serialise per-`lock_key` job execution. Prefixed so it
-/// shares a namespace with the rest of the job-store's locked operations
-/// (dedup index, etc.) without colliding.
-fn job_lock_key(lock_key: &LockKey) -> String {
-    format!("job:{lock_key}")
+/// Lease on a claim key. The holder's refresh task re-stamps it at a third
+/// of this; a claimant finding a lapsed lease takes the key over.
+const CLAIM_TTL_SECS: i64 = 60;
+
+/// The stored body of a claim key.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ClaimRecord {
+    instance: String,
+    expires_at: DateTime<Utc>,
 }
 
-/// A job claimed by a worker, ready to execute. `session` holds the
-/// distributed lock on the job's `lock_key`; its heartbeat keeps the lock
-/// alive, and the lock is released on `complete`/`fail`. `storage_key`
-/// identifies the pending file the envelope was loaded from so
-/// `complete`/`fail` can delete or rewrite that file.
+/// A held claim: the key, the instance token proving ownership, a flag the
+/// refresh task raises when the claim is lost (lapsed or taken over), and
+/// the refresh task itself, aborted on drop.
+pub struct JobClaim {
+    key: String,
+    instance: String,
+    lost: CancellationToken,
+    refresher: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl JobClaim {
+    /// Whether the lease lapsed or another worker took the key over; the
+    /// holder must stop touching queue state it no longer owns.
+    fn lost(&self) -> bool {
+        self.lost.is_cancelled()
+    }
+
+    /// Cancelled the moment the claim is lost, so the runner can abort a
+    /// handler mid-execution.
+    pub fn cancellation(&self) -> CancellationToken {
+        self.lost.clone()
+    }
+}
+
+impl Drop for JobClaim {
+    fn drop(&mut self) {
+        if let Some(refresher) = self.refresher.take() {
+            refresher.abort();
+        }
+    }
+}
+
+/// A job claimed by a worker, ready to execute. `claim` leases the job's
+/// `lock_key`; its refresh task keeps the lease alive, and the claim is
+/// released on `complete`/`fail`. `storage_key` identifies the pending file
+/// the envelope was loaded from so `complete`/`fail` can delete or rewrite
+/// that file.
 pub struct ClaimedJob {
     pub envelope: JobEnvelope,
     pub storage_key: String,
-    pub session: LockSession,
+    claim: JobClaim,
+}
+
+impl ClaimedJob {
+    /// Cancelled the moment the claim's lease is lost.
+    pub fn lock_lost(&self) -> CancellationToken {
+        self.claim.cancellation()
+    }
+
+    /// Test-only: a claimed job over a hand-built claim, so runner tests can
+    /// drive the lost-claim branch without a backend.
+    #[cfg(test)]
+    pub fn for_test(envelope: JobEnvelope, storage_key: String, lost: CancellationToken) -> Self {
+        let claim = JobClaim {
+            key: job_claim_path(&envelope.lock_key),
+            instance: String::new(),
+            lost,
+            refresher: None,
+        };
+        Self {
+            envelope,
+            storage_key,
+            claim,
+        }
+    }
 }
 
 pub enum FailOutcome {
@@ -596,18 +661,6 @@ impl ClaimOutcome {
 // ---------------------------------------------------------------------------
 // Error conversion helper
 // ---------------------------------------------------------------------------
-
-fn tx_error_to_job(err: TxError) -> Error {
-    match err {
-        TxError::Storage(e) => Error::from(e),
-        TxError::Lock(e) => Error::from(e),
-        TxError::Serde(e) => Error::Storage(format!("serialisation error: {e}")),
-        TxError::Conflict | TxError::Precondition | TxError::PartialCommit => {
-            Error::Storage("transaction conflict".to_string())
-        }
-        TxError::Build(msg) => Error::Storage(format!("engine build error: {msg}")),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // JobStore: unified producer + consumer + storage
@@ -857,58 +910,24 @@ impl JobStore {
         match self.store.object_store().head(&pending_key).await {
             Ok(_) => Ok(true),
             Err(StorageError::NotFound) => {
-                // Orphan: pending file vanished but the index lingers. Submit a
-                // one-mutation engine transaction whose Read fingerprint validates
-                // the index hasn't been refreshed by a concurrent enqueue between
-                // our GET and the apply. If it has, the engine returns Conflict
-                // and we don't delete the fresh index. Passing the index's own
-                // `storage_key` as the target makes the conditional delete fire
-                // for this orphan while reusing the shared fingerprint guard.
-                let mut tx = Transaction::builder().build();
-                if let Some((read, delete)) = Self::conditional_index_delete(
-                    index_path,
-                    &data,
-                    &index.storage_key,
-                    &index.storage_key,
-                ) {
-                    tx.reads.push(read);
-                    tx.mutations.push(delete);
-                }
-                match self.store.execute(tx).await {
-                    Ok(()) | Err(TxError::Conflict | TxError::Precondition) => Ok(false),
+                // Orphan: pending file vanished but the index lingers. Remove
+                // it so the caller's enqueue does not collide on the atomic
+                // create and drop a distinct job as a false dedup hit. A
+                // concurrent enqueue refreshing the index in the window loses
+                // its entry, which only costs a missed dedup later.
+                match self.store.object_store().delete(&index_path).await {
+                    Ok(()) => Ok(false),
                     Err(e) => {
-                        // Surface the transient failure instead of swallowing it
-                        // as `false`: the un-retired index would otherwise make
-                        // the caller's enqueue collide on `PutIfAbsent` and drop
-                        // a distinct job as a false dedup hit.
                         warn!(
                             lock_key = %lock_key,
                             error = %e,
-                            "Failed to remove orphan lock-key index via engine",
+                            "Failed to remove orphan lock-key index",
                         );
-                        Err(tx_error_to_job(e))
+                        Err(Error::from(e))
                     }
                 }
             }
             Err(e) => Err(Error::from(e)),
-        }
-    }
-
-    /// Return the raw bytes of the per-`lock_key` dedup index alongside the
-    /// parsed `storage_key` it contains, or `None` when the index is absent.
-    pub async fn get_lock_key_index_raw(
-        &self,
-        queue: Queue,
-        lock_key: &LockKey,
-    ) -> Result<Option<(String, Vec<u8>)>, Error> {
-        let index_path = job_lock_key_index_path(queue.as_str(), lock_key);
-        match self.get_raw(&index_path).await {
-            Ok(data) => {
-                let index = parse_lock_key_index(&data)?;
-                Ok(Some((index.storage_key, data)))
-            }
-            Err(Error::NotFound) => Ok(None),
-            Err(e) => Err(e),
         }
     }
 
@@ -918,67 +937,6 @@ impl JobStore {
             .get(key)
             .await
             .map_err(Error::from)
-    }
-
-    /// Build the read dependency and conditional `Delete` that retire a
-    /// per-`lock_key` dedup index, but only when the index still points at
-    /// `target_storage_key`.
-    ///
-    /// `index_storage_key` / `index_body` are the parsed `storage_key` and the
-    /// raw bytes of the current index (as returned by
-    /// [`Self::get_lock_key_index_raw`]). When the index points elsewhere the
-    /// returned pair is empty and the caller leaves the index untouched.
-    ///
-    /// The `Read` carries a fingerprint of `index_body`, so an index refreshed
-    /// by a concurrent enqueue between the read and the apply turns the delete
-    /// into a no-op conflict rather than clobbering the fresh index. Four
-    /// call sites fold this into their own transactions: the orphan self-heal
-    /// in `find_pending_with_lock_key`, `retire_claimed_index`, `complete`, and
-    /// `fail_dead_letter`.
-    fn conditional_index_delete(
-        index_path: String,
-        index_body: &[u8],
-        index_storage_key: &str,
-        target_storage_key: &str,
-    ) -> Option<(Read, Mutation)> {
-        if index_storage_key != target_storage_key {
-            return None;
-        }
-        let read = Read::present(index_path.clone(), index_body);
-        let delete = Mutation::Delete {
-            key: index_path,
-            expected: None,
-        };
-        Some((read, delete))
-    }
-
-    /// Fold a conditional dedup-index delete into `tx`: read the current index
-    /// for `lock_key`, and when it still points at `target_storage_key`, add its
-    /// fingerprint-guarded delete so a concurrent enqueue that refreshed the
-    /// index becomes a no-op conflict instead of a clobber. A missing index or a
-    /// mismatched target leaves `tx` untouched.
-    async fn fold_index_cleanup(
-        &self,
-        tx: &mut Transaction,
-        queue: Queue,
-        lock_key: &LockKey,
-        target_storage_key: &str,
-    ) -> Result<(), Error> {
-        let Some((index_storage_key, body)) = self.get_lock_key_index_raw(queue, lock_key).await?
-        else {
-            return Ok(());
-        };
-        let index_path = job_lock_key_index_path(queue.as_str(), lock_key);
-        if let Some((read, delete)) = Self::conditional_index_delete(
-            index_path,
-            &body,
-            &index_storage_key,
-            target_storage_key,
-        ) {
-            tx.reads.push(read);
-            tx.mutations.push(delete);
-        }
-        Ok(())
     }
 
     /// Retire the dedup index of a just-claimed job so a same-`lock_key`
@@ -1000,23 +958,140 @@ impl JobStore {
         lock_key: &LockKey,
         storage_key: &str,
     ) -> bool {
-        let mut tx = Transaction::builder().build();
-        if let Err(e) = self
-            .fold_index_cleanup(&mut tx, queue, lock_key, storage_key)
+        match self
+            .cleanup_index_if_ours(queue, lock_key, storage_key)
             .await
         {
-            warn!(%lock_key, error = %e, "Failed to read dedup index at claim");
-            return false;
-        }
-        if tx.mutations.is_empty() {
-            return true;
-        }
-        match self.store.execute(tx).await {
-            Ok(()) | Err(TxError::Conflict | TxError::Precondition) => true,
+            Ok(()) => true,
             Err(e) => {
-                warn!(%lock_key, error = %tx_error_to_job(e), "Failed to retire dedup index at claim");
+                warn!(%lock_key, error = %e, "Failed to retire dedup index at claim");
                 false
             }
+        }
+    }
+
+    /// Delete the dedup index when it still points at `storage_key` (or does
+    /// not parse). Read-then-delete: a producer re-pointing the index in the
+    /// window loses its entry, which only costs a missed dedup, never a job,
+    /// because pending files are claimed off the scan, not the index.
+    async fn cleanup_index_if_ours(
+        &self,
+        queue: Queue,
+        lock_key: &LockKey,
+        storage_key: &str,
+    ) -> Result<(), Error> {
+        let index_path = job_lock_key_index_path(queue.as_str(), lock_key);
+        let ours = match self.get_raw(&index_path).await {
+            Ok(body) => {
+                parse_lock_key_index(&body).map_or(true, |index| index.storage_key == storage_key)
+            }
+            Err(Error::NotFound) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        if ours {
+            self.store.object_store().delete(&index_path).await?;
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Claims: put-if-absent keys plus leases
+    // -----------------------------------------------------------------------
+
+    /// Try to claim `lock_key`: one atomic create of the claim key. A held
+    /// unexpired claim yields `None`; a lapsed one is deleted and re-created
+    /// (a takeover race leaves exactly one creator winning, and a stolen
+    /// claim is caught by the loser's refresh before it touches queue state).
+    async fn try_claim(&self, lock_key: &LockKey) -> Result<Option<JobClaim>, Error> {
+        let key = job_claim_path(lock_key);
+        let instance = Uuid::new_v4().to_string();
+        if !self.put_claim_if_absent(&key, &instance).await? {
+            if !self.claim_is_stale(&key).await? {
+                return Ok(None);
+            }
+            self.store.object_store().delete(&key).await?;
+            if !self.put_claim_if_absent(&key, &instance).await? {
+                return Ok(None);
+            }
+        }
+        let lost = CancellationToken::new();
+        let refresher = tokio::spawn(refresh_claim_loop(
+            self.store.clone(),
+            key.clone(),
+            instance.clone(),
+            lost.clone(),
+        ));
+        Ok(Some(JobClaim {
+            key,
+            instance,
+            lost,
+            refresher: Some(refresher),
+        }))
+    }
+
+    async fn put_claim_if_absent(&self, key: &str, instance: &str) -> Result<bool, Error> {
+        let record = ClaimRecord {
+            instance: instance.to_string(),
+            expires_at: Utc::now() + ChronoDuration::seconds(CLAIM_TTL_SECS),
+        };
+        let body = Bytes::from(
+            serde_json::to_vec(&record)
+                .map_err(|e| Error::Storage(format!("claim serialization failed: {e}")))?,
+        );
+        self.store
+            .object_store()
+            .create_if_absent(key, body)
+            .await
+            .map_err(Error::from)
+    }
+
+    /// Whether the claim at `key` is safe to take over: its lease lapsed, or
+    /// it is unreadable and old enough that no live refresher can own it.
+    async fn claim_is_stale(&self, key: &str) -> Result<bool, Error> {
+        match self.store.object_store().get(key).await {
+            Ok(raw) => {
+                if let Ok(record) = serde_json::from_slice::<ClaimRecord>(&raw) {
+                    return Ok(record.expires_at < Utc::now());
+                }
+            }
+            Err(StorageError::NotFound) => return Ok(true),
+            Err(e) => return Err(Error::from(e)),
+        }
+        // Unreadable: age it on its mtime so a corrupt claim cannot wedge
+        // the lock key forever, with double the lease as the safety margin.
+        let meta = match self.store.object_store().head(key).await {
+            Ok(meta) => meta,
+            Err(StorageError::NotFound) => return Ok(true),
+            Err(e) => return Err(Error::from(e)),
+        };
+        Ok(meta.last_modified.is_some_and(|modified| {
+            Utc::now().signed_duration_since(modified).num_seconds() > CLAIM_TTL_SECS * 2
+        }))
+    }
+
+    /// Release a claim the holder still owns; a lost or taken-over claim is
+    /// left for its new owner.
+    async fn release_claim(&self, mut claim: JobClaim) {
+        if let Some(refresher) = claim.refresher.take() {
+            refresher.abort();
+        }
+        if claim.lost() {
+            return;
+        }
+        match self.store.object_store().get(&claim.key).await {
+            Ok(raw) => {
+                if serde_json::from_slice::<ClaimRecord>(&raw)
+                    .is_ok_and(|record| record.instance == claim.instance)
+                    && let Err(e) = self.store.object_store().delete(&claim.key).await
+                {
+                    warn!("job queue: failed to release claim '{}': {e}", claim.key);
+                }
+            }
+            Err(StorageError::NotFound) => {}
+            Err(e) => warn!(
+                "job queue: failed to read claim '{}' at release: {e}",
+                claim.key
+            ),
         }
     }
 
@@ -1052,7 +1127,10 @@ impl JobStore {
             return Ok(());
         }
 
-        // Slow path: build the transaction.
+        // Slow path: index first, then pending, both atomic creates. Losing
+        // the index race means another replica enqueued this `lock_key`: a
+        // dedup hit, not an error. A crash between the two leaves an orphan
+        // index that `find_pending_with_lock_key` self-heals.
         let storage_key = make_storage_key(Utc::now(), &envelope.id);
         let pending_path = job_pending_path(envelope.queue.as_str(), &storage_key);
         let index_path = job_lock_key_index_path(envelope.queue.as_str(), &envelope.lock_key);
@@ -1063,39 +1141,20 @@ impl JobStore {
         );
         let index_body = Bytes::from(serialize_lock_key_index(&storage_key)?);
 
-        // Mutation order matters: index first, then pending. The CAS executor
-        // aborts cleanly if the first mutation's PutIfAbsent fails, meaning
-        // another replica already claimed this lock_key.
-        let tx = Transaction::builder()
-            .mutation(Mutation::PutIfAbsent {
-                key: index_path,
-                body: index_body,
-            })
-            .mutation(Mutation::PutIfAbsent {
-                key: pending_path,
-                body: pending_body,
-            })
-            .build();
-
-        // A `Conflict` or `Precondition` here means another replica won the
-        // race: treat as a dedup hit, not an error.
-        match self.store.execute(tx).await {
-            Ok(()) => {
-                metrics_provider()
-                    .job_queue_enqueued_total
-                    .with_label_values(&[envelope.queue.as_str(), "miss"])
-                    .inc();
-                Ok(())
-            }
-            Err(TxError::Conflict | TxError::Precondition) => {
-                metrics_provider()
-                    .job_queue_enqueued_total
-                    .with_label_values(&[envelope.queue.as_str(), "hit"])
-                    .inc();
-                Ok(())
-            }
-            Err(e) => Err(tx_error_to_job(e)),
-        }
+        let objects = self.store.object_store();
+        let outcome = if objects.create_if_absent(&index_path, index_body).await? {
+            objects
+                .create_if_absent(&pending_path, pending_body)
+                .await?;
+            "miss"
+        } else {
+            "hit"
+        };
+        metrics_provider()
+            .job_queue_enqueued_total
+            .with_label_values(&[envelope.queue.as_str(), outcome])
+            .inc();
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1175,12 +1234,7 @@ impl JobStore {
                 }
                 Err(e) => return Err(e),
             };
-            if let Some(session) = self
-                .store
-                .try_acquire(&[job_lock_key(&envelope.lock_key)])
-                .await
-                .map_err(tx_error_to_job)?
-            {
+            if let Some(claim) = self.try_claim(&envelope.lock_key).await? {
                 // Re-read under the execution lock: another worker may have
                 // completed this job (deleting the pending file) between our
                 // first read and the lock acquisition. Without this the stale
@@ -1188,16 +1242,16 @@ impl JobStore {
                 let envelope = match self.read_pending(queue, &storage_key).await {
                     Ok(envelope) => envelope,
                     Err(Error::NotFound) => {
-                        session.release().await;
+                        self.release_claim(claim).await;
                         continue;
                     }
                     Err(Error::Corrupt(e)) => {
                         self.discard_poison_pending(queue, &storage_key, &e).await;
-                        session.release().await;
+                        self.release_claim(claim).await;
                         continue;
                     }
                     Err(e) => {
-                        session.release().await;
+                        self.release_claim(claim).await;
                         return Err(e);
                     }
                 };
@@ -1209,7 +1263,7 @@ impl JobStore {
                     .retire_claimed_index(queue, &envelope.lock_key, &storage_key)
                     .await
                 {
-                    session.release().await;
+                    self.release_claim(claim).await;
                     continue;
                 }
                 debug!(
@@ -1221,7 +1275,7 @@ impl JobStore {
                     claimed: Some(ClaimedJob {
                         envelope,
                         storage_key,
-                        session,
+                        claim,
                     }),
                     next_ready: None,
                 });
@@ -1233,100 +1287,45 @@ impl JobStore {
         })
     }
 
-    /// Mark a claimed job as complete and release its execution lock.
-    ///
-    /// `handler_tx` carries the handler's work-product mutations (empty for
-    /// no-op handlers). This method appends the pending-file delete and a
-    /// conditional dedup-index delete, submits the merged transaction, and
-    /// releases the execution lock once the commit settles. The work commit
-    /// and the queue cleanup land atomically; the lock release follows
-    /// immediately after Reap so the next worker can claim this `lock_key`
-    /// without waiting on TTL.
-    pub async fn complete(
-        &self,
-        claimed: ClaimedJob,
-        handler_tx: Transaction,
-    ) -> Result<CompleteOutcome, Error> {
+    /// Mark a claimed job as complete: delete its pending file, retire the
+    /// dedup index when it still points at it, and release the claim. The
+    /// handler's effects already landed as their own idempotent writes. A
+    /// lost claim skips the cleanup entirely: the key's new holder owns that
+    /// state now, and a redundant re-run is what the handler contract covers.
+    pub async fn complete(&self, claimed: ClaimedJob) -> Result<CompleteOutcome, Error> {
         let ClaimedJob {
             envelope,
             storage_key,
-            session,
+            claim,
         } = claimed;
-        let pending_path = job_pending_path(envelope.queue.as_str(), &storage_key);
-        let index_path = job_lock_key_index_path(envelope.queue.as_str(), &envelope.lock_key);
-
-        let mut tx = handler_tx;
-        tx.mutations.push(Mutation::Delete {
-            key: pending_path,
-            expected: None,
-        });
-
-        // The execution lock keeps other workers off this `lock_key`, but not
-        // producers: `enqueue` writes the index without it. The read
-        // fingerprint is what makes the cleanup safe, not decoration, and an
-        // index pointing elsewhere is left alone. A corrupt index has no
-        // storage key to match, so it is deleted on the strength of its own
-        // bytes: a producer that replaces it in the window conflicts instead of
-        // losing its entry.
-        match self.get_raw(&index_path).await {
-            Ok(body) => {
-                let cleanup = match parse_lock_key_index(&body) {
-                    Ok(index) => Self::conditional_index_delete(
-                        index_path,
-                        &body,
-                        &index.storage_key,
-                        &storage_key,
-                    ),
-                    Err(_) => Some((
-                        Read::present(index_path.clone(), &body),
-                        Mutation::Delete {
-                            key: index_path,
-                            expected: None,
-                        },
-                    )),
-                };
-                if let Some((read, delete)) = cleanup {
-                    tx.reads.push(read);
-                    tx.mutations.push(delete);
-                }
-            }
-            Err(Error::NotFound) => {}
-            Err(e) => {
-                // We could not read the dedup index to build the cleanup. Fail
-                // the job over rather than returning an error that would leave
-                // the pending file re-claimable in a hot loop; we still hold the
-                // execution lock, so no other worker can claim this `lock_key`
-                // while `fail` runs.
-                let claimed = ClaimedJob {
-                    envelope,
-                    storage_key,
-                    session,
-                };
-                return self
-                    .fail(claimed, &format!("complete: index read failed: {e}"))
-                    .await
-                    .map(CompleteOutcome::FailedOver);
-            }
+        if claim.lost() {
+            warn!(
+                lock_key = envelope.lock_key.as_str(),
+                "job queue: claim lapsed during execution; leaving cleanup to the new holder"
+            );
+            return Ok(CompleteOutcome::Completed);
         }
-
-        match self.store.execute(tx).await {
+        let pending_path = job_pending_path(envelope.queue.as_str(), &storage_key);
+        let cleanup = async {
+            self.store.object_store().delete(&pending_path).await?;
+            self.cleanup_index_if_ours(envelope.queue, &envelope.lock_key, &storage_key)
+                .await
+        };
+        match cleanup.await {
             Ok(()) => {
-                session.release().await;
+                self.release_claim(claim).await;
                 Ok(CompleteOutcome::Completed)
             }
             Err(e) => {
-                // The work commit + queue cleanup did not land (e.g. a transient
-                // backend error, or a mutation referencing storage the executor
-                // cannot resolve). Treat it as a failed attempt and fail the job
-                // over (backoff then dead-letter) instead of leaving it to be
-                // re-claimed immediately, forever. We still hold the lock.
-                let err = tx_error_to_job(e);
+                // The cleanup did not land: fail the job over (backoff, then
+                // dead-letter) instead of leaving the pending file
+                // re-claimable in a hot loop. We still hold the claim.
                 let claimed = ClaimedJob {
                     envelope,
                     storage_key,
-                    session,
+                    claim,
                 };
-                self.fail(claimed, &format!("complete: commit failed: {err}"))
+                self.fail(claimed, &format!("complete: cleanup failed: {e}"))
                     .await
                     .map(CompleteOutcome::FailedOver)
             }
@@ -1344,7 +1343,7 @@ impl JobStore {
         let ClaimedJob {
             envelope,
             storage_key,
-            session,
+            claim,
         } = claimed;
         let new_attempts = envelope.attempts.saturating_add(1);
 
@@ -1352,7 +1351,7 @@ impl JobStore {
         // that somehow reached here without going through `enqueue`.
         if new_attempts >= envelope.max_attempts.unwrap_or(self.max_attempts) {
             return self
-                .fail_dead_letter(session, envelope, storage_key, err)
+                .fail_dead_letter(claim, envelope, storage_key, err)
                 .await;
         }
 
@@ -1363,8 +1362,7 @@ impl JobStore {
             ..envelope
         };
 
-        self.fail_retry(session, updated, storage_key, next_at)
-            .await
+        self.fail_retry(claim, updated, storage_key, next_at).await
     }
 
     /// Record a non-retryable failure: the job is dead-lettered immediately,
@@ -1378,18 +1376,18 @@ impl JobStore {
         let ClaimedJob {
             envelope,
             storage_key,
-            session,
+            claim,
         } = claimed;
-        self.fail_dead_letter(session, envelope, storage_key, err)
+        self.fail_dead_letter(claim, envelope, storage_key, err)
             .await
     }
 
-    /// Single transaction replaces the pending file and updates the index, then
-    /// deletes the old pending. The execution lock is held across the call and
-    /// released explicitly afterwards.
+    /// Rewrite the pending file under a new storage key encoding the bumped
+    /// `not_before`, then delete the old one; a crash between the two re-runs
+    /// the old envelope, which the handler-side idempotency contract covers.
     async fn fail_retry(
         &self,
-        session: LockSession,
+        claim: JobClaim,
         updated: JobEnvelope,
         old_storage_key: String,
         next_at: DateTime<Utc>,
@@ -1405,60 +1403,37 @@ impl JobStore {
         );
         let index_body = Bytes::from(serialize_lock_key_index(&new_storage_key)?);
 
-        let mut tx = Transaction::builder()
-            .mutation(Mutation::Put {
-                key: new_pending_path,
-                body: pending_body,
-                expected: None,
-            })
-            .mutation(Mutation::Delete {
-                key: old_pending_path,
-                expected: None,
-            })
-            .build();
-
-        // The execution lock does not exclude producers: `enqueue` writes the
-        // index without ever taking it. Point the index at the rescheduled job
-        // only while the claim's retire has left it absent, under a read that
-        // fingerprints that absence. A producer that indexed a fresh job in the
-        // meantime keeps its entry, and this retry stays unindexed until an
-        // enqueue self-heals it: a missed dedup hit costs a duplicate job,
-        // clobbering the entry would strand that producer's pending file.
-        match self
-            .get_lock_key_index_raw(updated.queue, &updated.lock_key)
-            .await
-        {
-            Ok(None) => {
-                tx.reads.push(Read::absent(index_path.clone()));
-                tx.mutations.push(Mutation::Put {
-                    key: index_path,
-                    body: index_body,
-                    expected: None,
-                });
-            }
-            Ok(Some(_)) => {}
-            Err(e) => {
-                warn!(
-                    lock_key = updated.lock_key.as_str(),
-                    error = %e,
-                    "Failed to read dedup index while rescheduling; leaving it untouched"
-                );
-            }
-        }
-
-        let result = self.store.execute(tx).await;
-        session.release().await;
-        result.map_err(tx_error_to_job)?;
+        let rewrite = async {
+            self.store
+                .object_store()
+                .put(&new_pending_path, pending_body)
+                .await?;
+            self.store.object_store().delete(&old_pending_path).await?;
+            // Point the index at the rescheduled job only while it is
+            // absent: a producer that indexed a fresh job in the meantime
+            // keeps its entry, and this retry stays unindexed until an
+            // enqueue self-heals it. A missed dedup hit costs a duplicate
+            // job; clobbering the entry would strand that producer's file.
+            let _ = self
+                .store
+                .object_store()
+                .create_if_absent(&index_path, index_body)
+                .await?;
+            Ok::<_, StorageError>(())
+        };
+        let result = rewrite.await;
+        self.release_claim(claim).await;
+        result?;
 
         Ok(FailOutcome::Retried { next_at })
     }
 
-    /// Single transaction writes the failed record and removes the pending and
-    /// (conditionally) the index. The execution lock is held across the call
-    /// and released explicitly afterwards.
+    /// Write the failed record, remove the pending file, and retire the
+    /// index when it still points at this job. Record first, so a crash
+    /// duplicates into the dead letter rather than losing the failure.
     async fn fail_dead_letter(
         &self,
-        session: LockSession,
+        claim: JobClaim,
         envelope: JobEnvelope,
         storage_key: String,
         err: &str,
@@ -1468,31 +1443,18 @@ impl JobStore {
 
         let failed_body = Bytes::from(serialize_dead_letter(&envelope, err)?);
 
-        let mut tx = Transaction::builder()
-            .mutation(Mutation::Put {
-                key: failed_path,
-                body: failed_body,
-                expected: None,
-            })
-            .mutation(Mutation::Delete {
-                key: pending_path,
-                expected: None,
-            })
-            .build();
-
-        // Conditionally include the index delete: only when the index still
-        // points at our storage_key, guarded by its read fingerprint.
-        if let Err(e) = self
-            .fold_index_cleanup(&mut tx, envelope.queue, &envelope.lock_key, &storage_key)
-            .await
-        {
-            session.release().await;
-            return Err(e);
-        }
-
-        let result = self.store.execute(tx).await;
-        session.release().await;
-        result.map_err(tx_error_to_job)?;
+        let bury = async {
+            self.store
+                .object_store()
+                .put(&failed_path, failed_body)
+                .await?;
+            self.store.object_store().delete(&pending_path).await?;
+            self.cleanup_index_if_ours(envelope.queue, &envelope.lock_key, &storage_key)
+                .await
+        };
+        let result = bury.await;
+        self.release_claim(claim).await;
+        result?;
 
         Ok(FailOutcome::MovedToDeadLetter)
     }
@@ -1517,7 +1479,7 @@ impl JobStore {
         // HEAD first for the fencing ETag (`None` when the backend does not
         // surface ETags, giving an unconditional delete, still safe: the new pending
         // key is fresh so a double-retry collides at `PutIfAbsent`).
-        let expected = self.store.object_store().head(&failed_path).await?.etag;
+        let _expected = self.store.object_store().head(&failed_path).await?.etag;
 
         let mut envelope = self.read_failed(queue, storage_key).await?.envelope;
         envelope.attempts = 0;
@@ -1529,25 +1491,16 @@ impl JobStore {
                 .map_err(|e| Error::Storage(format!("envelope serialization failed: {e}")))?,
         );
 
-        let tx = Transaction::builder()
-            .mutation(Mutation::PutIfAbsent {
-                key: pending_path,
-                body: pending_body,
-            })
-            .mutation(Mutation::Delete {
-                key: failed_path,
-                expected,
-            })
-            .build();
-
-        // A concurrent retry that won the race surfaces as `Conflict` (its
-        // pending key collided) or `Precondition` (the failed record it deleted
-        // is gone); either way the job is back in flight, so both join the
-        // success arm.
-        match self.store.execute(tx).await {
-            Ok(()) | Err(TxError::Conflict | TxError::Precondition) => Ok(()),
-            Err(e) => Err(tx_error_to_job(e)),
-        }
+        // Pending first, so a crash duplicates into a re-runnable job rather
+        // than losing the record; a concurrent retry collides on the atomic
+        // create and both observe the job back in flight.
+        let _ = self
+            .store
+            .object_store()
+            .create_if_absent(&pending_path, pending_body)
+            .await?;
+        self.store.object_store().delete(&failed_path).await?;
+        Ok(())
     }
 
     /// Delete a job by `state`/`storage_key`. Failed records are removed with a
@@ -1569,14 +1522,13 @@ impl JobStore {
         match state {
             JobState::Failed => {
                 let failed_path = job_failed_path(queue.as_str(), storage_key);
-                let expected = self.store.object_store().head(&failed_path).await?.etag;
-                let tx = Transaction::builder()
-                    .mutation(Mutation::Delete {
-                        key: failed_path,
-                        expected,
-                    })
-                    .build();
-                self.store.execute(tx).await.map_err(tx_error_to_job)
+                // Surface a stale key as `NotFound` before the idempotent delete.
+                self.store.object_store().head(&failed_path).await?;
+                self.store
+                    .object_store()
+                    .delete(&failed_path)
+                    .await
+                    .map_err(Error::from)
             }
             JobState::Pending => self.delete_pending(queue, storage_key).await,
         }
@@ -1597,24 +1549,50 @@ impl JobStore {
             }
             Err(e) => return Err(e),
         };
-        let expected = self.store.object_store().head(&pending_path).await?.etag;
-
-        let mut tx = Transaction::builder()
-            .mutation(Mutation::Delete {
-                key: pending_path,
-                expected,
-            })
-            .build();
-
-        // Fold a conditional index delete: only when the index still points at
-        // this storage key. The read fingerprint turns a concurrent index
-        // refresh into a no-op conflict rather than clobbering a fresh index.
+        // Surface a stale key as `NotFound` before the idempotent delete.
+        self.store.object_store().head(&pending_path).await?;
+        self.store.object_store().delete(&pending_path).await?;
         if let Some(lock_key) = lock_key {
-            self.fold_index_cleanup(&mut tx, queue, &lock_key, storage_key)
+            self.cleanup_index_if_ours(queue, &lock_key, storage_key)
                 .await?;
         }
+        Ok(())
+    }
+}
 
-        self.store.execute(tx).await.map_err(tx_error_to_job)
+/// The claim holder's lease refresher: re-stamp the record at a third of the
+/// lease, stop and raise `lost` the moment the key no longer carries this
+/// instance (taken over after a lapse) or cannot be re-stamped in time.
+async fn refresh_claim_loop(
+    store: Arc<Store>,
+    key: String,
+    instance: String,
+    lost: CancellationToken,
+) {
+    let period = Duration::from_secs(u64::try_from(CLAIM_TTL_SECS / 3).unwrap_or(20).max(1));
+    loop {
+        sleep(period).await;
+        let owned = match store.object_store().get(&key).await {
+            Ok(raw) => serde_json::from_slice::<ClaimRecord>(&raw)
+                .is_ok_and(|record| record.instance == instance && record.expires_at >= Utc::now()),
+            // Unreadable or gone: assume lost, the safe side for a lease.
+            Err(_) => false,
+        };
+        if !owned {
+            lost.cancel();
+            return;
+        }
+        let record = ClaimRecord {
+            instance: instance.clone(),
+            expires_at: Utc::now() + ChronoDuration::seconds(CLAIM_TTL_SECS),
+        };
+        let Ok(body) = serde_json::to_vec(&record) else {
+            lost.cancel();
+            return;
+        };
+        // A missed stamp is survivable inside the lease; the next tick
+        // retries, and a lapse is what `lost` reports.
+        let _ = store.object_store().put(&key, Bytes::from(body)).await;
     }
 }
 

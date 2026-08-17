@@ -120,7 +120,7 @@ pub async fn build_registry(
     // conditional-write probe runs at most once per process.
     let pending = if let Some(jq_config) = &config.global.job_queue {
         let engine = metadata_store.store_arc();
-        job_store::ensure_shared_lock(&engine)?;
+        job_store::ensure_claim_support(&engine).await?;
         let job_store: Arc<JobStore> = Arc::new(JobStore::with_retry_policy(
             engine,
             "server",
