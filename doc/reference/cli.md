@@ -71,7 +71,8 @@ angos scrub [options]
 
 Scrub streams every object key in both stores (blob and metadata), categorizes it by shape, and validates it concurrently, in three ordered passes: links and job records first, then blob-index shards, then blob data. It always runs the full set of checks:
 
-- Repairs every link a manifest implies (config, layer, sub-manifest, digest revision), the `referenced_by` back-links, and missing blob-index grants.
+- Repairs the digest revision link a manifest implies and the blob-index entries naming it for every digest it references.
+- Migrates a per-layer, per-config or per-index-child link file left by an earlier angos into blob-index entries, then reclaims the file.
 - Removes tags whose target manifest blob is missing, revisions whose manifest blob is missing, orphan referrer entries, stale blob-index entries, and tag or namespace directories whose names violate the OCI grammar.
 - Deletes objects whose content is unreadable (a link, job record, or index shard that does not parse).
 - Reclaims blobs with no references (re-checked under the blob-data lock, so it is safe alongside a live server).

@@ -614,11 +614,19 @@ fn lww_superseded(snapshot: &LinksSnapshot<'_>, tx: &LinksTx<'_>) -> Option<Stri
 
 /// Empty no-op short-circuit predicate: no creates, no blob side effects, and
 /// every delete target already missing.
+///
+/// A tracked reference is never absent in this sense: it has a blob-index entry
+/// to drop whether or not a link object survives from before the layout change,
+/// so its delete always has work to do.
 fn is_empty_noop(ops: &[OpSnapshot<'_>], tx: &LinksTx<'_>) -> bool {
     let had_creates = ops.iter().any(|op| matches!(op, OpSnapshot::Create { .. }));
     let all_deletes_absent = ops.iter().all(|op| match op {
         OpSnapshot::Create { .. } => true,
-        OpSnapshot::Delete { metadata, .. } => metadata.is_none(),
+        OpSnapshot::Delete {
+            link,
+            metadata,
+            referrer,
+        } => metadata.is_none() && !(link.is_tracked() && referrer.is_some()),
     });
     !had_creates && !tx.has_blob_side_effects() && all_deletes_absent
 }
@@ -666,8 +674,7 @@ fn build_link_mutations(
     if acc.missing_reference.is_some() {
         return Ok(acc);
     }
-    let acc = build_delete_mutations(namespace, ops, acc)?;
-    Ok(acc)
+    Ok(build_delete_mutations(namespace, ops, acc))
 }
 
 /// The create half of mutation planning: append a link `Put` per `Create` op,
@@ -698,6 +705,13 @@ fn build_create_mutations(
             // Ownership gate: a newly-referenced digest must already hold a
             // shard entry. Strict rejects the push, Permissive drops the link
             // so the namespace gains no access it did not have.
+            //
+            // `old_target` is read from the link object, which a tracked
+            // reference no longer writes, so this now runs on a re-push too
+            // rather than being skipped by the object's presence. A re-push
+            // normally passes on the entry its first push left; one whose
+            // entries have since been reclaimed is refused, which is the gate
+            // meaning what it says: the namespace no longer holds the blob.
             if old_target.is_none()
                 && let Some(state) = reference_shards.get(*target)
                 && state.as_ref().is_none_or(|(_, links)| links.is_empty())
@@ -709,24 +723,17 @@ fn build_create_mutations(
                 continue;
             }
 
-            // Tracked link: merge referrer into existing or new metadata.
-            let mut metadata = link_cache.remove(*link).unwrap_or_else(|| {
-                LinkMetadata::from_digest_at(
-                    (*target).clone(),
-                    tx.created_at().unwrap_or_else(Utc::now),
-                )
-                .with_media_type((*media_type).clone())
-                .with_descriptor(descriptor.as_ref().map(|b| b.as_ref().clone()))
-            });
-
+            // Tracked reference: the entry is the referring manifest's revision
+            // link, since the shard's own path already names the blob. The
+            // shard then says which manifests still hold it, and the link
+            // object that carried `referenced_by` is not written. Inserting is
+            // idempotent, so a re-push needs no special case.
             if let Some(manifest_digest) = referrer {
-                metadata.add_referrer((*manifest_digest).clone());
+                acc.push_blob_op(
+                    target,
+                    BlobIndexOperation::Insert(LinkKind::Digest((*manifest_digest).clone())),
+                );
             }
-
-            if old_target.is_none() {
-                acc.push_blob_op(target, BlobIndexOperation::Insert((*link).clone()));
-            }
-            acc.put_link(namespace, link, metadata)?;
         } else {
             // Non-tracked link.
             let same_target = old_target.as_ref() == Some(*target);
@@ -759,43 +766,45 @@ fn build_create_mutations(
     Ok(acc)
 }
 
-/// The delete half of mutation planning: for each `Delete` op whose link
-/// exists, either prune one referrer (a tracked link with references left
-/// becomes a `Put`) or remove the link outright (a `Delete` plus the
-/// blob-index `Remove`).
+/// The delete half of mutation planning: drop this referrer's blob-index entry
+/// for a tracked reference, and remove an untracked link outright (a `Delete`
+/// plus the blob-index `Remove`).
+///
+/// A tracked link object left by an angos that wrote one is not touched here.
+/// `scrub` migrates its referrers into entries and reclaims it, so nothing on
+/// the write path has to maintain the old shape.
 fn build_delete_mutations(
     namespace: &Namespace,
     ops: &[OpSnapshot<'_>],
     mut acc: LinkMutations,
-) -> Result<LinkMutations, TxError> {
+) -> LinkMutations {
     for op in ops {
         let OpSnapshot::Delete {
             link,
-            metadata: Some(metadata),
+            metadata,
             referrer,
         } = op
         else {
             continue;
         };
 
-        if link.is_tracked() && referrer.is_some() {
-            let mut pruned = (**metadata).clone();
-            if let Some(manifest_digest) = referrer {
-                pruned.remove_referrer(manifest_digest);
+        if link.is_tracked()
+            && let Some(manifest_digest) = referrer
+        {
+            if let Some(target) = link.tracked_target() {
+                acc.push_blob_op(
+                    target,
+                    BlobIndexOperation::Remove(LinkKind::Digest(manifest_digest.clone())),
+                );
             }
+            continue;
+        }
 
-            // References remain: keep the link with the referrer pruned;
-            // otherwise remove it outright.
-            if pruned.has_references() {
-                acc.put_link(namespace, link, pruned)?;
-            } else {
-                acc.delete_link(namespace, link, &metadata.target);
-            }
-        } else {
+        if let Some(metadata) = metadata {
             acc.delete_link(namespace, link, &metadata.target);
         }
     }
-    Ok(acc)
+    acc
 }
 
 /// The ownership pre-read: one shard read per newly-referenced digest (a

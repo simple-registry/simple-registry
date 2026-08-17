@@ -714,9 +714,11 @@ mod tests {
             assert!(
                 registry
                     .metadata_store
-                    .read_link(namespace, &link)
+                    .read_blob_index_namespace(namespace, &digest)
                     .await
-                    .is_ok()
+                    .is_ok_and(|links| links
+                        .contains(&LinkKind::Digest(Digest::sha256_of_bytes(b"manifest")))),
+                "the shard must still name the referring manifest"
             );
         })
         .await;

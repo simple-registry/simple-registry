@@ -322,22 +322,6 @@ impl Executor {
         Ok(())
     }
 
-    async fn add_referrer(
-        &self,
-        namespace: Namespace,
-        link: LinkKind,
-        target: Digest,
-        referrer: Digest,
-    ) -> Result<(), Error> {
-        self.metadata_store
-            .update_links(
-                &namespace,
-                &[LinkOperation::create_with_referrer(link, target, referrer)],
-            )
-            .await?;
-        Ok(())
-    }
-
     /// Retention tag deletion through the registry's standard delete path,
     /// so it emits `tag.delete`/`manifest.delete` events and, per its
     /// internal actor, mirrors only to `prune = true` downstreams.
@@ -421,21 +405,6 @@ impl Executor {
                     subject,
                     referrer,
                 })],
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn remove_referrer(
-        &self,
-        namespace: Namespace,
-        link: LinkKind,
-        referrer: Digest,
-    ) -> Result<(), Error> {
-        self.metadata_store
-            .update_links(
-                &namespace,
-                &[LinkOperation::delete_with_referrer(link, referrer)],
             )
             .await?;
         Ok(())
@@ -581,12 +550,6 @@ impl ActionSink for Executor {
                 link,
                 target,
             } => self.recreate_link(namespace, link, target).await,
-            Action::AddReferrer {
-                namespace,
-                link,
-                target,
-                referrer,
-            } => self.add_referrer(namespace, link, target, referrer).await,
             Action::DeleteTag { namespace, tag } => self.delete_tag(namespace, tag).await,
             Action::DeleteInvalidTag { namespace, tag } => {
                 self.delete_invalid_tag(namespace, tag).await
@@ -610,11 +573,6 @@ impl ActionSink for Executor {
                 self.delete_orphan_referrer(namespace, subject, referrer)
                     .await
             }
-            Action::RemoveReferrer {
-                namespace,
-                link,
-                referrer,
-            } => self.remove_referrer(namespace, link, referrer).await,
             Action::AbortMultipartUpload { upload } => self.abort_multipart_upload(upload).await,
             Action::EnqueueReplicationPush {
                 downstream,
@@ -641,7 +599,10 @@ impl ActionSink for Executor {
             } => self.delete_orphan_job(queue, state, storage_key).await,
             Action::QuarantineKey { store, key } => self.quarantine_key(store, key).await,
             Action::DeleteCorruptObject { store, key }
-            | Action::DeleteUnknownKey { store, key } => self.delete_walked_key(store, key).await,
+            | Action::DeleteUnknownKey { store, key }
+            | Action::DeleteSupersededLink { store, key } => {
+                self.delete_walked_key(store, key).await
+            }
         }
     }
 }
@@ -810,17 +771,21 @@ mod tests {
             let metadata_store = test_case.metadata_store();
             let namespace = Namespace::new("test-repo/app").unwrap();
 
-            // A tracked layer link: file and shard entry both live, bytes present.
+            // A tracked reference re-pushed: the revision backing the shard
+            // entry is live again, and the layer's bytes are present.
             let digest = put_blob_direct(metadata_store.store(), b"layer re-pushed").await;
-            let parent = Digest::sha256_of_bytes(b"parent manifest");
+            let parent = put_blob_direct(metadata_store.store(), b"parent manifest").await;
             metadata_store
                 .update_links(
                     &namespace,
-                    &[LinkOperation::create_with_referrer(
-                        LinkKind::Layer(digest.clone()),
-                        digest.clone(),
-                        parent,
-                    )],
+                    &[
+                        LinkOperation::create(LinkKind::Digest(parent.clone()), parent.clone()),
+                        LinkOperation::create_with_referrer(
+                            LinkKind::Layer(digest.clone()),
+                            digest.clone(),
+                            parent.clone(),
+                        ),
+                    ],
                 )
                 .await
                 .unwrap();
@@ -830,7 +795,7 @@ mod tests {
                 .apply(Action::RemoveBlobIndexLink {
                     namespace: namespace.clone(),
                     blob: digest.clone(),
-                    link: LinkKind::Layer(digest.clone()),
+                    link: LinkKind::Digest(parent.clone()),
                 })
                 .await
                 .unwrap();
@@ -839,7 +804,7 @@ mod tests {
                 metadata_store
                     .read_blob_index_namespace(&namespace, &digest)
                     .await
-                    .is_ok_and(|links| links.contains(&LinkKind::Layer(digest.clone()))),
+                    .is_ok_and(|links| links.contains(&LinkKind::Digest(parent.clone()))),
                 "an entry backed by a live link file must survive the stale removal"
             );
         })
@@ -1152,69 +1117,6 @@ mod tests {
         })
         .await;
     }
-
-    #[tokio::test]
-    async fn executor_remove_referrer_cascades_to_link_delete_when_referenced_by_becomes_empty() {
-        for_each_backend(async |test_case| {
-            let blob_store = test_case.blob_store();
-            let metadata_store = test_case.metadata_store();
-
-            let namespace = Namespace::new("test-repo/remove-referrer-cascade").unwrap();
-
-            // Create a layer blob and the corresponding layer link with exactly
-            // one phantom referrer so referenced_by = {phantom}.
-            let layer_content = b"layer content for cascade test";
-            let layer_digest = put_blob_direct(metadata_store.store(), layer_content).await;
-            let phantom_digest = Digest::from_str(
-                "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-            )
-            .unwrap();
-
-            metadata_store
-                .update_links(
-                    &namespace,
-                    &[LinkOperation::create_with_referrer(
-                        LinkKind::Layer(layer_digest.clone()),
-                        layer_digest.clone(),
-                        phantom_digest.clone(),
-                    )],
-                )
-                .await
-                .unwrap();
-
-            // Confirm the layer link exists with the phantom referrer.
-            let before = metadata_store
-                .read_link(&namespace, &LinkKind::Layer(layer_digest.clone()))
-                .await
-                .unwrap();
-            assert!(
-                before.referenced_by.contains(&phantom_digest),
-                "phantom referrer must be present before the action"
-            );
-
-            let executor = Executor::new_for_test(blob_store.clone(), metadata_store.clone());
-
-            executor
-                .apply(Action::RemoveReferrer {
-                    namespace: namespace.clone(),
-                    link: LinkKind::Layer(layer_digest.clone()),
-                    referrer: phantom_digest.clone(),
-                })
-                .await
-                .unwrap();
-
-            // After removing the only referrer the link itself must be gone.
-            assert!(
-                metadata_store
-                    .read_link(&namespace, &LinkKind::Layer(layer_digest.clone()))
-                    .await
-                    .is_err(),
-                "layer link must be removed when referenced_by becomes empty"
-            );
-        })
-        .await;
-    }
-
     #[tokio::test]
     async fn enqueue_replication_delete_stamps_source_ts_for_receiver_lww() {
         for_each_backend(async |test_case| {

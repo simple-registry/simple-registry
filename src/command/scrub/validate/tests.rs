@@ -167,31 +167,29 @@ async fn healthy_registry_emits_zero_actions() {
 async fn scrub_recreates_missing_child_links() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/heal-links").unwrap();
-        let (_, config_digest, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let (manifest_digest, config_digest, layer_digest) =
+            push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // Break the config and layer links out-of-band.
-        for link in [
-            LinkKind::Config(config_digest.clone()),
-            LinkKind::Layer(layer_digest.clone()),
-        ] {
+        // Break the references the manifest holds out-of-band. A tracked
+        // reference is its blob-index entry, so that is what goes.
+        let entry = LinkKind::Digest(manifest_digest.clone());
+        for digest in [&config_digest, &layer_digest] {
             metadata_store
-                .store()
-                .object_store()
-                .delete(&path_builder::link_path(&link, namespace))
+                .update_blob_index(namespace, digest, BlobIndexOperation::Remove(entry.clone()))
                 .await
                 .unwrap();
         }
 
         scrub_apply(test_case).await;
 
-        for link in [
-            LinkKind::Config(config_digest.clone()),
-            LinkKind::Layer(layer_digest.clone()),
-        ] {
+        for digest in [&config_digest, &layer_digest] {
             assert!(
-                metadata_store.read_link(namespace, &link).await.is_ok(),
-                "link {link} must be recreated"
+                metadata_store
+                    .read_blob_index_namespace(namespace, digest)
+                    .await
+                    .is_ok_and(|links| links.contains(&entry)),
+                "the reference to {digest} must be re-derived from the manifest"
             );
         }
     })
@@ -321,10 +319,12 @@ async fn missing_referrer_backlink_is_added_and_stale_one_removed() {
         let (manifest_digest, config_digest, _) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // Rewrite the config link with a bogus referrer and without the real one.
+        // A link object as a pre-layout-change push wrote it, naming a revision
+        // that does not exist. Its referrer set is still pruned; the reference
+        // the manifest really holds is repaired in the shard instead.
         let stale_revision = Digest::sha256_of_bytes(b"no-such-revision");
         let mut broken = LinkMetadata::from_digest(config_digest.clone());
-        broken.add_referrer(stale_revision.clone());
+        broken.referenced_by.insert(stale_revision.clone());
         put_link_raw(
             metadata_store.store(),
             namespace,
@@ -335,17 +335,19 @@ async fn missing_referrer_backlink_is_added_and_stale_one_removed() {
 
         scrub_apply(test_case).await;
 
-        let repaired = metadata_store
-            .read_link(namespace, &LinkKind::Config(config_digest))
-            .await
-            .unwrap();
         assert!(
-            repaired.referenced_by.contains(&manifest_digest),
-            "the real revision's back-link must be re-added"
+            metadata_store
+                .read_link(namespace, &LinkKind::Config(config_digest.clone()))
+                .await
+                .is_err(),
+            "a legacy link whose only referrer was stale must be removed"
         );
         assert!(
-            !repaired.referenced_by.contains(&stale_revision),
-            "the stale back-link must be pruned"
+            metadata_store
+                .read_blob_index_namespace(namespace, &config_digest)
+                .await
+                .is_ok_and(|links| links.contains(&LinkKind::Digest(manifest_digest))),
+            "the reference the manifest holds must be repaired in the shard"
         );
     })
     .await;
@@ -355,10 +357,10 @@ async fn missing_referrer_backlink_is_added_and_stale_one_removed() {
 async fn missing_blob_index_grant_is_regranted() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/regrant").unwrap();
-        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        let link = LinkKind::Layer(layer_digest.clone());
+        let link = LinkKind::Digest(manifest_digest.clone());
         metadata_store
             .update_blob_index(
                 namespace,
@@ -498,10 +500,10 @@ async fn stale_shard_entry_is_removed() {
 }
 
 #[tokio::test]
-async fn corrupt_shard_is_deleted_and_regranted_on_next_run() {
+async fn a_corrupt_shard_is_deleted_and_its_tracked_references_are_not_guessed() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/corrupt-shard").unwrap();
-        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
         let shard_key = path_builder::blob_index_shard_path(&layer_digest, namespace);
@@ -513,17 +515,19 @@ async fn corrupt_shard_is_deleted_and_regranted_on_next_run() {
             .unwrap();
 
         scrub_apply(test_case).await;
-        // The corrupt shard was deleted; the same run's link pass may have
-        // preceded the deletion, so a second run re-grants from the manifest.
         scrub_apply(test_case).await;
 
-        let links = metadata_store
-            .read_blob_index_namespace(namespace, &layer_digest)
-            .await
-            .unwrap();
+        // The entry was the only record that this namespace held the layer, so
+        // losing it is not recoverable from the manifest body: an owned
+        // reference and one a permissive push withheld read the same, and
+        // scrub declines to mint access. Re-pushing restores it.
+        let _ = manifest_digest;
         assert!(
-            links.contains(&LinkKind::Layer(layer_digest.clone())),
-            "grants must be rebuilt after the corrupt shard was deleted"
+            metadata_store
+                .read_blob_index_namespace(namespace, &layer_digest)
+                .await
+                .is_err(),
+            "a tracked reference must not be re-derived from a manifest body"
         );
     })
     .await;
@@ -1008,8 +1012,68 @@ async fn expired_intent_does_not_suppress_repairs() {
     .await;
 }
 
+/// A link object left by an angos that wrote one carries references that now
+/// live in the blob index. Scrub re-issues them as entries naming the manifest
+/// and reclaims the object, and the shard pass then drops the paired entry it
+/// backed, so the old shape leaves nothing behind.
 #[tokio::test]
-async fn live_intent_suppresses_referrer_removal() {
+async fn a_superseded_tracked_link_is_migrated_then_reclaimed() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/supersede").unwrap();
+        let (manifest_digest, config_digest, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        // The state a pre-change push left: a link object holding the referrer,
+        // and the paired entry backed by it.
+        let config_link = LinkKind::Config(config_digest.clone());
+        let mut legacy = LinkMetadata::from_digest(config_digest.clone());
+        legacy.referenced_by.insert(manifest_digest.clone());
+        put_link_raw(
+            metadata_store.store(),
+            namespace,
+            &config_link,
+            &serde_json::to_vec(&legacy).unwrap(),
+        )
+        .await;
+        metadata_store
+            .update_blob_index(
+                namespace,
+                &config_digest,
+                BlobIndexOperation::Insert(config_link.clone()),
+            )
+            .await
+            .unwrap();
+
+        scrub_apply(test_case).await;
+        // The shard pass prunes the paired entry once nothing backs it, which
+        // is the run after the object goes.
+        scrub_apply(test_case).await;
+
+        assert!(
+            metadata_store
+                .read_link(namespace, &config_link)
+                .await
+                .is_err(),
+            "the superseded link object must be reclaimed"
+        );
+        let links = metadata_store
+            .read_blob_index_namespace(namespace, &config_digest)
+            .await
+            .unwrap();
+        assert!(
+            links.contains(&LinkKind::Digest(manifest_digest)),
+            "its reference must be migrated to an entry naming the manifest"
+        );
+        assert!(
+            !links.contains(&config_link),
+            "the paired entry it backed must be gone"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn live_intent_suppresses_reclaiming_a_superseded_link() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/inflight-referrer").unwrap();
         let (_, config_digest, _) = push_healthy_image(test_case, namespace).await;
@@ -1017,12 +1081,11 @@ async fn live_intent_suppresses_referrer_removal() {
 
         // A referrer whose revision link is mid-write: referenced but absent.
         let inflight_revision = Digest::sha256_of_bytes(b"inflight-revision");
+        // A link object as a pre-layout-change push wrote it: its referrer set
+        // is what the migration re-issues as entries.
         let config_link = LinkKind::Config(config_digest.clone());
-        let mut current = metadata_store
-            .read_link(namespace, &config_link)
-            .await
-            .unwrap();
-        current.add_referrer(inflight_revision.clone());
+        let mut current = LinkMetadata::from_digest(config_digest.clone());
+        current.referenced_by.insert(inflight_revision.clone());
         put_link_raw(
             metadata_store.store(),
             namespace,
@@ -1039,13 +1102,12 @@ async fn live_intent_suppresses_referrer_removal() {
 
         scrub_apply(test_case).await;
 
-        let repaired = metadata_store
-            .read_link(namespace, &config_link)
-            .await
-            .unwrap();
         assert!(
-            repaired.referenced_by.contains(&inflight_revision),
-            "a back-link to a revision still being written must not be pruned"
+            metadata_store
+                .read_link(namespace, &config_link)
+                .await
+                .is_ok(),
+            "a link naming a revision still being written must not be reclaimed"
         );
     })
     .await;

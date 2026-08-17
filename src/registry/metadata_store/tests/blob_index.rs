@@ -101,27 +101,23 @@ async fn test_tracked_link_creates_with_referrers() {
     backend.update_links(&namespace, &ops).await.unwrap();
 
     for layer_digest in &layer_digests {
-        let link = LinkKind::Layer(layer_digest.clone());
-        let meta = backend
-            .read_link_reference(&namespace, &link)
+        let links = backend
+            .read_blob_index_namespace(&namespace, layer_digest)
             .await
             .unwrap();
-        assert_eq!(meta.target, *layer_digest);
         assert!(
-            meta.referenced_by.contains(&referrer_digest),
-            "Layer link {link} should have referrer {referrer_digest}"
+            links.contains(&LinkKind::Digest(referrer_digest.clone())),
+            "the shard for {layer_digest} should name referrer {referrer_digest}"
         );
     }
 
-    let config_link = LinkKind::Config(config_digest.clone());
-    let meta = backend
-        .read_link_reference(&namespace, &config_link)
+    let config_links = backend
+        .read_blob_index_namespace(&namespace, &config_digest)
         .await
         .unwrap();
-    assert_eq!(meta.target, config_digest);
     assert!(
-        meta.referenced_by.contains(&referrer_digest),
-        "Config link should have referrer {referrer_digest}"
+        config_links.contains(&LinkKind::Digest(referrer_digest.clone())),
+        "the config's shard should name referrer {referrer_digest}"
     );
 }
 
@@ -157,12 +153,11 @@ async fn test_tracked_link_deletes_with_referrers() {
     backend.update_links(&namespace, &create_ops).await.unwrap();
 
     for d in &layer_digests {
-        let link = LinkKind::Layer(d.clone());
-        let meta = backend
-            .read_link_reference(&namespace, &link)
+        let links = backend
+            .read_blob_index_namespace(&namespace, d)
             .await
             .unwrap();
-        assert_eq!(meta.target, *d);
+        assert!(links.contains(&LinkKind::Digest(referrer_digest.clone())));
     }
 
     let delete_ops: Vec<LinkOperation> = layer_digests

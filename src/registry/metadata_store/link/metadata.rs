@@ -75,18 +75,6 @@ impl LinkMetadata {
         }
     }
 
-    pub fn add_referrer(&mut self, digest: Digest) {
-        self.referenced_by.insert(digest);
-    }
-
-    pub fn remove_referrer(&mut self, digest: &Digest) {
-        self.referenced_by.remove(digest);
-    }
-
-    pub fn has_references(&self) -> bool {
-        !self.referenced_by.is_empty()
-    }
-
     /// `Some(created_at)` iff this link strictly supersedes an incoming write
     /// authored at `source_ts`: newer `created_at`, or equal with a target
     /// digest ordering above `incoming_digest` (the tie-break that stops
@@ -192,7 +180,7 @@ mod tests {
     #[test]
     fn link_metadata_survives_json_round_trip() {
         let mut meta = LinkMetadata::from_digest(digest());
-        meta.add_referrer(other_digest());
+        meta.referenced_by.insert(other_digest());
         let meta = meta
             .with_media_type(Some(media_type(
                 "application/vnd.oci.image.manifest.v1+json",
@@ -209,48 +197,6 @@ mod tests {
     }
 
     #[test]
-    fn add_referrer_inserts_unique_digest() {
-        let mut meta = LinkMetadata::from_digest(digest());
-        meta.add_referrer(other_digest());
-        assert!(meta.referenced_by.contains(&other_digest()));
-        assert!(meta.has_references());
-    }
-
-    #[test]
-    fn add_referrer_is_idempotent() {
-        let mut meta = LinkMetadata::from_digest(digest());
-        meta.add_referrer(other_digest());
-        meta.add_referrer(other_digest());
-        assert_eq!(meta.referenced_by.len(), 1);
-    }
-
-    #[test]
-    fn remove_referrer_eliminates_existing_digest() {
-        let mut meta = LinkMetadata::from_digest(digest());
-        meta.add_referrer(other_digest());
-        meta.remove_referrer(&other_digest());
-        assert!(meta.referenced_by.is_empty());
-        assert!(!meta.has_references());
-    }
-
-    #[test]
-    fn remove_referrer_unknown_digest_is_noop() {
-        let mut meta = LinkMetadata::from_digest(digest());
-        meta.remove_referrer(&other_digest());
-        assert!(meta.referenced_by.is_empty());
-    }
-
-    #[test]
-    fn has_references_reflects_set_state() {
-        let mut meta = LinkMetadata::from_digest(digest());
-        assert!(!meta.has_references());
-        meta.add_referrer(other_digest());
-        assert!(meta.has_references());
-        meta.remove_referrer(&other_digest());
-        assert!(!meta.has_references());
-    }
-
-    #[test]
     fn accessed_sets_accessed_at() {
         let before = Utc::now();
         let meta = LinkMetadata::from_digest(digest()).accessed();
@@ -264,7 +210,7 @@ mod tests {
     #[test]
     fn accessed_does_not_mutate_referrer_list() {
         let mut meta = LinkMetadata::from_digest(digest());
-        meta.add_referrer(other_digest());
+        meta.referenced_by.insert(other_digest());
         let meta = meta.accessed();
         assert_eq!(meta.referenced_by.len(), 1);
         assert!(meta.referenced_by.contains(&other_digest()));

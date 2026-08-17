@@ -75,6 +75,17 @@ impl LinkKind {
         )
     }
 
+    /// The digest a tracked reference points at, which its own shape names:
+    /// a layer or config link names the blob, an index child link names the
+    /// child. `None` for the kinds that are not tracked.
+    pub fn tracked_target(&self) -> Option<&Digest> {
+        match self {
+            LinkKind::Layer(digest) | LinkKind::Config(digest) => Some(digest),
+            LinkKind::Manifest { child, .. } => Some(child),
+            _ => None,
+        }
+    }
+
     pub fn from_reference(reference: &Reference) -> Self {
         match reference {
             Reference::Tag(s) => LinkKind::Tag(s.clone()),

@@ -61,17 +61,6 @@ pub enum Action {
         link: LinkKind,
         target: Digest,
     },
-    AddReferrer {
-        namespace: Namespace,
-        link: LinkKind,
-        target: Digest,
-        referrer: Digest,
-    },
-    RemoveReferrer {
-        namespace: Namespace,
-        link: LinkKind,
-        referrer: Digest,
-    },
     DeleteTag {
         namespace: Namespace,
         tag: Tag,
@@ -151,6 +140,13 @@ pub enum Action {
         store: WalkedStore,
         key: String,
     },
+    /// Reclaim a tracked link object whose references have been re-issued as
+    /// blob-index entries naming their manifest, which is where a tracked
+    /// reference lives now.
+    DeleteSupersededLink {
+        store: WalkedStore,
+        key: String,
+    },
 }
 
 impl fmt::Display for Action {
@@ -194,27 +190,6 @@ impl fmt::Display for Action {
                 write!(
                     f,
                     "recreate invalid link from namespace '{namespace}': '{link}' -> '{target}'"
-                )
-            }
-            Action::AddReferrer {
-                namespace,
-                link,
-                referrer,
-                ..
-            } => {
-                write!(
-                    f,
-                    "add referrer {referrer} to link {link} in namespace '{namespace}'"
-                )
-            }
-            Action::RemoveReferrer {
-                namespace,
-                link,
-                referrer,
-            } => {
-                write!(
-                    f,
-                    "remove referrer {referrer} from link {link} in namespace '{namespace}'"
                 )
             }
             Action::DeleteTag { namespace, tag } => {
@@ -299,6 +274,9 @@ impl fmt::Display for Action {
             }
             Action::DeleteCorruptObject { store, key } => {
                 write!(f, "delete corrupt {store} object '{key}'")
+            }
+            Action::DeleteSupersededLink { store, key } => {
+                write!(f, "reclaim superseded {store} link '{key}'")
             }
         }
     }

@@ -159,10 +159,6 @@ v2/
 │       │       └── {tag}/
 │       │           └── current/
 │       │               └── link
-│       ├── _layers/
-│       │   └── {algorithm}/
-│       │       └── {hash}/
-│       │           └── link
 │       └── _uploads/
 │           └── {uuid}/
 │               ├── data

@@ -551,9 +551,15 @@ impl RetentionChecker {
         digest: &Digest,
         blob_index: Option<&BlobIndex>,
     ) -> Result<bool, Error> {
+        // Another manifest in this namespace references it, which for a
+        // manifest digest means an index lists it as a child. The paired shape
+        // is what an angos wrote before the entry named the referrer alone, and
+        // is read until those drain.
         if blob_index.is_some_and(|index| {
-            has_link_kind(index, namespace, |link| {
-                matches!(link, LinkKind::Manifest { index: _, child: _ })
+            has_link_kind(index, namespace, |link| match link {
+                LinkKind::Digest(referrer) => referrer != digest,
+                LinkKind::Manifest { .. } => true,
+                _ => false,
             })
         }) {
             return Ok(true);
@@ -657,12 +663,13 @@ mod tests {
                         LinkKind::Tag(Tag::new("latest").unwrap()),
                         index_digest.clone(),
                     ),
-                    LinkOperation::create(
+                    LinkOperation::create_with_referrer(
                         LinkKind::Manifest {
                             index: index_digest.clone(),
                             child: child_digest.clone(),
                         },
                         child_digest.clone(),
+                        index_digest.clone(),
                     ),
                 ],
             )
@@ -681,10 +688,13 @@ mod tests {
                 namespace,
                 &[
                     LinkOperation::delete(LinkKind::Tag(Tag::new("latest").unwrap())),
-                    LinkOperation::delete(LinkKind::Manifest {
-                        index: index_digest.clone(),
-                        child: child_digest.clone(),
-                    }),
+                    LinkOperation::delete_with_referrer(
+                        LinkKind::Manifest {
+                            index: index_digest.clone(),
+                            child: child_digest.clone(),
+                        },
+                        index_digest.clone(),
+                    ),
                     LinkOperation::delete(LinkKind::Digest(index_digest)),
                 ],
             )

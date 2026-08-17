@@ -15,6 +15,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A manifest push commits its metadata in about half the storage requests it used to, and no longer serialises them one per key.
 - Requests of one instance contending for the same metadata key queue instead of racing, so a loser retries without having written anything and concurrent pushes stop amplifying each other's storage traffic.
 - Two pushes no longer conflict over the base layers their images share: a blob-index merge carries its delta alone, so it neither reads its shard up front nor aborts the transaction when another push writes the same one.
+- A manifest push writes one object per referenced digest instead of two: the blob-index entry now names the referring manifest, so the per-layer, per-config and per-index-child link files it used to keep in step are gone. `angos scrub` migrates the references an existing link file holds into entries and reclaims the file.
+- Re-pushing a manifest whose layers have been reclaimed no longer leaves the registry believing the blob is unreferenced, which let the next `angos prune` reclaim it again and break the image with nothing reported at push time. The push now re-asserts the reference, or is refused with `MANIFEST_BLOB_UNKNOWN` when the namespace no longer holds the blob at all, which is what a client's blob `HEAD` already reports before it uploads.
 
 ### Fixed
 

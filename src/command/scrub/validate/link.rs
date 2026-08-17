@@ -1,9 +1,8 @@
 //! Link-key validation: one visit per link file replaces the old per-concern
-//! walks (manifest link repair, `referenced_by` back-links, blob-index grant
-//! reconcile, tag digest links, referrer liveness, the invalid-tag gate, and
-//! the orphan-namespace clearing).
-
-use std::collections::HashSet;
+//! walks (manifest link repair, blob-index grant reconcile, tag digest links,
+//! referrer liveness, the invalid-tag gate, and the orphan-namespace
+//! clearing), plus the migration of a link object superseded by the
+//! blob-index entry naming its referrer.
 
 use tracing::{debug, warn};
 
@@ -48,21 +47,14 @@ impl Validator {
                 self.validate_referrer_link(key, &namespace, &subject, &referrer)
                     .await
             }
-            ParsedLink::Blob(digest) => {
-                self.validate_tracked_link(key, &namespace, LinkKind::Blob(digest))
-                    .await
+            // The ownership grant is still written and is its own record, so
+            // there is nothing here to repair or reclaim.
+            ParsedLink::Blob(_) => Ok(()),
+            ParsedLink::Layer(digest) | ParsedLink::Config(digest) => {
+                self.migrate_superseded_link(key, &namespace, &digest).await
             }
-            ParsedLink::Layer(digest) => {
-                self.validate_tracked_link(key, &namespace, LinkKind::Layer(digest))
-                    .await
-            }
-            ParsedLink::Config(digest) => {
-                self.validate_tracked_link(key, &namespace, LinkKind::Config(digest))
-                    .await
-            }
-            ParsedLink::ManifestIndex { index, child } => {
-                self.validate_tracked_link(key, &namespace, LinkKind::Manifest { index, child })
-                    .await
+            ParsedLink::ManifestIndex { child, .. } => {
+                self.migrate_superseded_link(key, &namespace, &child).await
             }
         }
     }
@@ -167,12 +159,6 @@ impl Validator {
         // withholds the link and the grant for a digest the namespace does not
         // own, so re-deriving them from the manifest body would hand it exactly
         // the cross-namespace read access the write path refused.
-        // The referrer back-link is a revision link but not a referenced one, so
-        // it is repaired without gaining a `referenced_by` entry of its own.
-        let referenced: HashSet<LinkKind> = link_plan::referenced_links(&manifest, revision)
-            .into_iter()
-            .map(|(link, _)| link)
-            .collect();
         for (link, target) in link_plan::revision_links(&manifest, revision) {
             if !self.holds_reference(namespace, &target, &link).await? {
                 debug!(
@@ -181,12 +167,15 @@ impl Validator {
                 );
                 continue;
             }
+            // A tracked reference has no link object: the shard entry naming
+            // this revision is the whole record, so the grant is the repair.
+            if link.is_tracked() {
+                self.ensure_grant(namespace, &target, &LinkKind::Digest(revision.clone()))
+                    .await?;
+                continue;
+            }
             self.ensure_link(namespace, &link, &target).await?;
             self.ensure_grant(namespace, &target, &link).await?;
-            if referenced.contains(&link) {
-                self.ensure_referenced_by(namespace, &link, &target, revision)
-                    .await?;
-            }
         }
         Ok(())
     }
@@ -198,6 +187,12 @@ impl Validator {
     /// state from minting access it never had. Losing both for a reference it
     /// did own leaves the manifest unrepaired (and unpullable) rather than
     /// guessing in favour of access.
+    ///
+    /// A tracked reference has only the entry now, the link object having gone
+    /// with the layout change, so a lost shard is not recoverable from a
+    /// manifest body: an owned reference and one a permissive push withheld
+    /// look the same, and the conservative reading wins. Re-pushing the
+    /// manifest restores it.
     async fn holds_reference(
         &self,
         namespace: &Namespace,
@@ -250,44 +245,49 @@ impl Validator {
         .await
     }
 
-    /// A blob/layer/config/index-child link: prune `referenced_by` entries
-    /// whose revision link is gone (the executor cascades the link's deletion
-    /// when the set empties).
-    async fn validate_tracked_link(
+    /// Migrate a link object that predates the blob-index entry naming its
+    /// referrer, then reclaim it.
+    ///
+    /// A tracked reference lives in the entry now, so the object is not
+    /// maintained: each referrer whose revision is still present is re-issued
+    /// as an entry against `target`, and the object is then deleted. The shard
+    /// pass drops the paired entry it backed once the object is gone, so the
+    /// old shape leaves nothing behind.
+    ///
+    /// A referrer whose revision has gone is simply not migrated: it is the
+    /// dangling back-link the old layout needed a repair to prune.
+    async fn migrate_superseded_link(
         &self,
         key: &str,
         namespace: &Namespace,
-        link: LinkKind,
+        target: &Digest,
     ) -> Result<(), Error> {
         let Some(metadata) = self.read_link_body(key).await? else {
             return Ok(());
         };
+        // Every revision consulted is evidence: one still being written has no
+        // revision link yet, so its reference would not be migrated and the
+        // reclaim has to wait rather than drop it.
+        let mut evidence = vec![key.to_string()];
         for referrer in &metadata.referenced_by {
             let revision_key =
                 path_builder::link_path(&LinkKind::Digest(referrer.clone()), namespace);
             if self.read_link_body(&revision_key).await?.is_some() {
-                continue;
+                self.ensure_grant(namespace, target, &LinkKind::Digest(referrer.clone()))
+                    .await?;
             }
-            let evidence = [key.to_string(), revision_key.clone()];
-            let revision_key = &revision_key;
-            let reverify = move || async move {
-                let Some(current) = self.read_link_body(key).await? else {
-                    return Ok(false);
-                };
-                Ok(current.referenced_by.contains(referrer)
-                    && self.read_link_body(revision_key).await?.is_none())
-            };
-            if !self.confirm_repair(&evidence, reverify).await? {
-                continue;
-            }
-            self.emit(Action::RemoveReferrer {
-                namespace: namespace.clone(),
-                link: link.clone(),
-                referrer: referrer.clone(),
-            })
-            .await?;
+            evidence.push(revision_key);
         }
-        Ok(())
+
+        let reverify = move || async move { Ok(self.read_link_body(key).await?.is_some()) };
+        if !self.confirm_repair(&evidence, reverify).await? {
+            return Ok(());
+        }
+        self.emit(Action::DeleteSupersededLink {
+            store: WalkedStore::Metadata,
+            key: key.to_string(),
+        })
+        .await
     }
 
     /// Read and parse the link body at `key`. `None` when the key vanished
@@ -340,44 +340,6 @@ impl Validator {
             namespace: namespace.clone(),
             link: link.clone(),
             target: expected.clone(),
-        })
-        .await
-    }
-
-    /// Ensure the back-link from `link` to `referrer` is present (absorbed
-    /// from the old `LinkReferencesChecker`). Stale-entry pruning happens
-    /// where each tracked link is visited.
-    async fn ensure_referenced_by(
-        &self,
-        namespace: &Namespace,
-        link: &LinkKind,
-        target: &Digest,
-        referrer: &Digest,
-    ) -> Result<(), Error> {
-        let link_key = path_builder::link_path(link, namespace);
-        // An absent link is a candidate too: the repair recreates it with the
-        // back-link, so a concurrent removal cascade cannot strand the child.
-        if let Some(metadata) = self.read_link_body(&link_key).await?
-            && metadata.referenced_by.contains(referrer)
-        {
-            return Ok(());
-        }
-        let evidence = [link_key.clone()];
-        let link_key = &link_key;
-        let reverify = move || async move {
-            Ok(self
-                .read_link_body(link_key)
-                .await?
-                .is_none_or(|current| !current.referenced_by.contains(referrer)))
-        };
-        if !self.confirm_repair(&evidence, reverify).await? {
-            return Ok(());
-        }
-        self.emit(Action::AddReferrer {
-            namespace: namespace.clone(),
-            link: link.clone(),
-            target: target.clone(),
-            referrer: referrer.clone(),
         })
         .await
     }

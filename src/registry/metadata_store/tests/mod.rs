@@ -1408,17 +1408,19 @@ pub async fn test_datastore_tracked_create_with_referrer(m: Arc<MetadataStore>) 
     .await
     .unwrap();
 
-    let metadata = m
-        .read_link(namespace, &LinkKind::Layer(digest_layer.clone()))
+    let links = m
+        .read_blob_index_namespace(namespace, &digest_layer)
         .await
         .unwrap();
-    assert_eq!(
-        metadata.target, digest_layer,
-        "Link target should be the layer digest"
+    assert!(
+        m.read_link(namespace, &LinkKind::Layer(digest_layer.clone()))
+            .await
+            .is_err(),
+        "a tracked reference writes no link object"
     );
     assert!(
-        metadata.referenced_by.contains(&digest_manifest),
-        "referenced_by should contain the manifest digest"
+        links.contains(&LinkKind::Digest(digest_manifest.clone())),
+        "the shard entry must name the referring manifest"
     );
 
     let blob_index = m.read_blob_index(&digest_layer).await.unwrap();
@@ -1427,7 +1429,7 @@ pub async fn test_datastore_tracked_create_with_referrer(m: Arc<MetadataStore>) 
         .get(namespace)
         .expect("Blob index should have an entry for the namespace");
     assert!(
-        links.contains(&LinkKind::Layer(digest_layer.clone())),
+        links.contains(&LinkKind::Digest(digest_manifest.clone())),
         "Blob index should contain the Layer link"
     );
 }
@@ -1469,17 +1471,17 @@ pub async fn test_datastore_tracked_delete_with_referrer(m: Arc<MetadataStore>) 
     .await
     .unwrap();
 
-    let metadata = m
-        .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
+    let links = m
+        .read_blob_index_namespace(namespace, &layer_digest)
         .await
         .unwrap();
     assert!(
-        metadata.referenced_by.contains(&first_manifest_digest),
-        "referenced_by should contain first manifest after both creates"
+        links.contains(&LinkKind::Digest(first_manifest_digest.clone())),
+        "the shard must name the first manifest after both creates"
     );
     assert!(
-        metadata.referenced_by.contains(&second_manifest_digest),
-        "referenced_by should contain second manifest after both creates"
+        links.contains(&LinkKind::Digest(second_manifest_digest.clone())),
+        "the shard must name the second manifest after both creates"
     );
 
     m.update_links(
@@ -1492,27 +1494,17 @@ pub async fn test_datastore_tracked_delete_with_referrer(m: Arc<MetadataStore>) 
     .await
     .unwrap();
 
-    let metadata = m
-        .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
+    let links = m
+        .read_blob_index_namespace(namespace, &layer_digest)
         .await
         .unwrap();
     assert!(
-        !metadata.referenced_by.contains(&first_manifest_digest),
-        "referenced_by should not contain first manifest after deletion"
+        !links.contains(&LinkKind::Digest(first_manifest_digest.clone())),
+        "the deleted manifest's entry must be gone"
     );
     assert!(
-        metadata.referenced_by.contains(&second_manifest_digest),
-        "referenced_by should still contain second manifest"
-    );
-
-    let blob_index = m.read_blob_index(&layer_digest).await.unwrap();
-    let links = blob_index
-        .namespace
-        .get(namespace)
-        .expect("Blob index should still have an entry for the namespace");
-    assert!(
-        links.contains(&LinkKind::Layer(layer_digest.clone())),
-        "Blob index should still contain the Layer link"
+        links.contains(&LinkKind::Digest(second_manifest_digest.clone())),
+        "the surviving manifest must keep the blob referenced"
     );
 }
 
@@ -1554,17 +1546,17 @@ pub async fn test_datastore_duplicated_layer_keeps_other_referrers(m: Arc<Metada
     ];
     m.update_links(namespace, &duplicated_create).await.unwrap();
 
-    let metadata = m
-        .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
+    let links = m
+        .read_blob_index_namespace(namespace, &layer_digest)
         .await
         .unwrap();
     assert!(
-        metadata.referenced_by.contains(&first_manifest_digest),
-        "referenced_by should keep the first manifest after the duplicated push"
+        links.contains(&LinkKind::Digest(first_manifest_digest.clone())),
+        "the shard should keep the first manifest after the duplicated push"
     );
     assert!(
-        metadata.referenced_by.contains(&second_manifest_digest),
-        "referenced_by should contain the second manifest after the duplicated push"
+        links.contains(&LinkKind::Digest(second_manifest_digest.clone())),
+        "the shard should name the second manifest after the duplicated push"
     );
 
     let duplicated_delete = vec![
@@ -1576,13 +1568,13 @@ pub async fn test_datastore_duplicated_layer_keeps_other_referrers(m: Arc<Metada
     ];
     m.update_links(namespace, &duplicated_delete).await.unwrap();
 
-    let metadata = m
-        .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
+    let links = m
+        .read_blob_index_namespace(namespace, &layer_digest)
         .await
         .unwrap();
     assert_eq!(
-        metadata.referenced_by,
-        HashSet::from([first_manifest_digest]),
+        links,
+        HashSet::from([LinkKind::Digest(first_manifest_digest)]),
         "deleting the duplicating manifest should leave the first manifest's reference"
     );
 }
@@ -1688,17 +1680,13 @@ pub async fn test_datastore_mixed_tracked_untracked_operations(m: Arc<MetadataSt
         "Tag link should have empty referenced_by"
     );
 
-    let layer_meta = m
-        .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
+    let layer_links = m
+        .read_blob_index_namespace(namespace, &layer_digest)
         .await
         .unwrap();
-    assert_eq!(
-        layer_meta.target, layer_digest,
-        "Layer link should target layer_digest"
-    );
     assert!(
-        layer_meta.referenced_by.contains(&manifest_digest),
-        "Layer link referenced_by should contain manifest_digest"
+        layer_links.contains(&LinkKind::Digest(manifest_digest.clone())),
+        "the layer's shard should name the referring manifest"
     );
 
     let digest_meta = m
@@ -1730,8 +1718,8 @@ pub async fn test_datastore_mixed_tracked_untracked_operations(m: Arc<MetadataSt
         .get(namespace)
         .expect("Blob index for layer_digest should have namespace entry");
     assert!(
-        layer_links.contains(&LinkKind::Layer(layer_digest.clone())),
-        "Blob index for layer_digest should contain the Layer link"
+        layer_links.contains(&LinkKind::Digest(manifest_digest.clone())),
+        "Blob index for layer_digest should name the referring manifest"
     );
 
     let digest_index = m.read_blob_index(&digest_link_digest).await.unwrap();

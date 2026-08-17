@@ -1533,11 +1533,11 @@ async fn concurrent_same_digest_pushes_keep_upload_ownership() {
             )
             .await
             .unwrap();
-        layer_digest
+        (layer_digest, Digest::sha256_of_bytes(&manifest_content))
     });
 
     let digests = join_all(pushes).await;
-    let layer_digest = &digests[0];
+    let (layer_digest, manifest_digest) = &digests[0];
     let blob_index = registry
         .metadata_store
         .read_blob_index(layer_digest)
@@ -1547,7 +1547,7 @@ async fn concurrent_same_digest_pushes_keep_upload_ownership() {
     for namespace in namespaces {
         let links = blob_index.namespace.get(&namespace).unwrap();
         assert!(links.contains(&LinkKind::Blob(layer_digest.clone())));
-        assert!(links.contains(&LinkKind::Layer(layer_digest.clone())));
+        assert!(links.contains(&LinkKind::Digest(manifest_digest.clone())));
     }
 
     test_case.cleanup().await;
@@ -2939,10 +2939,14 @@ async fn store_manifest_strict_accepts_a_reference_with_a_live_grant() {
         .store_manifest(&namespace, &ops, None, ReferencePolicy::Strict)
         .await
         .expect("a strict push with a live grant must commit");
-    store
-        .read_link_reference(&namespace, &LinkKind::Layer(layer_digest))
+    let links = store
+        .read_blob_index_namespace(&namespace, &layer_digest)
         .await
-        .expect("the layer link must be written");
+        .expect("the layer's shard must exist");
+    assert!(
+        links.contains(&LinkKind::Digest(manifest_digest)),
+        "the layer's shard must name the pushed manifest"
+    );
 }
 
 /// A Trusted (pull-through) push references content whose grants may not exist
@@ -2971,10 +2975,14 @@ async fn store_manifest_trusted_creates_first_grant_without_prior_entry() {
         .store_manifest(&namespace, &ops, None, ReferencePolicy::Trusted)
         .await
         .expect("a trusted push must commit without a prior grant");
-    store
-        .read_link_reference(&namespace, &LinkKind::Layer(layer_digest))
+    let links = store
+        .read_blob_index_namespace(&namespace, &layer_digest)
         .await
-        .expect("the layer link must be written");
+        .expect("the layer's shard must exist");
+    assert!(
+        links.contains(&LinkKind::Digest(manifest_digest)),
+        "the layer's shard must name the pushed manifest"
+    );
 }
 
 /// A permissive push must not grant access to an unowned reference: the link
