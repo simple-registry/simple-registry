@@ -2,7 +2,7 @@
 //! `BlobChecker` orphan GC and the orphan-namespace sweeps). Runs last: the
 //! index has been healed, so an empty index really means no references.
 
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use angos_oci::{Digest, Namespace};
@@ -17,7 +17,7 @@ use crate::{
         },
         scrub::validate::Validator,
     },
-    registry::Error as RegistryError,
+    registry::{Error as RegistryError, path_builder},
 };
 
 impl Validator {
@@ -59,6 +59,27 @@ impl Validator {
                 "scrub: blob '{digest}' reads as unreferenced but the shard walk found references for it; \
                  refusing to reclaim, the backend's listing is incomplete"
             );
+            return Ok(());
+        }
+        // The executor re-checks this gate before deleting; testing it here
+        // too keeps fresh bytes (an upload or push still in flight, or a
+        // just-deleted blob inside its grace period) from being emitted and
+        // counted as repairs on every walk.
+        let meta = match self
+            .blob_store
+            .object_store()
+            .head(&path_builder::blob_path(digest))
+            .await
+        {
+            Ok(meta) => meta,
+            Err(StorageError::NotFound) => return Ok(()),
+            Err(e) => return Err(RegistryError::from(e).into()),
+        };
+        let grace = i64::try_from(self.metadata_store.gc_grace_secs()).unwrap_or(i64::MAX);
+        let fresh = meta.last_modified.is_none_or(|modified| {
+            Utc::now().signed_duration_since(modified).num_seconds() < grace
+        });
+        if fresh {
             return Ok(());
         }
         self.emit(Action::DeleteOrphanBlob(digest.clone())).await
