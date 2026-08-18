@@ -3,8 +3,6 @@
 //! reconcile, tag digest links, referrer liveness, the invalid-tag gate, and
 //! the orphan-namespace clearing).
 
-use std::collections::HashSet;
-
 use tracing::{debug, warn};
 
 use angos_oci::{Digest, Manifest, Namespace, Tag};
@@ -277,12 +275,8 @@ impl Validator {
         // withholds the link and the grant for a digest the namespace does not
         // own, so re-deriving them from the manifest body would hand it exactly
         // the cross-namespace read access the write path refused.
-        // The referrer back-link is a revision link but not a referenced one, so
-        // it is repaired without gaining a `referenced_by` entry of its own.
-        let referenced: HashSet<LinkKind> = link_plan::referenced_links(&manifest, revision)
-            .into_iter()
-            .map(|(link, _)| link)
-            .collect();
+        // A tracked reference is pinned by its per-referrer entry alone; the
+        // legacy link file is advisory and never repaired from a manifest.
         for (link, target) in link_plan::revision_links(&manifest, revision) {
             if !self.holds_reference(namespace, &target, &link).await? {
                 debug!(
@@ -291,11 +285,16 @@ impl Validator {
                 );
                 continue;
             }
-            self.ensure_link(namespace, &link, &target).await?;
-            self.ensure_grant(namespace, &target, &link).await?;
-            if referenced.contains(&link) {
-                self.ensure_referenced_by(namespace, &link, &target, revision)
-                    .await?;
+            if link.is_tracked() {
+                self.ensure_grant(
+                    namespace,
+                    &target,
+                    &LinkKind::ReferencedBy(revision.clone()),
+                )
+                .await?;
+            } else {
+                self.ensure_link(namespace, &link, &target).await?;
+                self.ensure_grant(namespace, &target, &link).await?;
             }
         }
         Ok(true)
@@ -540,44 +539,6 @@ impl Validator {
             namespace: namespace.clone(),
             link: link.clone(),
             target: expected.clone(),
-        })
-        .await
-    }
-
-    /// Ensure the back-link from `link` to `referrer` is present (absorbed
-    /// from the old `LinkReferencesChecker`). Stale-entry pruning happens
-    /// where each tracked link is visited.
-    async fn ensure_referenced_by(
-        &self,
-        namespace: &Namespace,
-        link: &LinkKind,
-        target: &Digest,
-        referrer: &Digest,
-    ) -> Result<(), Error> {
-        let link_key = path_builder::link_path(link, namespace);
-        // An absent link is a candidate too: the repair recreates it with the
-        // back-link, so a concurrent removal cascade cannot strand the child.
-        if let Some(metadata) = self.read_link_body(&link_key).await?
-            && metadata.referenced_by.contains(referrer)
-        {
-            return Ok(());
-        }
-        let evidence = [link_key.clone()];
-        let link_key = &link_key;
-        let reverify = move || async move {
-            Ok(self
-                .read_link_body(link_key)
-                .await?
-                .is_none_or(|current| !current.referenced_by.contains(referrer)))
-        };
-        if !self.confirm_repair(&evidence, reverify).await? {
-            return Ok(());
-        }
-        self.emit(Action::AddReferrer {
-            namespace: namespace.clone(),
-            link: link.clone(),
-            target: target.clone(),
-            referrer: referrer.clone(),
         })
         .await
     }

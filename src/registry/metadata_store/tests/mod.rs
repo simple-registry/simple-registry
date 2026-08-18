@@ -1429,8 +1429,8 @@ pub async fn test_datastore_tracked_create_with_referrer(m: Arc<MetadataStore>) 
         .get(namespace)
         .expect("Blob index should have an entry for the namespace");
     assert!(
-        links.contains(&LinkKind::Layer(digest_layer.clone())),
-        "Blob index should contain the Layer link"
+        links.contains(&LinkKind::ReferencedBy(digest_manifest.clone())),
+        "Blob index should contain the per-referrer entry"
     );
 }
 
@@ -1471,17 +1471,26 @@ pub async fn test_datastore_tracked_delete_with_referrer(m: Arc<MetadataStore>) 
     .await
     .unwrap();
 
+    // The pins live as one per-referrer entry each; the link file is written
+    // once (by the first push) and never merged.
+    let blob_index = m.read_blob_index(&layer_digest).await.unwrap();
+    let links = blob_index
+        .namespace
+        .get(namespace)
+        .expect("Blob index should have an entry for the namespace");
+    assert!(
+        links.contains(&LinkKind::ReferencedBy(first_manifest_digest.clone()))
+            && links.contains(&LinkKind::ReferencedBy(second_manifest_digest.clone())),
+        "both pushes must leave their per-referrer entry"
+    );
     let metadata = m
         .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
         .await
         .unwrap();
-    assert!(
-        metadata.referenced_by.contains(&first_manifest_digest),
-        "referenced_by should contain first manifest after both creates"
-    );
-    assert!(
-        metadata.referenced_by.contains(&second_manifest_digest),
-        "referenced_by should contain second manifest after both creates"
+    assert_eq!(
+        metadata.referenced_by,
+        HashSet::from([first_manifest_digest.clone()]),
+        "the advisory link file carries only the referrer that created it"
     );
 
     m.update_links(
@@ -1494,27 +1503,23 @@ pub async fn test_datastore_tracked_delete_with_referrer(m: Arc<MetadataStore>) 
     .await
     .unwrap();
 
-    let metadata = m
+    // The collector-path delete emptied the advisory file's set, so the file
+    // is gone; the reference entries are never removed by writers.
+    let result = m
         .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
-        .await
-        .unwrap();
+        .await;
     assert!(
-        !metadata.referenced_by.contains(&first_manifest_digest),
-        "referenced_by should not contain first manifest after deletion"
+        matches!(result, Err(Error::NotFound)),
+        "the emptied advisory link file must be removed"
     );
-    assert!(
-        metadata.referenced_by.contains(&second_manifest_digest),
-        "referenced_by should still contain second manifest"
-    );
-
     let blob_index = m.read_blob_index(&layer_digest).await.unwrap();
     let links = blob_index
         .namespace
         .get(namespace)
         .expect("Blob index should still have an entry for the namespace");
     assert!(
-        links.contains(&LinkKind::Layer(layer_digest.clone())),
-        "Blob index should still contain the Layer link"
+        links.contains(&LinkKind::ReferencedBy(second_manifest_digest.clone())),
+        "the second manifest's per-referrer entry must survive"
     );
 }
 
@@ -1556,17 +1561,15 @@ pub async fn test_datastore_duplicated_layer_keeps_other_referrers(m: Arc<Metada
     ];
     m.update_links(namespace, &duplicated_create).await.unwrap();
 
-    let metadata = m
-        .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
-        .await
-        .unwrap();
+    let blob_index = m.read_blob_index(&layer_digest).await.unwrap();
+    let links = blob_index
+        .namespace
+        .get(namespace)
+        .expect("Blob index should have an entry for the namespace");
     assert!(
-        metadata.referenced_by.contains(&first_manifest_digest),
-        "referenced_by should keep the first manifest after the duplicated push"
-    );
-    assert!(
-        metadata.referenced_by.contains(&second_manifest_digest),
-        "referenced_by should contain the second manifest after the duplicated push"
+        links.contains(&LinkKind::ReferencedBy(first_manifest_digest.clone()))
+            && links.contains(&LinkKind::ReferencedBy(second_manifest_digest.clone())),
+        "the duplicated push must leave one per-referrer entry per manifest"
     );
 
     let duplicated_delete = vec![
@@ -1635,13 +1638,13 @@ pub async fn test_datastore_tracked_delete_removes_when_no_referrers(m: Arc<Meta
 
     // The reference entry outlives the link as a stale over-approximation;
     // pruning it is the collector's.
-    let layer_link = LinkKind::Layer(layer_digest.clone());
+    let entry = LinkKind::ReferencedBy(manifest_digest.clone());
     let index = m.read_blob_index(&layer_digest).await.unwrap();
     assert!(
         index
             .namespace
             .get(namespace)
-            .is_some_and(|links| links.contains(&layer_link)),
+            .is_some_and(|links| links.contains(&entry)),
         "the stale entry is the collector's to prune, not the writer's"
     );
 }
@@ -1650,6 +1653,79 @@ pub async fn test_datastore_tracked_delete_removes_when_no_referrers(m: Arc<Meta
 async fn test_tracked_delete_removes_when_no_referrers() {
     for_each_backend(async |test_case| {
         test_datastore_tracked_delete_removes_when_no_referrers(test_case.metadata_store()).await;
+    })
+    .await;
+}
+
+pub async fn test_datastore_shared_blob_pin_survives_other_manifest_delete(m: Arc<MetadataStore>) {
+    let namespace = &Namespace::new("shared-config-delete-ns").unwrap();
+
+    let config_digest = put_blob_direct(m.store(), b"shared config bytes").await;
+    let first_manifest = put_blob_direct(m.store(), b"first sharing manifest").await;
+    let second_manifest = put_blob_direct(m.store(), b"second sharing manifest").await;
+
+    for manifest in [&first_manifest, &second_manifest] {
+        m.update_links(
+            namespace,
+            &[
+                LinkOperation::create(LinkKind::Digest(manifest.clone()), manifest.clone()),
+                LinkOperation::create_with_referrer(
+                    LinkKind::Config(config_digest.clone()),
+                    config_digest.clone(),
+                    manifest.clone(),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+
+    m.delete_manifest(
+        namespace,
+        &first_manifest,
+        &[
+            LinkOperation::delete(LinkKind::Digest(first_manifest.clone())),
+            LinkOperation::delete_with_referrer(
+                LinkKind::Config(config_digest.clone()),
+                first_manifest.clone(),
+            ),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+
+    // The survivor's per-referrer entry still pins the blob; the deleted
+    // manifest's entry went stale with its revision and is the collector's.
+    let links = m
+        .read_blob_index_namespace(namespace, &config_digest)
+        .await
+        .unwrap();
+    let surviving = LinkKind::ReferencedBy(second_manifest.clone());
+    let deleted = LinkKind::ReferencedBy(first_manifest.clone());
+    assert!(
+        links.contains(&surviving),
+        "the surviving manifest's entry must remain"
+    );
+    assert!(
+        m.reference_backed(namespace, &surviving, &config_digest)
+            .await
+            .unwrap(),
+        "the surviving manifest's entry must still be backed"
+    );
+    assert!(
+        !m.reference_backed(namespace, &deleted, &config_digest)
+            .await
+            .unwrap(),
+        "the deleted manifest's entry must read as unbacked"
+    );
+}
+
+#[tokio::test]
+async fn test_shared_blob_pin_survives_other_manifest_delete() {
+    for_each_backend(async |test_case| {
+        test_datastore_shared_blob_pin_survives_other_manifest_delete(test_case.metadata_store())
+            .await;
     })
     .await;
 }
@@ -1731,8 +1807,8 @@ pub async fn test_datastore_mixed_tracked_untracked_operations(m: Arc<MetadataSt
         .get(namespace)
         .expect("Blob index for layer_digest should have namespace entry");
     assert!(
-        layer_links.contains(&LinkKind::Layer(layer_digest.clone())),
-        "Blob index for layer_digest should contain the Layer link"
+        layer_links.contains(&LinkKind::ReferencedBy(manifest_digest.clone())),
+        "Blob index for layer_digest should contain the per-referrer entry"
     );
 
     let digest_index = m.read_blob_index(&digest_link_digest).await.unwrap();

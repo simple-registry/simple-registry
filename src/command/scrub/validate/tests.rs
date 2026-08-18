@@ -166,34 +166,32 @@ async fn healthy_registry_emits_zero_actions() {
 }
 
 #[tokio::test]
-async fn scrub_recreates_missing_child_links() {
+async fn scrub_regrants_missing_per_referrer_entries() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/heal-links").unwrap();
-        let (_, config_digest, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let (manifest_digest, config_digest, layer_digest) =
+            push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // Break the config and layer links out-of-band.
-        for link in [
-            LinkKind::Config(config_digest.clone()),
-            LinkKind::Layer(layer_digest.clone()),
-        ] {
+        // Break the config and layer pins out-of-band.
+        let entry = LinkKind::ReferencedBy(manifest_digest.clone());
+        for digest in [&config_digest, &layer_digest] {
             metadata_store
-                .store()
-                .object_store()
-                .delete(&path_builder::link_path(&link, namespace))
+                .update_blob_index(namespace, digest, BlobIndexOperation::Remove(entry.clone()))
                 .await
                 .unwrap();
         }
 
         scrub_apply(test_case).await;
 
-        for link in [
-            LinkKind::Config(config_digest.clone()),
-            LinkKind::Layer(layer_digest.clone()),
-        ] {
+        for digest in [&config_digest, &layer_digest] {
+            let links = metadata_store
+                .read_blob_index_namespace(namespace, digest)
+                .await
+                .unwrap();
             assert!(
-                metadata_store.read_link(namespace, &link).await.is_ok(),
-                "link {link} must be recreated"
+                links.contains(&entry),
+                "the per-referrer entry on '{digest}' must be re-granted"
             );
         }
     })
@@ -337,17 +335,22 @@ async fn missing_referrer_backlink_is_added_and_stale_one_removed() {
 
         scrub_apply(test_case).await;
 
-        let repaired = metadata_store
-            .read_link(namespace, &LinkKind::Config(config_digest))
+        // Pruning the stale referrer empties the advisory file's set, so the
+        // collector reclaims the file; the real pin is the per-referrer entry.
+        assert!(
+            metadata_store
+                .read_link(namespace, &LinkKind::Config(config_digest.clone()))
+                .await
+                .is_err(),
+            "the stale advisory link file must be reclaimed"
+        );
+        let links = metadata_store
+            .read_blob_index_namespace(namespace, &config_digest)
             .await
             .unwrap();
         assert!(
-            repaired.referenced_by.contains(&manifest_digest),
-            "the real revision's back-link must be re-added"
-        );
-        assert!(
-            !repaired.referenced_by.contains(&stale_revision),
-            "the stale back-link must be pruned"
+            links.contains(&LinkKind::ReferencedBy(manifest_digest.clone())),
+            "the real revision's per-referrer entry must survive"
         );
     })
     .await;
@@ -357,10 +360,10 @@ async fn missing_referrer_backlink_is_added_and_stale_one_removed() {
 async fn missing_blob_index_grant_is_regranted() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/regrant").unwrap();
-        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        let link = LinkKind::Layer(layer_digest.clone());
+        let link = LinkKind::ReferencedBy(manifest_digest.clone());
         metadata_store
             .update_blob_index(
                 namespace,
@@ -378,7 +381,7 @@ async fn missing_blob_index_grant_is_regranted() {
             .unwrap();
         assert!(
             links.contains(&link),
-            "the layer grant must be re-issued from the manifest"
+            "the layer's per-referrer entry must be re-issued from the manifest"
         );
     })
     .await;
@@ -543,20 +546,22 @@ async fn young_dangling_ref_entry_is_kept() {
     .await;
 }
 
-/// Link repairs derived from a young revision (here: a deleted layer link)
-/// may race a push between its waves, so a graced scrub defers them.
+/// Link repairs derived from a young revision (here: a removed per-referrer
+/// entry) may race a push between its waves, so a graced scrub defers them.
 #[tokio::test]
 async fn young_revision_defers_link_repairs() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/young-revision").unwrap();
-        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        let layer_link = path_builder::link_path(&LinkKind::Layer(layer_digest), namespace);
+        let entry = LinkKind::ReferencedBy(manifest_digest.clone());
         metadata_store
-            .store()
-            .object_store()
-            .delete(&layer_link)
+            .update_blob_index(
+                namespace,
+                &layer_digest,
+                BlobIndexOperation::Remove(entry.clone()),
+            )
             .await
             .unwrap();
 
@@ -576,14 +581,13 @@ async fn young_revision_defers_link_repairs() {
 
         // The grace-0 store the fixture built repairs it immediately.
         scrub_apply(test_case).await;
+        let links = metadata_store
+            .read_blob_index_namespace(namespace, &layer_digest)
+            .await
+            .unwrap();
         assert!(
-            metadata_store
-                .store()
-                .object_store()
-                .head(&layer_link)
-                .await
-                .is_ok(),
-            "the layer link must be recreated once the grace period is out of scope"
+            links.contains(&entry),
+            "the entry must be re-granted once the grace period is out of scope"
         );
     })
     .await;
@@ -593,7 +597,7 @@ async fn young_revision_defers_link_repairs() {
 async fn corrupt_shard_is_deleted_and_regranted_on_next_run() {
     for_each_backend(async |test_case| {
         let namespace = &Namespace::new("test-repo/corrupt-shard").unwrap();
-        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
         let shard_key = path_builder::blob_index_shard_path(&layer_digest, namespace);
@@ -614,7 +618,7 @@ async fn corrupt_shard_is_deleted_and_regranted_on_next_run() {
             .await
             .unwrap();
         assert!(
-            links.contains(&LinkKind::Layer(layer_digest.clone())),
+            links.contains(&LinkKind::ReferencedBy(manifest_digest.clone())),
             "grants must be rebuilt after the corrupt shard was deleted"
         );
     })

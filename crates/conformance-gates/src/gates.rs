@@ -215,18 +215,17 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
             format!("quarantined bytes wrong for {}", alien.key)
         })?;
     }
-    let backlink = ctx
-        .store
-        .body(&probes.gate2_config_link())
-        .await?
-        .ok_or_else(|| fail("gate2 config link vanished during repair"))?;
-    let backlink = String::from_utf8_lossy(&backlink);
-    ensure(backlink.contains(&probes.gate2_manifest_digest), || {
-        "missing back-link was not re-added".to_string()
-    })?;
-    ensure(!backlink.contains(&probes.missing_digest), || {
-        "stale back-link was not pruned".to_string()
-    })?;
+    // The damaged legacy link carried only the stale referrer, so pruning it
+    // empties the set and the collector reclaims the file; the live pin is
+    // gate2's per-referrer reference entry on the config blob.
+    ensure(
+        !ctx.store.exists(&probes.gate2_config_link()).await?,
+        || "stale legacy config link was not reclaimed".to_string(),
+    )?;
+    ensure(
+        ctx.store.exists(&probes.gate2_config_ref_entry()).await?,
+        || "gate2's per-referrer config entry is missing".to_string(),
+    )?;
 
     // Ownership boundary: scrub must have left every age-gated and
     // config-relative artifact for prune, all the way through the fixpoint.

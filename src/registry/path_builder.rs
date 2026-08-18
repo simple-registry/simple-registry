@@ -114,6 +114,9 @@ fn ref_entry(link: &LinkKind) -> String {
         LinkKind::Manifest { index, .. } => {
             format!("r/idx.{}.{}", index.algorithm(), index.hash())
         }
+        LinkKind::ReferencedBy(referrer) => {
+            format!("r/{}.{}", referrer.algorithm(), referrer.hash())
+        }
     }
 }
 
@@ -149,7 +152,10 @@ pub fn parse_blob_ref_entry(digest: &Digest, entry: &str) -> Option<LinkKind> {
                     child: digest.clone(),
                 })
             } else {
-                None
+                // A bare `<algo>.<hash>` names the referring manifest.
+                // Unambiguous against the prefixed shapes: no algorithm is
+                // named `rev`, `layer`, `config`, `tag`, `sub`, or `idx`.
+                Some(LinkKind::ReferencedBy(parse_ref_digest(entry)?))
             }
         }
     }
@@ -417,6 +423,16 @@ pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> String {
                 child.hash()
             )
         }
+        // No writer ever creates this path; it exists only so the match is
+        // total. Reads of it yield NotFound and every caller treats that as
+        // absent/unbacked.
+        LinkKind::ReferencedBy(referrer) => {
+            format!(
+                "{REPOS_ROOT}/{namespace}/_refs/referenced-by/{}/{}",
+                referrer.algorithm(),
+                referrer.hash()
+            )
+        }
     }
 }
 
@@ -575,6 +591,7 @@ mod tests {
                 index: other.clone(),
                 child: digest.clone(),
             },
+            LinkKind::ReferencedBy(other.clone()),
         ];
         let dir = blob_ref_dir(&digest);
         for link in links {
@@ -614,6 +631,9 @@ mod tests {
             "ns!r/sub.sha256",
             "ns!r/sub.sha3.abcd",
             &format!("ns!r/idx.sha256.{}", "z".repeat(64)),
+            "ns!r/sha256",
+            "ns!r/sha3.abcd",
+            &format!("ns!r/sha256.{}", "z".repeat(64)),
         ] {
             assert_eq!(parse_blob_ref(&digest, key), None, "key {key:?}");
         }

@@ -23,6 +23,10 @@ pub enum LinkKind {
         index: Digest,
         child: Digest,
     },
+    /// A per-referrer reference entry: the manifest with this digest
+    /// references the blob the entry lives under. Backed while that
+    /// manifest's revision still resolves in the namespace.
+    ReferencedBy(Digest),
 }
 
 /// The shape [`LinkKind`] has always had inside a blob-index shard, where the
@@ -37,6 +41,9 @@ enum StoredLinkKind {
     Config(Digest),
     Referrer(Digest, Digest),
     Manifest(Digest, Digest),
+    /// Never present in a legacy shard (the kind postdates them); carried so
+    /// the conversions stay total.
+    ReferencedBy(Digest),
 }
 
 impl From<StoredLinkKind> for LinkKind {
@@ -49,6 +56,7 @@ impl From<StoredLinkKind> for LinkKind {
             StoredLinkKind::Config(digest) => LinkKind::Config(digest),
             StoredLinkKind::Referrer(subject, referrer) => LinkKind::Referrer { subject, referrer },
             StoredLinkKind::Manifest(index, child) => LinkKind::Manifest { index, child },
+            StoredLinkKind::ReferencedBy(referrer) => LinkKind::ReferencedBy(referrer),
         }
     }
 }
@@ -63,6 +71,7 @@ impl From<LinkKind> for StoredLinkKind {
             LinkKind::Config(digest) => StoredLinkKind::Config(digest),
             LinkKind::Referrer { subject, referrer } => StoredLinkKind::Referrer(subject, referrer),
             LinkKind::Manifest { index, child } => StoredLinkKind::Manifest(index, child),
+            LinkKind::ReferencedBy(referrer) => StoredLinkKind::ReferencedBy(referrer),
         }
     }
 }
@@ -71,7 +80,10 @@ impl LinkKind {
     pub fn is_tracked(&self) -> bool {
         matches!(
             self,
-            LinkKind::Layer(_) | LinkKind::Config(_) | LinkKind::Manifest { .. }
+            LinkKind::Layer(_)
+                | LinkKind::Config(_)
+                | LinkKind::Manifest { .. }
+                | LinkKind::ReferencedBy(_)
         )
     }
 
@@ -95,6 +107,7 @@ impl Display for LinkKind {
                 write!(f, "referrer:{subject}-{referrer}")
             }
             LinkKind::Manifest { index, child } => write!(f, "manifest:{index}-{child}"),
+            LinkKind::ReferencedBy(referrer) => write!(f, "referenced-by:{referrer}"),
         }
     }
 }
@@ -153,6 +166,10 @@ mod tests {
                     child: sha(HASH_B),
                 },
                 format!(r#"{{"Manifest":["sha256:{HASH_A}","sha256:{HASH_B}"]}}"#),
+            ),
+            (
+                LinkKind::ReferencedBy(sha(HASH_A)),
+                format!(r#"{{"ReferencedBy":"sha256:{HASH_A}"}}"#),
             ),
         ];
 
@@ -217,6 +234,11 @@ mod tests {
     }
 
     #[test]
+    fn is_tracked_returns_true_for_referenced_by() {
+        assert!(LinkKind::ReferencedBy(sha(HASH_A)).is_tracked());
+    }
+
+    #[test]
     fn is_tracked_returns_false_for_blob() {
         assert!(!LinkKind::Blob(sha(HASH_A)).is_tracked());
     }
@@ -275,6 +297,10 @@ mod tests {
                     child: sha(HASH_B),
                 },
                 format!("manifest:sha256:{HASH_A}-sha256:{HASH_B}"),
+            ),
+            (
+                LinkKind::ReferencedBy(sha(HASH_A)),
+                format!("referenced-by:sha256:{HASH_A}"),
             ),
         ];
 

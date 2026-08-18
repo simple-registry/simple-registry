@@ -749,24 +749,28 @@ fn build_create_mutations(
                 continue;
             }
 
-            // Tracked link: merge referrer into existing or new metadata.
-            let mut metadata = link_cache.remove(*link).unwrap_or_else(|| {
-                LinkMetadata::from_digest_at(
-                    (*target).clone(),
-                    tx.created_at().unwrap_or_else(Utc::now),
-                )
-                .with_media_type((*media_type).clone())
-                .with_descriptor(descriptor.as_ref().map(|b| b.as_ref().clone()))
-            });
-
+            // The pin: one write-once key per referring manifest, always
+            // written (idempotent), never merged, so concurrent pushes
+            // sharing a blob cannot clobber each other's references.
             if let Some(manifest_digest) = referrer {
-                metadata.add_referrer((*manifest_digest).clone());
+                acc.push_blob_op(
+                    target,
+                    BlobIndexOperation::Insert(LinkKind::ReferencedBy((*manifest_digest).clone())),
+                );
             }
 
-            if old_target.is_none() {
-                acc.push_blob_op(target, BlobIndexOperation::Insert((*link).clone()));
+            // The legacy link file is advisory only: written once when
+            // absent, never rewritten, cleaned up by the collector.
+            if !link_cache.contains_key(*link) {
+                let metadata = tracked_link_metadata(
+                    target,
+                    referrer.as_ref(),
+                    media_type.as_ref(),
+                    descriptor.as_deref(),
+                    tx,
+                );
+                acc.put_link(namespace, link, metadata)?;
             }
-            acc.put_link(namespace, link, metadata)?;
         } else {
             // Non-tracked link.
             let same_target = old_target.as_ref() == Some(*target);
@@ -841,6 +845,25 @@ fn build_create_mutations(
     Ok(acc)
 }
 
+/// The advisory metadata of a freshly-written tracked link file: the target,
+/// media type, descriptor, and referrer of its `Create` op.
+fn tracked_link_metadata(
+    target: &Digest,
+    referrer: Option<&Digest>,
+    media_type: Option<&MediaType>,
+    descriptor: Option<&Descriptor>,
+    tx: &LinksTx<'_>,
+) -> LinkMetadata {
+    let mut metadata =
+        LinkMetadata::from_digest_at(target.clone(), tx.created_at().unwrap_or_else(Utc::now))
+            .with_media_type(media_type.cloned())
+            .with_descriptor(descriptor.cloned());
+    if let Some(manifest_digest) = referrer {
+        metadata.add_referrer(manifest_digest.clone());
+    }
+    metadata
+}
+
 /// The delete half of mutation planning: for each `Delete` op whose link
 /// exists, either prune one referrer (a tracked link with references left
 /// becomes a `Put`), append a tag tombstone, or remove the link outright (a
@@ -880,6 +903,13 @@ fn build_delete_mutations(
         }
 
         if link.is_tracked() && referrer.is_some() {
+            // Writers never rewrite or delete a tracked link file: the pin
+            // lives in the per-referrer reference entry, which goes stale on
+            // its own once the referring revision is gone. Only the
+            // collector's `update_links` path still prunes legacy files.
+            if !matches!(tx, LinksTx::UpdateLinks) {
+                continue;
+            }
             let mut pruned = (**metadata).clone();
             if let Some(manifest_digest) = referrer {
                 pruned.remove_referrer(manifest_digest);

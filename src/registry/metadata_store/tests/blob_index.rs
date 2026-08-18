@@ -181,12 +181,13 @@ async fn test_tracked_link_deletes_with_referrers() {
 
         // The reference entry outlives the link as a stale over-approximation;
         // pruning it is the collector's.
+        let entry = LinkKind::ReferencedBy(referrer_digest.clone());
         let index = backend.read_blob_index(d).await.unwrap();
         assert!(
             index
                 .namespace
                 .get(&namespace)
-                .is_some_and(|links| links.contains(&link)),
+                .is_some_and(|links| links.contains(&entry)),
             "the stale entry is the collector's to prune, not the writer's"
         );
     }

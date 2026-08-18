@@ -667,15 +667,21 @@ mod tests {
             let digest = put_blob_direct(registry.metadata_store.store(), content).await;
             let link = LinkKind::Config(digest.clone());
 
+            // A live referring revision: its per-referrer entry is what pins
+            // the blob against the delete.
+            let manifest = put_blob_direct(registry.metadata_store.store(), b"manifest").await;
             registry
                 .metadata_store
                 .update_links(
                     namespace,
-                    &[LinkOperation::create_with_referrer(
-                        link.clone(),
-                        digest.clone(),
-                        Digest::sha256_of_bytes(b"manifest"),
-                    )],
+                    &[
+                        LinkOperation::create(LinkKind::Digest(manifest.clone()), manifest.clone()),
+                        LinkOperation::create_with_referrer(
+                            link.clone(),
+                            digest.clone(),
+                            manifest.clone(),
+                        ),
+                    ],
                 )
                 .await
                 .unwrap();
@@ -759,7 +765,20 @@ mod tests {
         for_each_backend(async |test_case| {
             let registry = test_case.registry();
             let namespace = &Namespace::new("test-repo").unwrap();
-            let parent = Digest::sha256_of_bytes(b"index manifest");
+            let parent = put_blob_direct(registry.metadata_store.store(), b"index manifest").await;
+            // The index-child pin is a per-referrer entry, backed only while
+            // the parent's revision resolves.
+            registry
+                .metadata_store
+                .update_links(
+                    namespace,
+                    &[LinkOperation::create(
+                        LinkKind::Digest(parent.clone()),
+                        parent.clone(),
+                    )],
+                )
+                .await
+                .unwrap();
             let subject = Digest::sha256_of_bytes(b"subject manifest");
 
             let cases = [
@@ -834,7 +853,9 @@ mod tests {
                 subject: subject.clone(),
                 referrer: digest.clone(),
             },
-            LinkKind::Blob(_) | LinkKind::Tag(_) => link.clone(),
+            // A per-referrer entry names only the referring manifest, so
+            // there is nothing to retarget.
+            LinkKind::Blob(_) | LinkKind::Tag(_) | LinkKind::ReferencedBy(_) => link.clone(),
         }
     }
 

@@ -564,7 +564,7 @@ impl RetentionChecker {
     ) -> Result<bool, Error> {
         if self
             .has_backed_link(namespace, digest, blob_index, |link| {
-                matches!(link, LinkKind::Manifest { .. })
+                matches!(link, LinkKind::Manifest { .. } | LinkKind::ReferencedBy(_))
             })
             .await?
         {
@@ -695,12 +695,13 @@ mod tests {
                         LinkKind::Tag(Tag::new("latest").unwrap()),
                         index_digest.clone(),
                     ),
-                    LinkOperation::create(
+                    LinkOperation::create_with_referrer(
                         LinkKind::Manifest {
                             index: index_digest.clone(),
                             child: child_digest.clone(),
                         },
                         child_digest.clone(),
+                        index_digest.clone(),
                     ),
                 ],
             )

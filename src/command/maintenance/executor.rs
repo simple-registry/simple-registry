@@ -240,7 +240,8 @@ impl Executor {
 
     /// Whether the reference entry for `link` is still backed: a blob
     /// self-grant is its own record, a tag is backed while it resolves to
-    /// `blob`, every other kind is backed by its link file.
+    /// `blob`, a per-referrer entry while the referring manifest's revision
+    /// resolves, every other kind is backed by its link file.
     async fn entry_still_backed(
         &self,
         namespace: &Namespace,
@@ -249,6 +250,18 @@ impl Executor {
     ) -> Result<bool, Error> {
         if matches!(link, LinkKind::Blob(_)) {
             return Ok(true);
+        }
+        if let LinkKind::ReferencedBy(referrer) = link {
+            let revision = LinkKind::Digest(referrer.clone());
+            return match self
+                .metadata_store
+                .read_link_reference(namespace, &revision)
+                .await
+            {
+                Ok(_) => Ok(true),
+                Err(RegistryError::NotFound) => Ok(false),
+                Err(e) => Err(Error::from(e)),
+            };
         }
         if matches!(
             link,
@@ -417,22 +430,6 @@ impl Executor {
     ) -> Result<(), Error> {
         self.metadata_store
             .update_links(&namespace, &[LinkOperation::create(link, target)])
-            .await?;
-        Ok(())
-    }
-
-    async fn add_referrer(
-        &self,
-        namespace: Namespace,
-        link: LinkKind,
-        target: Digest,
-        referrer: Digest,
-    ) -> Result<(), Error> {
-        self.metadata_store
-            .update_links(
-                &namespace,
-                &[LinkOperation::create_with_referrer(link, target, referrer)],
-            )
             .await?;
         Ok(())
     }
@@ -685,12 +682,6 @@ impl ActionSink for Executor {
                 link,
                 target,
             } => self.recreate_link(namespace, link, target).await,
-            Action::AddReferrer {
-                namespace,
-                link,
-                target,
-                referrer,
-            } => self.add_referrer(namespace, link, target, referrer).await,
             Action::DeleteTag { namespace, tag } => self.delete_tag(namespace, tag).await,
             Action::DeleteInvalidTag { namespace, tag } => {
                 self.delete_invalid_tag(namespace, tag).await
@@ -905,7 +896,7 @@ mod tests {
         .await;
     }
 
-    /// A push can recreate the link file behind an entry scrub confirmed
+    /// A push can recreate the revision behind an entry scrub confirmed
     /// dangling; the apply-time re-check must then keep the entry.
     #[tokio::test]
     async fn executor_remove_blob_index_link_keeps_entry_whose_link_reappeared() {
@@ -914,17 +905,21 @@ mod tests {
             let metadata_store = test_case.metadata_store();
             let namespace = Namespace::new("test-repo/app").unwrap();
 
-            // A tracked layer link: file and shard entry both live, bytes present.
+            // A pushed layer: its per-referrer entry is backed while the
+            // referring manifest's revision resolves.
             let digest = put_blob_direct(metadata_store.store(), b"layer re-pushed").await;
-            let parent = Digest::sha256_of_bytes(b"parent manifest");
+            let parent = put_blob_direct(metadata_store.store(), b"parent manifest").await;
             metadata_store
                 .update_links(
                     &namespace,
-                    &[LinkOperation::create_with_referrer(
-                        LinkKind::Layer(digest.clone()),
-                        digest.clone(),
-                        parent,
-                    )],
+                    &[
+                        LinkOperation::create(LinkKind::Digest(parent.clone()), parent.clone()),
+                        LinkOperation::create_with_referrer(
+                            LinkKind::Layer(digest.clone()),
+                            digest.clone(),
+                            parent.clone(),
+                        ),
+                    ],
                 )
                 .await
                 .unwrap();
@@ -934,7 +929,7 @@ mod tests {
                 .apply(Action::RemoveBlobIndexLink {
                     namespace: namespace.clone(),
                     blob: digest.clone(),
-                    link: LinkKind::Layer(digest.clone()),
+                    link: LinkKind::ReferencedBy(parent.clone()),
                 })
                 .await
                 .unwrap();
@@ -943,8 +938,8 @@ mod tests {
                 metadata_store
                     .read_blob_index_namespace(&namespace, &digest)
                     .await
-                    .is_ok_and(|links| links.contains(&LinkKind::Layer(digest.clone()))),
-                "an entry backed by a live link file must survive the stale removal"
+                    .is_ok_and(|links| links.contains(&LinkKind::ReferencedBy(parent.clone()))),
+                "an entry backed by a live referring revision must survive the stale removal"
             );
         })
         .await;

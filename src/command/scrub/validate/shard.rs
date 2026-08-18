@@ -159,8 +159,9 @@ impl Validator {
 
     /// Whether the link behind a reference key still backs it: a tag backs
     /// its key while it resolves to the blob, a revision or referrer while
-    /// its record or legacy link resolves, every other kind while its link
-    /// file exists.
+    /// its record or legacy link resolves, a per-referrer entry while the
+    /// referring manifest's revision resolves, every other kind while its
+    /// link file exists.
     async fn ref_backed(
         &self,
         namespace: &Namespace,
@@ -175,6 +176,18 @@ impl Validator {
                     .await
                 {
                     Ok(metadata) => Ok(&metadata.target == blob),
+                    Err(RegistryError::NotFound) => Ok(false),
+                    Err(e) => Err(e.into()),
+                }
+            }
+            LinkKind::ReferencedBy(referrer) => {
+                let revision = LinkKind::Digest(referrer.clone());
+                match self
+                    .metadata_store
+                    .read_link_reference(namespace, &revision)
+                    .await
+                {
+                    Ok(_) => Ok(true),
                     Err(RegistryError::NotFound) => Ok(false),
                     Err(e) => Err(e.into()),
                 }
@@ -222,7 +235,10 @@ fn convertible(digest: &Digest, link: &LinkKind) -> bool {
         LinkKind::Blob(d) | LinkKind::Digest(d) | LinkKind::Layer(d) | LinkKind::Config(d) => {
             d == digest
         }
-        LinkKind::Tag(_) => true,
+        // `ReferencedBy` postdates the shards, so it is never stored in one;
+        // representable as a key regardless (it spells out only the referrer
+        // digest).
+        LinkKind::Tag(_) | LinkKind::ReferencedBy(_) => true,
         LinkKind::Referrer { referrer, .. } => referrer == digest,
         LinkKind::Manifest { child, .. } => child == digest,
     }

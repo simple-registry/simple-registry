@@ -245,9 +245,10 @@ impl MetadataStore {
     }
 
     /// Whether the link behind a reference entry still backs it: a tag,
-    /// revision, or referrer while it resolves to `blob`, every other kind
-    /// while its link file exists. Reads are raw, so a cache cannot mask a
-    /// live reference.
+    /// revision, or referrer while it resolves to `blob`, a per-referrer
+    /// entry while the referring manifest's revision resolves, every other
+    /// kind while its link file exists. Reads are raw, so a cache cannot
+    /// mask a live reference.
     pub async fn reference_backed(
         &self,
         namespace: &Namespace,
@@ -258,6 +259,14 @@ impl MetadataStore {
             LinkKind::Tag(_) | LinkKind::Digest(_) | LinkKind::Referrer { .. } => {
                 match self.read_link_reference(namespace, link).await {
                     Ok(metadata) => Ok(&metadata.target == blob),
+                    Err(Error::NotFound) => Ok(false),
+                    Err(e) => Err(e),
+                }
+            }
+            LinkKind::ReferencedBy(referrer) => {
+                let revision = LinkKind::Digest(referrer.clone());
+                match self.read_link_reference(namespace, &revision).await {
+                    Ok(_) => Ok(true),
                     Err(Error::NotFound) => Ok(false),
                     Err(e) => Err(e),
                 }

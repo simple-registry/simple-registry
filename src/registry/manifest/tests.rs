@@ -1507,7 +1507,7 @@ async fn concurrent_same_digest_pushes_keep_upload_ownership() {
             ]
         });
         let manifest_content = serde_json::to_vec(&manifest).unwrap();
-        registry
+        let response = registry
             .put_manifest(
                 namespace,
                 &Reference::Tag(Tag::new("latest").unwrap()),
@@ -1516,11 +1516,11 @@ async fn concurrent_same_digest_pushes_keep_upload_ownership() {
             )
             .await
             .unwrap();
-        layer_digest
+        (layer_digest, response.digest)
     });
 
     let digests = join_all(pushes).await;
-    let layer_digest = &digests[0];
+    let (layer_digest, manifest_digest) = &digests[0];
     let blob_index = registry
         .metadata_store
         .read_blob_index(layer_digest)
@@ -1530,7 +1530,7 @@ async fn concurrent_same_digest_pushes_keep_upload_ownership() {
     for namespace in namespaces {
         let links = blob_index.namespace.get(&namespace).unwrap();
         assert!(links.contains(&LinkKind::Blob(layer_digest.clone())));
-        assert!(links.contains(&LinkKind::Layer(layer_digest.clone())));
+        assert!(links.contains(&LinkKind::ReferencedBy(manifest_digest.clone())));
     }
 
     test_case.cleanup().await;

@@ -509,7 +509,7 @@ v2/ref/{algorithm}/{hash_prefix}/{hash}/{namespace}!own
 v2/ref/{algorithm}/{hash_prefix}/{hash}/{namespace}!r/{entry}
 ```
 
-`{namespace}!own` records ownership (an upload or a cross-repository mount); each key under `{namespace}!r/` records one link through which the namespace references the blob (a layer, a config, a tag, a revision, a referrer, or an index child). `!` terminates the namespace: it is outside the namespace grammar, so the name always parses back out of the key.
+`{namespace}!own` records ownership (an upload or a cross-repository mount); each key under `{namespace}!r/` records one way the namespace references the blob: a tag, a revision, a referrer, an index child, or a `{algorithm}.{hash}` entry naming a manifest that references the blob as a layer or config. The per-manifest entry is what pins a shared layer: each referring manifest owns its own write-once key, so pushes sharing a blob never rewrite each other's references, and the key stays live exactly while the referring manifest's revision resolves. `!` terminates the namespace: it is outside the namespace grammar, so the name always parses back out of the key.
 
 For example, a blob owned by namespaces `myapp` and `team/backend` stores:
 

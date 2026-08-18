@@ -95,12 +95,6 @@ pub enum Action {
         link: LinkKind,
         target: Digest,
     },
-    AddReferrer {
-        namespace: Namespace,
-        link: LinkKind,
-        target: Digest,
-        referrer: Digest,
-    },
     RemoveReferrer {
         namespace: Namespace,
         link: LinkKind,
@@ -265,17 +259,6 @@ impl fmt::Display for Action {
                 write!(
                     f,
                     "recreate invalid link from namespace '{namespace}': '{link}' -> '{target}'"
-                )
-            }
-            Action::AddReferrer {
-                namespace,
-                link,
-                referrer,
-                ..
-            } => {
-                write!(
-                    f,
-                    "add referrer {referrer} to link {link} in namespace '{namespace}'"
                 )
             }
             Action::RemoveReferrer {

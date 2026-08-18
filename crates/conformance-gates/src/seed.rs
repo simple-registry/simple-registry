@@ -11,8 +11,6 @@ use crate::store::{GateStore, sha256_hex};
 pub const GATE_NS: &str = "conformance/gate";
 pub const GATE2_NS: &str = "conformance/gate2";
 pub const GATE_TAG: &str = "gate";
-/// `GATE_NS` percent-encoded the way blob-index shard filenames encode it.
-const GATE_NS_ENCODED: &str = "conformance%2Fgate";
 
 /// Counters the first scrub run over the seeded store must report. Repairs
 /// are a floor, not a pin: the gate2 back-link heal lands on run 2 because
@@ -66,16 +64,22 @@ pub struct Probes {
 }
 
 impl Probes {
-    /// Links a repair run must have recreated from the intact manifest.
+    /// Keys a repair run must have recreated from the intact manifest: the
+    /// per-referrer reference entries pinning the layer and config blobs,
+    /// plus the revision record.
     pub fn recreated_links(&self) -> Vec<String> {
         vec![
             format!(
-                "v2/repositories/{GATE_NS}/_layers/sha256/{}/link",
-                self.gate_layer_digest
+                "v2/ref/sha256/{}/{}/{GATE_NS}!r/sha256.{}",
+                &self.gate_layer_digest[..2],
+                self.gate_layer_digest,
+                self.gate_manifest_digest
             ),
             format!(
-                "v2/repositories/{GATE_NS}/_config/sha256/{}/link",
-                self.gate_config_digest
+                "v2/ref/sha256/{}/{}/{GATE_NS}!r/sha256.{}",
+                &self.gate_config_digest[..2],
+                self.gate_config_digest,
+                self.gate_manifest_digest
             ),
             format!(
                 "v2/ns/{GATE_NS}!rev/sha256/{}/{}",
@@ -156,6 +160,17 @@ impl Probes {
         format!(
             "v2/repositories/{GATE2_NS}/_config/sha256/{}/link",
             self.gate_config_digest
+        )
+    }
+
+    /// Gate2's per-referrer reference entry on the shared config blob: the
+    /// pin that must survive the legacy link file's reclamation.
+    pub fn gate2_config_ref_entry(&self) -> String {
+        format!(
+            "v2/ref/sha256/{}/{}/{GATE2_NS}!r/sha256.{}",
+            &self.gate_config_digest[..2],
+            self.gate_config_digest,
+            self.gate2_manifest_digest
         )
     }
 
