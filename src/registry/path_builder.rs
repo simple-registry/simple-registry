@@ -201,6 +201,25 @@ pub fn tag_entry_path(
     )
 }
 
+/// Directory holding every demoted tag-history directory of `namespace`.
+/// Nothing reads `!hist/` yet: it retains superseded entries for the future
+/// tag-history endpoint while `!tag/` keeps only each tag's current group.
+pub fn tag_hist_root(namespace: &Namespace) -> String {
+    format!("{NS_ROOT}/{namespace}!hist")
+}
+
+/// Directory holding one tag's demoted entries, `!`-terminated like
+/// [`tag_entry_dir`].
+pub fn tag_hist_dir(namespace: &Namespace, tag: &Tag) -> String {
+    format!("{}/{tag}!", tag_hist_root(namespace))
+}
+
+/// A demoted entry keeps its [`tag_entry_path`] file name, so history stays
+/// in newest-first order.
+pub fn tag_hist_path(namespace: &Namespace, tag: &Tag, entry_name: &str) -> String {
+    format!("{}/{entry_name}", tag_hist_dir(namespace, tag))
+}
+
 /// Advisory last-pull timestamp for a tag, overwritten in place. Kept apart
 /// from the write-once entries so those never mutate.
 pub fn tag_atime_path(namespace: &Namespace, tag: &Tag) -> String {
@@ -568,6 +587,20 @@ mod tests {
             tag_ord(None) > tag_ord(Some(DateTime::from_timestamp_millis(0).unwrap())),
             "a missing timestamp must sort after a real epoch one"
         );
+    }
+
+    #[test]
+    fn tag_hist_paths_mirror_tag_entry_paths() {
+        let ns = Namespace::new("org/app").unwrap();
+        let tag = Tag::new("v1").unwrap();
+        let digest = Digest::sha256(HASH_A).unwrap();
+        let entry_key = tag_entry_path(&ns, &tag, 7, true, &digest);
+        let file = entry_key.rsplit_once('/').unwrap().1;
+        let hist_key = tag_hist_path(&ns, &tag, file);
+        assert_eq!(hist_key, format!("v2/ns/org/app!hist/v1!/{file}"));
+        assert_eq!(hist_key, format!("{}/{file}", tag_hist_dir(&ns, &tag)));
+        assert!(hist_key.starts_with(&format!("{}/", tag_hist_root(&ns))));
+        assert_eq!(parse_tag_entry(file), Some((7, true, digest)));
     }
 
     /// Every link kind's reference key must decode back to the namespace and

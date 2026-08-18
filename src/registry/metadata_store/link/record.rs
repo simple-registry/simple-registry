@@ -85,7 +85,7 @@ pub fn referrer_set_mutation(
 impl MetadataStore {
     /// Resolve a manifest revision to link-shaped metadata: the record first,
     /// the legacy revision link as the fallback.
-    pub(crate) async fn resolve_revision(
+    pub async fn resolve_revision(
         &self,
         namespace: &Namespace,
         digest: &Digest,
@@ -107,7 +107,7 @@ impl MetadataStore {
 
     /// Resolve a referrer back-link: the record first (its body is the
     /// referring manifest's descriptor), the legacy link as the fallback.
-    pub(crate) async fn resolve_referrer(
+    pub async fn resolve_referrer(
         &self,
         namespace: &Namespace,
         subject: &Digest,
@@ -172,7 +172,7 @@ impl MetadataStore {
 
     /// Overwrite the revision's atime key with the current time: advisory, a
     /// plain put with no transaction and no read.
-    pub(crate) async fn write_revision_access_time(
+    pub async fn write_revision_access_time(
         &self,
         namespace: &Namespace,
         digest: &Digest,

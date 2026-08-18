@@ -20,7 +20,7 @@ use crate::{
     configuration::{Configuration, listeners::ServerTlsConfig, watcher::ConfigNotifier},
     jobs::Queue,
     jobs::runner::execute_one,
-    jobs::store::{self as job_store, JobHandler, JobStore},
+    jobs::store::{self as job_store, JobHandler, JobRetryPolicy, JobStore},
     registry::{
         Registry, blob_store::BlobStore, metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
@@ -228,6 +228,7 @@ struct WorkerContext {
     metadata_store: Arc<MetadataStore>,
     repositories: Arc<RepositoryResolver>,
     registry: Arc<Registry>,
+    retry_policy: JobRetryPolicy,
 }
 
 impl WorkerContext {
@@ -241,13 +242,14 @@ impl WorkerContext {
             repositories,
         } = bootstrap::maintenance_context(config).await?;
 
-        if config.global.job_queue.is_none() {
+        let Some(job_queue) = config.global.job_queue.as_ref() else {
             return Err(bootstrap::Error::JobQueue(
                 job_store::Error::Initialization(
                     "[global.job_queue] is required for the worker subcommand".to_string(),
                 ),
             ));
-        }
+        };
+        let retry_policy = job_queue.retry_policy();
 
         // Share the metadata store's engine façade instead of wiring (and
         // probing) a second store over the same backend.
@@ -258,7 +260,11 @@ impl WorkerContext {
             blob_store.clone(),
             metadata_store.clone(),
             repositories.clone(),
-            Arc::new(JobStore::new(storage.clone(), "worker")),
+            Arc::new(JobStore::with_retry_policy(
+                storage.clone(),
+                "worker",
+                retry_policy,
+            )),
         )?;
 
         // Spawn the engine recovery loop once per worker process so any
@@ -275,15 +281,17 @@ impl WorkerContext {
             metadata_store,
             repositories,
             registry,
+            retry_policy,
         })
     }
 
     /// Builds the [`Components`] for one queue: a fresh `JobStore` consumer
     /// over the shared storage plus the handler bound to that queue.
     fn components_for(&self, queue: Queue) -> Components {
-        let consumer = Arc::new(JobStore::new(
+        let consumer = Arc::new(JobStore::with_retry_policy(
             self.storage.clone(),
             Uuid::new_v4().to_string(),
+            self.retry_policy,
         ));
         let handler: Arc<dyn JobHandler> = match queue {
             Queue::Replication => Arc::new(ReplicationJobHandler::new(
@@ -320,7 +328,7 @@ mod tests {
         cache_fill::CACHE_FETCH_BLOB_KIND,
         jobs::{
             Queue,
-            store::{JobEnvelope, JobStore},
+            store::{JobEnvelope, JobRetryPolicy, JobStore},
         },
         metrics_provider,
         registry::{
@@ -391,6 +399,7 @@ mod tests {
             },
         );
         let context = WorkerContext {
+            retry_policy: JobRetryPolicy::default(),
             storage,
             blob_store,
             metadata_store,

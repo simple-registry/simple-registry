@@ -46,30 +46,28 @@ pub enum LinksTx<'a> {
     /// last-writer-wins gate (`delete_links`); `None` is a plain local delete.
     /// Unlike [`Self::DeleteManifest`] it does no blob-data reclamation.
     DeleteLinks { source_ts: Option<DateTime<Utc>> },
-    /// `store_manifest`: the link writes for a manifest push. The manifest
-    /// blob-data is written separately to the blob store by the registry before
-    /// this runs. `created_at` stamps new link metadata; a replicated write
-    /// passes the author's `source_ts` for LWW. `reference_policy` governs
-    /// newly-referenced digests the namespace does not own: Strict rejects the
-    /// push, Permissive drops the unowned link, Trusted grants blindly. The
-    /// caller's `blob-data:{digest}` lock keeps the ownership read from racing
-    /// a concurrent reclaim.
+    /// `store_manifest`: the link writes for a manifest push, ordered waves of
+    /// idempotent write-once puts with no lock; the `v2/gc` marker check
+    /// between waves A and C backs off while a collector run covers a
+    /// referenced digest. The manifest blob-data is written separately to the
+    /// blob store by the registry before this runs. `created_at` stamps new
+    /// link metadata; a replicated write passes the author's `source_ts` for
+    /// LWW. `reference_policy` governs newly-referenced digests the namespace
+    /// does not own: Strict rejects the push, Permissive drops the unowned
+    /// link, Trusted grants blindly.
     StoreManifest {
         created_at: Option<DateTime<Utc>>,
         reference_policy: ReferencePolicy,
     },
-    /// `delete_manifest`: removes the links and reports via `reclaim_blob`
-    /// whether the blob became unreferenced (the namespace's entries empty out
-    /// and no other namespace references it), leaving the blob-data reclaim to
-    /// the caller.
-    /// `source_ts` gates each deleted tag via LWW; the caller's
-    /// `blob-data:{digest}` lock keeps the unreferenced-check from racing a
-    /// concurrent grant.
+    /// `delete_manifest`: tag tombstones and referrer removals land before the
+    /// revision record's deletion, all idempotent and lock-free. Reference
+    /// keys and blob-data are left to the collector, whose reclaim the `v2/gc`
+    /// marker check coordinates. `source_ts` gates each deleted tag via LWW.
     DeleteManifest { source_ts: Option<DateTime<Utc>> },
-    /// `revoke_blob_ownership`: removes `namespace`'s ownership entry and
-    /// reports via `reclaim_blob` whether the blob became unreferenced. The
-    /// caller holds the `blob-data:{digest}` lock across the call and reclaims
-    /// the blob-data from the blob store.
+    /// `revoke_blob_ownership`: one idempotent delete of `namespace`'s `_own`
+    /// reference key, with no lock. The bytes stay until the collector finds
+    /// every remaining reference stale and reclaims them under the `v2/gc`
+    /// marker.
     RevokeBlobOwnership {
         blob: &'a Digest,
         ops: Vec<BlobIndexOperation>,
@@ -267,6 +265,13 @@ impl LinkMutations {
     /// for the collector: a writer that removed it could unpin a blob a
     /// concurrent push is committing.
     fn delete_link(&mut self, namespace: &Namespace, link: &LinkKind, _target: &Digest) {
+        let record_key = match link {
+            LinkKind::Digest(digest) => Some(path_builder::revision_record_path(namespace, digest)),
+            LinkKind::Referrer { subject, referrer } => Some(path_builder::referrer_record_path(
+                namespace, subject, referrer,
+            )),
+            _ => None,
+        };
         let wave = if matches!(link, LinkKind::Digest(_)) {
             &mut self.finals
         } else {
@@ -276,19 +281,7 @@ impl LinkMutations {
             key: path_builder::link_path(link, namespace),
             expected: None,
         });
-        let record_key = match link {
-            LinkKind::Digest(digest) => Some(path_builder::revision_record_path(namespace, digest)),
-            LinkKind::Referrer { subject, referrer } => Some(path_builder::referrer_record_path(
-                namespace, subject, referrer,
-            )),
-            _ => None,
-        };
         if let Some(key) = record_key {
-            let wave = if matches!(link, LinkKind::Digest(_)) {
-                &mut self.finals
-            } else {
-                &mut self.records
-            };
             wave.push(Mutation::Delete {
                 key,
                 expected: None,
@@ -403,8 +396,9 @@ impl MetadataStore {
                     self.store().object_store().put(key, body.clone()).await
                 }
                 Mutation::Delete { key, .. } => self.store().object_store().delete(key).await,
-                // The planner only produces puts and deletes.
-                _ => Ok(()),
+                other => Err(StorageError::Backend(format!(
+                    "link planner produced an unexpected mutation: {other:?}"
+                ))),
             }
         }))
         .await;
@@ -1041,17 +1035,17 @@ fn capture_prior_targets(ops: &[OpSnapshot<'_>]) -> Vec<(LinkKind, Option<Digest
 // store_manifest / delete_manifest: thin wrappers over the planner above.
 
 impl MetadataStore {
-    /// Persist a manifest's link metadata and blob-index reference keys as a
-    /// single atomic transaction. The manifest blob-data itself is content and
-    /// is written separately to the blob store by the caller. Returns the
-    /// [`LinksCommit`] carrying each created link's commit-validated prior
-    /// target.
+    /// Persist a manifest's link metadata and blob-index reference keys as
+    /// ordered waves of idempotent write-once puts: reference keys first, the
+    /// revision record after the `v2/gc` marker check, the tag entry and
+    /// referrer record last, with no lock. The manifest blob-data itself is
+    /// content and is written separately to the blob store by the caller.
+    /// Returns the [`LinksCommit`] carrying each created link's prior target.
     ///
     /// `reference_policy` governs newly-referenced digests the namespace does
-    /// not own, checked under the caller's `blob-data:{digest}` lock so the
-    /// decision cannot race a concurrent reclaim: Strict fails the push with
-    /// [`Error::ManifestBlobUnknown`], Permissive drops the unowned link,
-    /// Trusted grants blindly.
+    /// not own: Strict fails the push with [`Error::ManifestBlobUnknown`],
+    /// Permissive drops the unowned link, Trusted grants blindly. The marker
+    /// check keeps the decision from racing a concurrent reclaim.
     pub async fn store_manifest(
         &self,
         namespace: &Namespace,

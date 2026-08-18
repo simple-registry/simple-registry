@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use angos_oci::request::PutManifestRequest;
@@ -1410,6 +1410,281 @@ async fn live_intent_suppresses_referrer_removal() {
             repaired.referenced_by.contains(&inflight_revision),
             "a back-link to a revision still being written must not be pruned"
         );
+    })
+    .await;
+}
+
+/// Write one raw tag entry with the given author timestamp and body,
+/// returning its full key.
+async fn put_tag_entry(
+    metadata_store: &Arc<MetadataStore>,
+    namespace: &Namespace,
+    tag: &Tag,
+    ts_millis: i64,
+    deletion: bool,
+    digest: &Digest,
+    body: &'static [u8],
+) -> String {
+    let ts = DateTime::from_timestamp_millis(ts_millis).unwrap();
+    let key = path_builder::tag_entry_path(
+        namespace,
+        tag,
+        path_builder::tag_ord(Some(ts)),
+        deletion,
+        digest,
+    );
+    metadata_store
+        .store()
+        .object_store()
+        .put(&key, Bytes::from_static(body))
+        .await
+        .unwrap();
+    key
+}
+
+/// Three generations of one tag: the two superseded entries are demoted to
+/// `!hist/`, resolution still returns the winner, and a second run finds
+/// nothing left to do.
+#[tokio::test]
+async fn superseded_tag_entries_are_demoted_to_hist() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/demote").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let tag = Tag::new("v1").unwrap();
+
+        // The push tagged v1 at now; append two older generations.
+        let old_a = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            1_000_000,
+            false,
+            &manifest_digest,
+            b"{}",
+        )
+        .await;
+        let old_b = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            2_000_000,
+            false,
+            &manifest_digest,
+            b"{}",
+        )
+        .await;
+
+        scrub_apply(test_case).await;
+
+        let store = metadata_store.store().object_store();
+        for old in [&old_a, &old_b] {
+            assert!(
+                store.head(old).await.is_err(),
+                "superseded entry '{old}' must leave the tag prefix"
+            );
+            let name = old.rsplit_once('/').unwrap().1;
+            let hist = path_builder::tag_hist_path(namespace, &tag, name);
+            assert!(
+                store.head(&hist).await.is_ok(),
+                "demoted entry must exist at '{hist}'"
+            );
+        }
+        let resolved = metadata_store
+            .read_link_reference(namespace, &LinkKind::Tag(tag.clone()))
+            .await
+            .unwrap();
+        assert_eq!(resolved.target, manifest_digest);
+
+        let actions = scrub_capture(test_case).await;
+        assert!(
+            actions.is_empty(),
+            "a second run must find nothing left to demote, got: {:?}",
+            actions.iter().map(ToString::to_string).collect::<Vec<_>>()
+        );
+    })
+    .await;
+}
+
+/// A same-millisecond set+del pair is one complete winner group: neither
+/// half is demoted, while a strictly older entry still is.
+#[tokio::test]
+async fn same_millisecond_tie_group_is_never_split() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/tie-group").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let tag = Tag::new("tie").unwrap();
+
+        let ts = 5_000_000;
+        let set_key = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            ts,
+            false,
+            &manifest_digest,
+            b"{}",
+        )
+        .await;
+        let del_key = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            ts,
+            true,
+            &manifest_digest,
+            b"{}",
+        )
+        .await;
+        let older = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            ts - 10_000,
+            false,
+            &manifest_digest,
+            b"{}",
+        )
+        .await;
+
+        scrub_apply(test_case).await;
+
+        let store = metadata_store.store().object_store();
+        assert!(
+            store.head(&set_key).await.is_ok(),
+            "the winner group's set entry must stay"
+        );
+        assert!(
+            store.head(&del_key).await.is_ok(),
+            "the winner group's del entry must stay"
+        );
+        assert!(
+            store.head(&older).await.is_err(),
+            "the strictly older entry must be demoted"
+        );
+    })
+    .await;
+}
+
+/// A superseded entry whose key is younger than the grace period may be a
+/// racing push's write, so a graced scrub must keep it.
+#[tokio::test]
+async fn young_superseded_entry_is_kept() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/young-demote").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let tag = Tag::new("v1").unwrap();
+
+        // Superseded by ordinal, but the key itself was written just now.
+        let old_entry = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            1_000_000,
+            false,
+            &manifest_digest,
+            b"{}",
+        )
+        .await;
+
+        // Same stores, but a scrub whose grace period is real.
+        let graced = Arc::new(
+            MetadataStore::builder(build_store(metadata_store.store().object_store().clone()))
+                .gc_grace_secs(300)
+                .build(),
+        );
+        let blob_store = test_case.blob_store();
+        let sink: Arc<dyn ActionSink> =
+            Arc::new(Executor::new_for_test(blob_store.clone(), graced.clone()));
+        run_passes(&blob_store, &graced, sink).await;
+
+        assert!(
+            metadata_store
+                .store()
+                .object_store()
+                .head(&old_entry)
+                .await
+                .is_ok(),
+            "a superseded entry inside the grace period must be kept"
+        );
+    })
+    .await;
+}
+
+/// Demoted entries leave the `!tag/` prefix (so tag listings stop paging
+/// past them) while the hist keys keep the original bodies.
+#[tokio::test]
+async fn demoted_entries_leave_the_listing_and_keep_their_bodies() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/demote-list").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let tag = Tag::new("v1").unwrap();
+
+        let body_a: &'static [u8] = br#"{"media_type":"application/vnd.gen.a"}"#;
+        let body_b: &'static [u8] = br#"{"media_type":"application/vnd.gen.b"}"#;
+        let old_a = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            1_000_000,
+            false,
+            &manifest_digest,
+            body_a,
+        )
+        .await;
+        let old_b = put_tag_entry(
+            &metadata_store,
+            namespace,
+            &tag,
+            2_000_000,
+            false,
+            &manifest_digest,
+            body_b,
+        )
+        .await;
+
+        scrub_apply(test_case).await;
+
+        let tags = metadata_store
+            .list_tags(namespace, 100, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            tags.items.iter().filter(|t| t.as_ref() == "v1").count(),
+            1,
+            "the tag must list exactly once after demotion"
+        );
+        let dir = path_builder::tag_entry_dir(namespace, &tag);
+        let page = metadata_store
+            .store()
+            .object_store()
+            .list(&dir, 1000, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items.len(),
+            1,
+            "only the winner may remain under the tag prefix, got {:?}",
+            page.items
+        );
+
+        for (old, body) in [(&old_a, body_a), (&old_b, body_b)] {
+            let name = old.rsplit_once('/').unwrap().1;
+            let stored = metadata_store
+                .store()
+                .object_store()
+                .get(&path_builder::tag_hist_path(namespace, &tag, name))
+                .await
+                .unwrap();
+            assert_eq!(
+                stored.as_slice(),
+                body,
+                "the demoted body must be preserved verbatim"
+            );
+        }
     })
     .await;
 }

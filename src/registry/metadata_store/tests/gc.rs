@@ -259,3 +259,51 @@ async fn a_push_interrupted_between_waves_reads_consistently() {
         "without its record the revision must read as absent"
     );
 }
+
+/// The writer half of the marker protocol through the public push path: a
+/// manifest push referencing a blob covered by an unexpired collector run
+/// fails with the reclamation-in-progress conflict, and a retry after the
+/// run's release succeeds.
+#[tokio::test]
+async fn a_manifest_push_fails_closed_while_a_run_covers_its_blob() {
+    let case = FSRegistryTestCase::new();
+    let registry = case.registry();
+    let store = case.metadata_store();
+    let namespace = Namespace::new("gc-writer-push").unwrap();
+
+    let config_digest =
+        crate::registry::test_utils::upload_blob(registry, &namespace, br#"{"gc":true}"#).await;
+    let media_type =
+        angos_oci::MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap();
+    let content = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": media_type,
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": config_digest.to_string(),
+            "size": 11
+        },
+        "layers": []
+    }))
+    .unwrap();
+    let reference = angos_oci::Reference::Tag(angos_oci::Tag::new("latest").unwrap());
+
+    let claim = store
+        .gc_claim(&config_digest, &config_digest)
+        .await
+        .unwrap();
+    let error = registry
+        .put_manifest(&namespace, &reference, Some(&media_type), &content)
+        .await
+        .err();
+    assert!(
+        matches!(error, Some(Error::Conflict(_))),
+        "a push referencing a covered blob must fail closed with the reclamation conflict, got {error:?}"
+    );
+
+    store.gc_release(claim).await.unwrap();
+    registry
+        .put_manifest(&namespace, &reference, Some(&media_type), &content)
+        .await
+        .expect("a retry after the run's release must succeed");
+}

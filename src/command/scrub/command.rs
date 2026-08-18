@@ -293,8 +293,6 @@ mod tests {
         }
     }
 
-    /// The same seeded defects converge to the same state regardless of the
-    /// concurrency level.
     /// A tag entry's name carries the write's millisecond ordinal, which
     /// differs between the two seedings; normalise it before comparing.
     fn normalized(keys: &[String]) -> Vec<String> {
@@ -308,6 +306,8 @@ mod tests {
             .collect()
     }
 
+    /// The same seeded defects converge to the same state regardless of the
+    /// concurrency level.
     #[tokio::test]
     async fn concurrency_level_does_not_change_the_outcome() {
         let mut roots = Vec::new();

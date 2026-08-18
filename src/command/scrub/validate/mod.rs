@@ -189,8 +189,9 @@ impl Validator {
                     .await
             }
             (pass, KeyCategory::Unknown) => self.quarantine(walked_store(pass), key).await,
-            // Anything else is a known category owned by another pass or the
-            // other store (the two stores may share one physical root).
+            // Anything else is a known category needing nothing here: owned
+            // by another pass or the other store (the two stores may share
+            // one physical root), or write-once tag history under `!hist/`.
             _ => Ok(()),
         }
     }
@@ -202,16 +203,6 @@ impl Validator {
         Ok(())
     }
 
-    /// Confirm a cross-key inconsistency before repairing it, so a
-    /// transaction caught mid-apply is never mistaken for settled damage.
-    ///
-    /// A live intent listing any of `evidence_keys` marks the state as still
-    /// moving (a server write, or one of this run's own repairs on a
-    /// neighbouring key), so the check backs off and retries until it settles.
-    /// Once settled, the repair proceeds only when `reverify` still observes
-    /// the inconsistency; checking intents again after the re-read closes the
-    /// race with a transaction that started in between. A candidate that never
-    /// settles is left for the next run.
     /// Whether the metadata key at `key` is younger than the reclamation
     /// grace period, by the backend's own timestamp. A young key may belong
     /// to a push between two of its waves, so no repair may be derived from
@@ -230,6 +221,16 @@ impl Validator {
         Ok(Utc::now().signed_duration_since(modified).num_seconds() < grace)
     }
 
+    /// Confirm a cross-key inconsistency before repairing it, so a
+    /// transaction caught mid-apply is never mistaken for settled damage.
+    ///
+    /// A live intent listing any of `evidence_keys` marks the state as still
+    /// moving (a server write, or one of this run's own repairs on a
+    /// neighbouring key), so the check backs off and retries until it settles.
+    /// Once settled, the repair proceeds only when `reverify` still observes
+    /// the inconsistency; checking intents again after the re-read closes the
+    /// race with a transaction that started in between. A candidate that never
+    /// settles is left for the next run.
     pub async fn confirm_repair<F, Fut>(
         &self,
         evidence_keys: &[String],

@@ -1,15 +1,11 @@
 //! [`JobStore`]: unified job-queue storage, producer, and consumer backed by
-//! a storage façade (`Store`) carrying the object store and transaction
-//! executor.
+//! a storage façade (`Store`) carrying the object store.
 //!
-//! All write operations that require atomicity (enqueue dedup, complete,
-//! fail/retry, dead-letter) are handled by the transaction engine and never
-//! touch the object-store layer directly.
-//!
-//! The orphan self-heal inside [`JobStore::find_pending_with_lock_key`] also
-//! goes through the engine: it submits a one-mutation transaction whose read
-//! fingerprint guards against a concurrent enqueue that refreshes the index
-//! between the GET and the delete.
+//! The queue is lock-free and collector-free. Every mutation is an ordered
+//! sequence of idempotent object writes: enqueue dedup and claims rest on
+//! atomic `create_if_absent`, workers serialise on leased claim keys, and
+//! each crash window re-runs work instead of losing it (handlers are
+//! idempotent, so duplicates are safe).
 
 use std::{
     fmt,
@@ -70,7 +66,7 @@ pub fn job_lock_key_index_path(queue: &str, lock_key: &LockKey) -> String {
 }
 
 /// Path of the claim key serialising execution of one `lock_key` across
-/// workers. Created with `put_if_absent`, leased, refreshed by the holder,
+/// workers. Created with `create_if_absent`, leased, refreshed by the holder,
 /// and deleted on release; a lapsed lease is taken over by deletion.
 pub fn job_claim_path(lock_key: &LockKey) -> String {
     format!("{JOBS_ROOT}/claims/{}.json", lock_key.encode())
@@ -186,7 +182,7 @@ impl From<StorageError> for Error {
 }
 
 /// Precondition for `[global.job_queue]`: workers in separate processes
-/// serialise on claim keys, which requires an honest atomic `put_if_absent`
+/// serialise on claim keys, which requires an honest atomic `create_if_absent`
 /// from the backend. Probed once at startup with a scratch key: the second
 /// create of the same key must fail, or the provider would let two workers
 /// hold one claim.
@@ -223,10 +219,15 @@ pub async fn ensure_claim_support(store: &Store) -> Result<(), Error> {
 /// to separate `angos worker` processes and enables the queue-depth gauge.
 ///
 /// Storage is inherited from the shared `[metadata_store]` configuration.
-/// The per-`lock_key` execution lock TTL is governed by the configured lock
-/// backend, so there is no job-queue-level TTL knob.
 #[derive(Clone, Debug, Deserialize)]
 pub struct JobQueueConfig {
+    /// Lease on a job claim, in seconds. A crashed worker's jobs are taken
+    /// over after this long; the holder refreshes the lease at a third of it.
+    #[serde(
+        default = "default_claim_ttl_secs",
+        deserialize_with = "deserialize_claim_ttl_secs"
+    )]
+    pub claim_ttl_secs: u64,
     #[serde(
         default = "default_pending_refresh_interval_secs",
         deserialize_with = "deserialize_pending_refresh_interval_secs"
@@ -250,18 +251,20 @@ impl JobQueueConfig {
             max_attempts: self.max_attempts,
             backoff_min_ms: self.retry_backoff_min_ms,
             backoff_max_ms: self.retry_backoff_max_ms,
+            claim_ttl_secs: self.claim_ttl_secs,
         }
     }
 }
 
-/// The retry budget and backoff bounds a [`JobStore`] applies to failing jobs.
-/// Defaults match the historical in-code constants; the durable queue sources
-/// them from [`JobQueueConfig`].
+/// The retry budget, backoff bounds, and claim-lease TTL a [`JobStore`]
+/// applies. Defaults match the historical in-code constants; the durable
+/// queue sources them from [`JobQueueConfig`].
 #[derive(Clone, Copy, Debug)]
 pub struct JobRetryPolicy {
     pub max_attempts: u32,
     pub backoff_min_ms: u64,
     pub backoff_max_ms: u64,
+    pub claim_ttl_secs: u64,
 }
 
 impl Default for JobRetryPolicy {
@@ -270,6 +273,7 @@ impl Default for JobRetryPolicy {
             max_attempts: default_job_max_attempts(),
             backoff_min_ms: default_retry_backoff_min_ms(),
             backoff_max_ms: default_retry_backoff_max_ms(),
+            claim_ttl_secs: default_claim_ttl_secs(),
         }
     }
 }
@@ -284,6 +288,25 @@ fn default_retry_backoff_min_ms() -> u64 {
 
 fn default_retry_backoff_max_ms() -> u64 {
     10_000
+}
+
+fn default_claim_ttl_secs() -> u64 {
+    CLAIM_TTL_SECS
+}
+
+/// Floor on `claim_ttl_secs`. The holder refreshes at a third of the lease,
+/// so a shorter lease lapses before its first refresh can land.
+const MIN_CLAIM_TTL_SECS: u64 = 3;
+
+fn deserialize_claim_ttl_secs<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let value = u64::deserialize(deserializer)?;
+    if value < MIN_CLAIM_TTL_SECS {
+        return Err(serde::de::Error::custom(format!(
+            "claim_ttl_secs must be at least {MIN_CLAIM_TTL_SECS} \
+             (the lease is refreshed at a third of it)",
+        )));
+    }
+    Ok(value)
 }
 
 /// Floor on `pending_refresh_interval_secs`. The same value is the documented
@@ -493,24 +516,14 @@ pub fn serialize_dead_letter(envelope: &JobEnvelope, last_error: &str) -> Result
 
 /// Executor for a single job kind.
 ///
-/// Returns the work-product [`Transaction`] on success; the queue runtime
-/// merges it with the pending/index cleanup mutations and submits the whole
-/// thing as one engine transaction so the handler's effect and the queue
-/// bookkeeping commit atomically together. Return an empty [`Transaction`]
-/// when the handler has no storage-side effect to commit (the cleanup
-/// mutations still land atomically).
+/// `execute` applies its effects directly; `Ok(())` reports success and an
+/// `Err` fails the job over to the retry/dead-letter policy.
 ///
 /// # Idempotency
 ///
-/// `JobStore::complete` commits the work-product mutations and the
-/// pending/index deletes in a single engine transaction, so handlers whose
-/// effect is expressible as engine mutations need not be idempotent: each
-/// attempt either commits atomically or aborts cleanly.
-///
-/// Handlers with *external*, non-transactional side-effects (e.g. calls to
-/// an outside service) must still be idempotent: the engine cannot roll
-/// those back. The only re-execution path is a worker dying between claim
-/// and commit, bounded by the execution-lock TTL.
+/// Handlers MUST be idempotent: a lost claim or a crash between execution
+/// and cleanup re-runs the job, so a duplicate run is possible but a lost
+/// job is not.
 #[async_trait]
 pub trait JobHandler: Send + Sync {
     async fn execute(&self, envelope: &JobEnvelope) -> Result<(), Error>;
@@ -536,9 +549,10 @@ pub const MAX_REPORTED_PENDING: u64 = 10_000;
 // Consumer types
 // ---------------------------------------------------------------------------
 
-/// Lease on a claim key. The holder's refresh task re-stamps it at a third
-/// of this; a claimant finding a lapsed lease takes the key over.
-const CLAIM_TTL_SECS: i64 = 60;
+/// Default lease on a claim key; `[global.job_queue].claim_ttl_secs`
+/// overrides it. The holder's refresh task re-stamps the claim at a third
+/// of the lease; a claimant finding a lapsed lease takes the key over.
+const CLAIM_TTL_SECS: u64 = 60;
 
 /// The stored body of a claim key.
 #[derive(Serialize, Deserialize)]
@@ -671,9 +685,9 @@ impl ClaimOutcome {
 /// (`claim_one` / `complete` / `fail`), and raw storage primitives
 /// (`list_pending`, `count_pending`, `find_pending_with_lock_key`).
 ///
-/// All write operations that require atomicity go through the
-/// [`TransactionExecutor`](angos_tx_engine::executor::TransactionExecutor); the raw `ObjectStore` is used for reads and
-/// low-level access patterns that do not need CAS.
+/// All writes go straight to the `ObjectStore`: atomicity rests on
+/// `create_if_absent` for dedup and claims, and on ordered idempotent
+/// writes everywhere else.
 ///
 /// `worker_id` is an optional per-process identifier attached to structured
 /// log entries from `claim_one`; supply an empty string or any identifier when
@@ -685,6 +699,9 @@ pub struct JobStore {
     claim_error_backoff: Backoff,
     consecutive_claim_errors: AtomicU32,
     max_attempts: u32,
+    /// Claim-lease seconds, clamped at construction so chrono arithmetic on
+    /// it cannot overflow.
+    claim_ttl_secs: i64,
 }
 
 impl JobStore {
@@ -719,6 +736,9 @@ impl JobStore {
             claim_error_backoff: backoff(),
             consecutive_claim_errors: AtomicU32::new(0),
             max_attempts: retry.max_attempts,
+            claim_ttl_secs: i64::try_from(retry.claim_ttl_secs)
+                .unwrap_or(i64::MAX)
+                .clamp(1, 86_400),
         }
     }
 
@@ -888,12 +908,11 @@ impl JobStore {
     /// envelope (see [`LockKeyIndex`]).
     ///
     /// When the index references a pending file that has vanished (orphan),
-    /// submits a one-mutation engine transaction to delete the stale index,
-    /// guarded by a read fingerprint so a concurrent enqueue that refreshes
-    /// the index between our GET and the apply is never accidentally deleted.
-    /// A transient failure to delete the orphan is returned as an error rather
-    /// than `false`, so the caller never proceeds to an enqueue the lingering
-    /// index would silently coalesce away.
+    /// the stale index is removed read-then-delete: a concurrent enqueue
+    /// refreshing the index in that window loses its entry, which only costs
+    /// a missed dedup later. A transient failure to delete the orphan is
+    /// returned as an error rather than `false`, so the caller never proceeds
+    /// to an enqueue the lingering index would silently coalesce away.
     pub async fn find_pending_with_lock_key(
         &self,
         queue: Queue,
@@ -944,7 +963,7 @@ impl JobStore {
     /// enqueue arriving mid-execution starts a fresh pending file rather than
     /// coalescing into the already-resolved job and silently dropping its write.
     /// The pending file stays as the crash-recovery record, and the delete is
-    /// conditional plus fingerprint-guarded so a producer's newer index is
+    /// read-then-delete on the index's content so a producer's newer index is
     /// never clobbered.
     ///
     /// Returns whether the index is known not to point at `storage_key` any
@@ -996,7 +1015,7 @@ impl JobStore {
     }
 
     // -----------------------------------------------------------------------
-    // Claims: put-if-absent keys plus leases
+    // Claims: create-if-absent keys plus leases
     // -----------------------------------------------------------------------
 
     /// Try to claim `lock_key`: one atomic create of the claim key. A held
@@ -1027,6 +1046,7 @@ impl JobStore {
             key.clone(),
             instance.clone(),
             stamped_until,
+            self.claim_ttl_secs,
             lost.clone(),
         ));
         Ok(Some(JobClaim {
@@ -1046,7 +1066,7 @@ impl JobStore {
     ) -> Result<Option<DateTime<Utc>>, Error> {
         let record = ClaimRecord {
             instance: instance.to_string(),
-            expires_at: Utc::now() + ChronoDuration::seconds(CLAIM_TTL_SECS),
+            expires_at: Utc::now() + ChronoDuration::seconds(self.claim_ttl_secs),
         };
         let body = Bytes::from(
             serde_json::to_vec(&record)
@@ -1080,7 +1100,7 @@ impl JobStore {
             Err(e) => return Err(Error::from(e)),
         };
         Ok(meta.last_modified.is_some_and(|modified| {
-            Utc::now().signed_duration_since(modified).num_seconds() > CLAIM_TTL_SECS * 2
+            Utc::now().signed_duration_since(modified).num_seconds() > self.claim_ttl_secs * 2
         }))
     }
 
@@ -1119,10 +1139,9 @@ impl JobStore {
     /// Fast-path: `find_pending_with_lock_key` checks the dedup index and
     /// self-heals orphans (same semantics as a HEAD index + HEAD pending).
     ///
-    /// Slow-path: submit a transaction with `PutIfAbsent` on both the index
-    /// and the pending file. If two replicas race and both observe absence,
-    /// only one wins at the engine's Prepare/Apply stage; the loser receives
-    /// `Conflict` or `Precondition` and we treat that as a dedup hit.
+    /// Slow-path: atomic `create_if_absent` on the index, then the pending
+    /// file. If two replicas race and both observe absence, only one create
+    /// wins; the loser is treated as a dedup hit.
     pub async fn enqueue(&self, mut envelope: JobEnvelope) -> Result<(), Error> {
         // Apply the queue's configured retry budget unless a caller pinned one.
         envelope.max_attempts.get_or_insert(self.max_attempts);
@@ -1496,11 +1515,11 @@ impl JobStore {
     // Administrative mutations (operator-driven retry / delete)
     // -----------------------------------------------------------------------
 
-    /// Move a dead-letter record back to pending with its retry budget reset to
-    /// zero. Atomic: a single transaction `PutIfAbsent`s a fresh pending file
-    /// (new `not_before` = now) and deletes the failed record under an `ETag`
-    /// fence. Returns [`Error::NotFound`] when the failed record is already
-    /// gone (a stale key).
+    /// Move a dead-letter record back to pending with its retry budget reset
+    /// to zero: an atomic create of a fresh pending file (new `not_before` =
+    /// now) followed by a delete of the failed record. Returns
+    /// [`Error::NotFound`] when the failed record is already gone (a stale
+    /// key).
     ///
     /// The dedup index is deliberately **not** re-established: a retried job has
     /// no `lock_key` index entry, so a concurrent producer enqueuing the same
@@ -1509,10 +1528,9 @@ impl JobStore {
     /// contract makes a redundant run idempotent.
     pub async fn retry_failed(&self, queue: Queue, storage_key: &str) -> Result<(), Error> {
         let failed_path = job_failed_path(queue.as_str(), storage_key);
-        // HEAD first for the fencing ETag (`None` when the backend does not
-        // surface ETags, giving an unconditional delete, still safe: the new pending
-        // key is fresh so a double-retry collides at `PutIfAbsent`).
-        let _expected = self.store.object_store().head(&failed_path).await?.etag;
+        // Surface a stale key as `NotFound` before touching any state; a
+        // double-retry stays safe because it collides on the atomic create.
+        self.store.object_store().head(&failed_path).await?;
 
         let mut envelope = self.read_failed(queue, storage_key).await?.envelope;
         envelope.attempts = 0;
@@ -1536,15 +1554,16 @@ impl JobStore {
         Ok(())
     }
 
-    /// Delete a job by `state`/`storage_key`. Failed records are removed with a
-    /// single ETag-fenced delete. Pending deletes additionally fold in the
-    /// conditional dedup-index delete (only when the index still points at this
-    /// key), mirroring [`Self::fail_dead_letter`].
+    /// Delete a job by `state`/`storage_key`. Failed records are removed
+    /// head-then-delete: the head surfaces a stale key as
+    /// [`Error::NotFound`], then the idempotent delete removes the record.
+    /// Pending deletes additionally fold in the conditional dedup-index
+    /// delete (only when the index still points at this key), mirroring
+    /// [`Self::fail_dead_letter`].
     ///
     /// Deleting a *pending* job is best-effort against a worker that may be
     /// mid-execution: the operator holds no execution lock, so a claim already
-    /// in flight still commits its handler effect. The `ETag` fence prevents
-    /// clobbering a file the worker has since rewritten (retry) or removed.
+    /// in flight still commits its handler effect.
     /// Returns [`Error::NotFound`] for a stale key.
     pub async fn delete_job(
         &self,
@@ -1569,8 +1588,8 @@ impl JobStore {
 
     async fn delete_pending(&self, queue: Queue, storage_key: &str) -> Result<(), Error> {
         let pending_path = job_pending_path(queue.as_str(), storage_key);
-        // Read the envelope (for its `lock_key`) and HEAD for the fence; a
-        // missing pending file surfaces as `NotFound` for a 404. Only the
+        // Read the envelope (for its `lock_key`); a missing pending file
+        // surfaces as `NotFound` for a 404. Only the
         // `lock_key` needs the body, so a record that will not parse is still
         // deletable: the operator retiring it is the one recovery path, and
         // its index entry is reclaimed by the orphan-job sweep.
@@ -1632,9 +1651,10 @@ async fn refresh_claim_loop(
     key: String,
     instance: String,
     stamped_until: DateTime<Utc>,
+    claim_ttl_secs: i64,
     lost: CancellationToken,
 ) {
-    let period = Duration::from_secs(u64::try_from(CLAIM_TTL_SECS / 3).unwrap_or(20).max(1));
+    let period = Duration::from_secs(u64::try_from(claim_ttl_secs / 3).unwrap_or(20).max(1));
     let mut last_verified_expiry = stamped_until;
     loop {
         sleep(period).await;
@@ -1662,7 +1682,7 @@ async fn refresh_claim_loop(
         last_verified_expiry = expires_at;
         let record = ClaimRecord {
             instance: instance.clone(),
-            expires_at: Utc::now() + ChronoDuration::seconds(CLAIM_TTL_SECS),
+            expires_at: Utc::now() + ChronoDuration::seconds(claim_ttl_secs),
         };
         let Ok(body) = serde_json::to_vec(&record) else {
             lost.cancel();

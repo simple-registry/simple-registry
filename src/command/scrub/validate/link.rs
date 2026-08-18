@@ -130,6 +130,7 @@ impl Validator {
         let (Ok(namespace), Ok(tag)) = (Namespace::new(namespace_raw), Tag::new(tag_raw)) else {
             return Ok(());
         };
+        self.demote_superseded_entries(&namespace, &tag).await?;
         let metadata = match self
             .metadata_store
             .read_link_reference(&namespace, &LinkKind::Tag(tag.clone()))
@@ -141,13 +142,60 @@ impl Validator {
             Err(e) => return Err(e.into()),
         };
         self.validate_tag_target(&namespace, &tag, metadata.target, metadata.created_at)
-            .await?;
-        Ok(())
+            .await
+    }
+
+    /// Demote entries superseded by the tag's winner group to the `!hist/`
+    /// prefix. The complete lowest-ordinal group is the winner and always
+    /// stays, so a same-millisecond tie is never split; only strictly older
+    /// entries are candidates, each age-gated so a racing push's fresh entry
+    /// is never in scope.
+    async fn demote_superseded_entries(
+        &self,
+        namespace: &Namespace,
+        tag: &Tag,
+    ) -> Result<(), Error> {
+        let dir = path_builder::tag_entry_dir(namespace, tag);
+        let mut winner_ord = None;
+        let mut token = None;
+        loop {
+            let page = self
+                .metadata_store
+                .store()
+                .object_store()
+                .list(&dir, 1000, token)
+                .await
+                .map_err(RegistryError::from)?;
+            for name in &page.items {
+                let Some((ord, _, _)) = path_builder::parse_tag_entry(name) else {
+                    continue;
+                };
+                // The listing sorts newest first, so the first parseable
+                // ordinal is the winner group's.
+                let winner = *winner_ord.get_or_insert(ord);
+                if ord <= winner {
+                    continue;
+                }
+                if self.younger_than_grace(&format!("{dir}/{name}")).await? {
+                    continue;
+                }
+                self.emit(Action::DemoteTagEntry {
+                    namespace: namespace.clone(),
+                    tag: tag.clone(),
+                    entry_name: name.clone(),
+                })
+                .await?;
+            }
+            token = page.next_token;
+            if token.is_none() {
+                return Ok(());
+            }
+        }
     }
 
     /// The shared tail of both tag shapes: the current target must have blob
     /// bytes (else the orphan manifest is removed) and its digest revision
-    /// link (re-issued when missing). `true` means the target was healthy.
+    /// link (re-issued when missing).
     /// A tag whose winning entry is younger than the grace period is left
     /// alone: the walk can resolve it before a concurrent delete's tombstone
     /// lands and then read the revision after that delete removed it, and
@@ -158,19 +206,18 @@ impl Validator {
         tag: &Tag,
         target: Digest,
         entry_created_at: Option<DateTime<Utc>>,
-    ) -> Result<bool, Error> {
+    ) -> Result<(), Error> {
         self.ensure_catalog(namespace).await?;
         if let Some(created_at) = entry_created_at {
             let grace = i64::try_from(self.metadata_store.gc_grace_secs()).unwrap_or(i64::MAX);
             if Utc::now().signed_duration_since(created_at).num_seconds() < grace {
-                return Ok(true);
+                return Ok(());
             }
         }
         match self.blob_store.size(&target).await {
             Ok(_) => {
                 self.ensure_link(namespace, &LinkKind::Digest(target.clone()), &target)
-                    .await?;
-                Ok(true)
+                    .await
             }
             Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
                 warn!("scrub: tag '{namespace}:{tag}' targets missing blob '{target}'; removing");
@@ -178,8 +225,7 @@ impl Validator {
                     namespace: namespace.clone(),
                     digest: target,
                 })
-                .await?;
-                Ok(false)
+                .await
             }
             Err(e) => Err(e.into()),
         }

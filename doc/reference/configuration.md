@@ -166,8 +166,9 @@ section accepts only the tunables below.
 | `max_attempts` | u32 | `5` | Times a failing job is retried before it is dead-lettered. |
 | `retry_backoff_min_ms` | u64 | `100` | First retry backoff delay; the exponential schedule grows from here. |
 | `retry_backoff_max_ms` | u64 | `10000` | Ceiling on the exponential retry backoff. |
+| `claim_ttl_secs` | u64 | `60` | Lease on a job claim, in seconds. A crashed worker's jobs are taken over after this long; the holder refreshes the lease at a third of it. Minimum `3`. |
 
-> **Per-`lock_key` execution TTL is governed by the lock backend.** A worker that claims a job holds the lock configured under `[metadata_store]` for the duration of execution; the TTL on the lock object (`[metadata_store.fs.lock_strategy.redis].ttl`, `[metadata_store.s3.lock_strategy.s3].ttl_secs`) is what bounds how long another worker has to wait if the holder dies mid-job. Transient heartbeat failures (connect or refresh errors) tolerate a small budget (one heartbeat tick short of the TTL) before cancelling the job, so a brief network blip does not waste in-progress work; authoritative signals (ownership loss, max-hold expiry, missing lock object) cancel immediately.
+> **Crash takeover is bounded by `claim_ttl_secs`.** A worker that claims a job leases the job's claim key for `claim_ttl_secs` and refreshes the lease at a third of it. If the holder dies mid-job, another worker takes the claim over once the lease lapses and re-runs the job; handlers are idempotent, so the re-run duplicates work at worst. Transient refresh errors are tolerated while the last verified lease still covers the holder.
 
 See [Enable Durable Cache Jobs](../how-to/durable-cache-jobs.md) for a full
 setup guide including `angos worker` invocation and KEDA autoscaling.

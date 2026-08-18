@@ -60,6 +60,43 @@ macro_rules! object_store_conformance {
             }
 
             #[tokio::test]
+            async fn create_if_absent_first_create_wins_second_keeps_original() {
+                let (store, _guard) = $fixture;
+                assert!(
+                    store
+                        .create_if_absent("cia/k", Bytes::from_static(b"first"))
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    !store
+                        .create_if_absent("cia/k", Bytes::from_static(b"second"))
+                        .await
+                        .unwrap()
+                );
+                assert_eq!(store.get("cia/k").await.unwrap(), b"first");
+            }
+
+            #[tokio::test]
+            async fn create_if_absent_succeeds_again_after_delete() {
+                let (store, _guard) = $fixture;
+                assert!(
+                    store
+                        .create_if_absent("cia/again", Bytes::from_static(b"v1"))
+                        .await
+                        .unwrap()
+                );
+                store.delete("cia/again").await.unwrap();
+                assert!(
+                    store
+                        .create_if_absent("cia/again", Bytes::from_static(b"v2"))
+                        .await
+                        .unwrap()
+                );
+                assert_eq!(store.get("cia/again").await.unwrap(), b"v2");
+            }
+
+            #[tokio::test]
             async fn get_missing_key_returns_not_found() {
                 let (store, _guard) = $fixture;
                 assert_eq!(store.get("missing").await.unwrap_err(), Error::NotFound);
@@ -204,6 +241,40 @@ macro_rules! object_store_conformance {
                 assert_eq!(page.items, vec!["a".to_string(), "b".to_string()]);
                 let page2 = store.list("pg/", 2, page.next_token).await.unwrap();
                 assert_eq!(page2.items, vec!["c".to_string()]);
+                assert!(page2.next_token.is_none());
+            }
+
+            #[tokio::test]
+            async fn list_after_starts_strictly_after_the_given_key() {
+                let (store, _guard) = $fixture;
+                for k in ["la/a", "la/b", "la/c"] {
+                    store.put(k, Bytes::from_static(b"x")).await.unwrap();
+                }
+                let page = store
+                    .list_after("la/", 10, None, Some("a".to_string()))
+                    .await
+                    .unwrap();
+                assert_eq!(page.items, vec!["b".to_string(), "c".to_string()]);
+                assert!(page.next_token.is_none());
+            }
+
+            #[tokio::test]
+            async fn list_after_paginates_across_page_boundaries() {
+                let (store, _guard) = $fixture;
+                for k in ["lap/a", "lap/b", "lap/c", "lap/d"] {
+                    store.put(k, Bytes::from_static(b"x")).await.unwrap();
+                }
+                let page = store
+                    .list_after("lap/", 2, None, Some("a".to_string()))
+                    .await
+                    .unwrap();
+                assert_eq!(page.items, vec!["b".to_string(), "c".to_string()]);
+                // `token` wins over `start_after` on resumed pages.
+                let page2 = store
+                    .list_after("lap/", 2, page.next_token, Some("a".to_string()))
+                    .await
+                    .unwrap();
+                assert_eq!(page2.items, vec!["d".to_string()]);
                 assert!(page2.next_token.is_none());
             }
 

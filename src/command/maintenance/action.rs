@@ -56,6 +56,14 @@ pub enum Action {
         namespace: Namespace,
         tag: Tag,
     },
+    /// Demote one superseded tag entry to the `!hist/` prefix: the hist key
+    /// is written with the entry's body, then the `!tag/` key deleted, so an
+    /// interrupted demotion duplicates rather than loses.
+    DemoteTagEntry {
+        namespace: Namespace,
+        tag: Tag,
+        entry_name: String,
+    },
     /// Convert one legacy revision link into a revision record, then delete
     /// the link. Record first, so an interrupted conversion duplicates rather
     /// than loses.
@@ -212,6 +220,16 @@ impl fmt::Display for Action {
                 write!(
                     f,
                     "convert legacy tag link '{namespace}:{tag}' to a tag entry"
+                )
+            }
+            Action::DemoteTagEntry {
+                namespace,
+                tag,
+                entry_name,
+            } => {
+                write!(
+                    f,
+                    "demote superseded tag entry '{namespace}:{tag}' ({entry_name}) to history"
                 )
             }
             Action::ConvertRevisionLink { namespace, digest } => {

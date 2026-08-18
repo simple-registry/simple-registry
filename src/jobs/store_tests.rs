@@ -5,7 +5,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::{Duration as ChronoDuration, TimeZone as _, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, TimeZone as _, Utc};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -16,10 +16,11 @@ use angos_storage::{
 };
 
 use crate::jobs::store::{
-    ClaimCheck, ClaimedJob, FailOutcome, JobEnvelope, JobQueueConfig, JobRetryPolicy, JobState,
-    JobStore, LockKey, MAX_REPORTED_PENDING, Queue, STORAGE_KEY_PREFIX_LEN, job_claim_path,
-    job_lock_key_index_path, job_pending_path, make_storage_key, parse_lock_key_index,
-    parse_not_before, serialize_dead_letter, serialize_lock_key_index, should_cancel_claim,
+    ClaimCheck, ClaimedJob, CompleteOutcome, FailOutcome, JOBS_ROOT, JobEnvelope, JobQueueConfig,
+    JobRetryPolicy, JobState, JobStore, LockKey, MAX_REPORTED_PENDING, Queue,
+    STORAGE_KEY_PREFIX_LEN, ensure_claim_support, job_claim_path, job_lock_key_index_path,
+    job_pending_path, make_storage_key, parse_lock_key_index, parse_not_before,
+    serialize_dead_letter, serialize_lock_key_index, should_cancel_claim,
 };
 use crate::metrics_provider;
 use crate::registry::test_utils::build_store;
@@ -1370,4 +1371,196 @@ async fn claim_one_takes_over_a_stale_claim() {
         h.store.complete(claimed).await.expect("complete");
     })
     .await;
+}
+
+/// A release by an instance that no longer owns the claim key must leave the
+/// new owner's record in place.
+#[tokio::test]
+async fn release_leaves_a_foreign_claim_intact() {
+    for_each_job_backend(async |h| {
+        h.store
+            .enqueue(dummy_envelope("cache.ns:sha256:foreign"))
+            .await
+            .expect("enqueue");
+        let claimed = h
+            .store
+            .claim_one(Queue::Cache)
+            .await
+            .expect("claim")
+            .claimed
+            .expect("Some");
+
+        // Another worker took the key over: overwrite the claim record with a
+        // foreign instance before this holder releases it.
+        let claim_path = job_claim_path(&lock_key("cache.ns:sha256:foreign"));
+        let foreign = format!(
+            r#"{{"instance":"foreign-instance","expires_at":"{}"}}"#,
+            (Utc::now() + ChronoDuration::seconds(300)).to_rfc3339(),
+        );
+        h.raw
+            .put(&claim_path, Bytes::from(foreign))
+            .await
+            .expect("overwrite claim");
+
+        assert!(matches!(
+            h.store.complete(claimed).await.expect("complete"),
+            CompleteOutcome::Completed
+        ));
+
+        let body = h
+            .raw
+            .get(&claim_path)
+            .await
+            .expect("the foreign claim must survive the release");
+        let record: serde_json::Value = serde_json::from_slice(&body).expect("claim json");
+        assert_eq!(record["instance"], "foreign-instance");
+    })
+    .await;
+}
+
+/// The startup probe must pass on every job backend and leave no scratch key
+/// behind.
+#[tokio::test]
+async fn ensure_claim_support_probe_succeeds_and_cleans_up() {
+    metrics_provider::init_for_tests();
+    let dir = TempDir::new().expect("temp dir");
+    let backends: [Arc<dyn ObjectStore>; 2] = [
+        Arc::new(StorageFsBackend::builder(dir.path()).build()),
+        Arc::new(MemoryObjectStore::new()),
+    ];
+    for raw in backends {
+        let facade = build_store(raw.clone());
+        ensure_claim_support(&facade).await.expect("probe");
+        let page = raw
+            .list(&format!("{JOBS_ROOT}/claims/"), 10, None)
+            .await
+            .expect("list claims");
+        assert!(
+            page.items.is_empty(),
+            "the probe must clean up its scratch key, found {:?}",
+            page.items
+        );
+    }
+}
+
+/// Fails the first delete under the pending prefix, modelling a transient
+/// backend error on `complete`'s cleanup.
+struct FailPendingDeleteOnce {
+    remaining: AtomicUsize,
+}
+
+#[async_trait]
+impl StoreHook for FailPendingDeleteOnce {
+    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+        if let StoreOp::Delete { key } = op
+            && key.starts_with("_jobs/pending/")
+            && self.remaining.swap(0, Ordering::SeqCst) == 1
+        {
+            return Err(StorageError::Backend(
+                "injected pending-delete failure".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A failed pending-delete in `complete` must fail the job over to a retry
+/// under a new storage key rather than leave it re-claimable in a hot loop.
+#[tokio::test]
+async fn complete_cleanup_failure_fails_over_to_retry() {
+    metrics_provider::init_for_tests();
+    let inner: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+    let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+        inner.clone(),
+        FailPendingDeleteOnce {
+            remaining: AtomicUsize::new(1),
+        },
+    ));
+    let store = Arc::new(JobStore::new(build_store(hooked), "test-worker"));
+
+    store
+        .enqueue(dummy_envelope("cache.ns:sha256:cleanup"))
+        .await
+        .expect("enqueue");
+    let claimed = store
+        .claim_one(Queue::Cache)
+        .await
+        .expect("claim")
+        .claimed
+        .expect("Some");
+    let original_key = claimed.storage_key.clone();
+
+    assert!(matches!(
+        store.complete(claimed).await.expect("complete"),
+        CompleteOutcome::FailedOver(FailOutcome::Retried { .. })
+    ));
+
+    let pending = store.list_pending(Queue::Cache, 10).await.expect("list");
+    assert_eq!(pending.len(), 1, "the job must be re-queued exactly once");
+    assert_ne!(
+        pending[0], original_key,
+        "the retry must land under a new storage key"
+    );
+    let updated = store
+        .read_pending(Queue::Cache, &pending[0])
+        .await
+        .expect("read retry");
+    assert_eq!(updated.attempts, 1);
+}
+
+#[test]
+fn claim_ttl_defaults_and_floor() {
+    let cfg = toml::from_str::<JobQueueConfig>("").expect("all fields default");
+    assert_eq!(cfg.claim_ttl_secs, 60);
+
+    let err = toml::from_str::<JobQueueConfig>("claim_ttl_secs = 2")
+        .expect_err("claim_ttl_secs below the floor must be rejected");
+    assert!(
+        err.to_string().contains("claim_ttl_secs"),
+        "error must name the field: {err}"
+    );
+
+    let cfg = toml::from_str::<JobQueueConfig>("claim_ttl_secs = 3").expect("floor value parses");
+    assert_eq!(cfg.claim_ttl_secs, 3);
+}
+
+/// The configured lease must reach the stored claim record.
+#[tokio::test]
+async fn claim_ttl_knob_stamps_the_claim_lease() {
+    metrics_provider::init_for_tests();
+    let raw: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+    let store = Arc::new(JobStore::with_retry_policy(
+        build_store(raw.clone()),
+        "test-worker",
+        JobRetryPolicy {
+            claim_ttl_secs: 7,
+            ..JobRetryPolicy::default()
+        },
+    ));
+    store
+        .enqueue(dummy_envelope("cache.ns:sha256:ttl"))
+        .await
+        .expect("enqueue");
+    let _claimed = store
+        .claim_one(Queue::Cache)
+        .await
+        .expect("claim")
+        .claimed
+        .expect("Some");
+
+    let body = raw
+        .get(&job_claim_path(&lock_key("cache.ns:sha256:ttl")))
+        .await
+        .expect("claim record");
+    let record: serde_json::Value = serde_json::from_slice(&body).expect("claim json");
+    let expires_at: DateTime<Utc> = record["expires_at"]
+        .as_str()
+        .expect("expires_at")
+        .parse()
+        .expect("timestamp");
+    let lease = (expires_at - Utc::now()).num_seconds();
+    assert!(
+        (1..=7).contains(&lease),
+        "the lease must reflect the 7s knob, got {lease}s"
+    );
 }

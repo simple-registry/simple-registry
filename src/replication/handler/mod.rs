@@ -1,7 +1,7 @@
 //! [`ReplicationJobHandler`]: the [`JobHandler`] that drives the replication
-//! push pipeline. It returns an empty [`Transaction`] on success (the effect is
-//! an external HTTP push the engine cannot roll back), so the pipeline stays
-//! idempotent via HEAD-before-PUT under the at-least-once contract.
+//! push pipeline. The handler's HTTP pushes are its effects and `Ok(())`
+//! reports success; the pipeline stays idempotent via HEAD-before-PUT under
+//! the at-least-once contract.
 
 use std::sync::Arc;
 
@@ -474,7 +474,7 @@ impl JobHandler for ReplicationJobHandler {
             .await
             .inspect_err(|_| Self::record_failure(&job.target().downstream))?;
 
-        // Empty transaction: the HTTP push is the side effect.
+        // The pushes above are the handler's effects; `Ok(())` reports success.
         Ok(())
     }
 }

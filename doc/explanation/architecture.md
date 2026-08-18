@@ -150,11 +150,6 @@ A client that sends the `X-Angos-No-Redirect` request header is served the body 
 v2/
 ├── repositories/
 │   └── {namespace}/
-│       ├── _manifests/
-│       │   └── revisions/
-│       │       └── {algorithm}/
-│       │           └── {hash}/
-│       │               └── link
 │       ├── _layers/
 │       │   └── {algorithm}/
 │       │       └── {hash}/

@@ -363,22 +363,22 @@ impl ObjectStore for Backend {
             let mut temp = TempFileBuilder::new()
                 .prefix(ATOMIC_WRITE_TMP_PREFIX)
                 .tempfile_in(&parent)
-                .map_err(|e| backend_error("put_if_absent", &target, &e))?;
+                .map_err(|e| backend_error("create_if_absent", &target, &e))?;
             temp.write_all(&data)
-                .map_err(|e| backend_error("put_if_absent", &target, &e))?;
+                .map_err(|e| backend_error("create_if_absent", &target, &e))?;
             if sync {
                 temp.as_file()
                     .sync_all()
-                    .map_err(|e| backend_error("put_if_absent", &target, &e))?;
+                    .map_err(|e| backend_error("create_if_absent", &target, &e))?;
             }
             match std::fs::hard_link(temp.path(), &target) {
                 Ok(()) => Ok(true),
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
-                Err(e) => Err(backend_error("put_if_absent", &target, &e)),
+                Err(e) => Err(backend_error("create_if_absent", &target, &e)),
             }
         })
         .await
-        .map_err(|e| Error::Backend(format!("put-if-absent task panicked: {e}")))?
+        .map_err(|e| Error::Backend(format!("create-if-absent task panicked: {e}")))?
     }
 
     async fn delete(&self, key: &str) -> Result<(), Error> {

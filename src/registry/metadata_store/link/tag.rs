@@ -93,7 +93,7 @@ impl MetadataStore {
     /// does not beat an equal-timestamped push of the same digest); a
     /// tombstone winner reads as `NotFound` and shadows any legacy link; a
     /// tag with no entries falls back to the legacy `current/link`.
-    pub(crate) async fn resolve_tag(
+    pub async fn resolve_tag(
         &self,
         namespace: &Namespace,
         tag: &Tag,
@@ -171,7 +171,7 @@ impl MetadataStore {
     /// `metadata`'s target, timestamp, and media type, as a sibling replica's
     /// write would land it.
     #[cfg(test)]
-    pub(crate) async fn write_tag_state(
+    pub async fn write_tag_state(
         &self,
         namespace: &Namespace,
         tag: &Tag,
@@ -232,7 +232,7 @@ impl MetadataStore {
     /// Overwrite the tag's atime key with the current time. Advisory: the
     /// newest arriving timestamp is the correct value, so this is a plain put
     /// with no transaction and no read.
-    pub(crate) async fn write_tag_access_time(
+    pub async fn write_tag_access_time(
         &self,
         namespace: &Namespace,
         tag: &Tag,

@@ -136,8 +136,9 @@ impl MetadataStore {
         match ref_mutation(namespace, digest, &operation) {
             Mutation::Put { key, body, .. } => self.store().object_store().put(&key, body).await,
             Mutation::Delete { key, .. } => self.store().object_store().delete(&key).await,
-            // `ref_mutation` only produces puts and deletes.
-            _ => Ok(()),
+            other => Err(StorageError::Backend(format!(
+                "ref_mutation produced an unexpected mutation: {other:?}"
+            ))),
         }
         .map_err(Error::from)
     }

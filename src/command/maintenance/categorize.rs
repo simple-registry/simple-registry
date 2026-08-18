@@ -46,6 +46,9 @@ pub enum KeyCategory {
     /// write-once tag event. Grammars are checked at categorization, so both
     /// names are known valid.
     TagEntry { namespace: String, tag: String },
+    /// `v2/ns/{ns}!hist/{tag}!/{ord}.{kind}.{alg}.{hash}` (metadata store):
+    /// one demoted tag-history entry, write-once and never validated.
+    TagHistory,
     /// `v2/ns/{ns}!atime/tag/{tag}` or `v2/ns/{ns}!atime/rev/{alg}/{hash}`
     /// (metadata store): an advisory last-pull timestamp, overwritten in
     /// place.
@@ -260,6 +263,15 @@ fn categorize_ns(rest: &str) -> KeyCategory {
                 namespace: namespace.to_string(),
                 tag: tag.to_string(),
             };
+        }
+        return KeyCategory::Unknown;
+    }
+    if let Some(hist_rest) = marker.strip_prefix("hist/") {
+        let Some((tag, entry)) = hist_rest.split_once("!/") else {
+            return KeyCategory::Unknown;
+        };
+        if Tag::new(tag).is_ok() && parse_tag_entry(entry).is_some() {
+            return KeyCategory::TagHistory;
         }
         return KeyCategory::Unknown;
     }
@@ -486,8 +498,8 @@ mod tests {
             metadata_store::LinkKind,
             path_builder::{
                 blob_index_shard_path, blob_path, blob_ref_own_path, blob_ref_path, link_path,
-                tag_atime_path, tag_entry_path, upload_hash_context_path, upload_path,
-                upload_start_date_path,
+                tag_atime_path, tag_entry_path, tag_hist_path, upload_hash_context_path,
+                upload_path, upload_start_date_path,
             },
         },
     };
@@ -580,6 +592,19 @@ mod tests {
             categorize(&tag_atime_path(&ns, &tag)),
             KeyCategory::TagAccessTime
         );
+    }
+
+    #[test]
+    fn tag_hist_paths_round_trip() {
+        let ns = Namespace::new("org/app").unwrap();
+        let tag = Tag::new("v1.0").unwrap();
+        let entry_key = tag_entry_path(&ns, &tag, u64::MAX - 1, false, &digest_a());
+        let file = entry_key.rsplit_once('/').unwrap().1;
+        assert_eq!(
+            categorize(&tag_hist_path(&ns, &tag, file)),
+            KeyCategory::TagHistory
+        );
+        assert_eq!(categorize("v2/ns/org/app!hist/v1.0"), KeyCategory::Unknown);
     }
 
     #[test]

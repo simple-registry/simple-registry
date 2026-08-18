@@ -224,7 +224,7 @@ retry_delay_ms = 50    # Delay between retries (default: 50)
 
 ### With S3 + Redis
 
-Selecting `lock_strategy = "redis"` makes Redis the lock-object backend. When the S3 provider supports conditional operations, the CAS executor still coordinates every metadata write; Redis supplies only the lock objects. Coordination routes through locks only when conditional operations are unavailable or disabled: set `conditional_operations = false` in `[metadata_store.s3]` to force that.
+Selecting `lock_strategy = "redis"` makes Redis the lock-object backend. No metadata write routes through the CAS executor or through locks anymore (see Locking Behavior below); the setting is accepted and probed but has no effect on current write paths.
 
 ```toml
 [blob_store.s3]
@@ -252,17 +252,21 @@ key_prefix = "angos"
 Reads and writes are lock-free everywhere: registry metadata is write-once
 and ordered (see Write Coordination below), blob reclamation is fenced by
 the `v2/gc/` marker protocol, and the job queue serialises workers with
-leased claim keys created atomically (see Write Coordination).
+leased claim keys created atomically (`create_if_absent`).
+
+The `lock_strategy` blocks below remain a compatibility surface: their keys
+are accepted and validated, and an explicit strategy is still probed at
+startup, but no data path takes a lock on current write paths. The surface
+is slated for removal.
 
 ### In-Memory Locking
 
-- Default for filesystem metadata stores and for S3 providers without conditional-operation support
-- Only safe for single-instance deployments
-- No coordination between replicas
+- Accepted as the implicit default for filesystem metadata stores and for S3 providers without conditional-operation support
+- No effect on current write paths
 
 ### Redis Locking
 
-Suitable for multi-replica with any storage backend:
+Accepted with any metadata store backend:
 
 ```toml
 [metadata_store.fs.lock_strategy.redis]
@@ -273,11 +277,13 @@ max_retries = 100           # Retry attempts
 retry_delay_ms = 10         # Initial retry delay; retries back off up to 1s with jitter
 ```
 
+The keys parse and the Redis endpoint is validated, but no lock is taken on
+current write paths.
+
 ### S3 Locking
 
-Available only when using S3 for metadata (not supported with filesystem metadata stores), and the default there when the provider supports the full conditional set. Uses conditional writes (`If-None-Match: *`) to implement distributed locks directly in the S3 bucket, eliminating the need for Redis. Stale locks are automatically recovered after TTL expiry.
-
-Lock operations use a dedicated S3 client with independent timeout configuration, separate from the metadata store's main S3 client. This allows tuning lock behavior independently: lock operations should fail fast rather than blocking for minutes, which is important in high-latency S3 scenarios.
+Accepted only when using S3 for metadata (not supported with filesystem
+metadata stores):
 
 ```toml
 [metadata_store.s3.lock_strategy.s3]
@@ -286,21 +292,15 @@ max_retries = 100           # Acquisition retry attempts
 retry_delay_ms = 50         # Delay between retries (minimum: 1)
 ```
 
-The heartbeat interval is automatically calculated as `ttl_secs / 3`. For example, with the default `ttl_secs = 30`, heartbeats occur every 10 seconds. The minimum `ttl_secs` value is 9 seconds, resulting in a minimum heartbeat interval of 3 seconds. Transient heartbeat failures (connect errors, refresh timeouts) accumulate up to a small budget (one heartbeat tick short of the TTL, so the lease is dropped while still valid) before cancelling the in-flight operation, so a short network blip does not kill in-progress work. Authoritative signals (ownership loss, max-hold expiry, missing lock object) cancel immediately.
+The keys parse, and an explicit `lock_strategy.s3` still fails fast at
+startup when the provider misses any conditional operation (`If-None-Match:
+*` writes, `If-Match` writes and deletes); `conditional_operations =
+true|false` declares support explicitly and skips the probe. The registry
+relies on those same conditional writes directly (atomic create-if-absent on
+claim, dedup, and marker keys), not on lock objects: no lock is taken on
+current write paths.
 
-:::note
-The S3 provider must support conditional writes and conditional deletes. Angos probes for this capability at startup: an explicit `lock_strategy.s3` fails fast when any operation is missing, while an unset lock strategy falls back to the in-process memory lock. Setting `conditional_operations = true|false` declares support explicitly and skips the probe; `false` also pins the unset-lock default to the memory lock.
-Known providers that support the full conditional set: AWS S3, Exoscale SOS
-:::
-
-If your S3 provider does not support them, use Redis locking instead:
-
-```toml
-[metadata_store.s3.lock_strategy.redis]
-url = "redis://redis:6379"
-ttl = 10
-key_prefix = "registry-locks"
-```
+Known providers that support the full conditional set: AWS S3, Exoscale SOS.
 
 ---
 

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::Utc;
 use tracing::{debug, info};
 use uuid::Uuid;
@@ -273,9 +274,8 @@ impl Executor {
     }
 
     /// Whether the reference entry for `link` is still backed: a blob
-    /// self-grant is its own record, a tag is backed while it resolves to
-    /// `blob`, a per-referrer entry while the referring manifest's revision
-    /// resolves, every other kind is backed by its link file.
+    /// self-grant is its own record; every other kind defers to the
+    /// content-based [`MetadataStore::reference_backed`].
     async fn entry_still_backed(
         &self,
         namespace: &Namespace,
@@ -285,44 +285,10 @@ impl Executor {
         if matches!(link, LinkKind::Blob(_)) {
             return Ok(true);
         }
-        if let LinkKind::ReferencedBy(referrer) = link {
-            let revision = LinkKind::Digest(referrer.clone());
-            return match self
-                .metadata_store
-                .read_link_reference(namespace, &revision)
-                .await
-            {
-                Ok(_) => Ok(true),
-                Err(RegistryError::NotFound) => Ok(false),
-                Err(e) => Err(Error::from(e)),
-            };
-        }
-        if matches!(
-            link,
-            LinkKind::Tag(_) | LinkKind::Digest(_) | LinkKind::Referrer { .. }
-        ) {
-            return match self
-                .metadata_store
-                .read_link_reference(namespace, link)
-                .await
-            {
-                Ok(metadata) => Ok(&metadata.target == blob),
-                Err(RegistryError::NotFound) => Ok(false),
-                Err(e) => Err(Error::from(e)),
-            };
-        }
-        let link_key = path_builder::link_path(link, namespace);
-        match self
-            .metadata_store
-            .store()
-            .object_store()
-            .head(&link_key)
+        self.metadata_store
+            .reference_backed(namespace, link, blob)
             .await
-        {
-            Ok(_) => Ok(true),
-            Err(StorageError::NotFound) => Ok(false),
-            Err(e) => Err(Error::from(RegistryError::from(e))),
-        }
+            .map_err(Error::from)
     }
 
     /// Re-add a blob-index grant the index is missing for a still-referenced
@@ -494,6 +460,39 @@ impl Executor {
             )
             .await?;
         Ok(())
+    }
+
+    /// Move one superseded tag entry to the `!hist/` prefix, re-reading the
+    /// body at apply time (a vanished entry was demoted concurrently). Hist
+    /// key first, then the delete, so an interruption duplicates rather than
+    /// loses; both halves are idempotent.
+    async fn demote_tag_entry(
+        &self,
+        namespace: Namespace,
+        tag: Tag,
+        entry_name: String,
+    ) -> Result<(), Error> {
+        let store = self.metadata_store.store().object_store();
+        let entry_key = format!(
+            "{}/{entry_name}",
+            path_builder::tag_entry_dir(&namespace, &tag)
+        );
+        let body = match store.get(&entry_key).await {
+            Ok(body) => body,
+            Err(StorageError::NotFound) => return Ok(()),
+            Err(e) => return Err(Error::from(RegistryError::from(e))),
+        };
+        store
+            .put(
+                &path_builder::tag_hist_path(&namespace, &tag, &entry_name),
+                Bytes::from(body),
+            )
+            .await
+            .map_err(RegistryError::from)?;
+        match store.delete(&entry_key).await {
+            Ok(()) | Err(StorageError::NotFound) => Ok(()),
+            Err(e) => Err(Error::from(RegistryError::from(e))),
+        }
     }
 
     async fn delete_invalid_tag(&self, namespace: Namespace, tag: String) -> Result<(), Error> {
@@ -730,6 +729,11 @@ impl ActionSink for Executor {
                 target,
             } => self.recreate_link(namespace, link, target).await,
             Action::DeleteTag { namespace, tag } => self.delete_tag(namespace, tag).await,
+            Action::DemoteTagEntry {
+                namespace,
+                tag,
+                entry_name,
+            } => self.demote_tag_entry(namespace, tag, entry_name).await,
             Action::DeleteInvalidTag { namespace, tag } => {
                 self.delete_invalid_tag(namespace, tag).await
             }

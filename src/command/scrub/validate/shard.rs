@@ -6,7 +6,6 @@
 
 use std::collections::HashSet;
 
-use chrono::Utc;
 use tracing::{debug, warn};
 
 use angos_oci::{Digest, Namespace};
@@ -119,27 +118,19 @@ impl Validator {
         }
         // A key younger than the grace period may belong to a push between
         // its reference wave and its commit, whose backing does not exist
-        // yet. Same gate as the collector's liveness test: age is the
-        // backend's own timestamp, and a missing timestamp never reads in
-        // favour of removal.
-        let meta = match self.metadata_store.store().object_store().head(key).await {
-            Ok(meta) => meta,
-            Err(StorageError::NotFound) => return Ok(()),
-            Err(e) => return Err(RegistryError::from(e).into()),
-        };
-        let Some(modified) = meta.last_modified else {
-            return Ok(());
-        };
-        let age = Utc::now().signed_duration_since(modified);
-        if age.num_seconds()
-            < i64::try_from(self.metadata_store.gc_grace_secs()).unwrap_or(i64::MAX)
-        {
+        // yet. A gone key reads as not-young; the reverify below observes
+        // its absence and skips the removal.
+        if self.younger_than_grace(key).await? {
             return Ok(());
         }
         // Only a confirmed-dead backing justifies removing the key; a
         // transient read error must not. The reads are raw so the metadata
         // cache cannot mask this run's repairs.
-        if self.ref_backed(&namespace, &link, digest).await? {
+        if self
+            .metadata_store
+            .reference_backed(&namespace, &link, digest)
+            .await?
+        {
             return Ok(());
         }
         let evidence = [key.to_string(), path_builder::link_path(&link, &namespace)];
@@ -157,58 +148,6 @@ impl Validator {
         .await
     }
 
-    /// Whether the link behind a reference key still backs it: a tag backs
-    /// its key while it resolves to the blob, a revision or referrer while
-    /// its record or legacy link resolves, a per-referrer entry while the
-    /// referring manifest's revision resolves, every other kind while its
-    /// link file exists.
-    async fn ref_backed(
-        &self,
-        namespace: &Namespace,
-        link: &LinkKind,
-        blob: &Digest,
-    ) -> Result<bool, Error> {
-        match link {
-            LinkKind::Tag(_) | LinkKind::Digest(_) | LinkKind::Referrer { .. } => {
-                match self
-                    .metadata_store
-                    .read_link_reference(namespace, link)
-                    .await
-                {
-                    Ok(metadata) => Ok(&metadata.target == blob),
-                    Err(RegistryError::NotFound) => Ok(false),
-                    Err(e) => Err(e.into()),
-                }
-            }
-            LinkKind::ReferencedBy(referrer) => {
-                let revision = LinkKind::Digest(referrer.clone());
-                match self
-                    .metadata_store
-                    .read_link_reference(namespace, &revision)
-                    .await
-                {
-                    Ok(_) => Ok(true),
-                    Err(RegistryError::NotFound) => Ok(false),
-                    Err(e) => Err(e.into()),
-                }
-            }
-            _ => {
-                let link_key = path_builder::link_path(link, namespace);
-                match self
-                    .metadata_store
-                    .store()
-                    .object_store()
-                    .head(&link_key)
-                    .await
-                {
-                    Ok(_) => Ok(true),
-                    Err(StorageError::NotFound) => Ok(false),
-                    Err(e) => Err(RegistryError::from(e).into()),
-                }
-            }
-        }
-    }
-
     /// Re-observe a dangling reference key: it still exists while its backing
     /// is still dead.
     async fn ref_still_dangling(
@@ -223,7 +162,10 @@ impl Validator {
             Err(StorageError::NotFound) => return Ok(false),
             Err(e) => return Err(RegistryError::from(e).into()),
         }
-        Ok(!self.ref_backed(namespace, link, blob).await?)
+        Ok(!self
+            .metadata_store
+            .reference_backed(namespace, link, blob)
+            .await?)
     }
 }
 

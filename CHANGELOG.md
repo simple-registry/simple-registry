@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The durable job queue serialises workers with leased claim keys under `_jobs/claims/` (atomic create-if-absent on every backend, `link(2)` on FS) instead of distributed locks and transactions; `[global.job_queue]` now requires a backend whose create-if-absent is honest, probed once at startup.
 - Blob reads and every scrub repair that races a live writer (dangling-reference removal, orphan-blob reclamation, link repairs derived from a fresh revision) honour the reclamation grace period, now configurable as `[global] gc_grace_secs` (default 300), so a stale reference entry cannot resurrect a deleted blob and scrub under load reports zeros.
 - A manifest's layer and config references are pinned by per-manifest reference keys instead of the link files' rewritten `referenced_by` sets, removing the last read-modify-write from the push path; the legacy link files become advisory and the collector reclaims them.
+- Scrub demotes superseded tag entries to a per-namespace `!hist/` prefix, keeping the hot tag listing at one entry per tag while retaining full tag history.
+- `[global.job_queue] claim_ttl_secs` configures the job-claim lease (default 60), setting how quickly a crashed worker's jobs are taken over.
 
 ## 1.5.0
 
