@@ -74,9 +74,6 @@ impl MetadataStore {
     ) -> Result<Page<Namespace>, Error> {
         debug!("Fetching {n} namespace(s) with continuation token: {last:?}");
 
-        // The catalog index is written but not read here: the walk already
-        // finds every name the index could hold, so merging it in only adds
-        // cost until the legacy walk is retired and the index serves alone.
         let mut namespaces = self.collect_namespaces(None).await?;
         namespaces.sort();
 
@@ -108,9 +105,9 @@ impl MetadataStore {
         }
     }
 
-    /// Walks the manifest catalog in a single concurrent tree walk and returns
-    /// every namespace, unpaginated and unsorted. `scope` restricts the walk to
-    /// one repository's subtree; `None` walks the whole store.
+    /// Enumerates every namespace, unpaginated and unsorted. `scope` walks one
+    /// repository's legacy subtree merged with its scoped `v2/ns` listings;
+    /// `None` merges the whole-store legacy walk with the `v2/cat` index.
     #[instrument(skip(self))]
     pub async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<Namespace>, Error> {
         let (root, prefix) = path_builder::namespace_walk_root(scope);
@@ -132,31 +129,32 @@ impl MetadataStore {
         )
         .await?;
 
-        // A namespace whose tags or revisions live under `v2/ns/` may hold no
-        // `_manifests` marker of its own; merge those in. A scoped walk lists
-        // only the scope's own tag and rev roots plus its `/` subtree, so the
-        // whole-segment rule is the listed prefix rather than a client-side
-        // filter over the full root; an unscoped walk stays one flat listing.
-        // A revision record's existence is liveness; a tag counts only when
-        // its resolved winner is live, so a namespace holding only tombstones
-        // does not resurface.
-        let listings: Vec<(String, String)> = match scope {
-            Some(scope) => vec![
-                (
-                    format!("{}/{scope}!tag", path_builder::NS_ROOT),
-                    format!("{scope}!tag/"),
-                ),
-                (
-                    format!("{}/{scope}!rev", path_builder::NS_ROOT),
-                    format!("{scope}!rev/"),
-                ),
-                (
-                    format!("{}/{scope}", path_builder::NS_ROOT),
-                    format!("{scope}/"),
-                ),
-            ],
-            None => vec![(path_builder::NS_ROOT.to_string(), String::new())],
+        let Some(scope) = scope else {
+            self.merge_indexed_namespaces(&mut namespaces).await?;
+            return Ok(namespaces);
         };
+
+        // A scoped namespace whose tags or revisions live under `v2/ns/` may
+        // hold no `_manifests` marker of its own; merge those in from the
+        // scope's own tag and rev roots plus its `/` subtree, so the
+        // whole-segment rule is the listed prefix rather than a client-side
+        // filter over the full root. A revision record's existence is
+        // liveness; a tag counts only when its resolved winner is live, so a
+        // namespace holding only tombstones does not resurface.
+        let listings: [(String, String); 3] = [
+            (
+                format!("{}/{scope}!tag", path_builder::NS_ROOT),
+                format!("{scope}!tag/"),
+            ),
+            (
+                format!("{}/{scope}!rev", path_builder::NS_ROOT),
+                format!("{scope}!rev/"),
+            ),
+            (
+                format!("{}/{scope}", path_builder::NS_ROOT),
+                format!("{scope}/"),
+            ),
+        ];
         let mut fold = WinnerFold::default();
         let mut record_names: HashSet<String> = HashSet::new();
         for (root, key_prefix) in &listings {
@@ -201,6 +199,39 @@ impl MetadataStore {
             }
         }
         Ok(namespaces)
+    }
+
+    /// Merge the `v2/cat` index into `namespaces`: every write lands one key
+    /// per namespace (`ensure_catalog_index`), and content predating the
+    /// index is covered by the legacy walk or gains its key from the scrub
+    /// backfill. A name the walk already found needs no probe; an index-only
+    /// name is content-checked so a stale key of an emptied namespace does
+    /// not list.
+    async fn merge_indexed_namespaces(&self, namespaces: &mut Vec<Namespace>) -> Result<(), Error> {
+        let seen: HashSet<Namespace> = namespaces.iter().cloned().collect();
+        let mut token = None;
+        loop {
+            let page = self
+                .store()
+                .object_store()
+                .list(path_builder::CAT_ROOT, 1000, token)
+                .await?;
+            for key in &page.items {
+                let Some(name) = key.strip_suffix('!') else {
+                    continue;
+                };
+                let Ok(namespace) = Namespace::new(name) else {
+                    continue;
+                };
+                if !seen.contains(&namespace) && self.has_manifest_content(&namespace).await? {
+                    namespaces.push(namespace);
+                }
+            }
+            token = page.next_token;
+            if token.is_none() {
+                return Ok(());
+            }
+        }
     }
 
     #[instrument(skip(self))]
@@ -593,10 +624,16 @@ impl MetadataStore {
         for prefix in [
             format!("{}/{name}!tag", path_builder::NS_ROOT),
             format!("{}/{name}!hist", path_builder::NS_ROOT),
+            format!("{}/{name}!rev", path_builder::NS_ROOT),
+            format!("{}/{name}!sub", path_builder::NS_ROOT),
             format!("{}/{name}!atime", path_builder::NS_ROOT),
         ] {
             self.store().object_store().delete_prefix(&prefix).await?;
         }
+        self.store()
+            .object_store()
+            .delete(&format!("{}/{name}!", path_builder::CAT_ROOT))
+            .await?;
         Ok(())
     }
 }

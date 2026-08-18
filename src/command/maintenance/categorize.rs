@@ -22,7 +22,8 @@ use crate::{
     registry::{
         metadata_store::{LinkKind, decode_blob_index_shard_namespace},
         path_builder::{
-            BLOBS_ROOT, CAT_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT, parse_blob_ref, parse_tag_entry,
+            BLOBS_ROOT, CAT_ROOT, GC_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT, parse_blob_ref,
+            parse_tag_entry,
         },
     },
 };
@@ -80,6 +81,10 @@ pub enum KeyCategory {
     JobIndex { queue: Queue },
     /// A worker's leased claim key under `_jobs/claims/` (metadata store).
     JobClaim,
+    /// A collector run marker under `v2/gc/` (metadata store). The one key a
+    /// writer and the collector must both observe; the walk recognizes it and
+    /// never touches it (a crashed run's marker expires by its own TTL).
+    GcMarker,
     /// Transaction-engine state (`.tx-log/`, `.tx-bodies/`, `.tx-locks/`).
     /// Engine-owned: the walk never touches these keys directly; scrub
     /// reclaims their garbage only through the engine's own janitor sweep.
@@ -155,6 +160,13 @@ pub fn categorize(key: &str) -> KeyCategory {
     }
     if !key.contains('/') && key.starts_with(PROBE_KEY_PREFIX) {
         return KeyCategory::Probe;
+    }
+    if let Some(rest) = strip_prefix_dir(key, GC_ROOT) {
+        return if rest.contains('/') {
+            KeyCategory::Unknown
+        } else {
+            KeyCategory::GcMarker
+        };
     }
     if let Some(rest) = strip_prefix_dir(key, JOBS_ROOT) {
         return categorize_job(rest);
@@ -489,6 +501,18 @@ fn parse_digest(algorithm: &str, hash: &str) -> Option<Digest> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn gc_markers_are_recognized_and_nested_gc_keys_are_not() {
+        assert!(matches!(
+            categorize("v2/gc/0f7a2f2e-run"),
+            KeyCategory::GcMarker
+        ));
+        assert!(matches!(
+            categorize("v2/gc/nested/key"),
+            KeyCategory::Unknown
+        ));
+    }
     use angos_oci::{Namespace, Tag};
 
     use crate::command::maintenance::categorize::*;

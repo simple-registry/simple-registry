@@ -251,8 +251,8 @@ impl BlobStore {
 
     /// Write `body` directly at the content-addressed blob path, for small
     /// in-memory content (manifest bodies); layer blobs use the streaming upload
-    /// lifecycle instead. Idempotent (the digest fixes path and bytes); callers
-    /// serialise against concurrent reclaim with the blob-data lock.
+    /// lifecycle instead. Idempotent (the digest fixes path and bytes); fresh
+    /// bytes sit inside the collector's grace period, so no reclaim can race.
     #[instrument(skip(self, body))]
     pub async fn put_blob(&self, digest: &Digest, body: Bytes) -> Result<(), Error> {
         self.object

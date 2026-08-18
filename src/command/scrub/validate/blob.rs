@@ -26,8 +26,8 @@ impl Validator {
         let index = match self.metadata_store.read_blob_index(digest).await {
             Ok(index) => index,
             Err(RegistryError::NotFound) => {
-                // No index at all: unreferenced bytes. The executor re-checks
-                // under the blob-data lock before deleting.
+                // No index at all: unreferenced bytes. The executor
+                // re-verifies liveness under a gc run marker before deleting.
                 return self.reclaim_orphan_blob(digest).await;
             }
             Err(e) => return Err(e.into()),

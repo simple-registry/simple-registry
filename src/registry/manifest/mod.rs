@@ -594,9 +594,8 @@ impl Registry {
             .referrer_subject(resolved_repository, reference)
             .await?;
 
-        // A digest delete cascades to every pointing tag; the scan, the plan and
-        // the commit run together under the blob-data lock. LWW guarding of a
-        // replicated delete happens in the link transaction planner.
+        // A digest delete cascades to every pointing tag. LWW guarding of a
+        // replicated delete happens in the link planner.
         let existed_before = self
             .commit_manifest_delete(resolved_repository, namespace, reference, source_ts)
             .await?;
@@ -694,10 +693,9 @@ impl Registry {
     /// Commits the delete transaction, reporting whether the reference counted
     /// as present beforehand (the replication-dispatch gate).
     ///
-    /// A digest delete resolves its pointing tags, plans and commits inside the
-    /// blob-data lock, which the push path holds across its own link
-    /// transaction: a tag pushed to this digest therefore either lands before
-    /// the scan and cascades with the delete, or lands after it. Planning
+    /// A digest delete resolves its pointing tags and tombstones each one; a
+    /// tag pushed concurrently appends its own newer entry and wins
+    /// resolution by timestamp regardless of interleaving. Planning
     /// outside the lock would let such a tag outlive the revision link it points
     /// at. The lock equally keeps the unreferenced-check and byte reclaim from
     /// missing a concurrent reference grant. A tag delete drops its link

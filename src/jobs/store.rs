@@ -1099,7 +1099,10 @@ impl JobStore {
             Err(StorageError::NotFound) => return Ok(true),
             Err(e) => return Err(Error::from(e)),
         };
-        Ok(meta.last_modified.is_some_and(|modified| {
+        // A backend that reports no timestamp gives corruption nothing to
+        // age against; read it as stale, since duplicate execution is
+        // tolerated and a wedged lock key is not.
+        Ok(meta.last_modified.is_none_or(|modified| {
             Utc::now().signed_duration_since(modified).num_seconds() > self.claim_ttl_secs * 2
         }))
     }

@@ -628,6 +628,26 @@ async fn young_tag_defers_target_repairs() {
     .await;
 }
 
+/// The run marker is the one key a writer and the collector both consult;
+/// a scrub walk must never quarantine a live one.
+#[tokio::test]
+async fn a_live_gc_marker_survives_the_walk() {
+    for_each_backend(async |test_case| {
+        let metadata_store = test_case.metadata_store();
+        let digest = Digest::sha256_of_bytes(b"marker-covered blob");
+        let claim = metadata_store.gc_claim(&digest, &digest).await.unwrap();
+
+        scrub_apply(test_case).await;
+
+        assert!(
+            metadata_store.gc_blocked(&[&digest]).await.unwrap(),
+            "the live run marker must survive a scrub walk"
+        );
+        metadata_store.gc_release(claim).await.unwrap();
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn corrupt_shard_is_deleted_and_regranted_on_next_run() {
     for_each_backend(async |test_case| {

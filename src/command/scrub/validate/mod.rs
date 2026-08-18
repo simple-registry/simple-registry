@@ -191,7 +191,8 @@ impl Validator {
             (pass, KeyCategory::Unknown) => self.quarantine(walked_store(pass), key).await,
             // Anything else is a known category needing nothing here: owned
             // by another pass or the other store (the two stores may share
-            // one physical root), or write-once tag history under `!hist/`.
+            // one physical root), write-once tag history under `!hist/`, or
+            // a live collector run marker under `v2/gc/`.
             _ => Ok(()),
         }
     }

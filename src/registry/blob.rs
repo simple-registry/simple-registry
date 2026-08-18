@@ -43,7 +43,7 @@ fn whole_blob_response(
 /// blob-index grant can live on separate backends without one being routed
 /// through the other's executor. Byte presence is the dedup gate and the grant
 /// is idempotent, so a retry after a partial fill re-grants without re-fetching;
-/// a crash before the grant leaves the blob-data for scrub to reclaim.
+/// a crash before the grant leaves the bytes for scrub to reclaim.
 pub async fn cache_blob(
     blob_store: &BlobStore,
     metadata_store: &MetadataStore,
@@ -113,8 +113,8 @@ async fn fill_cache_session(
         warn!("Pull-through blob digest mismatch: expected {digest}, got {computed_digest}");
         return Err(Error::DigestInvalid);
     }
-    // Promotion and grant share the coarse lock `delete_blob` holds while
-    // reclaiming, mirroring the manifest path's bytes-then-link order.
+    // Bytes land before the grant, mirroring the manifest path's
+    // bytes-then-link order; both are fresh and inside the grace period.
     promote_and_grant(
         blob_store,
         metadata_store,
@@ -420,13 +420,11 @@ mod tests {
         test_fixtures::client::test_client_config,
     };
 
-    /// `delete_blob` must hold the `blob-data:{digest}` coarse lock across its
-    /// revoke-and-reclaim transaction, so a concurrent reference grant cannot be
-    /// missed while the unreferenced check and the blob-data delete are decided.
-    /// Regression guard for the conformance `MANIFEST_BLOB_UNKNOWN` failure
-    /// caused by dropping that lock during the transactional-engine migration.
+    /// `delete_blob` only revokes the caller's ownership key; the bytes stay
+    /// for the collector, so a concurrent reference in another namespace can
+    /// never be stranded by the delete.
     #[tokio::test]
-    async fn delete_blob_waits_for_blob_data_lock_before_reclaiming_data() {
+    async fn delete_blob_only_revokes_ownership_and_leaves_the_bytes() {
         for_each_backend(async |test_case| {
             let registry = test_case.registry();
             let first = &Namespace::new("test-repo/first").unwrap();

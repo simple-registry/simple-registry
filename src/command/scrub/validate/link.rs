@@ -398,13 +398,15 @@ impl Validator {
         }
     }
 
-    /// Whether `namespace` already holds `target`: a live blob-index entry for
-    /// the digest, or this link already on disk. The blob index is what
-    /// authorizes a cross-namespace read, and a withheld reference leaves
-    /// neither behind, so this is what separates repairing a namespace's own
-    /// state from minting access it never had. Losing both for a reference it
-    /// did own leaves the manifest unrepaired (and unpullable) rather than
-    /// guessing in favour of access.
+    /// Whether `namespace` already holds `target`. Writers never remove
+    /// reference keys or tracked link files, so raw existence is not
+    /// ownership: the namespace's own blob-index key counts directly, any
+    /// other entry (and the link itself) only while the metadata store's
+    /// `reference_backed` vouches for it, else a manifest
+    /// delete's stale leftovers would mint back the access the write path
+    /// refused. Losing every backed reference for one the namespace did own
+    /// leaves the manifest unrepaired (and unpullable) rather than guessing
+    /// in favour of access.
     async fn holds_reference(
         &self,
         namespace: &Namespace,
@@ -416,12 +418,28 @@ impl Validator {
             .read_blob_index_namespace(namespace, target)
             .await
         {
-            Ok(links) if !links.is_empty() => return Ok(true),
-            Ok(_) | Err(RegistryError::NotFound) => {}
+            Ok(links) => {
+                if links.contains(&LinkKind::Blob(target.clone())) {
+                    return Ok(true);
+                }
+                for entry in &links {
+                    if self
+                        .metadata_store
+                        .reference_backed(namespace, entry, target)
+                        .await?
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+            Err(RegistryError::NotFound) => {}
             Err(e) => return Err(e.into()),
         }
-        let link_key = path_builder::link_path(link, namespace);
-        Ok(self.read_link_body(&link_key).await?.is_some())
+        let backed = self
+            .metadata_store
+            .reference_backed(namespace, link, target)
+            .await?;
+        Ok(backed)
     }
 
     /// A referrer link is live only while its referrer manifest is a current
@@ -458,7 +476,7 @@ impl Validator {
         referrer: &Digest,
     ) -> Result<(), Error> {
         let Ok(namespace) = Namespace::new(namespace_raw) else {
-            return Ok(());
+            return self.handle_invalid_namespace(namespace_raw).await;
         };
         let key = path_builder::referrer_record_path(&namespace, subject, referrer);
         match self.metadata_store.store().object_store().head(&key).await {

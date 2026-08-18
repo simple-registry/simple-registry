@@ -19,7 +19,7 @@ use futures_util::future::join_all;
 use tracing::warn;
 
 use angos_oci::{Descriptor, Digest, MediaType, Namespace};
-use angos_tx_engine::{StorageError, error::Error as TxError, store::Store, transaction::Mutation};
+use angos_tx_engine::{StorageError, error::Error as TxError, transaction::Mutation};
 
 use crate::registry::{
     Error,
@@ -141,10 +141,9 @@ struct LinksTxCaptured {
     missing_reference: Option<Digest>,
 }
 
-/// Prior link state captured by a committed link transaction. The retry loop
-/// re-reads each `Create` op's link on every attempt and the commit validates
-/// those exact bytes, so this is the state the commit was actually validated
-/// against, never a stale pre-write read.
+/// Prior link state captured by a committed link write: the snapshot each
+/// `Create` op was planned against, reported to callers for replication
+/// dispatch.
 #[derive(Default)]
 pub struct LinksCommit {
     /// Prior target per `Create` op's link; `None` = the link did not exist.
@@ -355,14 +354,14 @@ impl MetadataStore {
         self.apply_writes(&plan.refs).await?;
         // Wave B: the collector check. An unexpired run covering one of the
         // referenced blobs means a reclaim may be mid-flight; back off.
-        let gc_checked_at = Instant::now();
         if !plan.gc_digests.is_empty() {
             self.gc_backoff(&plan.gc_digests).await?;
-        }
-        // The clearance only vouches for one grace period; a longer stall
-        // before the records wave redoes the check.
-        if !plan.gc_digests.is_empty() && gc_checked_at.elapsed().as_secs() > self.gc_grace_secs {
-            self.gc_backoff(&plan.gc_digests).await?;
+            // The clearance only vouches for one grace period; a stall
+            // between it and the records wave redoes the check.
+            let gc_cleared_at = Instant::now();
+            if gc_cleared_at.elapsed().as_secs() > self.gc_grace_secs {
+                self.gc_backoff(&plan.gc_digests).await?;
+            }
         }
         // Waves C and D, in order.
         self.apply_writes(&plan.records).await?;
@@ -458,8 +457,7 @@ impl MetadataStore {
 
         // Ownership pre-read: one reference lookup per newly-referenced digest
         // of a policy-checked push.
-        let store = self.store_arc();
-        let ownership = preread_reference_ownership(store.as_ref(), namespace, &ops, tx).await?;
+        let ownership = preread_reference_ownership(self, namespace, &ops, tx).await?;
 
         // Plan: build the link mutations over the snapshot state.
         let LinkMutations {
@@ -507,10 +505,9 @@ impl MetadataStore {
         ))
     }
 
-    /// The snapshot pass: read each operation's link once, in parallel,
-    /// capturing the raw bytes (for the transaction read set) and the parsed
-    /// metadata (for planning) together. A non-`NotFound` read error fails the
-    /// attempt rather than being planned around as an absent link.
+    /// The snapshot pass: read each operation's link once, in parallel, for
+    /// planning. A non-`NotFound` read error fails the attempt rather than
+    /// being planned around as an absent link.
     ///
     /// Repeated operations are collapsed first: a manifest may legally list the
     /// same digest twice, and planning that link twice would erase the referrers
@@ -540,9 +537,8 @@ impl MetadataStore {
                 LinkOperation::Create { link, .. } | LinkOperation::Delete { link, .. } => link,
             };
             // Tags, revisions, and referrers resolve from their write-once
-            // shapes: there is no single mutable object whose bytes could
-            // join the read set, and none is needed, because concurrent
-            // writers of these kinds write disjoint or identical keys.
+            // shapes: concurrent writers of these kinds write disjoint or
+            // identical keys, so no prior bytes need capturing.
             let resolved = match link {
                 LinkKind::Tag(tag) => Some(self.resolve_tag(namespace, tag).await),
                 LinkKind::Digest(digest) => Some(self.resolve_revision(namespace, digest).await),
@@ -560,8 +556,7 @@ impl MetadataStore {
                 return Ok((op, metadata));
             }
             let link_path = path_builder::link_path(link, namespace);
-            let found = self.read_link_raw(&link_path).await?;
-            let metadata = found.map(|(_, metadata)| metadata);
+            let metadata = self.read_link_raw(&link_path).await?;
             Ok::<_, TxError>((op, metadata))
         }))
         .await;
@@ -606,16 +601,12 @@ impl MetadataStore {
     /// Read a link's exact stored bytes and parsed metadata, or `None` when
     /// absent. The snapshot pass needs the raw bytes for the read-set
     /// fingerprint alongside the parsed metadata.
-    async fn read_link_raw(
-        &self,
-        link_path: &str,
-    ) -> Result<Option<(Bytes, LinkMetadata)>, TxError> {
+    async fn read_link_raw(&self, link_path: &str) -> Result<Option<LinkMetadata>, TxError> {
         match self.store().object_store().get(link_path).await {
             Ok(data) => {
-                let bytes = Bytes::from(data.clone());
                 let metadata: LinkMetadata = serde_json::from_slice(&data)
                     .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
-                Ok(Some((bytes, metadata)))
+                Ok(Some(metadata))
             }
             Err(StorageError::NotFound) => Ok(None),
             Err(e) => Err(TxError::Storage(e)),
@@ -626,9 +617,8 @@ impl MetadataStore {
 /// The last-writer-wins gate for replicated writes and deletes: returns
 /// `Some(message)` when a local tag is newer than the replicated source, so
 /// the attempt commits an empty transaction and the caller maps it to
-/// [`Error::ReplicationSuperseded`]. The comparison runs against the same
-/// snapshot the read set validates, so a racing tag write aborts the commit
-/// rather than gating LWW on stale state.
+/// [`Error::ReplicationSuperseded`]. A racing local tag write appends a
+/// fresher entry that wins resolution by timestamp either way.
 fn lww_superseded(snapshot: &LinksSnapshot<'_>, tx: &LinksTx<'_>) -> Option<String> {
     // A stored tag timestamp carries millisecond precision (the entry
     // ordinal), so the incoming side is compared at the same precision or an
@@ -932,10 +922,12 @@ fn build_delete_mutations(
 
 /// The ownership pre-read: one reference lookup per newly-referenced digest
 /// (a tracked Create whose link does not exist yet) of a policy-checked push.
-/// A namespace owns a digest when it holds any reference entry for it, new
-/// keys or legacy shard alike.
+/// Writers never remove reference keys, so a raw entry is not ownership: the
+/// namespace's own key counts directly, anything else only while
+/// [`MetadataStore::reference_backed`] vouches for it, short-circuiting on
+/// the first hit so an owned digest costs no extra reads.
 async fn preread_reference_ownership(
-    store: &Store,
+    m: &MetadataStore,
     namespace: &Namespace,
     ops: &[OpSnapshot<'_>],
     tx: &LinksTx<'_>,
@@ -966,10 +958,22 @@ async fn preread_reference_ownership(
         {
             continue;
         }
-        let entries = namespace_entries_merged(store, namespace, target)
+        let entries = namespace_entries_merged(m.store(), namespace, target)
             .await
             .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
-        ownership.insert((*target).clone(), !entries.is_empty());
+        let mut owned = entries.contains(&LinkKind::Blob((*target).clone()));
+        if !owned {
+            for entry in &entries {
+                if m.reference_backed(namespace, entry, target)
+                    .await
+                    .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?
+                {
+                    owned = true;
+                    break;
+                }
+            }
+        }
+        ownership.insert((*target).clone(), owned);
     }
     Ok(ownership)
 }

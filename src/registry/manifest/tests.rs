@@ -2947,6 +2947,110 @@ async fn store_manifest_strict_accepts_a_reference_with_a_live_grant() {
         .expect("the layer link must be written");
 }
 
+/// A manifest delete leaves its reference keys (and, until the collector
+/// prunes it, the advisory link file) behind. Once the file is pruned, the
+/// stale keys alone must not pass the Strict ownership gate, or a push could
+/// name the layer digest without uploading bytes and mint itself a fresh
+/// backed reference.
+#[tokio::test]
+async fn store_manifest_strict_rejects_stale_references_of_a_deleted_manifest() {
+    let test_case = FSRegistryTestCase::new();
+    let store = test_case.metadata_store();
+    let namespace = Namespace::new("stale-guard-repo").unwrap();
+
+    let layer_digest = Digest::sha256_of_bytes(b"stale-guard-layer");
+    let push_ops = |manifest: &Digest| {
+        [
+            LinkOperation::create(LinkKind::Digest(manifest.clone()), manifest.clone()),
+            LinkOperation::create_with_referrer(
+                LinkKind::Layer(layer_digest.clone()),
+                layer_digest.clone(),
+                manifest.clone(),
+            ),
+        ]
+    };
+
+    let first = Digest::sha256_of_bytes(b"stale-guard-first");
+    store
+        .store_manifest(
+            &namespace,
+            &push_ops(&first),
+            None,
+            ReferencePolicy::Trusted,
+        )
+        .await
+        .expect("seed the first manifest");
+
+    // While the first manifest lives its entry backs the reference, so the
+    // same push passes the Strict gate.
+    let second = Digest::sha256_of_bytes(b"stale-guard-second");
+    store
+        .store_manifest(
+            &namespace,
+            &push_ops(&second),
+            None,
+            ReferencePolicy::Strict,
+        )
+        .await
+        .expect("a Strict push backed by a live reference must commit");
+
+    for manifest in [&first, &second] {
+        store
+            .delete_manifest(
+                &namespace,
+                manifest,
+                &[
+                    LinkOperation::delete(LinkKind::Digest((*manifest).clone())),
+                    LinkOperation::delete_with_referrer(
+                        LinkKind::Layer(layer_digest.clone()),
+                        (*manifest).clone(),
+                    ),
+                ],
+                None,
+            )
+            .await
+            .expect("delete the manifest");
+    }
+    // The collector's prune of the advisory link file; the reference keys
+    // stay behind for its slower age-out.
+    store
+        .update_links(
+            &namespace,
+            &[LinkOperation::delete_with_referrer(
+                LinkKind::Layer(layer_digest.clone()),
+                first.clone(),
+            )],
+        )
+        .await
+        .expect("prune the advisory link file");
+
+    let stale = store
+        .read_blob_index_namespace(&namespace, &layer_digest)
+        .await
+        .expect("the stale reference keys must still exist");
+    assert!(
+        stale.contains(&LinkKind::ReferencedBy(first.clone())),
+        "the deleted manifest's reference key is the collector's to prune, got: {stale:?}"
+    );
+
+    let third = Digest::sha256_of_bytes(b"stale-guard-third");
+    let result = store
+        .store_manifest(&namespace, &push_ops(&third), None, ReferencePolicy::Strict)
+        .await
+        .err();
+    assert!(
+        matches!(result, Some(Error::ManifestBlobUnknown)),
+        "stale reference keys must not pass the Strict ownership gate, got: {result:?}"
+    );
+    assert!(
+        store
+            .read_link_reference(&namespace, &LinkKind::Digest(third))
+            .await
+            .is_err(),
+        "the rejected push must not commit any link"
+    );
+}
+
 /// A Trusted (pull-through) push references content whose grants may not exist
 /// yet, so it must keep creating first grants on an absent shard.
 #[tokio::test]
