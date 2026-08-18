@@ -216,17 +216,30 @@ impl MetadataStore {
                 .object_store()
                 .list(path_builder::CAT_ROOT, 1000, token)
                 .await?;
-            for key in &page.items {
-                let Some(name) = key.strip_suffix('!') else {
-                    continue;
-                };
-                let Ok(namespace) = Namespace::new(name) else {
-                    continue;
-                };
-                if !seen.contains(&namespace) && self.has_manifest_content(&namespace).await? {
+            let candidates: Vec<Namespace> = page
+                .items
+                .iter()
+                .filter_map(|key| key.strip_suffix('!'))
+                .filter_map(|name| Namespace::new(name).ok())
+                .filter(|namespace| !seen.contains(namespace))
+                .collect();
+            // One content probe per index-only name; fanned out so a page of
+            // namespaces costs one round-trip group, not one per name.
+            let probes = candidates.into_iter().map(|namespace| async move {
+                match self.has_manifest_content(&namespace).await {
+                    Ok(true) => Ok(Some(namespace)),
+                    Ok(false) => Ok(None),
+                    Err(e) => Err(e),
+                }
+            });
+            let mut probing =
+                stream::iter(probes).buffer_unordered(self.namespace_walk_concurrency);
+            while let Some(result) = probing.next().await {
+                if let Some(namespace) = result? {
                     namespaces.push(namespace);
                 }
             }
+            drop(probing);
             token = page.next_token;
             if token.is_none() {
                 return Ok(());
@@ -477,7 +490,9 @@ impl MetadataStore {
     /// entry of each, so a namespace that was never written costs the listings
     /// that find nothing.
     pub async fn has_manifest_content(&self, namespace: &Namespace) -> Result<bool, Error> {
-        let revisions = self.stream_revisions(namespace);
+        // A one-key page answers the existence probe; the full page size is
+        // for enumeration callers.
+        let revisions = self.stream_revisions_paged(namespace, 1);
         tokio::pin!(revisions);
         if revisions.next().await.transpose()?.is_some() {
             return Ok(true);
@@ -525,9 +540,23 @@ impl MetadataStore {
         &'a self,
         namespace: &'a Namespace,
     ) -> impl Stream<Item = Result<Digest, Error>> + Send + 'a {
+        self.stream_revisions_paged(namespace, 1000)
+    }
+
+    /// [`Self::stream_revisions`] with a caller-chosen record page size, so an
+    /// existence probe can ask for one key instead of a full page.
+    pub fn stream_revisions_paged<'a>(
+        &'a self,
+        namespace: &'a Namespace,
+        page_size: u16,
+    ) -> impl Stream<Item = Result<Digest, Error>> + Send + 'a {
         let records = paginated(move |token| async move {
             let root = path_builder::revision_records_root(namespace);
-            let page = self.store().object_store().list(&root, 1000, token).await?;
+            let page = self
+                .store()
+                .object_store()
+                .list(&root, page_size, token)
+                .await?;
             Ok::<_, Error>((page.items, page.next_token))
         })
         .try_filter_map(|key| {

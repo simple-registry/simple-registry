@@ -501,18 +501,6 @@ fn parse_digest(algorithm: &str, hash: &str) -> Option<Digest> {
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn gc_markers_are_recognized_and_nested_gc_keys_are_not() {
-        assert!(matches!(
-            categorize("v2/gc/0f7a2f2e-run"),
-            KeyCategory::GcMarker
-        ));
-        assert!(matches!(
-            categorize("v2/gc/nested/key"),
-            KeyCategory::Unknown
-        ));
-    }
     use angos_oci::{Namespace, Tag};
 
     use crate::command::maintenance::categorize::*;
@@ -863,5 +851,16 @@ mod tests {
                 },
             }
         );
+    }
+    #[test]
+    fn gc_markers_are_recognized_and_nested_gc_keys_are_not() {
+        assert!(matches!(
+            categorize("v2/gc/0f7a2f2e-run"),
+            KeyCategory::GcMarker
+        ));
+        assert!(matches!(
+            categorize("v2/gc/nested/key"),
+            KeyCategory::Unknown
+        ));
     }
 }

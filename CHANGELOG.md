@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Scrub demotes superseded tag entries to a per-namespace `!hist/` prefix, keeping the hot tag listing at one entry per tag while retaining full tag history.
 - `[global.job_queue] claim_ttl_secs` configures the job-claim lease (default 60), setting how quickly a crashed worker's jobs are taken over.
 - A write racing an active blob reclamation answers 503 `RECLAMATION_IN_PROGRESS` with `Retry-After` instead of a 409, so clients back off and retry instead of treating it as a refusal.
+- The catalog is served from the `v2/cat/` index merged with the legacy tree walk; a namespace whose index write was lost to a crash lists again after the next scrub backfill.
 
 ## 1.5.0
 

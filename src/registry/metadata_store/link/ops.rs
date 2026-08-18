@@ -351,15 +351,16 @@ impl MetadataStore {
         }
 
         // Wave A: reference keys, before anything that could commit them.
+        let refs_started_at = Instant::now();
         self.apply_writes(&plan.refs).await?;
         // Wave B: the collector check. An unexpired run covering one of the
         // referenced blobs means a reclaim may be mid-flight; back off.
         if !plan.gc_digests.is_empty() {
             self.gc_backoff(&plan.gc_digests).await?;
-            // The clearance only vouches for one grace period; a stall
-            // between it and the records wave redoes the check.
-            let gc_cleared_at = Instant::now();
-            if gc_cleared_at.elapsed().as_secs() > self.gc_grace_secs {
+            // The clearance vouches for one grace period counted from the
+            // reference wave; a wave A plus backoff slower than that redoes
+            // the check, since the records wave follows immediately.
+            if refs_started_at.elapsed().as_secs() > self.gc_grace_secs {
                 self.gc_backoff(&plan.gc_digests).await?;
             }
         }

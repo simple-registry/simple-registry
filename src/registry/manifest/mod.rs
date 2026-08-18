@@ -695,13 +695,10 @@ impl Registry {
     ///
     /// A digest delete resolves its pointing tags and tombstones each one; a
     /// tag pushed concurrently appends its own newer entry and wins
-    /// resolution by timestamp regardless of interleaving. Planning
-    /// outside the lock would let such a tag outlive the revision link it points
-    /// at. The lock equally keeps the unreferenced-check and byte reclaim from
-    /// missing a concurrent reference grant. A tag delete drops its link
-    /// directly. Threading `source_ts` into the transaction makes the deleted
-    /// links part of its validated read set, so a concurrent newer re-put aborts
-    /// the delete rather than being clobbered by an older replicated delete.
+    /// resolution by timestamp regardless of interleaving. A tag delete
+    /// writes one tombstone. `source_ts` stamps a replicated delete with the
+    /// author's clock, so the LWW gate resolves it against local writes the
+    /// same way an entry would.
     async fn commit_manifest_delete(
         &self,
         resolved_repository: Option<&Repository>,
