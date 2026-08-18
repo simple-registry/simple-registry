@@ -3,6 +3,7 @@
 //! reconcile, tag digest links, referrer liveness, the invalid-tag gate, and
 //! the orphan-namespace clearing).
 
+use chrono::{DateTime, Utc};
 use tracing::{debug, warn};
 
 use angos_oci::{Digest, Manifest, Namespace, Tag};
@@ -98,7 +99,7 @@ impl Validator {
         let Some(metadata) = self.read_link_body(key).await? else {
             return Ok(());
         };
-        self.validate_tag_target(namespace, &tag, metadata.target)
+        self.validate_tag_target(namespace, &tag, metadata.target, metadata.created_at)
             .await?;
         // Convert whether or not the target was healthy: the entry is tag
         // history either way, an unhealthy target's orphan repair tombstones
@@ -137,7 +138,7 @@ impl Validator {
             Err(RegistryError::NotFound) => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        self.validate_tag_target(&namespace, &tag, metadata.target)
+        self.validate_tag_target(&namespace, &tag, metadata.target, metadata.created_at)
             .await?;
         Ok(())
     }
@@ -145,13 +146,24 @@ impl Validator {
     /// The shared tail of both tag shapes: the current target must have blob
     /// bytes (else the orphan manifest is removed) and its digest revision
     /// link (re-issued when missing). `true` means the target was healthy.
+    /// A tag whose winning entry is younger than the grace period is left
+    /// alone: the walk can resolve it before a concurrent delete's tombstone
+    /// lands and then read the revision after that delete removed it, and
+    /// repairing on that interleaving would resurrect a deleted manifest.
     async fn validate_tag_target(
         &self,
         namespace: &Namespace,
         tag: &Tag,
         target: Digest,
+        entry_created_at: Option<DateTime<Utc>>,
     ) -> Result<bool, Error> {
         self.ensure_catalog(namespace).await?;
+        if let Some(created_at) = entry_created_at {
+            let grace = i64::try_from(self.metadata_store.gc_grace_secs()).unwrap_or(i64::MAX);
+            if Utc::now().signed_duration_since(created_at).num_seconds() < grace {
+                return Ok(true);
+            }
+        }
         match self.blob_store.size(&target).await {
             Ok(_) => {
                 self.ensure_link(namespace, &LinkKind::Digest(target.clone()), &target)
@@ -405,6 +417,12 @@ impl Validator {
             Ok(_) => {}
             Err(StorageError::NotFound) => return Ok(()),
             Err(e) => return Err(RegistryError::from(e).into()),
+        }
+        // A young record may precede its referrer's revision inside a push,
+        // or follow a delete whose tombstoning the walk raced; either way
+        // pruning waits out the grace period.
+        if self.younger_than_grace(&key).await? {
+            return Ok(());
         }
         if self.revision_exists(&namespace, referrer).await? {
             return Ok(());

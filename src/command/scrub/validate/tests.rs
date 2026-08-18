@@ -593,6 +593,41 @@ async fn young_revision_defers_link_repairs() {
     .await;
 }
 
+/// A tag whose entry is inside the grace period can be observed mid-delete
+/// (tombstone not yet landed, revision record already gone); a graced scrub
+/// must not derive repairs from it.
+#[tokio::test]
+async fn young_tag_defers_target_repairs() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/young-tag").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let record = path_builder::revision_record_path(namespace, &manifest_digest);
+        metadata_store
+            .store()
+            .object_store()
+            .delete(&record)
+            .await
+            .unwrap();
+
+        let graced = Arc::new(
+            MetadataStore::builder(build_store(metadata_store.store().object_store().clone()))
+                .gc_grace_secs(300)
+                .build(),
+        );
+        let blob_store = test_case.blob_store();
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        run_passes(&blob_store, &graced, sink.clone() as Arc<dyn ActionSink>).await;
+        let deferred = sink.lock().unwrap().is_empty();
+        assert!(
+            deferred,
+            "repairs behind a tag entry inside the grace period must wait"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn corrupt_shard_is_deleted_and_regranted_on_next_run() {
     for_each_backend(async |test_case| {
