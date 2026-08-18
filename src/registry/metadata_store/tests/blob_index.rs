@@ -1,3 +1,4 @@
+use std::slice;
 use std::str::FromStr;
 
 use bytes::Bytes;
@@ -8,7 +9,9 @@ use angos_tx_engine::lock::{LockStrategy, S3LockConfig};
 use crate::registry::metadata_store::tests::test_config;
 use crate::registry::{
     Error,
-    metadata_store::{BlobIndexOperation, LinkKind, LinkOperation, blob_index::shard::read_shard},
+    metadata_store::{
+        BlobIndexOperation, LinkKind, LinkMetadata, LinkOperation, blob_index::shard::read_shard,
+    },
     path_builder,
     test_utils::fs_test_stack,
 };
@@ -485,4 +488,74 @@ async fn corrupt_shard_fails_reclaim_read_instead_of_parsing_empty() {
 
     let result = read_shard(store, &shard_path).await;
     assert!(result.is_err(), "corrupt shard must error, got: {result:?}");
+}
+
+/// A legacy shard's tracked entry is backed only while a manifest in the
+/// link body's referrer set still resolves: the surviving link file alone
+/// must not pin the blob once the referring manifest is deleted, or blob
+/// DELETE on a pre-migration store answers `BlobReferenced` forever.
+#[tokio::test]
+async fn legacy_tracked_entry_reads_unbacked_once_its_referrer_is_gone() {
+    let stack = fs_test_stack();
+    let store = &stack.metadata_store;
+    let namespace = Namespace::new("legacy-tracked-backing").unwrap();
+    let layer =
+        Digest::from_str("sha256:cc00000000000000000000000000000000000000000000000000000000000001")
+            .unwrap();
+    let manifest =
+        Digest::from_str("sha256:cc00000000000000000000000000000000000000000000000000000000000002")
+            .unwrap();
+
+    let link = LinkKind::Layer(layer.clone());
+    let shard = serde_json::to_vec(slice::from_ref(&link)).unwrap();
+    store
+        .store()
+        .object_store()
+        .put(
+            &path_builder::blob_index_shard_path(&layer, &namespace),
+            Bytes::from(shard),
+        )
+        .await
+        .unwrap();
+    let mut metadata = LinkMetadata::from_digest(layer.clone());
+    metadata.add_referrer(manifest.clone());
+    store
+        .write_link_reference(&namespace, &link, &metadata)
+        .await
+        .unwrap();
+    store
+        .update_links(
+            &namespace,
+            &[LinkOperation::create(
+                LinkKind::Digest(manifest.clone()),
+                manifest.clone(),
+            )],
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .reference_backed(&namespace, &link, &layer)
+            .await
+            .unwrap(),
+        "a tracked entry must read as backed while its referrer's revision resolves"
+    );
+
+    store
+        .delete_links(
+            &namespace,
+            &[LinkOperation::delete(LinkKind::Digest(manifest.clone()))],
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !store
+            .reference_backed(&namespace, &link, &layer)
+            .await
+            .unwrap(),
+        "a tracked entry must read as unbacked once its only referrer's revision is deleted"
+    );
 }

@@ -11,6 +11,7 @@
 //! legal. Single-link primitives live in [`super::storage`].
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -361,7 +362,13 @@ impl MetadataStore {
         self.apply_writes(&plan.refs).await?;
         // Wave B: the collector check. An unexpired run covering one of the
         // referenced blobs means a reclaim may be mid-flight; back off.
+        let gc_checked_at = Instant::now();
         if !plan.gc_digests.is_empty() {
+            self.gc_backoff(&plan.gc_digests).await?;
+        }
+        // The clearance only vouches for one grace period; a longer stall
+        // before the records wave redoes the check.
+        if !plan.gc_digests.is_empty() && gc_checked_at.elapsed().as_secs() > self.gc_grace_secs {
             self.gc_backoff(&plan.gc_digests).await?;
         }
         // Waves C and D, in order.
@@ -415,7 +422,7 @@ impl MetadataStore {
         if self.gc_clear(&digests).await? {
             return Ok(());
         }
-        Err(Error::Internal(
+        Err(Error::Conflict(
             "blob reclamation in progress for a referenced blob; retry".to_string(),
         ))
     }

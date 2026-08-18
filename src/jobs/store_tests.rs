@@ -5,8 +5,9 @@ use std::sync::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::{TimeZone as _, Utc};
+use chrono::{Duration as ChronoDuration, TimeZone as _, Utc};
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 
 use angos_storage::{
     Error as StorageError, MemoryObjectStore, ObjectStore,
@@ -15,9 +16,10 @@ use angos_storage::{
 };
 
 use crate::jobs::store::{
-    FailOutcome, JobEnvelope, JobQueueConfig, JobRetryPolicy, JobState, JobStore, LockKey,
-    MAX_REPORTED_PENDING, Queue, STORAGE_KEY_PREFIX_LEN, make_storage_key, parse_lock_key_index,
-    parse_not_before, serialize_dead_letter, serialize_lock_key_index,
+    ClaimCheck, ClaimedJob, FailOutcome, JobEnvelope, JobQueueConfig, JobRetryPolicy, JobState,
+    JobStore, LockKey, MAX_REPORTED_PENDING, Queue, STORAGE_KEY_PREFIX_LEN, job_claim_path,
+    job_lock_key_index_path, job_pending_path, make_storage_key, parse_lock_key_index,
+    parse_not_before, serialize_dead_letter, serialize_lock_key_index, should_cancel_claim,
 };
 use crate::metrics_provider;
 use crate::registry::test_utils::build_store;
@@ -1241,6 +1243,131 @@ async fn a_poison_pending_record_can_be_deleted() {
             h.raw.head(&path).await.is_err(),
             "the pending object must be gone"
         );
+    })
+    .await;
+}
+
+/// A worker whose claim lapsed mid-execution must not reschedule or bury the
+/// job: the pending file, dedup index, and dead-letter store belong to the
+/// key's new holder, exactly as on the `complete` path.
+#[tokio::test]
+async fn fail_with_lost_claim_leaves_pending_and_index_untouched() {
+    for_each_job_backend(async |h| {
+        let mut env = dummy_envelope("cache.ns:sha256:lostfail");
+        env.max_attempts = Some(5);
+        h.store.enqueue(env).await.expect("enqueue");
+        let storage_key = h
+            .store
+            .list_pending(Queue::Cache, 10)
+            .await
+            .expect("list")
+            .pop()
+            .expect("one pending job");
+        let envelope = h
+            .store
+            .read_pending(Queue::Cache, &storage_key)
+            .await
+            .expect("read pending");
+
+        let lost = CancellationToken::new();
+        lost.cancel();
+        let claimed = ClaimedJob::for_test(envelope.clone(), storage_key.clone(), lost);
+        assert!(matches!(
+            h.store.fail(claimed, "boom").await.expect("fail"),
+            FailOutcome::Retried { .. }
+        ));
+
+        // Same guarantee on the dead-letter path.
+        let lost = CancellationToken::new();
+        lost.cancel();
+        let claimed = ClaimedJob::for_test(envelope, storage_key.clone(), lost);
+        assert!(matches!(
+            h.store
+                .fail_terminal(claimed, "boom")
+                .await
+                .expect("fail_terminal"),
+            FailOutcome::MovedToDeadLetter
+        ));
+
+        let pending = h.store.list_pending(Queue::Cache, 10).await.expect("list");
+        assert_eq!(
+            pending,
+            vec![storage_key.clone()],
+            "the original pending file must be the only one"
+        );
+        let pending_path = job_pending_path("cache", &storage_key);
+        assert!(
+            h.raw.head(&pending_path).await.is_ok(),
+            "the pending file must be untouched"
+        );
+        let index_path = job_lock_key_index_path("cache", &lock_key("cache.ns:sha256:lostfail"));
+        assert!(
+            h.raw.head(&index_path).await.is_ok(),
+            "the dedup index must be untouched"
+        );
+        assert_eq!(
+            h.store.count_failed(Queue::Cache).await.expect("count"),
+            0,
+            "nothing may be dead-lettered by a lost claim"
+        );
+    })
+    .await;
+}
+
+/// The refresher's loss predicate: a positive loss cancels immediately, and
+/// a transient read error only cancels once the last verified expiry passed.
+#[test]
+fn should_cancel_claim_tolerates_transient_errors_inside_the_lease() {
+    let now = Utc::now();
+    let future = now + ChronoDuration::seconds(40);
+    let past = now - ChronoDuration::seconds(1);
+    assert!(
+        !should_cancel_claim(&ClaimCheck::Unverifiable, future, now),
+        "a read error inside the lease must not cancel"
+    );
+    assert!(
+        should_cancel_claim(&ClaimCheck::Unverifiable, past, now),
+        "read errors past the last verified expiry must cancel"
+    );
+    assert!(
+        should_cancel_claim(&ClaimCheck::Lost, future, now),
+        "a record showing another instance or a lapse must cancel"
+    );
+    assert!(
+        !should_cancel_claim(&ClaimCheck::Owned { expires_at: future }, past, now),
+        "a verified own record must never cancel"
+    );
+}
+
+/// A lapsed claim must not wedge its lock key: a later claimant sees the
+/// stale record, takes the key over, and claims the job.
+#[tokio::test]
+async fn claim_one_takes_over_a_stale_claim() {
+    for_each_job_backend(async |h| {
+        h.store
+            .enqueue(dummy_envelope("cache.ns:sha256:stale"))
+            .await
+            .expect("enqueue");
+        let claim_path = job_claim_path(&lock_key("cache.ns:sha256:stale"));
+        h.raw
+            .put(
+                &claim_path,
+                Bytes::from_static(
+                    br#"{"instance":"departed-worker","expires_at":"2020-01-01T00:00:00Z"}"#,
+                ),
+            )
+            .await
+            .expect("write stale claim");
+
+        let claimed = h
+            .store
+            .claim_one(Queue::Cache)
+            .await
+            .expect("claim")
+            .claimed
+            .expect("a stale claim must be taken over");
+        assert_eq!(claimed.envelope.lock_key, lock_key("cache.ns:sha256:stale"));
+        h.store.complete(claimed).await.expect("complete");
     })
     .await;
 }

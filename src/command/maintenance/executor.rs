@@ -155,6 +155,25 @@ impl Executor {
 }
 
 impl Executor {
+    /// Whether the object at `key` is younger than the reclamation grace
+    /// period; `None` when the key is gone. A missing timestamp reads as
+    /// young, so an unreadable age never justifies a deletion.
+    async fn key_younger_than_grace(
+        &self,
+        store: &dyn ObjectStore,
+        key: &str,
+    ) -> Result<Option<bool>, Error> {
+        let meta = match store.head(key).await {
+            Ok(meta) => meta,
+            Err(StorageError::NotFound) => return Ok(None),
+            Err(e) => return Err(Error::from(RegistryError::from(e))),
+        };
+        let grace = i64::try_from(self.metadata_store.gc_grace_secs()).unwrap_or(i64::MAX);
+        Ok(Some(meta.last_modified.is_none_or(|modified| {
+            Utc::now().signed_duration_since(modified).num_seconds() < grace
+        })))
+    }
+
     /// The collector's only irreversible action, fenced by the marker
     /// protocol instead of a lock: age-gate the bytes, check reference
     /// liveness, publish a run covering the digest, re-verify under a
@@ -163,22 +182,17 @@ impl Executor {
     /// young key reads live) or after the marker was visible to its own
     /// check, so it backed off.
     async fn delete_orphan_blob(&self, digest: Digest) -> Result<(), Error> {
-        let meta = match self
-            .blob_store
-            .object_store()
-            .head(&path_builder::blob_path(&digest))
-            .await
-        {
-            Ok(meta) => meta,
-            Err(StorageError::NotFound) => return Ok(()),
-            Err(e) => return Err(Error::from(RegistryError::from(e))),
-        };
         // Fresh bytes are unconditionally live: an upload's `_own` key or a
         // push's reference may still be in flight.
-        let grace = i64::try_from(self.metadata_store.gc_grace_secs()).unwrap_or(i64::MAX);
-        let fresh = meta.last_modified.is_none_or(|modified| {
-            Utc::now().signed_duration_since(modified).num_seconds() < grace
-        });
+        let Some(fresh) = self
+            .key_younger_than_grace(
+                self.blob_store.object_store().as_ref(),
+                &path_builder::blob_path(&digest),
+            )
+            .await?
+        else {
+            return Ok(());
+        };
         if fresh || self.metadata_store.blob_references_live(&digest).await? {
             info!("skipping orphan blob deletion: '{digest}' reads live");
             return Ok(());
@@ -203,7 +217,10 @@ impl Executor {
                 return Err(Error::from(e));
             }
         }
-        self.metadata_store.delete_blob_references(&digest).await?;
+        if let Err(e) = self.metadata_store.delete_blob_references(&digest).await {
+            let _ = self.metadata_store.gc_release(claim).await;
+            return Err(Error::from(e));
+        }
         self.metadata_store
             .gc_release(claim)
             .await
@@ -221,21 +238,38 @@ impl Executor {
         blob: Digest,
         link: LinkKind,
     ) -> Result<(), Error> {
+        let bytes_exist = match self.blob_store.size(&blob).await {
+            Ok(_) => true,
+            Err(RegistryError::BlobUnknown | RegistryError::NotFound) => false,
+            Err(e) => return Err(Error::from(e)),
+        };
+        if bytes_exist && self.entry_still_backed(&namespace, &link, &blob).await? {
+            info!("skipping blob-index removal: entry for '{namespace}/{blob}' is live again");
+            return Ok(());
+        }
+        // A young reference key may be a concurrent push's re-put between
+        // its reference wave and its commit; a gone key needs no removal.
+        let ref_key = path_builder::blob_ref_path(&blob, &namespace, &link);
+        match self
+            .key_younger_than_grace(
+                self.metadata_store.store().object_store().as_ref(),
+                &ref_key,
+            )
+            .await?
         {
-            let bytes_exist = match self.blob_store.size(&blob).await {
-                Ok(_) => true,
-                Err(RegistryError::BlobUnknown | RegistryError::NotFound) => false,
-                Err(e) => return Err(Error::from(e)),
-            };
-            if bytes_exist && self.entry_still_backed(&namespace, &link, &blob).await? {
-                info!("skipping blob-index removal: entry for '{namespace}/{blob}' is live again");
+            None => return Ok(()),
+            Some(true) => {
+                info!(
+                    "skipping blob-index removal: entry for '{namespace}/{blob}' is inside the grace period"
+                );
                 return Ok(());
             }
-            self.metadata_store
-                .update_blob_index(&namespace, &blob, BlobIndexOperation::Remove(link))
-                .await?;
-            Ok(())
+            Some(false) => {}
         }
+        self.metadata_store
+            .update_blob_index(&namespace, &blob, BlobIndexOperation::Remove(link))
+            .await?;
+        Ok(())
     }
 
     /// Whether the reference entry for `link` is still backed: a blob
@@ -305,22 +339,18 @@ impl Executor {
         blob: Digest,
         link: LinkKind,
     ) -> Result<(), Error> {
-        {
-            match self.blob_store.size(&blob).await {
-                Ok(_) => {}
-                Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
-                    info!(
-                        "skipping blob-index grant: bytes were reclaimed for '{namespace}/{blob}'"
-                    );
-                    return Ok(());
-                }
-                Err(e) => return Err(Error::from(e)),
+        match self.blob_store.size(&blob).await {
+            Ok(_) => {}
+            Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
+                info!("skipping blob-index grant: bytes were reclaimed for '{namespace}/{blob}'");
+                return Ok(());
             }
-            self.metadata_store
-                .update_blob_index(&namespace, &blob, BlobIndexOperation::Insert(link.clone()))
-                .await?;
-            Ok(())
+            Err(e) => return Err(Error::from(e)),
         }
+        self.metadata_store
+            .update_blob_index(&namespace, &blob, BlobIndexOperation::Insert(link.clone()))
+            .await?;
+        Ok(())
     }
 
     /// The migration actions: each converts one legacy shape into its new
@@ -393,33 +423,50 @@ impl Executor {
         namespace: Namespace,
         blob: Digest,
     ) -> Result<(), Error> {
+        // Re-check at apply time: a manifest reference may have appeared
+        // since the checker classified the grant as orphaned.
+        let links = match self
+            .metadata_store
+            .read_blob_index_namespace(&namespace, &blob)
+            .await
         {
-            // Re-check under the lock: a manifest reference may have appeared
-            // since the checker classified the grant as orphaned.
-            let links = match self
-                .metadata_store
-                .read_blob_index_namespace(&namespace, &blob)
-                .await
-            {
-                Ok(links) => links,
-                // The grant vanished since classification (a concurrent revoke
-                // or delete): nothing left to do.
-                Err(RegistryError::NotFound) => return Ok(()),
-                Err(e) => return Err(Error::from(e)),
-            };
-            if links.iter().any(LinkKind::is_tracked) {
+            Ok(links) => links,
+            // The grant vanished since classification (a concurrent revoke
+            // or delete): nothing left to do.
+            Err(RegistryError::NotFound) => return Ok(()),
+            Err(e) => return Err(Error::from(e)),
+        };
+        if links.iter().any(LinkKind::is_tracked) {
+            info!(
+                "skipping orphan grant revoke: a manifest reference appeared for '{namespace}/{blob}'"
+            );
+            return Ok(());
+        }
+        // A young `_own` key may be a concurrent upload completion
+        // re-granting ownership; a gone key is already revoked.
+        let own_key = path_builder::blob_ref_own_path(&blob, &namespace);
+        match self
+            .key_younger_than_grace(
+                self.metadata_store.store().object_store().as_ref(),
+                &own_key,
+            )
+            .await?
+        {
+            None => return Ok(()),
+            Some(true) => {
                 info!(
-                    "skipping orphan grant revoke: a manifest reference appeared for '{namespace}/{blob}'"
+                    "skipping orphan grant revoke: ownership of '{namespace}/{blob}' is inside the grace period"
                 );
                 return Ok(());
             }
-            // Revoke the grant; the bytes are the collector's to reclaim
-            // once every reference is stale.
-            self.metadata_store
-                .revoke_blob_ownership(&namespace, &blob)
-                .await?;
-            Ok(())
+            Some(false) => {}
         }
+        // Revoke the grant; the bytes are the collector's to reclaim
+        // once every reference is stale.
+        self.metadata_store
+            .revoke_blob_ownership(&namespace, &blob)
+            .await?;
+        Ok(())
     }
 
     async fn recreate_link(
@@ -981,6 +1028,99 @@ mod tests {
                     .await
                     .is_err(),
                 "a dangling entry must be removed"
+            );
+        })
+        .await;
+    }
+
+    /// A reference key inside the grace period may be a concurrent push's
+    /// re-put between its reference wave and its commit, so a graced executor
+    /// must keep it even when it reads stale.
+    #[tokio::test]
+    async fn executor_remove_blob_index_link_keeps_young_reference_key() {
+        for_each_backend(async |test_case| {
+            let blob_store = test_case.blob_store();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/app").unwrap();
+
+            // Byteless and unbacked, but freshly written.
+            let digest = Digest::sha256_of_bytes(b"re-pushed between waves");
+            let link = LinkKind::Layer(digest.clone());
+            metadata_store
+                .update_blob_index(
+                    &namespace,
+                    &digest,
+                    BlobIndexOperation::Insert(link.clone()),
+                )
+                .await
+                .unwrap();
+
+            // Same stores, but an executor whose grace period is real.
+            let graced = Arc::new(
+                MetadataStore::builder(build_store(metadata_store.store().object_store().clone()))
+                    .gc_grace_secs(300)
+                    .build(),
+            );
+            let executor = Executor::new_for_test(blob_store, graced);
+            executor
+                .apply(Action::RemoveBlobIndexLink {
+                    namespace: namespace.clone(),
+                    blob: digest.clone(),
+                    link: link.clone(),
+                })
+                .await
+                .unwrap();
+
+            assert!(
+                metadata_store
+                    .read_blob_index_namespace(&namespace, &digest)
+                    .await
+                    .is_ok_and(|links| links.contains(&link)),
+                "a reference key inside the grace period must be kept"
+            );
+        })
+        .await;
+    }
+
+    /// An `_own` key inside the grace period may be a concurrent upload
+    /// completion re-granting ownership, so a graced executor must keep it.
+    #[tokio::test]
+    async fn executor_remove_orphan_blob_grant_keeps_young_ownership() {
+        for_each_backend(async |test_case| {
+            let blob_store = test_case.blob_store();
+            let metadata_store = test_case.metadata_store();
+            let namespace = Namespace::new("test-repo/app").unwrap();
+
+            let digest = put_blob_direct(metadata_store.store(), b"grant-only blob").await;
+            metadata_store
+                .update_blob_index(
+                    &namespace,
+                    &digest,
+                    BlobIndexOperation::Insert(LinkKind::Blob(digest.clone())),
+                )
+                .await
+                .unwrap();
+
+            let graced = Arc::new(
+                MetadataStore::builder(build_store(metadata_store.store().object_store().clone()))
+                    .gc_grace_secs(300)
+                    .build(),
+            );
+            let executor = Executor::new_for_test(blob_store, graced);
+            executor
+                .apply(Action::RemoveOrphanBlobGrant {
+                    namespace: namespace.clone(),
+                    blob: digest.clone(),
+                })
+                .await
+                .unwrap();
+
+            assert!(
+                metadata_store
+                    .read_blob_index_namespace(&namespace, &digest)
+                    .await
+                    .is_ok_and(|links| links.contains(&LinkKind::Blob(digest.clone()))),
+                "an ownership grant inside the grace period must be kept"
             );
         })
         .await;

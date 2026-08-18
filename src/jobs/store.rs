@@ -25,7 +25,8 @@ use bytes::Bytes;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio::{
-    select,
+    select, spawn,
+    task::JoinHandle,
     time::{MissedTickBehavior, interval, sleep},
 };
 use tokio_util::sync::CancellationToken;
@@ -540,7 +541,7 @@ pub const MAX_REPORTED_PENDING: u64 = 10_000;
 const CLAIM_TTL_SECS: i64 = 60;
 
 /// The stored body of a claim key.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct ClaimRecord {
     instance: String,
     expires_at: DateTime<Utc>,
@@ -553,7 +554,7 @@ pub struct JobClaim {
     key: String,
     instance: String,
     lost: CancellationToken,
-    refresher: Option<tokio::task::JoinHandle<()>>,
+    refresher: Option<JoinHandle<()>>,
 }
 
 impl JobClaim {
@@ -999,26 +1000,33 @@ impl JobStore {
     // -----------------------------------------------------------------------
 
     /// Try to claim `lock_key`: one atomic create of the claim key. A held
-    /// unexpired claim yields `None`; a lapsed one is deleted and re-created
-    /// (a takeover race leaves exactly one creator winning, and a stolen
-    /// claim is caught by the loser's refresh before it touches queue state).
+    /// unexpired claim yields `None`; a lapsed one is deleted and re-created.
+    /// The takeover is deliberately unfenced (no conditional store): two
+    /// claimants can both see the lapse, and the later delete can remove the
+    /// earlier winner's fresh claim, so both may execute for a while. Each
+    /// loser's refresher notices the foreign record within one refresh
+    /// period, so the cost is bounded duplicate execution of an idempotent
+    /// handler, never a lost job.
     async fn try_claim(&self, lock_key: &LockKey) -> Result<Option<JobClaim>, Error> {
         let key = job_claim_path(lock_key);
         let instance = Uuid::new_v4().to_string();
-        if !self.put_claim_if_absent(&key, &instance).await? {
+        let mut stamped_until = self.put_claim_if_absent(&key, &instance).await?;
+        if stamped_until.is_none() {
             if !self.claim_is_stale(&key).await? {
                 return Ok(None);
             }
             self.store.object_store().delete(&key).await?;
-            if !self.put_claim_if_absent(&key, &instance).await? {
-                return Ok(None);
-            }
+            stamped_until = self.put_claim_if_absent(&key, &instance).await?;
         }
+        let Some(stamped_until) = stamped_until else {
+            return Ok(None);
+        };
         let lost = CancellationToken::new();
-        let refresher = tokio::spawn(refresh_claim_loop(
+        let refresher = spawn(refresh_claim_loop(
             self.store.clone(),
             key.clone(),
             instance.clone(),
+            stamped_until,
             lost.clone(),
         ));
         Ok(Some(JobClaim {
@@ -1029,7 +1037,13 @@ impl JobStore {
         }))
     }
 
-    async fn put_claim_if_absent(&self, key: &str, instance: &str) -> Result<bool, Error> {
+    /// Atomically create the claim record; returns its `expires_at` when the
+    /// create won, `None` when the key already exists.
+    async fn put_claim_if_absent(
+        &self,
+        key: &str,
+        instance: &str,
+    ) -> Result<Option<DateTime<Utc>>, Error> {
         let record = ClaimRecord {
             instance: instance.to_string(),
             expires_at: Utc::now() + ChronoDuration::seconds(CLAIM_TTL_SECS),
@@ -1038,11 +1052,12 @@ impl JobStore {
             serde_json::to_vec(&record)
                 .map_err(|e| Error::Storage(format!("claim serialization failed: {e}")))?,
         );
-        self.store
+        let created = self
+            .store
             .object_store()
             .create_if_absent(key, body)
-            .await
-            .map_err(Error::from)
+            .await?;
+        Ok(created.then_some(record.expires_at))
     }
 
     /// Whether the claim at `key` is safe to take over: its lease lapsed, or
@@ -1392,6 +1407,15 @@ impl JobStore {
         old_storage_key: String,
         next_at: DateTime<Utc>,
     ) -> Result<FailOutcome, Error> {
+        // Mirrors `complete`: a lost claim must not touch queue state the
+        // key's new holder now owns, so report the intended outcome only.
+        if claim.lost() {
+            warn!(
+                lock_key = updated.lock_key.as_str(),
+                "job queue: claim lapsed during execution; leaving the retry to the new holder"
+            );
+            return Ok(FailOutcome::Retried { next_at });
+        }
         let new_storage_key = make_storage_key(next_at, &updated.id);
         let new_pending_path = job_pending_path(updated.queue.as_str(), &new_storage_key);
         let old_pending_path = job_pending_path(updated.queue.as_str(), &old_storage_key);
@@ -1438,6 +1462,15 @@ impl JobStore {
         storage_key: String,
         err: &str,
     ) -> Result<FailOutcome, Error> {
+        // Mirrors `complete`: a lost claim must not touch queue state the
+        // key's new holder now owns, so report the intended outcome only.
+        if claim.lost() {
+            warn!(
+                lock_key = envelope.lock_key.as_str(),
+                "job queue: claim lapsed during execution; leaving the dead-letter to the new holder"
+            );
+            return Ok(FailOutcome::MovedToDeadLetter);
+        }
         let failed_path = job_failed_path(envelope.queue.as_str(), &storage_key);
         let pending_path = job_pending_path(envelope.queue.as_str(), &storage_key);
 
@@ -1560,28 +1593,73 @@ impl JobStore {
     }
 }
 
+/// What one refresh-tick read of the claim key concluded.
+enum ClaimCheck {
+    /// The record still carries this instance with an unexpired lease.
+    Owned { expires_at: DateTime<Utc> },
+    /// Positive loss: the record is gone, unparseable, expired, or carries
+    /// another instance.
+    Lost,
+    /// The read failed, so ownership is unknown this tick.
+    Unverifiable,
+}
+
+/// Whether the refresher must raise `lost`: a positive loss always cancels,
+/// while an unverifiable read only cancels once the last verified expiry has
+/// passed, because the lease itself is the tolerance for transient errors.
+fn should_cancel_claim(
+    check: &ClaimCheck,
+    last_verified_expiry: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> bool {
+    match check {
+        ClaimCheck::Owned { .. } => false,
+        ClaimCheck::Lost => true,
+        ClaimCheck::Unverifiable => now >= last_verified_expiry,
+    }
+}
+
 /// The claim holder's lease refresher: re-stamp the record at a third of the
-/// lease, stop and raise `lost` the moment the key no longer carries this
-/// instance (taken over after a lapse) or cannot be re-stamped in time.
+/// lease, stop and raise `lost` when the key positively no longer carries
+/// this instance, or when read errors persist past the last verified expiry.
+/// The re-stamp is an unconditional put, so it can overwrite a takeover's
+/// record written between the read and the put; like the takeover race on
+/// `try_claim`, that costs at most bounded duplicate execution of an
+/// idempotent handler, detected within one refresh period, and never a lost
+/// job.
 async fn refresh_claim_loop(
     store: Arc<Store>,
     key: String,
     instance: String,
+    stamped_until: DateTime<Utc>,
     lost: CancellationToken,
 ) {
     let period = Duration::from_secs(u64::try_from(CLAIM_TTL_SECS / 3).unwrap_or(20).max(1));
+    let mut last_verified_expiry = stamped_until;
     loop {
         sleep(period).await;
-        let owned = match store.object_store().get(&key).await {
-            Ok(raw) => serde_json::from_slice::<ClaimRecord>(&raw)
-                .is_ok_and(|record| record.instance == instance && record.expires_at >= Utc::now()),
-            // Unreadable or gone: assume lost, the safe side for a lease.
-            Err(_) => false,
+        let check = match store.object_store().get(&key).await {
+            Ok(raw) => match serde_json::from_slice::<ClaimRecord>(&raw) {
+                Ok(record) if record.instance == instance && record.expires_at >= Utc::now() => {
+                    ClaimCheck::Owned {
+                        expires_at: record.expires_at,
+                    }
+                }
+                _ => ClaimCheck::Lost,
+            },
+            Err(StorageError::NotFound) => ClaimCheck::Lost,
+            // A transient read error is not loss; retry on the next tick
+            // while the last verified stamp still covers us.
+            Err(_) => ClaimCheck::Unverifiable,
         };
-        if !owned {
+        if should_cancel_claim(&check, last_verified_expiry, Utc::now()) {
             lost.cancel();
             return;
         }
+        let ClaimCheck::Owned { expires_at } = check else {
+            continue;
+        };
+        last_verified_expiry = expires_at;
         let record = ClaimRecord {
             instance: instance.clone(),
             expires_at: Utc::now() + ChronoDuration::seconds(CLAIM_TTL_SECS),
@@ -1592,7 +1670,14 @@ async fn refresh_claim_loop(
         };
         // A missed stamp is survivable inside the lease; the next tick
         // retries, and a lapse is what `lost` reports.
-        let _ = store.object_store().put(&key, Bytes::from(body)).await;
+        if store
+            .object_store()
+            .put(&key, Bytes::from(body))
+            .await
+            .is_ok()
+        {
+            last_verified_expiry = record.expires_at;
+        }
     }
 }
 

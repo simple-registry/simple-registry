@@ -212,6 +212,12 @@ async fn sweep_one_shard(
         .read_blob_index_namespace(&namespace, blob)
         .await?;
     for link in links {
+        // The walked key's age gate does not cover its siblings: a fresh
+        // `_own` granted before its bytes land is a normal in-flight state,
+        // so each entry is gated on its own reference key.
+        if entry_is_young(ctx, &path_builder::blob_ref_path(blob, &namespace, &link)).await? {
+            continue;
+        }
         ctx.sink
             .apply(Action::RemoveBlobIndexLink {
                 namespace: namespace.clone(),
@@ -221,6 +227,26 @@ async fn sweep_one_shard(
             .await?;
     }
     Ok(())
+}
+
+/// Whether an entry's reference key is younger than the sweep window. A
+/// missing timestamp reads as young; a gone key reads as old, since its only
+/// record is the already-gated legacy shard.
+async fn entry_is_young(ctx: &ShardSweep<'_>, ref_key: &str) -> Result<bool, Error> {
+    let meta = match ctx
+        .metadata_store
+        .store()
+        .object_store()
+        .head(ref_key)
+        .await
+    {
+        Ok(meta) => meta,
+        Err(StorageError::NotFound) => return Ok(false),
+        Err(e) => return Err(RegistryError::from(e).into()),
+    };
+    Ok(meta
+        .last_modified
+        .is_none_or(|modified| ctx.now.signed_duration_since(modified) < ctx.window))
 }
 
 #[cfg(test)]
@@ -292,8 +318,10 @@ mod tests {
 
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    use std::time::Duration as StdDuration;
 
     use async_trait::async_trait;
+    use tokio::time::sleep;
 
     use angos_oci::{Digest, Namespace};
 
@@ -454,6 +482,77 @@ mod tests {
             sink.iter()
                 .all(|a| matches!(a, Action::AbortMultipartUpload { .. }))
         );
+    }
+
+    /// The walked key's age gate does not vouch for its siblings: an `_own`
+    /// grant landed after the sweep's cutoff (a normal state for an upload
+    /// whose bytes are still in flight) must survive the purge its old
+    /// sibling entry triggers.
+    #[tokio::test]
+    async fn byteless_purge_keeps_young_sibling_own_key() {
+        for_each_backend(async |test_case| {
+            let namespace = Namespace::new("test-repo/byteless-own").unwrap();
+            let blob_store = test_case.blob_store();
+            let metadata_store = test_case.metadata_store();
+
+            let ghost = Digest::sha256_of_bytes(b"byteless with fresh own");
+            let stale = LinkKind::Layer(ghost.clone());
+            metadata_store
+                .update_blob_index(
+                    &namespace,
+                    &ghost,
+                    BlobIndexOperation::Insert(stale.clone()),
+                )
+                .await
+                .unwrap();
+            // A sweep cutoff between the two puts: the layer entry reads old
+            // and the later `_own` grant reads young. The sleeps keep both
+            // clear of the cutoff on second-granularity store timestamps.
+            sleep(StdDuration::from_millis(1500)).await;
+            let window = Duration::hours(1);
+            let now = Utc::now() + window;
+            sleep(StdDuration::from_millis(1500)).await;
+            metadata_store
+                .update_blob_index(
+                    &namespace,
+                    &ghost,
+                    BlobIndexOperation::Insert(LinkKind::Blob(ghost.clone())),
+                )
+                .await
+                .unwrap();
+
+            let sink: Mutex<Vec<Action>> = Mutex::new(Vec::new());
+            let ctx = ShardSweep {
+                blob_store: &blob_store,
+                metadata_store: &metadata_store,
+                window,
+                now,
+                sink: &sink,
+            };
+            let walked = path_builder::blob_ref_path(&ghost, &namespace, &stale);
+            sweep_one_shard(&ctx, &walked, &ghost, namespace.as_ref())
+                .await
+                .unwrap();
+
+            let actions = sink.into_inner().unwrap();
+            assert!(
+                actions.iter().any(
+                    |a| matches!(a, Action::RemoveBlobIndexLink { link, .. } if link == &stale)
+                ),
+                "the old byteless entry must still be purged"
+            );
+            assert!(
+                !actions.iter().any(|a| matches!(
+                    a,
+                    Action::RemoveBlobIndexLink {
+                        link: LinkKind::Blob(_),
+                        ..
+                    }
+                )),
+                "a young sibling `_own` grant must survive the purge"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]

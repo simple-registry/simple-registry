@@ -19,8 +19,11 @@ use crate::{
     jobs::Queue,
     jobs::store::{Error, JobEnvelope, JobHandler},
     registry::{
-        Error as RegistryError, blob::cache_blob, blob_ownership::BlobOwnership,
-        blob_store::BlobStore, metadata_store::MetadataStore,
+        Error as RegistryError,
+        blob::cache_blob,
+        blob_ownership::{BlobOwnership, GrantOutcome},
+        blob_store::BlobStore,
+        metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
     },
 };
@@ -134,13 +137,15 @@ impl CacheFillJobHandler {
         // commit across both. The work is idempotent, so it is safe to redo on a
         // retry even though it no longer commits atomically with job completion.
         //
-        // The guarded grant catches a reclaim mid-flight; absent (or
-        // vanished) bytes fall through to the fetch path.
+        // The guarded grant catches a reclaim mid-flight; anything but a
+        // clean grant falls through to the fetch path, whose fresh bytes are
+        // grace-protected.
         let granted = match self.blob_store.size(digest).await {
             Ok(_) => {
                 BlobOwnership::new(self.metadata_store.as_ref())
                     .grant_existing(&self.blob_store, namespace, digest)
                     .await?
+                    == GrantOutcome::Granted
             }
             Err(RegistryError::BlobUnknown | RegistryError::NotFound) => false,
             Err(error) => return Err(error),

@@ -14,7 +14,7 @@ use crate::{
     http_response::{ResponseBody, build_response},
     registry::{
         Error, Registry,
-        blob_ownership::promote_and_grant,
+        blob_ownership::{GrantOutcome, promote_and_grant},
         blob_store::{hashing_reader::HashingReader, resumable_hasher::Hasher},
     },
 };
@@ -39,49 +39,58 @@ impl Registry {
     where
         S: AsyncRead + Unpin,
     {
+        if self.blob_store.size(digest).await.is_err() {
+            return Ok(false);
+        }
+
+        // The blob already exists, so there is nothing to store: hash the
+        // body into a sink under the target algorithm alone, purely to
+        // confirm it matches. With a declared length, drain at most one byte
+        // past it so an over-long body is rejected as soon as the surplus
+        // appears rather than after the whole `bound_blob_stream`-capped
+        // body is read.
+        let mut reader =
+            HashingReader::new(&mut *stream, Hasher::for_algorithm(digest.algorithm()));
+        match content_length {
+            Some(expected) => {
+                // Draining faults are I/O (surface the source); only the
+                // read-vs-declared comparison is a length mismatch (416).
+                let read = copy(
+                    &mut (&mut reader).take(expected.saturating_add(1)),
+                    &mut sink(),
+                )
+                .await?;
+                if read != expected {
+                    return Err(Error::RangeNotSatisfiable);
+                }
+            }
+            None => {
+                copy(&mut reader, &mut sink()).await?;
+            }
+        }
+
+        let upload_digest = reader.into_hasher().digest(digest.algorithm())?;
+        if &upload_digest != digest {
+            warn!("Expected digest '{digest}', got '{upload_digest}'");
+            return Err(Error::DigestInvalid);
+        }
+
+        // The bytes pre-exist and may be old: the guarded grant catches a
+        // mid-flight reclaim. The body is already drained, so neither miss
+        // may fall through to a fresh write; both surface as retryable
+        // conflicts (the digest matched, the client just repushes).
+        match self
+            .blob_ownership()
+            .grant_existing(&self.blob_store, namespace, digest)
+            .await?
         {
-            if self.blob_store.size(digest).await.is_err() {
-                return Ok(false);
-            }
-
-            // The blob already exists, so there is nothing to store: hash the
-            // body into a sink under the target algorithm alone, purely to
-            // confirm it matches. With a declared length, drain at most one byte
-            // past it so an over-long body is rejected as soon as the surplus
-            // appears rather than after the whole `bound_blob_stream`-capped
-            // body is read.
-            let mut reader =
-                HashingReader::new(&mut *stream, Hasher::for_algorithm(digest.algorithm()));
-            match content_length {
-                Some(expected) => {
-                    // Draining faults are I/O (surface the source); only the
-                    // read-vs-declared comparison is a length mismatch (416).
-                    let read = copy(
-                        &mut (&mut reader).take(expected.saturating_add(1)),
-                        &mut sink(),
-                    )
-                    .await?;
-                    if read != expected {
-                        return Err(Error::RangeNotSatisfiable);
-                    }
-                }
-                None => {
-                    copy(&mut reader, &mut sink()).await?;
-                }
-            }
-
-            let upload_digest = reader.into_hasher().digest(digest.algorithm())?;
-            if &upload_digest != digest {
-                warn!("Expected digest '{digest}', got '{upload_digest}'");
-                return Err(Error::DigestInvalid);
-            }
-
-            // The bytes pre-exist and may be old: the guarded grant
-            // catches a mid-flight reclaim, falling back to a fresh
-            // upload of the streamed body.
-            self.blob_ownership()
-                .grant_existing(&self.blob_store, namespace, digest)
-                .await
+            GrantOutcome::Granted => Ok(true),
+            GrantOutcome::BytesAbsent => Err(Error::Conflict(
+                "blob bytes were reclaimed during upload; retry".to_string(),
+            )),
+            GrantOutcome::ReclaimBlocked => Err(Error::Conflict(
+                "blob reclamation in progress; retry".to_string(),
+            )),
         }
     }
 
@@ -113,26 +122,24 @@ impl Registry {
         mount: &BlobMount,
         source: &Namespace,
     ) -> Result<Option<Digest>, Error> {
-        (async {
-            if self.blob_store.size(&mount.digest).await.is_err()
-                || !self
-                    .blob_ownership()
-                    .can_read(source, &mount.digest)
-                    .await?
-            {
-                return Ok(None);
-            }
-
-            if !self
+        if self.blob_store.size(&mount.digest).await.is_err()
+            || !self
                 .blob_ownership()
-                .grant_existing(&self.blob_store, namespace, &mount.digest)
+                .can_read(source, &mount.digest)
                 .await?
-            {
-                return Ok(None);
-            }
-            Ok(Some(mount.digest.clone()))
-        })
-        .await
+        {
+            return Ok(None);
+        }
+
+        match self
+            .blob_ownership()
+            .grant_existing(&self.blob_store, namespace, &mount.digest)
+            .await?
+        {
+            GrantOutcome::Granted => Ok(Some(mount.digest.clone())),
+            // Vanished or reclaiming bytes both degrade to a fresh session.
+            GrantOutcome::BytesAbsent | GrantOutcome::ReclaimBlocked => Ok(None),
+        }
     }
 
     /// Source namespaces whose read policy must permit the caller: `[from]`
@@ -2601,6 +2608,48 @@ mod tests {
                 .await
                 .is_err(),
             "the oversized chunked PUT session must be aborted, not committed"
+        );
+    }
+
+    /// A monolithic PUT over already-present bytes whose guarded grant hits
+    /// a covering collector run must fail closed with a retryable conflict:
+    /// the body is already drained, so falling through to a fresh write
+    /// would misreport a digest mismatch.
+    #[tokio::test]
+    async fn completing_over_an_existing_blob_fails_closed_while_gc_covers_it() {
+        let test_case = FSRegistryTestCase::new();
+        let registry = test_case.registry();
+        let store = test_case.metadata_store();
+        let namespace = &Namespace::new("test-repo").unwrap();
+        let content = b"existing bytes under a collector run";
+        let digest = put_blob_direct(store.store(), content).await;
+
+        let session_id = UploadSessionId::generate();
+        registry
+            .blob_store
+            .create_upload(namespace, &session_id, None)
+            .await
+            .unwrap();
+
+        let claim = store.gc_claim(&digest, &digest).await.unwrap();
+        let result = registry
+            .complete_upload(
+                None,
+                CompleteUploadRequest {
+                    namespace: namespace.clone(),
+                    session_id: session_id.clone(),
+                    digest: digest.clone(),
+                    content_range: None,
+                    content_length: Some(content.len() as u64),
+                },
+                Cursor::new(content.to_vec()),
+            )
+            .await;
+        store.gc_release(claim).await.unwrap();
+
+        assert!(
+            matches!(result, Err(Error::Conflict(_))),
+            "a gc-covered guarded grant must surface a retryable conflict, got {result:?}"
         );
     }
 

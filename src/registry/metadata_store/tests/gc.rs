@@ -1,10 +1,12 @@
 use bytes::Bytes;
 
-use angos_oci::{Digest, Namespace};
+use angos_oci::{Digest, Namespace, UploadSessionId};
 
 use crate::command::maintenance::action::Action;
 use crate::command::maintenance::executor::{ActionSink, Executor};
 use crate::registry::{
+    Error,
+    blob_ownership::{GrantOutcome, promote_and_grant},
     metadata_store::{BlobIndexOperation, LinkKind},
     path_builder,
     test_utils::{FSRegistryTestCase, RegistryTestCase},
@@ -91,6 +93,46 @@ async fn a_push_backs_off_while_a_collector_run_covers_its_blob() {
     );
 }
 
+/// A guarded grant against still-present bytes fails closed while an
+/// unexpired collector run covers the digest: the grant reports the reclaim
+/// and the promotion path surfaces a retryable conflict instead of handing
+/// out bytes the collector may be deleting.
+#[tokio::test]
+async fn a_guarded_grant_fails_closed_while_a_run_covers_present_bytes() {
+    let case = FSRegistryTestCase::new();
+    let store = case.metadata_store();
+    let namespace = Namespace::new("gc-blocked-grant").unwrap();
+    let digest = seed_blob(&case, b"gc-blocked-grant-bytes").await;
+
+    let claim = store.gc_claim(&digest, &digest).await.unwrap();
+    let outcome = case
+        .registry()
+        .blob_ownership()
+        .grant_existing(&case.blob_store(), &namespace, &digest)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        GrantOutcome::ReclaimBlocked,
+        "present bytes under a covering run must report the reclaim"
+    );
+
+    let result = promote_and_grant(
+        &case.blob_store(),
+        store.as_ref(),
+        &namespace,
+        &UploadSessionId::generate(),
+        &digest,
+        22,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(Error::Conflict(_))),
+        "promotion over a covering run must fail closed with a retryable conflict, got {result:?}"
+    );
+    store.gc_release(claim).await.unwrap();
+}
+
 /// A mount (or any grant against pre-existing bytes) racing a sweep never
 /// hands out a reference to reclaimed bytes: the guarded grant re-probes the
 /// blob after the collector check and reports the blob gone.
@@ -105,12 +147,16 @@ async fn a_guarded_grant_never_returns_a_reclaimed_blob() {
     // The sweep wins the race: the bytes are gone by the time the grant
     // re-probes them.
     case.blob_store().delete_blob(&digest).await.unwrap();
-    let granted = registry
+    let outcome = registry
         .blob_ownership()
         .grant_existing(&case.blob_store(), &namespace, &digest)
         .await
         .unwrap();
-    assert!(!granted, "a reclaimed blob must never be granted");
+    assert_eq!(
+        outcome,
+        GrantOutcome::BytesAbsent,
+        "a reclaimed blob must never be granted"
+    );
 
     // A crash between waves leaves partial state; every prefix of the wave
     // order reads consistently. Wave A only: reference keys with no revision.

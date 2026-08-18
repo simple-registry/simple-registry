@@ -766,8 +766,8 @@ mod tests {
             let registry = test_case.registry();
             let namespace = &Namespace::new("test-repo").unwrap();
             let parent = put_blob_direct(registry.metadata_store.store(), b"index manifest").await;
-            // The index-child pin is a per-referrer entry, backed only while
-            // the parent's revision resolves.
+            // Tracked kinds and the index-child pin are backed only while a
+            // referring manifest's revision resolves, so each names `parent`.
             registry
                 .metadata_store
                 .update_links(
@@ -806,14 +806,15 @@ mod tests {
                     .unwrap();
 
                 let retargeted = retarget_link(&link, &digest);
-                let op = if let LinkKind::Manifest {
-                    index: parent,
-                    child: _,
-                } = &link
-                {
-                    LinkOperation::create_with_referrer(retargeted, digest.clone(), parent.clone())
-                } else {
-                    LinkOperation::create(retargeted, digest.clone())
+                let op = match &link {
+                    LinkKind::Layer(_) | LinkKind::Config(_) | LinkKind::Manifest { .. } => {
+                        LinkOperation::create_with_referrer(
+                            retargeted,
+                            digest.clone(),
+                            parent.clone(),
+                        )
+                    }
+                    _ => LinkOperation::create(retargeted, digest.clone()),
                 };
                 registry
                     .metadata_store

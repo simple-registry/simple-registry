@@ -246,9 +246,12 @@ impl MetadataStore {
     }
 
     /// Convert one legacy `current/link` into a `set` entry stamped with the
-    /// link's recorded `created_at`, then delete the link. Entry first, so an
-    /// interruption loses nothing; both halves are idempotent. An absent link
-    /// is a no-op (a racer or an earlier run already converted it).
+    /// link's recorded `created_at`, then delete the link once it is older
+    /// than the grace period (an old-binary writer may still rewrite a young
+    /// one in place; a skipped delete waits for the next run). Entry first,
+    /// so an interruption loses nothing; both halves are idempotent. An
+    /// absent link is a no-op (a racer or an earlier run already converted
+    /// it).
     pub async fn convert_legacy_tag_link(
         &self,
         namespace: &Namespace,
@@ -277,7 +280,20 @@ impl MetadataStore {
             "{}/current/link",
             path_builder::manifest_tag_dir(namespace, tag.as_ref())
         );
-        self.store().object_store().delete(&link_path).await?;
+        match self.store().object_store().head(&link_path).await {
+            Ok(meta) => {
+                // A missing timestamp reads as young: never delete a file an
+                // old-shape writer may just have rewritten.
+                let age = meta
+                    .last_modified
+                    .map_or(0, |m| Utc::now().signed_duration_since(m).num_seconds());
+                if age >= i64::try_from(self.gc_grace_secs).unwrap_or(i64::MAX) {
+                    self.store().object_store().delete(&link_path).await?;
+                }
+            }
+            Err(StorageError::NotFound) => {}
+            Err(e) => return Err(e.into()),
+        }
         self.cache_invalidate(namespace, &super::LinkKind::Tag(tag.clone()))
             .await;
         Ok(())

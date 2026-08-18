@@ -247,8 +247,9 @@ impl MetadataStore {
     /// Whether the link behind a reference entry still backs it: a tag,
     /// revision, or referrer while it resolves to `blob`, a per-referrer
     /// entry while the referring manifest's revision resolves, every other
-    /// kind while its link file exists. Reads are raw, so a cache cannot
-    /// mask a live reference.
+    /// (legacy tracked) kind while a manifest in its recorded referrer set
+    /// still resolves. Reads are raw, so a cache cannot mask a live
+    /// reference.
     pub async fn reference_backed(
         &self,
         namespace: &Namespace,
@@ -272,12 +273,26 @@ impl MetadataStore {
                 }
             }
             _ => {
-                let link_key = path_builder::link_path(link, namespace);
-                match self.store().object_store().head(&link_key).await {
-                    Ok(_) => Ok(true),
-                    Err(StorageError::NotFound) => Ok(false),
-                    Err(e) => Err(e.into()),
+                // Legacy tracked entries: the link file alone is not
+                // liveness, since a manifest delete leaves it in place. An
+                // unparseable body fails the read, so reclaim decisions
+                // stay closed.
+                let metadata = match self.read_link_reference(namespace, link).await {
+                    Ok(metadata) => metadata,
+                    Err(Error::NotFound) => return Ok(false),
+                    Err(e) => return Err(e),
+                };
+                for referrer in &metadata.referenced_by {
+                    match self
+                        .read_link_reference(namespace, &LinkKind::Digest(referrer.clone()))
+                        .await
+                    {
+                        Ok(_) => return Ok(true),
+                        Err(Error::NotFound) => {}
+                        Err(e) => return Err(e),
+                    }
                 }
+                Ok(false)
             }
         }
     }

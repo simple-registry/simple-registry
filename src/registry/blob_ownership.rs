@@ -25,12 +25,18 @@ pub async fn promote_and_grant(
     match blob_store.size(digest).await {
         Ok(_) => {
             // Old bytes: run the full guarded grant so a mid-flight reclaim
-            // is caught; a vanished blob falls back to a fresh promotion.
-            if BlobOwnership::new(metadata_store)
+            // is caught; only vanished bytes fall back to a fresh promotion.
+            match BlobOwnership::new(metadata_store)
                 .grant_existing(blob_store, namespace, digest)
                 .await?
             {
-                return Ok(());
+                GrantOutcome::Granted => return Ok(()),
+                GrantOutcome::BytesAbsent => {}
+                GrantOutcome::ReclaimBlocked => {
+                    return Err(Error::Conflict(
+                        "blob reclamation in progress; retry".to_string(),
+                    ));
+                }
             }
         }
         Err(Error::BlobUnknown | Error::NotFound) => {}
@@ -42,6 +48,18 @@ pub async fn promote_and_grant(
     BlobOwnership::new(metadata_store)
         .grant(namespace, digest)
         .await
+}
+
+/// Outcome of a guarded grant against pre-existing bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantOutcome {
+    /// The grant landed and the bytes are still present.
+    Granted,
+    /// The bytes are gone: the dangling grant is byteless and prune reaps it.
+    BytesAbsent,
+    /// An unexpired collector run still covers the digest after the backoff
+    /// budget, so a reclaim may be mid-flight and the caller must fail closed.
+    ReclaimBlocked,
 }
 
 pub struct BlobOwnership<'a> {
@@ -70,22 +88,21 @@ impl<'a> BlobOwnership<'a> {
 
     /// Grant a reference to bytes that already exist (a mount, a cache fill,
     /// a re-upload of a present blob): the grant lands first, then the
-    /// collector check, then a re-probe of the bytes. `false` means the blob
-    /// was, or is being, reclaimed; the dangling grant is byteless and
-    /// prune's sweep reaps it.
+    /// collector check, then a re-probe of the bytes. Anything but
+    /// [`GrantOutcome::Granted`] means the reference must not be relied on.
     pub async fn grant_existing(
         &self,
         blob_store: &BlobStore,
         namespace: &Namespace,
         digest: &Digest,
-    ) -> Result<bool, Error> {
+    ) -> Result<GrantOutcome, Error> {
         self.grant(namespace, digest).await?;
         if !self.metadata_store.gc_clear(&[digest]).await? {
-            return Ok(false);
+            return Ok(GrantOutcome::ReclaimBlocked);
         }
         match blob_store.size(digest).await {
-            Ok(_) => Ok(true),
-            Err(Error::BlobUnknown | Error::NotFound) => Ok(false),
+            Ok(_) => Ok(GrantOutcome::Granted),
+            Err(Error::BlobUnknown | Error::NotFound) => Ok(GrantOutcome::BytesAbsent),
             Err(error) => Err(error),
         }
     }
