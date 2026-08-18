@@ -85,10 +85,10 @@ impl Registry {
             .await?
         {
             GrantOutcome::Granted => Ok(true),
-            GrantOutcome::BytesAbsent => Err(Error::Conflict(
+            GrantOutcome::BytesAbsent => Err(Error::ReclamationInProgress(
                 "blob bytes were reclaimed during upload; retry".to_string(),
             )),
-            GrantOutcome::ReclaimBlocked => Err(Error::Conflict(
+            GrantOutcome::ReclaimBlocked => Err(Error::ReclamationInProgress(
                 "blob reclamation in progress; retry".to_string(),
             )),
         }
@@ -2648,7 +2648,7 @@ mod tests {
         store.gc_release(claim).await.unwrap();
 
         assert!(
-            matches!(result, Err(Error::Conflict(_))),
+            matches!(result, Err(Error::ReclamationInProgress(_))),
             "a gc-covered guarded grant must surface a retryable conflict, got {result:?}"
         );
     }

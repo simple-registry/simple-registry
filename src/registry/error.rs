@@ -53,6 +53,10 @@ pub enum Error {
     /// convergence, not a retry-conflict). Mapped to HTTP 409.
     #[error("{0}")]
     Conflict(String),
+    /// A collector run covers a blob the write references; transient, the
+    /// client retries after the collector's batch moves on.
+    #[error("reclamation in progress: {0}")]
+    ReclamationInProgress(String),
     /// A replication write lost last-writer-wins: the local tag is strictly
     /// newer than the incoming `source_ts`. Mapped to a distinct OCI code so
     /// the sender can treat it as convergence rather than a conflict to retry.

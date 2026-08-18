@@ -35,7 +35,7 @@ pub async fn promote_and_grant(
                 GrantOutcome::Granted => return Ok(()),
                 GrantOutcome::BytesAbsent => {}
                 GrantOutcome::ReclaimBlocked => {
-                    return Err(Error::Conflict(
+                    return Err(Error::ReclamationInProgress(
                         "blob reclamation in progress; retry".to_string(),
                     ));
                 }

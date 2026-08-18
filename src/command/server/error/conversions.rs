@@ -6,7 +6,7 @@ use crate::{
     auth,
     command::{
         bootstrap,
-        server::error::{Error, INTERNAL_ERROR_CODE},
+        server::error::{Error, INTERNAL_ERROR_CODE, RECLAMATION_IN_PROGRESS_CODE},
     },
     configuration, event_webhook,
     jobs::store as job_store,
@@ -96,6 +96,14 @@ impl From<registry::Error> for Error {
             registry::Error::Conflict(msg) => {
                 oci_error(StatusCode::CONFLICT, ErrorCode::Denied, Some(msg))
             }
+            // Transient by construction: the collector's batch moves on, so
+            // the client backs off and retries rather than treating it as a
+            // refusal.
+            registry::Error::ReclamationInProgress(msg) => angos_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                RECLAMATION_IN_PROGRESS_CODE,
+                Some(msg),
+            ),
             // The one code outside the spec's set, and the only one a client
             // never sees: it answers a replication write, which angos marks with
             // its own header and whose sender reads this code to converge.

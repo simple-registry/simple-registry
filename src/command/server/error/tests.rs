@@ -33,6 +33,7 @@ fn owes_a_spec_code(error: &registry::Error) -> bool {
         | registry::Error::RangeNotSatisfiable
         | registry::Error::Conflict(_) => true,
         registry::Error::ReplicationSuperseded(_)
+        | registry::Error::ReclamationInProgress(_)
         | registry::Error::Initialization(_)
         | registry::Error::EventDelivery(_)
         | registry::Error::Internal(_)

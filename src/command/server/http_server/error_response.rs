@@ -2,10 +2,13 @@ use http_body_util::Full;
 use hyper::{
     Response, StatusCode,
     body::Bytes,
-    header::{CONTENT_TYPE, HeaderValue, WWW_AUTHENTICATE},
+    header::{CONTENT_TYPE, HeaderValue, RETRY_AFTER, WWW_AUTHENTICATE},
 };
 
-use crate::{command::server::error::Error, http_response::ResponseBody};
+use crate::{
+    command::server::error::{Error, RECLAMATION_IN_PROGRESS_CODE},
+    http_response::ResponseBody,
+};
 
 const BASIC_AUTH_CHALLENGE: &str = r#"Basic realm="Angos", charset="UTF-8""#;
 
@@ -29,6 +32,14 @@ pub fn error_to_response(
         .body(ResponseBody::Fixed(Full::new(body)))
         .unwrap_or_else(|_| fallback_500());
     response.extensions_mut().insert(error.to_string());
+
+    if matches!(error, Error::Custom { code, .. } if code == RECLAMATION_IN_PROGRESS_CODE) {
+        // The collector's writer backoff clears in about a second; tell the
+        // client when to come back instead of leaving it to guess.
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+    }
 
     if matches!(error, Error::Unauthorized(_)) {
         response.headers_mut().insert(

@@ -415,7 +415,7 @@ impl MetadataStore {
         if self.gc_clear(&digests).await? {
             return Ok(());
         }
-        Err(Error::Conflict(
+        Err(Error::ReclamationInProgress(
             "blob reclamation in progress for a referenced blob; retry".to_string(),
         ))
     }

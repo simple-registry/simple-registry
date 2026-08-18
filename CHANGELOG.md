@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A manifest's layer and config references are pinned by per-manifest reference keys instead of the link files' rewritten `referenced_by` sets, removing the last read-modify-write from the push path; the legacy link files become advisory and the collector reclaims them.
 - Scrub demotes superseded tag entries to a per-namespace `!hist/` prefix, keeping the hot tag listing at one entry per tag while retaining full tag history.
 - `[global.job_queue] claim_ttl_secs` configures the job-claim lease (default 60), setting how quickly a crashed worker's jobs are taken over.
+- A write racing an active blob reclamation answers 503 `RECLAMATION_IN_PROGRESS` with `Retry-After` instead of a 409, so clients back off and retry instead of treating it as a refusal.
 
 ## 1.5.0
 

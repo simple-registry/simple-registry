@@ -41,6 +41,7 @@ pub enum Error {
 /// has no word for. A 5xx code is unconstrained, so these never collide.
 pub const INTERNAL_ERROR_CODE: &str = "INTERNAL_ERROR";
 pub const PROVIDER_UNAVAILABLE_CODE: &str = "PROVIDER_UNAVAILABLE";
+pub const RECLAMATION_IN_PROGRESS_CODE: &str = "RECLAMATION_IN_PROGRESS";
 
 impl Error {
     pub fn status_code(&self) -> StatusCode {

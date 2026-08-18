@@ -127,7 +127,7 @@ async fn a_guarded_grant_fails_closed_while_a_run_covers_present_bytes() {
     )
     .await;
     assert!(
-        matches!(result, Err(Error::Conflict(_))),
+        matches!(result, Err(Error::ReclamationInProgress(_))),
         "promotion over a covering run must fail closed with a retryable conflict, got {result:?}"
     );
     store.gc_release(claim).await.unwrap();
@@ -297,7 +297,7 @@ async fn a_manifest_push_fails_closed_while_a_run_covers_its_blob() {
         .await
         .err();
     assert!(
-        matches!(error, Some(Error::Conflict(_))),
+        matches!(error, Some(Error::ReclamationInProgress(_))),
         "a push referencing a covered blob must fail closed with the reclamation conflict, got {error:?}"
     );
 
