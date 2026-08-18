@@ -322,7 +322,7 @@ jobs:
       - name: Run zot benchmark with scrub under live load (${{ matrix.description }})
         run: |
           zb_workdir="$(mktemp -d "${RUNNER_TEMP}/zb-conformance-${{ matrix.variant }}.XXXXXX")"
-          ./zb --working-dir "$zb_workdir" -c 5 -r conformance -n 100 http://localhost:8000 &
+          ./zb --working-dir "$zb_workdir" -c 10 -r conformance -n 100 http://localhost:8000 &
           zb_pid=$!
           sleep 2
 

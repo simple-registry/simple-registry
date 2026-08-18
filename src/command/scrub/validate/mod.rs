@@ -212,6 +212,24 @@ impl Validator {
     /// the inconsistency; checking intents again after the re-read closes the
     /// race with a transaction that started in between. A candidate that never
     /// settles is left for the next run.
+    /// Whether the metadata key at `key` is younger than the reclamation
+    /// grace period, by the backend's own timestamp. A young key may belong
+    /// to a push between two of its waves, so no repair may be derived from
+    /// (or applied to) it; a missing timestamp never reads in favour of one.
+    /// A missing key is not young: its absence is the caller's evidence.
+    pub async fn younger_than_grace(&self, key: &str) -> Result<bool, Error> {
+        let meta = match self.metadata_store.store().object_store().head(key).await {
+            Ok(meta) => meta,
+            Err(StorageError::NotFound) => return Ok(false),
+            Err(e) => return Err(RegistryError::from(e).into()),
+        };
+        let Some(modified) = meta.last_modified else {
+            return Ok(true);
+        };
+        let grace = i64::try_from(self.metadata_store.gc_grace_secs()).unwrap_or(i64::MAX);
+        Ok(Utc::now().signed_duration_since(modified).num_seconds() < grace)
+    }
+
     pub async fn confirm_repair<F, Fut>(
         &self,
         evidence_keys: &[String],

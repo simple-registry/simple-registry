@@ -235,6 +235,22 @@ impl Validator {
             return Ok(self.blob_store.size(revision).await.is_ok());
         }
 
+        // A revision younger than the grace period may belong to a push
+        // whose later waves are still in flight; deriving repairs from it
+        // would race them, so it waits for the next run.
+        if self
+            .younger_than_grace(&path_builder::revision_record_path(namespace, revision))
+            .await?
+            || self
+                .younger_than_grace(&path_builder::link_path(
+                    &LinkKind::Digest(revision.clone()),
+                    namespace,
+                ))
+                .await?
+        {
+            return Ok(false);
+        }
+
         let content = match self.blob_store.read(revision).await {
             Ok(content) => content,
             Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
@@ -436,6 +452,11 @@ impl Validator {
         let Some(metadata) = self.read_link_body(key).await? else {
             return Ok(());
         };
+        // A young link file may carry the back-link of a push whose revision
+        // record is still in flight; pruning waits out the grace period.
+        if self.younger_than_grace(key).await? {
+            return Ok(());
+        }
         for referrer in &metadata.referenced_by {
             if self.revision_exists(namespace, referrer).await? {
                 continue;

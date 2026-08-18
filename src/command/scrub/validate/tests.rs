@@ -543,6 +543,52 @@ async fn young_dangling_ref_entry_is_kept() {
     .await;
 }
 
+/// Link repairs derived from a young revision (here: a deleted layer link)
+/// may race a push between its waves, so a graced scrub defers them.
+#[tokio::test]
+async fn young_revision_defers_link_repairs() {
+    for_each_backend(async |test_case| {
+        let namespace = &Namespace::new("test-repo/young-revision").unwrap();
+        let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
+        let metadata_store = test_case.metadata_store();
+
+        let layer_link = path_builder::link_path(&LinkKind::Layer(layer_digest), namespace);
+        metadata_store
+            .store()
+            .object_store()
+            .delete(&layer_link)
+            .await
+            .unwrap();
+
+        let graced = Arc::new(
+            MetadataStore::builder(build_store(metadata_store.store().object_store().clone()))
+                .gc_grace_secs(300)
+                .build(),
+        );
+        let blob_store = test_case.blob_store();
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        run_passes(&blob_store, &graced, sink.clone() as Arc<dyn ActionSink>).await;
+        let deferred = sink.lock().unwrap().is_empty();
+        assert!(
+            deferred,
+            "repairs on a revision inside the grace period must wait for the next run"
+        );
+
+        // The grace-0 store the fixture built repairs it immediately.
+        scrub_apply(test_case).await;
+        assert!(
+            metadata_store
+                .store()
+                .object_store()
+                .head(&layer_link)
+                .await
+                .is_ok(),
+            "the layer link must be recreated once the grace period is out of scope"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn corrupt_shard_is_deleted_and_regranted_on_next_run() {
     for_each_backend(async |test_case| {
