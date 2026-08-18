@@ -48,7 +48,7 @@ pub struct MetadataStore {
 /// Default reclamation grace period. It only has to exceed the widest
 /// adjacent-request gap on a write path plus clock skew, so minutes are
 /// comfortable.
-const DEFAULT_GC_GRACE_SECS: u64 = 300;
+pub const DEFAULT_GC_GRACE_SECS: u64 = 300;
 
 pub struct Builder {
     store: Arc<Store>,
@@ -72,8 +72,8 @@ impl Builder {
     }
 
     /// The reclamation grace period, in seconds. Production deployments run
-    /// the default; tests shrink it to exercise reclamation immediately.
-    #[cfg(test)]
+    /// the default; tests and offline maintenance runs shrink it to exercise
+    /// reclamation immediately.
     #[must_use]
     pub fn gc_grace_secs(mut self, secs: u64) -> Self {
         self.gc_grace_secs = secs;

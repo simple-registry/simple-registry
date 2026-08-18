@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Manifest revisions and referrers are stored as immutable records under `v2/ns/`, and `v2/cat/` gains one index key per namespace so the catalog serves ordered pages straight off a listing; legacy links keep answering reads until `angos scrub` converts them.
 - Registry pushes and deletes are ordered waves of unconditional writes: the metadata transaction and the `blob-data` lock are gone, blob reclamation moves entirely to `angos scrub` fenced by a `v2/gc/` run-marker protocol, and deletes answer `202 Accepted` while the bytes wait for the sweep.
 - The durable job queue serialises workers with leased claim keys under `_jobs/claims/` (atomic create-if-absent on every backend, `link(2)` on FS) instead of distributed locks and transactions; `[global.job_queue]` now requires a backend whose create-if-absent is honest, probed once at startup.
+- Blob reads, scrub's dangling-reference removal, and scrub's orphan-blob reclamation all honour the reclamation grace period, now configurable as `[global] gc_grace_secs` (default 300), so a stale reference entry cannot resurrect a deleted blob and scrub cannot race an in-flight push.
 
 ## 1.5.0
 

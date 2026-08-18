@@ -100,18 +100,18 @@ impl Validator {
         let Some(metadata) = self.read_link_body(key).await? else {
             return Ok(());
         };
-        if self
-            .validate_tag_target(namespace, &tag, metadata.target)
-            .await?
-        {
-            // A concurrent tag write appends a fresher entry that wins
-            // resolution regardless, so the conversion cannot race one.
-            self.emit(Action::ConvertTagLink {
-                namespace: namespace.clone(),
-                tag,
-            })
+        self.validate_tag_target(namespace, &tag, metadata.target)
             .await?;
-        }
+        // Convert whether or not the target was healthy: the entry is tag
+        // history either way, an unhealthy target's orphan repair tombstones
+        // the tag, and a surviving legacy link would re-propose that repair
+        // on every walk. A concurrent tag write appends a fresher entry that
+        // wins resolution regardless, so the conversion cannot race one.
+        self.emit(Action::ConvertTagLink {
+            namespace: namespace.clone(),
+            tag,
+        })
+        .await?;
         Ok(())
     }
 

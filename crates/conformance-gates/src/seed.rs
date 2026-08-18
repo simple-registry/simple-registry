@@ -78,7 +78,8 @@ impl Probes {
                 self.gate_config_digest
             ),
             format!(
-                "v2/repositories/{GATE_NS}/_manifests/revisions/sha256/{}/link",
+                "v2/ns/{GATE_NS}!rev/sha256/{}/{}",
+                &self.gate_manifest_digest[..2],
                 self.gate_manifest_digest
             ),
         ]
@@ -182,11 +183,24 @@ impl Probes {
     /// outside these means scrub damaged innocent data.
     pub fn blast_prefixes(&self) -> Vec<String> {
         let blob_container = |digest: &str| format!("v2/blobs/sha256/{}/{digest}/", &digest[..2]);
+        let ref_container = |digest: &str| format!("v2/ref/sha256/{}/{digest}/", &digest[..2]);
         vec![
             format!("v2/repositories/{GATE_NS}/"),
             format!("v2/repositories/{GATE2_NS}/"),
             "v2/repositories/UPPER-NS/".to_string(),
             "v2/repositories/UPPER-UP/".to_string(),
+            format!("v2/ns/{GATE_NS}!"),
+            format!("v2/ns/{GATE2_NS}!"),
+            format!("v2/cat/{GATE_NS}!"),
+            format!("v2/cat/{GATE2_NS}!"),
+            ref_container(&self.gate_layer_digest),
+            ref_container(&self.gate_config_digest),
+            ref_container(&self.gate_manifest_digest),
+            ref_container(&self.gate2_layer_digest),
+            ref_container(&self.gate2_manifest_digest),
+            ref_container(&self.orphan_digest),
+            ref_container(&self.grant_only_digest),
+            ref_container(&self.byteless_digest),
             blob_container(&self.gate_layer_digest),
             blob_container(&self.gate_config_digest),
             blob_container(&self.gate_manifest_digest),
@@ -443,10 +457,7 @@ fn blob_data_key(digest: &str) -> String {
     format!("v2/blobs/sha256/{}/{digest}/data", &digest[..2])
 }
 
-/// The `GATE_NS` blob-index shard key of a blob digest.
+/// The `GATE_NS` ownership reference key of a blob digest.
 fn shard_key(digest: &str) -> String {
-    format!(
-        "v2/blobs/sha256/{}/{digest}/refs/{GATE_NS_ENCODED}.json",
-        &digest[..2]
-    )
+    format!("v2/ref/sha256/{}/{digest}/{GATE_NS}!own", &digest[..2])
 }

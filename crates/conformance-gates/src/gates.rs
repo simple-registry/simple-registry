@@ -383,7 +383,6 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
         )
         .await?;
     for (key, what) in [
-        (probes.grant_only_data(), "grant-only blob bytes"),
         (probes.grant_only_shard(), "grant-only blob grant"),
         (probes.byteless_shard(), "byteless index entry"),
     ] {
@@ -396,6 +395,27 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
             "orphan multipart survived past the -u window".to_string()
         })?;
     }
+
+    // Prune only revokes the grant; the bytes are the collector's to
+    // reclaim. Scrub (running with the gate config's zero grace) must now
+    // collect the unreferenced bytes within the same bounded fixpoint.
+    let mut reclaim_runs = 0;
+    loop {
+        let reclaim = ctx.scrub_logged("scrub-reclaim.log").await?;
+        reclaim_runs += 1;
+        if reclaim.is_all_zero() {
+            break;
+        }
+        ensure(reclaim_runs < FIXPOINT_MAX_RUNS, || {
+            format!("no reclaim fixpoint after {reclaim_runs} runs")
+        })?;
+    }
+    ensure(!ctx.store.exists(&probes.grant_only_data()).await?, || {
+        format!(
+            "grant-only blob bytes survived the collector after revocation ({})",
+            probes.grant_only_data()
+        )
+    })?;
 
     // The quarantine's contents were verified above; empty it like the
     // operator would, then require the store to still converge with no

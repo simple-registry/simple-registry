@@ -346,10 +346,33 @@ jobs:
 
           wait "$zb_pid"
 
+          # Deletes defer reclamation to scrub behind the grace period, so the
+          # benchmark's deleted repositories leave collectible residue that
+          # ages into scope at an arbitrary point of the gate sequence. The
+          # gates need deterministic runs: give them a config with the grace
+          # at zero (safe: no live traffic once zb exits) and drain the
+          # residue now so the healthy gate starts from a settled store.
+          if grep -q '^\[global\]$' "conformance/${{ matrix.config }}"; then
+            sed '/^\[global\]$/a gc_grace_secs = 0' "conformance/${{ matrix.config }}" > conformance/gates-config.toml
+          else
+            { cat "conformance/${{ matrix.config }}"; printf '\n[global]\ngc_grace_secs = 0\n'; } > conformance/gates-config.toml
+          fi
+          for i in 1 2 3 4 5; do
+            docker run --rm $docker_user \
+              -e RUST_LOG=info \
+              -v "$PWD/conformance/gates-config.toml:/config.toml" \
+              -v "$PWD/conformance:/conformance" \
+              --network host \
+              ${CONFORMANCE_IMAGE_NAME} \
+              scrub 2>&1 | tee drain-residue.log
+            grep -qE "scrub complete: walked [0-9]+ key\(s\): 0 repair\(s\), 0 quarantined, 0 corrupt deleted, 0 failure\(s\)" drain-residue.log && break
+            [ "$i" -eq 5 ] && { echo "benchmark residue did not drain in 5 runs"; exit 1; }
+          done
+
       - name: Scrub gates (${{ matrix.description }})
         run: |
           export GATE_ANGOS_DOCKER_IMAGE=${CONFORMANCE_IMAGE_NAME}
-          export GATE_CONFIG="$PWD/conformance/${{ matrix.config }}"
+          export GATE_CONFIG="$PWD/conformance/gates-config.toml"
           if [[ "${{ matrix.s3 }}" == "true" ]]; then
             export GATE_MODE=s3 GATE_ENDPOINT=http://127.0.0.1:9000 GATE_BUCKET=registry
           else

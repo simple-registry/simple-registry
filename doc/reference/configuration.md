@@ -119,6 +119,7 @@ listener.
 | `event_webhooks`            | [string] | `[]`     | Event webhook names for all repositories    |
 | `shutdown_drain_secs`       | u64      | `30`     | Seconds to keep draining in-flight work on shutdown before forcing exit. |
 | `namespace_walk_concurrency`| usize    | `128`    | Concurrent directory scans a catalog / upload-namespace walk keeps in flight, hiding per-request backend latency on S3. |
+| `gc_grace_secs`             | u64      | `300`    | Reclamation grace period: scrub leaves unreferenced blobs, dangling reference keys, and stale index entries alone while they are younger than this, so it can never race an in-flight push or upload. Lower it only for offline maintenance runs against a store with no live traffic. |
 | `trusted_proxies`           | [string] | `[]`     | Proxy IPs or CIDR networks (e.g. `"10.0.0.1"`, `"10.0.0.0/8"`) whose `X-Forwarded-For`/`X-Real-IP` headers are honored as the client IP. From any other peer those headers are ignored and the socket address is used. |
 
 `max_manifest_size` and `max_blob_size` must be greater than zero.

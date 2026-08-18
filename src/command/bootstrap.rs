@@ -170,6 +170,7 @@ pub async fn metadata_store(
     config: &ResolvedStorageConfig,
     auth_cache: &Arc<Cache>,
     namespace_walk_concurrency: usize,
+    gc_grace_secs: u64,
 ) -> Result<Arc<MetadataStore>, Error> {
     let store = build_store(config).await?;
 
@@ -183,7 +184,8 @@ pub async fn metadata_store(
     let mut builder = MetadataStore::builder(store)
         .link_cache_ttl(link_cache_ttl)
         .access_time_debounce_secs(access_time_debounce_secs)
-        .namespace_walk_concurrency(namespace_walk_concurrency);
+        .namespace_walk_concurrency(namespace_walk_concurrency)
+        .gc_grace_secs(gc_grace_secs);
 
     // Wire in the auth cache for link-metadata caching (only meaningful on S3,
     // where link_cache_ttl > 0 by default).
@@ -214,6 +216,7 @@ pub async fn maintenance_context(config: &Configuration) -> Result<MaintenanceCo
         &config.resolve_registry_storage(),
         &auth_cache,
         config.global.namespace_walk_concurrency,
+        config.global.gc_grace_secs,
     )
     .await?;
     let repositories = repositories(

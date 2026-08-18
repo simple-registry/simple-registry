@@ -8,6 +8,7 @@ use crate::{
     configuration::{RegexPattern, TrustedProxy},
     jobs::store::JobQueueConfig,
     policy::{AccessPolicyConfig, RetentionPolicyConfig},
+    registry::metadata_store::DEFAULT_GC_GRACE_SECS,
     registry::pagination::NAMESPACE_WALK_CONCURRENCY,
 };
 
@@ -83,6 +84,13 @@ pub struct GlobalConfig {
     /// flight, hiding per-request backend latency on S3.
     #[serde(default = "default_namespace_walk_concurrency")]
     pub namespace_walk_concurrency: usize,
+    /// Reclamation grace period in seconds: scrub leaves unreferenced blobs,
+    /// dangling reference keys, and stale index entries alone while they are
+    /// younger than this, so it can never race an in-flight push or upload.
+    /// Lower it only for offline maintenance runs against a store with no
+    /// live traffic.
+    #[serde(default = "default_gc_grace_secs")]
+    pub gc_grace_secs: u64,
     /// Proxy IPs or CIDR networks whose `X-Forwarded-For`/`X-Real-IP` headers
     /// are honored as the client IP. From any other peer (the default, since
     /// the list is empty) those headers are ignored and the socket address is
@@ -97,6 +105,10 @@ fn default_shutdown_drain_secs() -> u64 {
 
 fn default_namespace_walk_concurrency() -> usize {
     NAMESPACE_WALK_CONCURRENCY
+}
+
+fn default_gc_grace_secs() -> u64 {
+    DEFAULT_GC_GRACE_SECS
 }
 
 fn default_max_concurrent_requests() -> usize {
@@ -168,6 +180,7 @@ impl Default for GlobalConfig {
             job_queue: None,
             shutdown_drain_secs: default_shutdown_drain_secs(),
             namespace_walk_concurrency: default_namespace_walk_concurrency(),
+            gc_grace_secs: default_gc_grace_secs(),
             trusted_proxies: Vec::new(),
         }
     }

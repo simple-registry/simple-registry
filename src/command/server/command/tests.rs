@@ -102,6 +102,7 @@ async fn test_build_metadata_store_filesystem_success() {
         &config.resolve_registry_storage(),
         &auth_cache,
         config.global.namespace_walk_concurrency,
+        config.global.gc_grace_secs,
     )
     .await;
 
@@ -314,6 +315,7 @@ async fn test_build_registry_components_integration() {
         &config.resolve_registry_storage(),
         &auth_cache,
         config.global.namespace_walk_concurrency,
+        config.global.gc_grace_secs,
     )
     .await
     .unwrap();

@@ -90,6 +90,7 @@ pub async fn build_registry(
         &storage_config,
         auth_cache,
         config.global.namespace_walk_concurrency,
+        config.global.gc_grace_secs,
     )
     .await
     .map_err(Error::from)?;
