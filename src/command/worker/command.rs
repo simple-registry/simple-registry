@@ -12,7 +12,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
-use angos_tx_engine::store::Store;
+use angos_storage::ObjectStore;
 
 use crate::{
     cache_fill::CacheFillJobHandler,
@@ -53,9 +53,6 @@ pub struct Command {
     poll_interval: Duration,
     shutdown: CancellationToken,
     workers: TaskTracker,
-    /// Cancellation token tied to the transactional-engine recovery loop.
-    /// Fired on shutdown to stop it.
-    engine_maintenance: CancellationToken,
 }
 
 struct QueueRunner {
@@ -99,8 +96,7 @@ fn resolve_queues(requested: &[String]) -> Result<Vec<Queue>, Error> {
 
 impl Command {
     pub async fn new(options: &Options, config: &Configuration) -> Result<Self, Error> {
-        let engine_maintenance = CancellationToken::new();
-        let context = WorkerContext::build(config, Some(engine_maintenance.clone())).await?;
+        let context = WorkerContext::build(config).await?;
 
         let mut queues = Vec::new();
         for queue in resolve_queues(&options.queue)? {
@@ -118,7 +114,6 @@ impl Command {
             poll_interval: *options.poll_interval,
             shutdown: CancellationToken::new(),
             workers: TaskTracker::new(),
-            engine_maintenance,
         })
     }
 
@@ -137,9 +132,6 @@ impl Command {
         for runner in &self.queues {
             runner.inner.load().registry.shutdown().await;
         }
-        // Stop the transactional-engine maintenance tasks alongside the worker
-        // pool so they don't outlive the process's storage handles.
-        self.engine_maintenance.cancel();
     }
 
     /// Spawn `concurrency` claim-loop tasks per drained queue and wait for them
@@ -199,9 +191,7 @@ async fn worker_loop(
 #[async_trait]
 impl ConfigNotifier for Command {
     async fn notify_config_change(&self, config: &Configuration) {
-        // The engine maintenance tasks were spawned by the initial bootstrap;
-        // hot reloads do not respawn them.
-        let context = match WorkerContext::build(config, None).await {
+        let context = match WorkerContext::build(config).await {
             Ok(context) => context,
             Err(e) => {
                 error!("Failed to rebuild worker context on reload: {e}");
@@ -223,7 +213,7 @@ impl ConfigNotifier for Command {
 /// Queue-independent worker resources, built once and shared so draining N
 /// queues does not rebuild storage and stores N times.
 struct WorkerContext {
-    storage: Arc<Store>,
+    storage: Arc<dyn ObjectStore>,
     blob_store: Arc<BlobStore>,
     metadata_store: Arc<MetadataStore>,
     repositories: Arc<RepositoryResolver>,
@@ -232,10 +222,7 @@ struct WorkerContext {
 }
 
 impl WorkerContext {
-    async fn build(
-        config: &Configuration,
-        engine_maintenance: Option<CancellationToken>,
-    ) -> Result<Self, Error> {
+    async fn build(config: &Configuration) -> Result<Self, Error> {
         let bootstrap::MaintenanceContext {
             blob_store,
             metadata_store,
@@ -251,9 +238,9 @@ impl WorkerContext {
         };
         let retry_policy = job_queue.retry_policy();
 
-        // Share the metadata store's engine façade instead of wiring (and
-        // probing) a second store over the same backend.
-        let storage = metadata_store.store_arc();
+        // Share the metadata store's object store instead of wiring a
+        // second backend over the same storage.
+        let storage = metadata_store.object_store().clone();
         job_store::ensure_claim_support(&storage).await?;
         let registry = bootstrap::registry(
             config,
@@ -266,14 +253,6 @@ impl WorkerContext {
                 retry_policy,
             )),
         )?;
-
-        // Spawn the engine recovery loop once per worker process so any
-        // crashed-mid-Apply transactions are recovered. It is backend-wide,
-        // so one instance covers every drained queue; the garbage-only
-        // janitors are driven by `angos scrub` instead.
-        if let Some(token) = engine_maintenance {
-            tokio::spawn(storage.recovery(token));
-        }
 
         Ok(Self {
             storage,
@@ -333,7 +312,7 @@ mod tests {
         metrics_provider,
         registry::{
             Registry, RegistryConfig, blob_store::BlobStore, metadata_store::MetadataStore,
-            repository_resolver::RepositoryResolver, test_utils::build_store,
+            repository_resolver::RepositoryResolver,
         },
         replication::REPLICATION_PUSH_MANIFEST_KIND,
     };
@@ -378,15 +357,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
 
-        let object: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(root).build());
-        let storage = build_store(object);
+        let storage: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(root).build());
         let metadata_store = Arc::new(
             MetadataStore::builder(storage.clone())
                 .link_cache_ttl(0)
                 .access_time_debounce_secs(0)
                 .build(),
         );
-        let blob_store = Arc::new(BlobStore::new(storage.object_store().clone(), None));
+        let blob_store = Arc::new(BlobStore::new(storage.clone(), None));
         let repositories = Arc::new(RepositoryResolver::new(Arc::new(HashMap::new())).unwrap());
 
         let registry = Registry::new(

@@ -607,7 +607,10 @@ mod tests {
             ReplicationMode::EventReconcile,
             true,
         ));
-        let job_store = Arc::new(JobStore::new(metadata_store.store_arc(), "scrub-test"));
+        let job_store = Arc::new(JobStore::new(
+            metadata_store.object_store().clone(),
+            "scrub-test",
+        ));
 
         let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone());
 
@@ -1398,7 +1401,10 @@ mod tests {
             false,
         ));
 
-        let job_store = Arc::new(JobStore::new(metadata_store.store_arc(), "scrub-test"));
+        let job_store = Arc::new(JobStore::new(
+            metadata_store.object_store().clone(),
+            "scrub-test",
+        ));
 
         let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone());
 
@@ -1518,7 +1524,10 @@ mod tests {
             ReplicationMode::EventReconcile,
             true,
         ));
-        let job_store = Arc::new(JobStore::new(metadata_store.store_arc(), "scrub-test"));
+        let job_store = Arc::new(JobStore::new(
+            metadata_store.object_store().clone(),
+            "scrub-test",
+        ));
 
         let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone());
 

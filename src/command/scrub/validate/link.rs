@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use tracing::{debug, warn};
 
 use angos_oci::{Digest, Manifest, Namespace, Tag};
-use angos_tx_engine::StorageError;
+use angos_storage::Error as StorageError;
 
 use crate::{
     command::{
@@ -161,7 +161,6 @@ impl Validator {
         loop {
             let page = self
                 .metadata_store
-                .store()
                 .object_store()
                 .list(&dir, 1000, token)
                 .await
@@ -364,13 +363,7 @@ impl Validator {
     /// link.
     async fn revision_exists(&self, namespace: &Namespace, digest: &Digest) -> Result<bool, Error> {
         let record_key = path_builder::revision_record_path(namespace, digest);
-        match self
-            .metadata_store
-            .store()
-            .object_store()
-            .head(&record_key)
-            .await
-        {
+        match self.metadata_store.object_store().head(&record_key).await {
             Ok(_) => return Ok(true),
             Err(StorageError::NotFound) => {}
             Err(e) => return Err(RegistryError::from(e).into()),
@@ -386,7 +379,7 @@ impl Validator {
             return Ok(());
         }
         let key = path_builder::catalog_index_path(namespace);
-        match self.metadata_store.store().object_store().head(&key).await {
+        match self.metadata_store.object_store().head(&key).await {
             Ok(_) => Ok(()),
             Err(StorageError::NotFound) => {
                 self.emit(Action::EnsureCatalogIndex {
@@ -463,7 +456,7 @@ impl Validator {
                 })
                 .await;
         }
-        self.remove_dead_referrer(key, namespace, subject, referrer)
+        self.remove_dead_referrer(namespace, subject, referrer)
             .await
     }
 
@@ -479,7 +472,7 @@ impl Validator {
             return self.handle_invalid_namespace(namespace_raw).await;
         };
         let key = path_builder::referrer_record_path(&namespace, subject, referrer);
-        match self.metadata_store.store().object_store().head(&key).await {
+        match self.metadata_store.object_store().head(&key).await {
             Ok(_) => {}
             Err(StorageError::NotFound) => return Ok(()),
             Err(e) => return Err(RegistryError::from(e).into()),
@@ -493,7 +486,7 @@ impl Validator {
         if self.revision_exists(&namespace, referrer).await? {
             return Ok(());
         }
-        self.remove_dead_referrer(&key, &namespace, subject, referrer)
+        self.remove_dead_referrer(&namespace, subject, referrer)
             .await
     }
 
@@ -501,18 +494,12 @@ impl Validator {
     /// manifest is durably gone, then emit the orphan-referrer deletion.
     async fn remove_dead_referrer(
         &self,
-        key: &str,
         namespace: &Namespace,
         subject: &Digest,
         referrer: &Digest,
     ) -> Result<(), Error> {
-        let evidence = [
-            key.to_string(),
-            path_builder::revision_record_path(namespace, referrer),
-            path_builder::link_path(&LinkKind::Digest(referrer.clone()), namespace),
-        ];
         let reverify = move || async move { Ok(!self.revision_exists(namespace, referrer).await?) };
-        if !self.confirm_repair(&evidence, reverify).await? {
+        if !self.confirm_repair(reverify).await? {
             return Ok(());
         }
         self.emit(Action::DeleteOrphanReferrer {
@@ -523,9 +510,11 @@ impl Validator {
         .await
     }
 
-    /// A blob/layer/config/index-child link: prune `referenced_by` entries
-    /// whose revision link is gone (the executor cascades the link's deletion
-    /// when the set empties).
+    /// A blob/layer/config/index-child link file: prune `referenced_by`
+    /// entries whose revision is gone, re-home each live referrer's pin to
+    /// its per-referrer reference entry, and once every live pin is covered
+    /// and every dead one pruned, retire the file (the executor re-checks
+    /// its age before deleting).
     async fn validate_tracked_link(
         &self,
         key: &str,
@@ -536,19 +525,32 @@ impl Validator {
             return Ok(());
         };
         // A young link file may carry the back-link of a push whose revision
-        // record is still in flight; pruning waits out the grace period.
+        // record is still in flight; pruning and retirement both wait out
+        // the grace period.
         if self.younger_than_grace(key).await? {
             return Ok(());
         }
+        let blob = match &link {
+            LinkKind::Manifest { child, .. } => child.clone(),
+            LinkKind::Blob(digest) | LinkKind::Layer(digest) | LinkKind::Config(digest) => {
+                digest.clone()
+            }
+            // Dispatch never routes other kinds here.
+            _ => return Ok(()),
+        };
+        let mut retire = true;
         for referrer in &metadata.referenced_by {
             if self.revision_exists(namespace, referrer).await? {
+                // A live pin must exist as a per-referrer entry before the
+                // file may go.
+                if !self
+                    .ensure_grant(namespace, &blob, &LinkKind::ReferencedBy(referrer.clone()))
+                    .await?
+                {
+                    retire = false;
+                }
                 continue;
             }
-            let evidence = [
-                key.to_string(),
-                path_builder::revision_record_path(namespace, referrer),
-                path_builder::link_path(&LinkKind::Digest(referrer.clone()), namespace),
-            ];
             let reverify = move || async move {
                 let Some(current) = self.read_link_body(key).await? else {
                     return Ok(false);
@@ -556,7 +558,8 @@ impl Validator {
                 Ok(current.referenced_by.contains(referrer)
                     && !self.revision_exists(namespace, referrer).await?)
             };
-            if !self.confirm_repair(&evidence, reverify).await? {
+            if !self.confirm_repair(reverify).await? {
+                retire = false;
                 continue;
             }
             self.emit(Action::RemoveReferrer {
@@ -566,13 +569,20 @@ impl Validator {
             })
             .await?;
         }
+        if retire {
+            self.emit(Action::RetireTrackedLink {
+                namespace: namespace.clone(),
+                link,
+            })
+            .await?;
+        }
         Ok(())
     }
 
     /// Read and parse the link body at `key`. `None` when the key vanished
     /// concurrently or its content was unreadable garbage (deleted here).
     async fn read_link_body(&self, key: &str) -> Result<Option<LinkMetadata>, Error> {
-        let raw = match self.metadata_store.store().object_store().get(key).await {
+        let raw = match self.metadata_store.object_store().get(key).await {
             Ok(raw) => raw,
             Err(StorageError::NotFound) => return Ok(None),
             Err(e) => return Err(RegistryError::from(e).into()),
@@ -608,7 +618,6 @@ impl Validator {
         {
             return Ok(());
         }
-        let evidence = [link_key.clone()];
         let link_key = &link_key;
         let reverify = move || async move {
             Ok(self
@@ -616,7 +625,7 @@ impl Validator {
                 .await?
                 .is_none_or(|current| &current.target != expected))
         };
-        if !self.confirm_repair(&evidence, reverify).await? {
+        if !self.confirm_repair(reverify).await? {
             return Ok(());
         }
         self.emit(Action::RecreateLink {
@@ -629,19 +638,20 @@ impl Validator {
 
     /// Emit a grant for `link` on `blob` unless the index already records it,
     /// and only for bytes that still exist (absorbed from the old
-    /// `BlobIndexChecker`).
+    /// `BlobIndexChecker`). Returns whether the entry is accounted for:
+    /// already recorded, or its grant emitted this run.
     async fn ensure_grant(
         &self,
         namespace: &Namespace,
         blob: &Digest,
         link: &LinkKind,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         match self
             .metadata_store
             .read_blob_index_namespace(namespace, blob)
             .await
         {
-            Ok(links) if links.contains(link) => return Ok(()),
+            Ok(links) if links.contains(link) => return Ok(true),
             Ok(_) | Err(RegistryError::NotFound) => {}
             Err(e) => return Err(e.into()),
         }
@@ -650,11 +660,10 @@ impl Validator {
             Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
                 // A manifest referencing missing bytes is a broken-manifest
                 // problem; granting it would churn against the blob GC.
-                return Ok(());
+                return Ok(false);
             }
             Err(e) => return Err(e.into()),
         }
-        let evidence = [path_builder::blob_index_shard_path(blob, namespace)];
         let reverify = move || async move {
             match self
                 .metadata_store
@@ -666,14 +675,15 @@ impl Validator {
                 Err(e) => Err(e.into()),
             }
         };
-        if !self.confirm_repair(&evidence, reverify).await? {
-            return Ok(());
+        if !self.confirm_repair(reverify).await? {
+            return Ok(false);
         }
         self.emit(Action::GrantBlobIndexLink {
             namespace: namespace.clone(),
             blob: blob.clone(),
             link: link.clone(),
         })
-        .await
+        .await?;
+        Ok(true)
     }
 }

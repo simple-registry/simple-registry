@@ -57,7 +57,6 @@ pub struct Command {
     validator: Arc<Validator>,
     stats: Arc<WalkStats>,
     concurrency: usize,
-    dry_run: bool,
     delete_unknown: bool,
     /// Held so the end of the run can drain in-flight async webhook
     /// deliveries the delete actions triggered.
@@ -110,7 +109,6 @@ impl Command {
             validator,
             stats,
             concurrency: options.concurrency,
-            dry_run: options.dry_run,
             delete_unknown: options.delete_unknown,
             registry,
         })
@@ -122,17 +120,6 @@ impl Command {
     /// failure aborts the run, since the later passes' deletions rely on the
     /// earlier repairs.
     pub async fn run(&mut self) -> Result<(), Error> {
-        // Engine housekeeping first: reclaim orphaned transaction staging
-        // bodies and expired lock objects through the engine's own janitors
-        // (age-gated by engine thresholds; serving processes no longer run
-        // periodic janitor loops). The sweep mutates directly, so dry-run
-        // skips it.
-        if self.dry_run {
-            info!("Dry-run mode: skipping the engine janitor sweep");
-        } else {
-            self.metadata_store.store().janitor_sweep().await;
-        }
-
         self.walk_pass(Pass::MetadataLinks, "").await?;
         // Legacy shards first (each converts into reference keys), then the
         // reference keys, so a converted shard's keys are validated in the
@@ -156,9 +143,7 @@ impl Command {
 
     async fn walk_pass(&self, pass: Pass, prefix: &str) -> Result<(), Error> {
         let objects = match pass {
-            Pass::MetadataLinks | Pass::MetadataShards => {
-                self.metadata_store.store().object_store()
-            }
+            Pass::MetadataLinks | Pass::MetadataShards => self.metadata_store.object_store(),
             Pass::Blob => self.blob_store.object_store(),
         };
         let validator = &self.validator;
@@ -231,12 +216,12 @@ mod tests {
         // Seed content plus two defects through a throwaway command's stores.
         let seed = Command::new(&options(true, 2), &config).await.unwrap();
         seed_manifest(
-            seed.metadata_store.store(),
+            seed.metadata_store.object_store(),
             &seed.metadata_store,
             &namespace,
         )
         .await;
-        let objects = seed.metadata_store.store().object_store();
+        let objects = seed.metadata_store.object_store();
         objects
             .put("stray/junk-object", Bytes::from_static(b"junk"))
             .await
@@ -319,13 +304,12 @@ mod tests {
 
             let seed = Command::new(&options(true, 1), &config).await.unwrap();
             seed_manifest(
-                seed.metadata_store.store(),
+                seed.metadata_store.object_store(),
                 &seed.metadata_store,
                 &namespace,
             )
             .await;
             seed.metadata_store
-                .store()
                 .object_store()
                 .put("stray/junk", Bytes::from_static(b"junk"))
                 .await
@@ -338,15 +322,10 @@ mod tests {
 
             // Collect the final key set (sorted by the walker).
             let keys = std::sync::Mutex::new(Vec::new());
-            walk::for_each_key(
-                command.metadata_store.store().object_store(),
-                "",
-                1,
-                |key| {
-                    keys.lock().unwrap().push(key);
-                    async {}
-                },
-            )
+            walk::for_each_key(command.metadata_store.object_store(), "", 1, |key| {
+                keys.lock().unwrap().push(key);
+                async {}
+            })
             .await
             .unwrap();
             roots.push((concurrency, keys.into_inner().unwrap(), temp_dir));

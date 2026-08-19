@@ -234,36 +234,6 @@ histogram_quantile(0.95, sum by (webhook, le) (rate(event_webhook_delivery_durat
 
 ---
 
-## Lock Metrics
-
-Distributed-lock operations: acquisition, heartbeat invalidation, and stale-lock recovery. The `backend` label names the configured lock backend; see [Distributed Locking](configuration.md#distributed-locking) for its configuration.
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `lock_acquisition_duration_ms` | Histogram | `backend` | Lock acquisition duration in milliseconds |
-| `lock_acquisitions_total` | Counter | `backend`, `result` | Total lock acquisition attempts |
-| `lock_retries_total` | Counter | `backend` | Total lock acquisition retries |
-| `lock_invalidations_total` | Counter | `backend`, `reason` | Total lock invalidations |
-| `lock_recoveries_total` | Counter | `backend`, `result` | Total stale lock recovery attempts |
-
-**Label Values:**
-
-- `backend`: `s3`, `redis`, `memory`
-- `result` (acquisitions): `success`, `timeout`, `error`
-- `result` (recoveries): `success` (stale lock claimed), `lost_race` (another instance claimed it first)
-- `reason` (invalidations): `ownership_lost`, `max_hold_exceeded`, `heartbeat_failure`, `file_disappeared` (both S3 and Redis report transient-failure-driven cancellations as `heartbeat_failure`)
-
-**Example:**
-```promql
-# Lock acquisition failures by backend
-sum by (backend, result) (rate(lock_acquisitions_total{result!="success"}[5m]))
-
-# P95 lock acquisition latency
-histogram_quantile(0.95, rate(lock_acquisition_duration_ms_bucket[5m]))
-```
-
----
-
 ## Job Queue Metrics
 
 `angos_job_queue_pending` and `angos_job_queue_failed` are published only when

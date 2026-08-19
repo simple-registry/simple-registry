@@ -4,9 +4,13 @@
 //! GET/modify/PUT under one per-subject lock so concurrent jobs cannot drop
 //! each other's update.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex as StdMutex, PoisonError},
+    time::Duration,
+};
 
-use tokio::time::timeout;
+use tokio::{sync::Mutex as AsyncMutex, time::timeout};
 use tracing::warn;
 
 use angos_oci::manifest_accept_types;
@@ -14,16 +18,21 @@ use angos_oci::request::{DeleteManifestRequest, GetManifestRequest, PutManifestR
 use angos_oci::{Content, Descriptor, Digest, Manifest, MediaType, Namespace, Reference};
 
 use crate::{
-    registry::{Error as RegistryError, metadata_store::MetadataStore},
+    registry::Error as RegistryError,
     registry_client::{Error as ClientError, RegistryClient},
     replication::Error,
 };
 
 /// Upper bound on each downstream HTTP call inside the referrers-merge
-/// critical section, kept well below the metadata executor lock's 300-second
-/// max-hold lease (the tx-engine default) so a hung downstream cannot outlive
-/// the lease and let a concurrent merge re-admit a lost update.
+/// critical section, so a hung downstream cannot hold the per-subject merge
+/// mutex indefinitely and starve concurrent jobs of the same subject.
 const REFERRERS_MERGE_HTTP_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// Per-subject merge mutexes, keyed by `namespace:subject`. In-process only:
+/// the queue drains each store from one worker process pool, which is the
+/// same coverage the removed engine's memory lock gave this path.
+static SUBJECT_LOCKS: LazyLock<StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 /// Pushes the OCI-1.0 referrers fallback tag index for a subject-bearing
 /// manifest the downstream did not auto-index.
@@ -33,7 +42,6 @@ const REFERRERS_MERGE_HTTP_TIMEOUT: Duration = Duration::from_mins(1);
 /// a set merge must never lose an LWW comparison and drop a descriptor.
 pub async fn push_referrers_fallback(
     downstream: &RegistryClient,
-    metadata_store: &Arc<MetadataStore>,
     namespace: &Namespace,
     downstream_namespace: &Namespace,
     digest: &Digest,
@@ -56,23 +64,17 @@ pub async fn push_referrers_fallback(
         %fallback_tag,
         "Downstream did not index subject (OCI-1.0); merging referrers fallback index"
     );
-    with_subject_lock(
-        metadata_store,
-        namespace,
-        &subject,
-        &fallback_tag,
-        async || {
-            merge_referrers_fallback(
-                downstream,
-                downstream_namespace,
-                &reference,
-                digest,
-                manifest,
-                body,
-            )
-            .await
-        },
-    )
+    with_subject_lock(namespace, &subject, async || {
+        merge_referrers_fallback(
+            downstream,
+            downstream_namespace,
+            &reference,
+            digest,
+            manifest,
+            body,
+        )
+        .await
+    })
     .await
 }
 
@@ -82,7 +84,6 @@ pub async fn push_referrers_fallback(
 /// this removal cannot lose each other's update.
 pub async fn remove_referrers_fallback(
     downstream: &RegistryClient,
-    metadata_store: &Arc<MetadataStore>,
     namespace: &Namespace,
     downstream_namespace: &Namespace,
     subject: &Digest,
@@ -90,15 +91,9 @@ pub async fn remove_referrers_fallback(
 ) -> Result<(), Error> {
     let fallback_tag = subject.referrers_fallback_tag();
     let reference = Reference::Tag(fallback_tag.clone());
-    with_subject_lock(
-        metadata_store,
-        namespace,
-        subject,
-        &fallback_tag,
-        async || {
-            prune_fallback_descriptor(downstream, downstream_namespace, &reference, referrer).await
-        },
-    )
+    with_subject_lock(namespace, subject, async || {
+        prune_fallback_descriptor(downstream, downstream_namespace, &reference, referrer).await
+    })
     .await
 }
 
@@ -126,33 +121,35 @@ pub async fn deleted_referrer_subject(
 }
 
 /// Runs `critical` (the GET/modify/PUT of one fallback index) under the
-/// subject's merge lock: two referrers of the same subject are distinct jobs
+/// subject's merge mutex: two referrers of the same subject are distinct jobs
 /// the queue runs concurrently, and unserialized merges read the same base
-/// index and drop the loser's descriptor. The lock lives on the metadata
-/// executor, which every drain of this store shares, but cannot cover an
-/// unrelated sender registry pushing to the same downstream.
+/// index and drop the loser's descriptor. In-process only, like the memory
+/// lock it replaces; it cannot cover an unrelated sender registry pushing to
+/// the same downstream.
 ///
 /// The key is deliberately downstream-agnostic: the critical section is two
 /// short HTTP calls, so cross-downstream contention never matters in practice.
 async fn with_subject_lock(
-    metadata_store: &Arc<MetadataStore>,
     namespace: &Namespace,
     subject: &Digest,
-    fallback_tag: &str,
     critical: impl AsyncFnOnce() -> Result<(), Error>,
 ) -> Result<(), Error> {
-    let lock_keys = [format!("replication-referrers:{namespace}:{subject}")];
-    let session = metadata_store
-        .store()
-        .acquire(&lock_keys)
-        .await
-        .map_err(|e| {
-            Error::Internal(format!(
-                "referrers fallback lock acquire failed for '{fallback_tag}': {e}"
-            ))
-        })?;
-    let result = critical().await;
-    session.release().await;
+    let key = format!("replication-referrers:{namespace}:{subject}");
+    let lock = {
+        let mut locks = SUBJECT_LOCKS.lock().unwrap_or_else(PoisonError::into_inner);
+        locks.entry(key.clone()).or_default().clone()
+    };
+    let result = {
+        let _guard = lock.lock().await;
+        critical().await
+    };
+    // Drop our clone, then forget the entry when no other job holds one, so
+    // the map does not grow with every subject ever merged.
+    drop(lock);
+    let mut locks = SUBJECT_LOCKS.lock().unwrap_or_else(PoisonError::into_inner);
+    if locks.get(&key).is_some_and(|l| Arc::strong_count(l) == 1) {
+        locks.remove(&key);
+    }
     result
 }
 

@@ -1459,7 +1459,6 @@ mod tests {
         // have arrived from outside the write paths.
         test_case
             .metadata_store()
-            .store()
             .object_store()
             .put(
                 "v2/repositories/test-repo/BAD/_manifests/tags/v1/current/link",

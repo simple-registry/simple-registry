@@ -306,7 +306,10 @@ mod tests {
 
     /// Job store over the shared test store, under this suite's worker id.
     fn orphan_job_store(metadata_store: &MetadataStore) -> Arc<JobStore> {
-        Arc::new(JobStore::new(metadata_store.store_arc(), "orphan-test"))
+        Arc::new(JobStore::new(
+            metadata_store.object_store().clone(),
+            "orphan-test",
+        ))
     }
 
     /// Bare registry client for [`Upstream`]; never dialed by these checkers.

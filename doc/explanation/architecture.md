@@ -150,15 +150,10 @@ A client that sends the `X-Angos-No-Redirect` request header is served the body 
 v2/
 ├── repositories/
 │   └── {namespace}/
-│       ├── _layers/
-│       │   └── {algorithm}/
-│       │       └── {hash}/
-│       │           └── link
 │       └── _uploads/
 │           └── {uuid}/
 │               ├── data
-│               ├── startedat
-│               └── hashstates/
+│               └── session.json
 ├── blobs/
 │   └── {algorithm}/
 │       └── {hash_prefix}/
@@ -194,13 +189,13 @@ v2/
     └── {namespace}!
 ```
 
-The two stores split this tree by content: the blob store holds the blob `data` files and the `_uploads/` session directories, while the metadata store holds the rest of the `v2/repositories/` tree (links), the blob-index reference keys under `v2/ref/`, and the tag state under `v2/ns/`. Each reference key is an empty write-once object recording one link through which a namespace references the blob: `{namespace}!own` marks ownership (upload or mount), and each key under `{namespace}!r/` marks one referencing link.
+The two stores split this tree by content: the blob store holds the blob `data` files and the `_uploads/` session directories (the only current content under `v2/repositories/`), while the metadata store holds any legacy link files remaining under `v2/repositories/`, the blob-index reference keys under `v2/ref/`, and the tag state under `v2/ns/`. Each reference key is an empty write-once object recording one link through which a namespace references the blob: `{namespace}!own` marks ownership (upload or mount), and each key under `{namespace}!r/` marks one referencing link.
 
 A tag is an ordered set of write-once entries: `{ord}` inverts the author's unix-millisecond timestamp so a listing yields newest first, `set` entries record a push and `del` entries a deletion (still naming the digest the tag held), and the newest entry group decides the tag's current state. Writers only append, so concurrent pushes and replicas never contend; last-writer-wins is a property of the key names. The `!` terminator sorts below every character the name grammars admit, which keeps flat listings in true lexical order.
 
-A stored manifest revision is one immutable record under `{namespace}!rev/`: its existence makes the digest resolvable and its body carries the media type and creation time. A referrer is one record per (subject, referrer) under `{namespace}!sub/`, whose body is the referring manifest's descriptor. Advisory last-pull timestamps live in their own overwritten keys under `{namespace}!atime/`, so none of the write-once shapes ever mutate, which is what makes them cacheable without staleness. `v2/cat/` holds one empty key per namespace, written once per namespace per process, so the catalog serves ordered pages straight off its listing; the `!` terminator lets nested repositories such as `a` and `a/b` coexist on FS.
+A stored manifest revision is one immutable record under `{namespace}!rev/`: its existence makes the digest resolvable and its body carries the media type and creation time. A referrer is one record per (subject, referrer) under `{namespace}!sub/`, whose body is the referring manifest's descriptor. Advisory last-pull timestamps live in their own overwritten keys under `{namespace}!atime/`, so none of the write-once shapes ever mutate, which is what makes them cacheable without staleness. `v2/cat/` holds one empty key per namespace, written once per namespace per process, so the catalog serves ordered pages straight off its listing alone, with no legacy tree walk; content predating the index joins the catalog after scrub backfills its key. The `!` terminator lets nested repositories such as `a` and `a/b` coexist on FS.
 
-Stores written by earlier versions may still hold per-namespace `refs/{namespace}.json` shards under `v2/blobs/` and per-tag `current/link`, revision, and referrer link files under `v2/repositories/`; all are read as a fallback and converted to the new shapes by scrub.
+Stores written by earlier versions may still hold per-namespace `refs/{namespace}.json` shards under `v2/blobs/` and per-tag `current/link`, revision, referrer, and layer/config/index-child (`_layers/`, `_config/`, `_manifests/index/`) link files under `v2/repositories/`; all are read as a fallback and converted to the new shapes by scrub, which retires each advisory layer/config/index-child file once its live references are re-homed to per-referrer reference keys.
 
 ### Content Addressing
 
@@ -237,12 +232,11 @@ Built on Tokio with configurable parallelism:
 - `max_concurrent_requests`: HTTP request limit
 - `max_concurrent_cache_jobs`: Background cache operations
 
-### Locking
+### Write Coordination
 
-Distributed locking for multi-replica deployments:
-- In-memory locks for single instance
-- Redis locks for multiple instances
-- S3 locks for multiple instances using conditional writes (no extra infrastructure needed)
+Lock-free across any number of replicas: registry metadata is write-once and
+ordered, blob reclamation is fenced by the `v2/gc/` run-marker protocol, and
+the durable job queue serialises workers with atomically created claim keys.
 
 ---
 

@@ -1,5 +1,6 @@
 //! The namespace / tag / revision / referrer catalog: the content-derived
-//! enumeration endpoints and the namespace tree-walk they build on.
+//! enumeration endpoints, served from the `v2/cat` index (unscoped) or the
+//! scoped legacy walk plus `v2/ns` listings.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -63,9 +64,10 @@ impl WinnerFold {
 }
 
 impl MetadataStore {
-    /// Lists the namespaces holding manifest content (a `_manifests` child);
-    /// an `_uploads`-only namespace is not a catalog entry and is discovered
-    /// through the blob store instead, where upload sessions live.
+    /// Lists the namespaces holding manifest content (at least one revision
+    /// or live tag); an `_uploads`-only namespace is not a catalog entry and
+    /// is discovered through the blob store instead, where upload sessions
+    /// live.
     #[instrument(skip(self))]
     pub async fn list_namespaces(
         &self,
@@ -74,8 +76,8 @@ impl MetadataStore {
     ) -> Result<Page<Namespace>, Error> {
         debug!("Fetching {n} namespace(s) with continuation token: {last:?}");
 
-        let mut namespaces = self.collect_namespaces(None).await?;
-        namespaces.sort();
+        // The index listing is already in `Namespace` order, so no sort here.
+        let namespaces = self.collect_namespaces(None).await?;
 
         Ok(pagination::paginate_sorted(&namespaces, n, last.as_deref()))
     }
@@ -92,7 +94,7 @@ impl MetadataStore {
             return;
         }
         let key = path_builder::catalog_index_path(namespace);
-        if let Err(e) = self.store().object_store().put(&key, Bytes::new()).await {
+        if let Err(e) = self.object_store().put(&key, Bytes::new()).await {
             warn!("failed to write catalog index for '{namespace}': {e}");
             match self.catalog_indexed.lock() {
                 Ok(mut set) => {
@@ -105,12 +107,22 @@ impl MetadataStore {
         }
     }
 
-    /// Enumerates every namespace, unpaginated and unsorted. `scope` walks one
-    /// repository's legacy subtree merged with its scoped `v2/ns` listings;
-    /// `None` merges the whole-store legacy walk with the `v2/cat` index.
+    /// Enumerates every namespace, unpaginated. `scope` walks one
+    /// repository's legacy subtree merged with its scoped `v2/ns` listings,
+    /// unsorted; `None` serves the `v2/cat` index alone, in its lexical key
+    /// order.
     #[instrument(skip(self))]
     pub async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<Namespace>, Error> {
-        let (root, prefix) = path_builder::namespace_walk_root(scope);
+        // Unscoped, the index is the catalog: every write lands one key per
+        // namespace (`ensure_catalog_index`), so no legacy tree walk runs
+        // here. A namespace holding only pre-index legacy content lists again
+        // once scrub's backfill writes its key, the documented migration
+        // contract.
+        let Some(scope) = scope else {
+            return self.collect_indexed_namespaces().await;
+        };
+
+        let (root, prefix) = path_builder::namespace_walk_root(Some(scope));
 
         let mut namespaces = pagination::collect_namespaces_with_marker(
             &root,
@@ -119,7 +131,6 @@ impl MetadataStore {
             self.namespace_walk_concurrency,
             |path| async move {
                 let sub_prefixes = self
-                    .store()
                     .object_store()
                     .list_all_children(&path)
                     .await?
@@ -128,11 +139,6 @@ impl MetadataStore {
             },
         )
         .await?;
-
-        let Some(scope) = scope else {
-            self.merge_indexed_namespaces(&mut namespaces).await?;
-            return Ok(namespaces);
-        };
 
         // A scoped namespace whose tags or revisions live under `v2/ns/` may
         // hold no `_manifests` marker of its own; merge those in from the
@@ -160,7 +166,7 @@ impl MetadataStore {
         for (root, key_prefix) in &listings {
             let mut token = None;
             loop {
-                let page = self.store().object_store().list(root, 1000, token).await?;
+                let page = self.object_store().list(root, 1000, token).await?;
                 for item in &page.items {
                     let key = format!("{key_prefix}{item}");
                     let Some((name, marker)) = key.split_once('!') else {
@@ -201,18 +207,15 @@ impl MetadataStore {
         Ok(namespaces)
     }
 
-    /// Merge the `v2/cat` index into `namespaces`: every write lands one key
-    /// per namespace (`ensure_catalog_index`), and content predating the
-    /// index is covered by the legacy walk or gains its key from the scrub
-    /// backfill. A name the walk already found needs no probe; an index-only
-    /// name is content-checked so a stale key of an emptied namespace does
-    /// not list.
-    async fn merge_indexed_namespaces(&self, namespaces: &mut Vec<Namespace>) -> Result<(), Error> {
-        let seen: HashSet<Namespace> = namespaces.iter().cloned().collect();
+    /// Enumerate the `v2/cat` index: one key per namespace, in lexical key
+    /// order, which is `Namespace` order since the trailing `!` sorts below
+    /// every namespace character. Each name is content-checked so a stale
+    /// key of an emptied namespace does not list.
+    async fn collect_indexed_namespaces(&self) -> Result<Vec<Namespace>, Error> {
+        let mut namespaces = Vec::new();
         let mut token = None;
         loop {
             let page = self
-                .store()
                 .object_store()
                 .list(path_builder::CAT_ROOT, 1000, token)
                 .await?;
@@ -221,10 +224,10 @@ impl MetadataStore {
                 .iter()
                 .filter_map(|key| key.strip_suffix('!'))
                 .filter_map(|name| Namespace::new(name).ok())
-                .filter(|namespace| !seen.contains(namespace))
                 .collect();
-            // One content probe per index-only name; fanned out so a page of
-            // namespaces costs one round-trip group, not one per name.
+            // One content probe per name; fanned out so a page of namespaces
+            // costs one round-trip group, not one per name, and ordered so
+            // the listing's lexical order survives.
             let probes = candidates.into_iter().map(|namespace| async move {
                 match self.has_manifest_content(&namespace).await {
                     Ok(true) => Ok(Some(namespace)),
@@ -232,8 +235,7 @@ impl MetadataStore {
                     Err(e) => Err(e),
                 }
             });
-            let mut probing =
-                stream::iter(probes).buffer_unordered(self.namespace_walk_concurrency);
+            let mut probing = stream::iter(probes).buffered(self.namespace_walk_concurrency);
             while let Some(result) = probing.next().await {
                 if let Some(namespace) = result? {
                     namespaces.push(namespace);
@@ -242,7 +244,7 @@ impl MetadataStore {
             drop(probing);
             token = page.next_token;
             if token.is_none() {
-                return Ok(());
+                return Ok(namespaces);
             }
         }
     }
@@ -275,7 +277,6 @@ impl MetadataStore {
         let namespace = namespace.clone();
         stream::once(async move {
             let tag_dirs = self
-                .store()
                 .object_store()
                 .list_all_children(&tags_dir)
                 .await?
@@ -310,7 +311,7 @@ impl MetadataStore {
         let mut fold = WinnerFold::default();
         let mut token = None;
         loop {
-            let page = self.store().object_store().list(&root, 1000, token).await?;
+            let page = self.object_store().list(&root, 1000, token).await?;
             for key in &page.items {
                 let Some((group, file)) = key.split_once('/') else {
                     continue;
@@ -356,11 +357,7 @@ impl MetadataStore {
     #[cfg(test)]
     async fn collect_tag_dir_names(&self, namespace: &Namespace) -> Result<Vec<String>, Error> {
         let tags_dir = path_builder::manifest_tags_dir(namespace);
-        let children = self
-            .store()
-            .object_store()
-            .list_all_children(&tags_dir)
-            .await?;
+        let children = self.object_store().list_all_children(&tags_dir).await?;
         Ok(children.sub_prefixes)
     }
 
@@ -386,7 +383,6 @@ impl MetadataStore {
 
         let tags_dir = path_builder::manifest_tags_dir(namespace);
         let legacy_only: Vec<Tag> = self
-            .store()
             .object_store()
             .list_all_children(&tags_dir)
             .await?
@@ -432,11 +428,7 @@ impl MetadataStore {
         let records = paginated(move |token| {
             let record_dir = record_dir.clone();
             async move {
-                let page = self
-                    .store()
-                    .object_store()
-                    .list(&record_dir, 1000, token)
-                    .await?;
+                let page = self.object_store().list(&record_dir, 1000, token).await?;
                 Ok::<_, Error>((page.items, page.next_token))
             }
         })
@@ -451,11 +443,7 @@ impl MetadataStore {
             let mut referrers = Vec::new();
             let mut token = None;
             loop {
-                let page = self
-                    .store()
-                    .object_store()
-                    .list(&legacy_dir, 1000, token)
-                    .await?;
+                let page = self.object_store().list(&legacy_dir, 1000, token).await?;
                 for key in &page.items {
                     let mut parts = key.split('/');
                     let (Some(algorithm), Some(hash)) = (parts.next(), parts.next()) else {
@@ -500,7 +488,6 @@ impl MetadataStore {
 
         let tags_dir = path_builder::manifest_tags_dir(namespace);
         let page = self
-            .store()
             .object_store()
             .list_children(&tags_dir, 1, None, None)
             .await?;
@@ -523,7 +510,7 @@ impl MetadataStore {
             path_builder::referrer_record_dir(namespace, subject),
             path_builder::manifest_referrers_dir(namespace, subject),
         ] {
-            let page = self.store().object_store().list(&dir, 1, None).await?;
+            let page = self.object_store().list(&dir, 1, None).await?;
             if !page.items.is_empty() {
                 return Ok(true);
             }
@@ -552,11 +539,7 @@ impl MetadataStore {
     ) -> impl Stream<Item = Result<Digest, Error>> + Send + 'a {
         let records = paginated(move |token| async move {
             let root = path_builder::revision_records_root(namespace);
-            let page = self
-                .store()
-                .object_store()
-                .list(&root, page_size, token)
-                .await?;
+            let page = self.object_store().list(&root, page_size, token).await?;
             Ok::<_, Error>((page.items, page.next_token))
         })
         .try_filter_map(|key| {
@@ -579,7 +562,6 @@ impl MetadataStore {
                 let mut token = None;
                 loop {
                     let page = self
-                        .store()
                         .object_store()
                         .list_children(&revisions_dir, 1000, token, None)
                         .await?;
@@ -634,8 +616,7 @@ impl MetadataStore {
                 "unsafe tag directory name: '{tag_name}'"
             )));
         }
-        self.store()
-            .object_store()
+        self.object_store()
             .delete_prefix(&path_builder::manifest_tag_dir(namespace, tag_name))
             .await
             .map_err(Error::from)
@@ -649,7 +630,7 @@ impl MetadataStore {
     pub async fn delete_namespace_directory(&self, name: &str) -> Result<(), Error> {
         let prefix = path_builder::namespace_dir(name)
             .ok_or_else(|| Error::Internal(format!("unsafe namespace directory name: '{name}'")))?;
-        self.store().object_store().delete_prefix(&prefix).await?;
+        self.object_store().delete_prefix(&prefix).await?;
         for prefix in [
             format!("{}/{name}!tag", path_builder::NS_ROOT),
             format!("{}/{name}!hist", path_builder::NS_ROOT),
@@ -657,10 +638,9 @@ impl MetadataStore {
             format!("{}/{name}!sub", path_builder::NS_ROOT),
             format!("{}/{name}!atime", path_builder::NS_ROOT),
         ] {
-            self.store().object_store().delete_prefix(&prefix).await?;
+            self.object_store().delete_prefix(&prefix).await?;
         }
-        self.store()
-            .object_store()
+        self.object_store()
             .delete(&format!("{}/{name}!", path_builder::CAT_ROOT))
             .await?;
         Ok(())

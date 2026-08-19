@@ -7,7 +7,7 @@ use bytes::Bytes;
 use tracing::{instrument, warn};
 
 use angos_oci::Namespace;
-use angos_tx_engine::StorageError;
+use angos_storage::Error as StorageError;
 
 use crate::registry::{
     Error,
@@ -34,7 +34,7 @@ impl MetadataStore {
             _ => {}
         }
         let link_path = path_builder::link_path(link, namespace);
-        match self.store().object_store().get(&link_path).await {
+        match self.object_store().get(&link_path).await {
             Ok(data) => serde_json::from_slice(&data).map_err(|e| Error::Internal(e.to_string())),
             Err(StorageError::NotFound) => Err(Error::NotFound),
             Err(e) => Err(e.into()),
@@ -72,8 +72,7 @@ impl MetadataStore {
         }
         let link_path = path_builder::link_path(link, namespace);
         let serialized = Bytes::from(serde_json::to_vec(metadata)?);
-        self.store()
-            .object_store()
+        self.object_store()
             .put(&link_path, serialized)
             .await
             .map_err(Error::from)

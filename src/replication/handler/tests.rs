@@ -11,7 +11,6 @@ use wiremock::{
 use angos_oci::header::DOCKER_CONTENT_DIGEST;
 use angos_oci::{Digest, Namespace, Tag};
 use angos_storage::{ObjectStore, fs::Backend as StorageFsBackend};
-use angos_tx_engine::store::Store;
 
 use crate::{
     cache,
@@ -23,7 +22,7 @@ use crate::{
         blob_store::BlobStore,
         metadata_store::{LinkKind, LinkOperation, MetadataStore},
         test_utils::{
-            FsTestStack, build_store, downstream_client, fs_test_stack, put_blob_direct,
+            FsTestStack, downstream_client, fs_test_stack, put_blob_direct,
             repository_with_replication, seed_manifest, single_repo_resolver,
         },
     },
@@ -240,7 +239,7 @@ fn repository_with_named_downstream(name: &str, client: Arc<RegistryClient>) -> 
     )
 }
 
-async fn put_blob(store: &Arc<Store>, content: &[u8]) -> Digest {
+async fn put_blob(store: &Arc<dyn ObjectStore>, content: &[u8]) -> Digest {
     put_blob_direct(store, content).await
 }
 
@@ -471,7 +470,7 @@ async fn execute_push_resolves_tag_past_the_link_cache() {
     let dir = TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let object: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(root).build());
-    let store = build_store(object);
+    let store = object;
     let metadata_store = Arc::new(
         MetadataStore::builder(store.clone())
             .cache(cache::Config::Memory.to_backend().unwrap())
@@ -479,7 +478,7 @@ async fn execute_push_resolves_tag_past_the_link_cache() {
             .access_time_debounce_secs(0)
             .build(),
     );
-    let blob_store = Arc::new(BlobStore::new(store.object_store().clone(), None));
+    let blob_store = Arc::new(BlobStore::new(store.clone(), None));
 
     // Two manifests sharing the same blobs; the tag starts on `stale`.
     let config_bytes = br#"{"config":true}"#.to_vec();

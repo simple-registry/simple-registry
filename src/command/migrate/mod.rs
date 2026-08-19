@@ -16,7 +16,7 @@
 //! the OCI spec requires. It is idempotent, so a partially completed run can
 //! simply be re-run.
 
-use std::str;
+use std::{str, sync::Arc};
 
 use argh::FromArgs;
 use bytes::Bytes;
@@ -24,9 +24,7 @@ use futures_util::TryStreamExt;
 use tracing::{debug, info, warn};
 
 use angos_oci::{Digest, Manifest, MediaType};
-use angos_tx_engine::{
-    error::Error as TxError, executor::DEFAULT_RETRY_BUDGET, store::Store, transaction::Mutation,
-};
+use angos_storage::{Error as StorageError, ObjectStore};
 
 use crate::{
     command::bootstrap,
@@ -139,54 +137,42 @@ fn needs_backfill(key: &str, metadata: &LinkMetadata) -> bool {
     metadata.media_type.is_none() && serves_manifest(key)
 }
 
-/// Rewrite one link inside a transaction whose read set is the link itself, so
-/// the body the decision was made from is the body being replaced. A tag push
-/// landing in between loses the etag precondition on a CAS backend and waits on
-/// the key's lock on a lock-coordinated one, instead of being silently reverted
-/// to its pre-push target.
-async fn rewrite_link(store: &Store, blob_store: &BlobStore, key: &str) -> Result<Plan, Error> {
-    let plan = store
-        .update_with_payload(
-            &[key.to_string()],
-            |bodies| async move {
-                let Some(body) = bodies.first().and_then(Option::as_ref) else {
-                    return Ok((Vec::new(), Plan::Vanished));
-                };
-                let (metadata, plan) = match classify(body) {
-                    LinkForm::Unrecognized => return Ok((Vec::new(), Plan::Unrecognized)),
-                    LinkForm::Legacy(target) => {
-                        let media_type = link_media_type(blob_store, key, &target).await;
-                        (
-                            LinkMetadata::without_timestamp(target.clone())
-                                .with_media_type(media_type),
-                            Plan::Migrated(target),
-                        )
-                    }
-                    LinkForm::Current(metadata) if needs_backfill(key, &metadata) => {
-                        match link_media_type(blob_store, key, &metadata.target).await {
-                            Some(media_type) => (
-                                (*metadata).with_media_type(Some(media_type)),
-                                Plan::Backfilled,
-                            ),
-                            None => return Ok((Vec::new(), Plan::Current)),
-                        }
-                    }
-                    LinkForm::Current(_) => return Ok((Vec::new(), Plan::Current)),
-                };
-                let body = Bytes::from(serde_json::to_vec(&metadata).map_err(TxError::Serde)?);
-                Ok((
-                    vec![Mutation::Put {
-                        key: key.to_string(),
-                        body,
-                        expected: None,
-                    }],
-                    plan,
-                ))
-            },
-            DEFAULT_RETRY_BUDGET,
-        )
-        .await
-        .map_err(registry::Error::from)?;
+/// Rewrite one link as a plain read-classify-write. Legacy links are the
+/// migration's subject and nothing rewrites them concurrently: pushes write
+/// tag entries and revision records, not these keys, so the unguarded
+/// overwrite cannot revert a live write.
+async fn rewrite_link(
+    store: &Arc<dyn ObjectStore>,
+    blob_store: &BlobStore,
+    key: &str,
+) -> Result<Plan, Error> {
+    let body = match store.get(key).await {
+        Ok(body) => body,
+        Err(StorageError::NotFound) => return Ok(Plan::Vanished),
+        Err(e) => return Err(registry::Error::from(e).into()),
+    };
+    let (metadata, plan) = match classify(&body) {
+        LinkForm::Unrecognized => return Ok(Plan::Unrecognized),
+        LinkForm::Legacy(target) => {
+            let media_type = link_media_type(blob_store, key, &target).await;
+            (
+                LinkMetadata::without_timestamp(target.clone()).with_media_type(media_type),
+                Plan::Migrated(target),
+            )
+        }
+        LinkForm::Current(metadata) if needs_backfill(key, &metadata) => {
+            match link_media_type(blob_store, key, &metadata.target).await {
+                Some(media_type) => (
+                    (*metadata).with_media_type(Some(media_type)),
+                    Plan::Backfilled,
+                ),
+                None => return Ok(Plan::Current),
+            }
+        }
+        LinkForm::Current(_) => return Ok(Plan::Current),
+    };
+    let body = Bytes::from(serde_json::to_vec(&metadata).map_err(registry::Error::from)?);
+    store.put(key, body).await.map_err(registry::Error::from)?;
     Ok(plan)
 }
 
@@ -203,7 +189,7 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
         info!("Dry-run mode: scanning links without rewriting them");
     }
 
-    let report = migrate_links(metadata_store.store(), &blob_store, options.dry_run).await?;
+    let report = migrate_links(metadata_store.object_store(), &blob_store, options.dry_run).await?;
 
     log_summary(&report, options.dry_run);
     Ok(())
@@ -213,16 +199,13 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
 /// bare-digest file as JSON and backfilling a missing manifest media type.
 /// Streams the keys so it never holds more than one listing page in memory.
 async fn migrate_links(
-    store: &Store,
+    store: &Arc<dyn ObjectStore>,
     blob_store: &BlobStore,
     dry_run: bool,
 ) -> Result<Report, Error> {
     let root = path_builder::REPOS_ROOT;
     let mut report = Report::default();
-    let mut keys = store
-        .object_store()
-        .list_all(root)
-        .map_err(registry::Error::from);
+    let mut keys = store.list_all(root).map_err(registry::Error::from);
     while let Some(key) = keys.try_next().await? {
         // `list_all` yields keys relative to `root`; rebuild the full key before
         // touching the object.
@@ -244,7 +227,7 @@ async fn migrate_links(
 /// Read one link file, rewriting a bare-digest legacy link as JSON and
 /// backfilling a served-manifest link's missing media type from the body.
 async fn migrate_one(
-    store: &Store,
+    store: &Arc<dyn ObjectStore>,
     blob_store: &BlobStore,
     key: &str,
     dry_run: bool,
@@ -255,11 +238,7 @@ async fn migrate_one(
         // A dry run writes nothing, so it needs neither a transaction nor the
         // manifest body: classifying the link is enough to say what a real run
         // would do.
-        let raw = store
-            .object_store()
-            .get(key)
-            .await
-            .map_err(registry::Error::from)?;
+        let raw = store.get(key).await.map_err(registry::Error::from)?;
         match classify(&raw) {
             LinkForm::Unrecognized => Plan::Unrecognized,
             LinkForm::Legacy(target) => Plan::Migrated(target),
@@ -339,10 +318,7 @@ fn log_summary(report: &Report, dry_run: bool) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    };
+    use std::sync::Arc;
 
     use angos_oci::{Namespace, Tag};
     use angos_storage::{
@@ -433,7 +409,7 @@ mod tests {
         // Seed a pre-JSON bare-digest link, the format the serving path no
         // longer reads.
         put_link_raw(
-            metadata_store.store(),
+            metadata_store.object_store(),
             &namespace,
             &link,
             target.to_string().as_bytes(),
@@ -444,7 +420,7 @@ mod tests {
             "bare-digest link should not parse before migration"
         );
 
-        let report = migrate_links(metadata_store.store(), &blob_store, false)
+        let report = migrate_links(metadata_store.object_store(), &blob_store, false)
             .await
             .unwrap();
         assert_eq!(report.migrated, 1);
@@ -477,14 +453,14 @@ mod tests {
         blob_store.put_blob(&target, body).await.unwrap();
 
         put_link_raw(
-            metadata_store.store(),
+            metadata_store.object_store(),
             &namespace,
             &link,
             target.to_string().as_bytes(),
         )
         .await;
 
-        let report = migrate_links(metadata_store.store(), &blob_store, false)
+        let report = migrate_links(metadata_store.object_store(), &blob_store, false)
             .await
             .unwrap();
         assert_eq!(report.migrated, 1);
@@ -505,14 +481,14 @@ mod tests {
         // A JSON tag link that an earlier migrate rewrote without a media type.
         let metadata = LinkMetadata::without_timestamp(target.clone());
         put_link_raw(
-            metadata_store.store(),
+            metadata_store.object_store(),
             &namespace,
             &link,
             &serde_json::to_vec(&metadata).unwrap(),
         )
         .await;
 
-        let report = migrate_links(metadata_store.store(), &blob_store, false)
+        let report = migrate_links(metadata_store.object_store(), &blob_store, false)
             .await
             .unwrap();
         assert_eq!(report.migrated, 0);
@@ -534,14 +510,14 @@ mod tests {
         let link = LinkKind::Layer(digest());
 
         put_link_raw(
-            metadata_store.store(),
+            metadata_store.object_store(),
             &namespace,
             &link,
             digest().to_string().as_bytes(),
         )
         .await;
 
-        let report = migrate_links(metadata_store.store(), &blob_store, false)
+        let report = migrate_links(metadata_store.object_store(), &blob_store, false)
             .await
             .unwrap();
         assert_eq!(report.migrated, 1);
@@ -563,19 +539,19 @@ mod tests {
         let target = seed_manifest_blob(&blob_store).await;
 
         put_link_raw(
-            metadata_store.store(),
+            metadata_store.object_store(),
             &namespace,
             &link,
             target.to_string().as_bytes(),
         )
         .await;
 
-        migrate_links(metadata_store.store(), &blob_store, false)
+        migrate_links(metadata_store.object_store(), &blob_store, false)
             .await
             .unwrap();
 
         // A second pass finds the link already current and rewrites nothing.
-        let report = migrate_links(metadata_store.store(), &blob_store, false)
+        let report = migrate_links(metadata_store.object_store(), &blob_store, false)
             .await
             .unwrap();
         assert_eq!(report.migrated, 0);
@@ -613,7 +589,7 @@ mod tests {
 
         for link in [&broken, &healthy] {
             put_link_raw(
-                test_case.metadata_store().store(),
+                test_case.metadata_store().object_store(),
                 &namespace,
                 link,
                 digest().to_string().as_bytes(),
@@ -621,7 +597,7 @@ mod tests {
             .await;
         }
 
-        let inner: Arc<dyn ObjectStore> = test_case.metadata_store().store().object_store().clone();
+        let inner: Arc<dyn ObjectStore> = test_case.metadata_store().object_store().clone();
         let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
             inner,
             FailReadsOf {
@@ -630,7 +606,7 @@ mod tests {
         ));
         let metadata_store = metadata_store_over_cached(hooked, 0);
 
-        let report = migrate_links(metadata_store.store(), &blob_store, false)
+        let report = migrate_links(metadata_store.object_store(), &blob_store, false)
             .await
             .expect("one unreadable link must not fail the run");
 
@@ -639,88 +615,6 @@ mod tests {
         assert!(
             metadata_store.read_link(&namespace, &healthy).await.is_ok(),
             "the healthy link must be readable after the run"
-        );
-    }
-
-    /// Writes `body` to `key` the first time the locked executor re-reads that
-    /// key to verify its read fingerprint, which is the instant a concurrent
-    /// tag push would land: after migrate captured the body it decided from,
-    /// before migrate's own write.
-    struct PushOnVerifyingRead {
-        inner: Arc<dyn ObjectStore>,
-        key: String,
-        body: Bytes,
-        reads: AtomicUsize,
-        injected: Arc<AtomicBool>,
-    }
-
-    #[async_trait::async_trait]
-    impl StoreHook for PushOnVerifyingRead {
-        async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
-            if let StoreOp::Get { key } = op
-                && key == self.key
-                && self.reads.fetch_add(1, Ordering::SeqCst) == 1
-            {
-                self.inner.put(&self.key, self.body.clone()).await?;
-                self.injected.store(true, Ordering::SeqCst);
-            }
-            Ok(())
-        }
-    }
-
-    /// A tag push landing between migrate's read and its write must survive.
-    /// The unlocked read-modify-write this replaced put the pre-push target
-    /// back, silently losing the push.
-    #[tokio::test]
-    async fn a_push_landing_mid_rewrite_is_not_reverted() {
-        let test_case = FSRegistryTestCase::new();
-        let blob_store = test_case.blob_store();
-        let namespace = Namespace::new("migrate-repo").unwrap();
-        let link = LinkKind::Tag(Tag::new("latest").unwrap());
-        let key = path_builder::link_path(&link, &namespace);
-        let pushed = Digest::sha256_of_bytes(b"the tag push that must survive");
-
-        // The push writes a current JSON link, exactly as a real push would.
-        let pushed_body = Bytes::from(
-            serde_json::to_vec(&LinkMetadata::without_timestamp(pushed.clone())).unwrap(),
-        );
-        let injected = Arc::new(AtomicBool::new(false));
-        let inner: Arc<dyn ObjectStore> = test_case.metadata_store().store().object_store().clone();
-        let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
-            inner.clone(),
-            PushOnVerifyingRead {
-                inner,
-                key: key.clone(),
-                body: pushed_body,
-                reads: AtomicUsize::new(0),
-                injected: injected.clone(),
-            },
-        ));
-        let metadata_store = metadata_store_over_cached(hooked, 0);
-
-        // Seed the legacy bare-digest link migrate is about to rewrite.
-        put_link_raw(
-            metadata_store.store(),
-            &namespace,
-            &link,
-            digest().to_string().as_bytes(),
-        )
-        .await;
-
-        rewrite_link(metadata_store.store(), &blob_store, &key)
-            .await
-            .expect("a link changing mid-rewrite must not fail the run");
-
-        // Without this the test passes vacuously: an unlocked read-modify-write
-        // never re-reads, so the push would never be injected at all.
-        assert!(
-            injected.load(Ordering::SeqCst),
-            "the rewrite must re-read the link under the lock, which is where the push lands"
-        );
-        let final_link = metadata_store.read_link(&namespace, &link).await.unwrap();
-        assert_eq!(
-            final_link.target, pushed,
-            "the pushed target must survive; migrate must not restore the pre-push one"
         );
     }
 
@@ -733,14 +627,14 @@ mod tests {
         let link = LinkKind::Tag(Tag::new("latest").unwrap());
 
         put_link_raw(
-            metadata_store.store(),
+            metadata_store.object_store(),
             &namespace,
             &link,
             digest().to_string().as_bytes(),
         )
         .await;
 
-        let report = migrate_links(metadata_store.store(), &blob_store, true)
+        let report = migrate_links(metadata_store.object_store(), &blob_store, true)
             .await
             .unwrap();
         assert_eq!(report.migrated, 1);

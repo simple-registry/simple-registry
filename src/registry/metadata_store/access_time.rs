@@ -2,9 +2,8 @@
 //! lives here.
 //!
 //! With a debounce configured, stamps are buffered in [`AccessTimeWriter`] and
-//! flushed periodically; otherwise each read stamps inline through the store's
-//! advisory update, which picks a conditional write or a read-modify-write
-//! transaction below the storage API.
+//! flushed periodically; otherwise each read stamps inline. Access times are
+//! advisory, so every stamp is a plain overwrite and a lost race is dropped.
 
 use std::{
     collections::HashMap,
@@ -22,9 +21,7 @@ use tokio::{spawn, sync::Mutex, time::sleep};
 use tracing::{instrument, warn};
 
 use angos_oci::Namespace;
-use angos_tx_engine::{
-    error::Error as TxError, executor::DEFAULT_RETRY_BUDGET, store::Store, transaction::Mutation,
-};
+use angos_storage::{Error as StorageError, ObjectStore};
 
 use crate::registry::{
     Error,
@@ -38,7 +35,7 @@ use crate::registry::{
 /// buffering writer plus its background flush task; otherwise stamps are
 /// applied inline and no writer is spun up.
 pub fn build_writer(
-    store: &Arc<Store>,
+    store: &Arc<dyn ObjectStore>,
     debounce_secs: u64,
 ) -> (Option<AccessTimeWriter>, Option<Arc<FlushHandle>>) {
     if debounce_secs == 0 {
@@ -58,7 +55,7 @@ pub fn build_writer(
 }
 
 fn spawn_flush_task(
-    store: Arc<Store>,
+    store: Arc<dyn ObjectStore>,
     writer: AccessTimeWriter,
     shutdown: Arc<AtomicBool>,
     interval: Duration,
@@ -97,7 +94,7 @@ impl AccessTimeWriter {
             .insert(key, (namespace.clone(), link.clone()));
     }
 
-    pub async fn flush(&self, store: &Store) {
+    pub async fn flush(&self, store: &Arc<dyn ObjectStore>) {
         let entries: Vec<(Namespace, LinkKind)> = {
             let mut pending = self.pending.lock().await;
             pending.drain().map(|(_, v)| v).collect()
@@ -110,7 +107,6 @@ impl AccessTimeWriter {
                 // transaction and no read.
                 let result = match advisory_atime_path(&namespace, &link) {
                     Some(key) => store
-                        .object_store()
                         .put(&key, Bytes::from(Utc::now().to_rfc3339()))
                         .await
                         .map_err(Error::from),
@@ -165,15 +161,14 @@ impl MetadataStore {
 
     pub async fn flush_access_times(&self) {
         if let Some(writer) = &self.access_time_writer {
-            writer.flush(self.store()).await;
+            writer.flush(self.object_store()).await;
         }
     }
 
-    /// Stamp the access time inline. A tag stamps its own atime key with a
-    /// plain overwrite; every other kind goes through the store's advisory
-    /// update, which picks a conditional write or a read-modify-write
-    /// transaction. Access times are advisory, so a lost race is dropped as a
-    /// no-op.
+    /// Stamp the access time inline. A tag or revision stamps its own atime
+    /// key with a plain overwrite; every other kind rewrites its link body
+    /// with a fresh `accessed_at`. Access times are advisory, so a concurrent
+    /// writer's lost update is acceptable.
     async fn stamp_link_access_time(
         &self,
         namespace: &Namespace,
@@ -195,17 +190,11 @@ impl MetadataStore {
             _ => {}
         }
         let link_path = path_builder::link_path(link, namespace);
-        self.store()
-            .update_advisory(&link_path, |body| {
-                let link_data = serde_json::from_slice::<LinkMetadata>(&body)
-                    .map_err(|e| TxError::Build(e.to_string()))?
-                    .accessed();
-                let serialized =
-                    Bytes::from(serde_json::to_vec(&link_data).map_err(TxError::Serde)?);
-                Ok((serialized, link_data))
-            })
-            .await
-            .map_err(Error::from)
+        let body = self.object_store().get(&link_path).await?;
+        let link_data = serde_json::from_slice::<LinkMetadata>(&body)?.accessed();
+        let serialized = Bytes::from(serde_json::to_vec(&link_data)?);
+        self.object_store().put(&link_path, serialized).await?;
+        Ok(link_data)
     }
 }
 
@@ -219,43 +208,21 @@ fn advisory_atime_path(namespace: &Namespace, link: &LinkKind) -> Option<String>
     }
 }
 
-/// Flush a single access-time update via a read-modify-write transaction.
-///
-/// A content-hash read guard lets a concurrent writer's fresher timestamp win
-/// on conflict; access times are advisory, so a `Conflict` after the retry
-/// budget is silently discarded.
+/// Flush a single access-time update as a plain read-modify-write. Access
+/// times are advisory, so a concurrent writer's lost update is acceptable
+/// and a vanished link is nothing to stamp.
 async fn flush_one_access_time(
-    store: &Store,
+    store: &Arc<dyn ObjectStore>,
     namespace: &Namespace,
     link: &LinkKind,
 ) -> Result<(), Error> {
     let link_path = path_builder::link_path(link, namespace);
-    let keys = [link_path.clone()];
-    store
-        .update(
-            &keys,
-            |bodies| {
-                let link_path = link_path.clone();
-                async move {
-                    // Link vanished: nothing to stamp. An empty mutation set
-                    // commits a no-op transaction.
-                    let Some(body) = &bodies[0] else {
-                        return Ok(Vec::new());
-                    };
-                    let link_data = serde_json::from_slice::<LinkMetadata>(body)
-                        .map_err(|e| TxError::Build(e.to_string()))?
-                        .accessed();
-                    let serialized =
-                        Bytes::from(serde_json::to_vec(&link_data).map_err(TxError::Serde)?);
-                    Ok(vec![Mutation::Put {
-                        key: link_path,
-                        body: serialized,
-                        expected: None,
-                    }])
-                }
-            },
-            DEFAULT_RETRY_BUDGET,
-        )
-        .await
-        .map_err(Error::from)
+    let body = match store.get(&link_path).await {
+        Ok(body) => body,
+        Err(StorageError::NotFound) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let link_data = serde_json::from_slice::<LinkMetadata>(&body)?.accessed();
+    let serialized = Bytes::from(serde_json::to_vec(&link_data)?);
+    store.put(&link_path, serialized).await.map_err(Error::from)
 }

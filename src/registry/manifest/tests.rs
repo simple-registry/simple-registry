@@ -1029,7 +1029,7 @@ async fn a_backend_fault_is_not_reported_as_a_missing_manifest() {
     let tag = Tag::new("latest").unwrap();
     let link = LinkKind::Tag(tag.clone());
 
-    let inner: Arc<dyn ObjectStore> = case.metadata_store().store().object_store().clone();
+    let inner: Arc<dyn ObjectStore> = case.metadata_store().object_store().clone();
     let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
         inner,
         FailReadsOf {
@@ -2280,7 +2280,6 @@ async fn manifest_blob_lives_in_blob_store_with_split_backends() {
     assert!(
         test_case
             .metadata_store()
-            .store()
             .object_store()
             .get(&blob_path(&digest))
             .await
@@ -2941,10 +2940,14 @@ async fn store_manifest_strict_accepts_a_reference_with_a_live_grant() {
         .store_manifest(&namespace, &ops, None, ReferencePolicy::Strict)
         .await
         .expect("a strict push with a live grant must commit");
-    store
-        .read_link_reference(&namespace, &LinkKind::Layer(layer_digest))
+    let links = store
+        .read_blob_index_namespace(&namespace, &layer_digest)
         .await
-        .expect("the layer link must be written");
+        .expect("the layer's reference entries must be readable");
+    assert!(
+        links.contains(&LinkKind::ReferencedBy(manifest_digest)),
+        "the per-referrer entry must be written"
+    );
 }
 
 /// A manifest delete leaves its reference keys (and, until the collector
@@ -3077,10 +3080,14 @@ async fn store_manifest_trusted_creates_first_grant_without_prior_entry() {
         .store_manifest(&namespace, &ops, None, ReferencePolicy::Trusted)
         .await
         .expect("a trusted push must commit without a prior grant");
-    store
-        .read_link_reference(&namespace, &LinkKind::Layer(layer_digest))
+    let links = store
+        .read_blob_index_namespace(&namespace, &layer_digest)
         .await
-        .expect("the layer link must be written");
+        .expect("the layer's reference entries must be readable");
+    assert!(
+        links.contains(&LinkKind::ReferencedBy(manifest_digest)),
+        "the per-referrer entry must be written"
+    );
 }
 
 /// A permissive push must not grant access to an unowned reference: the link
@@ -3460,7 +3467,7 @@ async fn replicated_delete_not_superseded_by_a_link_without_created_at() {
     let legacy_digest = Digest::sha256_of_bytes(b"legacy-manifest");
     let link_without_created_at = format!(r#"{{"target":"{legacy_digest}","created_at":null}}"#);
     put_link_raw(
-        registry.metadata_store.store(),
+        registry.metadata_store.object_store(),
         namespace,
         &link,
         link_without_created_at.as_bytes(),
@@ -3642,7 +3649,7 @@ async fn replication_superseded_maps_to_distinct_oci_code() {
 mod noop_suppression_tests {
     //! No-op suppression (loop prevention): an inbound manifest write that does
     //! not change local state must not be re-dispatched for replication. The
-    //! harness shares one `Store` between the blob store, metadata store, and a
+    //! harness shares one object store between the blob store, metadata store, and a
     //! caller-held `JobStore`, and spawns no drain, so enqueued jobs persist
     //! for counting.
 
@@ -3672,7 +3679,7 @@ mod noop_suppression_tests {
     const NAMESPACE: &str = "nginx";
 
     /// Build a `Registry` whose blob store, metadata store, and a caller-held
-    /// `JobStore` all share one FS-backed `Store`, carrying a single
+    /// `JobStore` all share one FS-backed object store, carrying a single
     /// event+reconcile downstream so `dispatch_replication` enqueues.
     fn build_registry() -> (Arc<Registry>, Arc<JobStore>, TempDir) {
         let FsTestStack {

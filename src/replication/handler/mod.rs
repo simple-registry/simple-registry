@@ -387,7 +387,6 @@ impl ReplicationJobHandler {
         };
         let outcome = pipeline::delete_manifest(
             &downstream.registry_client,
-            &self.metadata_store,
             namespace,
             downstream_namespace,
             &reference,

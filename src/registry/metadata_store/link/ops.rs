@@ -19,7 +19,7 @@ use futures_util::future::join_all;
 use tracing::warn;
 
 use angos_oci::{Descriptor, Digest, MediaType, Namespace};
-use angos_tx_engine::{StorageError, error::Error as TxError, transaction::Mutation};
+use angos_storage::Error as StorageError;
 
 use crate::registry::{
     Error,
@@ -28,6 +28,7 @@ use crate::registry::{
         blob_index::{namespace_entries_merged, ref_mutation},
         link::record::{referrer_set_mutation, revision_set_mutation},
         link::tag::{tag_del_mutation, tag_set_mutation},
+        mutation::Mutation,
     },
     path_builder,
 };
@@ -244,14 +245,11 @@ impl LinkMutations {
         namespace: &Namespace,
         link: &LinkKind,
         metadata: LinkMetadata,
-    ) -> Result<(), TxError> {
-        let body = serde_json::to_vec(&metadata)
-            .map(Bytes::from)
-            .map_err(TxError::Serde)?;
+    ) -> Result<(), Error> {
+        let body = serde_json::to_vec(&metadata).map(Bytes::from)?;
         self.records.push(Mutation::Put {
             key: path_builder::link_path(link, namespace),
             body,
-            expected: None,
         });
         self.written_links.push((link.clone(), metadata));
         Ok(())
@@ -278,13 +276,9 @@ impl LinkMutations {
         };
         wave.push(Mutation::Delete {
             key: path_builder::link_path(link, namespace),
-            expected: None,
         });
         if let Some(key) = record_key {
-            wave.push(Mutation::Delete {
-                key,
-                expected: None,
-            });
+            wave.push(Mutation::Delete { key });
         }
         self.deleted_links.push(link.clone());
     }
@@ -336,10 +330,7 @@ impl MetadataStore {
         operations: &[LinkOperation],
         tx: LinksTx<'_>,
     ) -> Result<LinksCommit, Error> {
-        let (plan, result) = self
-            .plan_links(namespace, operations, &tx)
-            .await
-            .map_err(Error::from)?;
+        let (plan, result) = self.plan_links(namespace, operations, &tx).await?;
 
         if let Some(message) = result.superseded {
             return Err(Error::ReplicationSuperseded(message));
@@ -392,13 +383,8 @@ impl MetadataStore {
     async fn apply_writes(&self, writes: &[Mutation]) -> Result<(), Error> {
         let results = join_all(writes.iter().map(|write| async move {
             match write {
-                Mutation::Put { key, body, .. } => {
-                    self.store().object_store().put(key, body.clone()).await
-                }
-                Mutation::Delete { key, .. } => self.store().object_store().delete(key).await,
-                other => Err(StorageError::Backend(format!(
-                    "link planner produced an unexpected mutation: {other:?}"
-                ))),
+                Mutation::Put { key, body } => self.object_store().put(key, body.clone()).await,
+                Mutation::Delete { key } => self.object_store().delete(key).await,
             }
         }))
         .await;
@@ -428,7 +414,7 @@ impl MetadataStore {
         namespace: &Namespace,
         operations: &[LinkOperation],
         tx: &LinksTx<'_>,
-    ) -> Result<(WavePlan, LinksTxCaptured), TxError> {
+    ) -> Result<(WavePlan, LinksTxCaptured), Error> {
         // Snapshot: one read pass over every operation's link.
         let snapshot = self.snapshot_links(namespace, operations).await?;
 
@@ -451,10 +437,7 @@ impl MetadataStore {
             ));
         }
 
-        let LinksSnapshot {
-            ops,
-            mut link_cache,
-        } = snapshot;
+        let LinksSnapshot { ops, link_cache } = snapshot;
 
         // Ownership pre-read: one reference lookup per newly-referenced digest
         // of a policy-checked push.
@@ -468,7 +451,7 @@ impl MetadataStore {
             written_links,
             deleted_links,
             missing_reference,
-        } = build_link_mutations(namespace, &ops, &mut link_cache, tx, &ownership)?;
+        } = build_link_mutations(namespace, &ops, &link_cache, tx, &ownership)?;
 
         if let Some(digest) = missing_reference {
             return Ok((
@@ -518,7 +501,7 @@ impl MetadataStore {
         &self,
         namespace: &Namespace,
         operations: &'a [LinkOperation],
-    ) -> Result<LinksSnapshot<'a>, TxError> {
+    ) -> Result<LinksSnapshot<'a>, Error> {
         let mut seen_ops = HashSet::new();
         let operations: Vec<&LinkOperation> = operations
             .iter()
@@ -552,13 +535,13 @@ impl MetadataStore {
                 let metadata = match result {
                     Ok(metadata) => Some(metadata),
                     Err(Error::NotFound) => None,
-                    Err(e) => return Err(TxError::Storage(StorageError::Backend(e.to_string()))),
+                    Err(e) => return Err(e),
                 };
                 return Ok((op, metadata));
             }
             let link_path = path_builder::link_path(link, namespace);
             let metadata = self.read_link_raw(&link_path).await?;
-            Ok::<_, TxError>((op, metadata))
+            Ok::<_, Error>((op, metadata))
         }))
         .await;
 
@@ -602,15 +585,14 @@ impl MetadataStore {
     /// Read a link's exact stored bytes and parsed metadata, or `None` when
     /// absent. The snapshot pass needs the raw bytes for the read-set
     /// fingerprint alongside the parsed metadata.
-    async fn read_link_raw(&self, link_path: &str) -> Result<Option<LinkMetadata>, TxError> {
-        match self.store().object_store().get(link_path).await {
+    async fn read_link_raw(&self, link_path: &str) -> Result<Option<LinkMetadata>, Error> {
+        match self.object_store().get(link_path).await {
             Ok(data) => {
-                let metadata: LinkMetadata = serde_json::from_slice(&data)
-                    .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
+                let metadata: LinkMetadata = serde_json::from_slice(&data)?;
                 Ok(Some(metadata))
             }
             Err(StorageError::NotFound) => Ok(None),
-            Err(e) => Err(TxError::Storage(e)),
+            Err(e) => Err(Error::from(e)),
         }
     }
 }
@@ -685,10 +667,10 @@ fn is_empty_noop(ops: &[OpSnapshot<'_>], tx: &LinksTx<'_>) -> bool {
 fn build_link_mutations(
     namespace: &Namespace,
     ops: &[OpSnapshot<'_>],
-    link_cache: &mut HashMap<LinkKind, LinkMetadata>,
+    link_cache: &HashMap<LinkKind, LinkMetadata>,
     tx: &LinksTx<'_>,
     ownership: &ReferenceOwnership,
-) -> Result<LinkMutations, TxError> {
+) -> Result<LinkMutations, Error> {
     let acc = LinkMutations {
         records: Vec::new(),
         finals: Vec::new(),
@@ -711,11 +693,11 @@ fn build_link_mutations(
 fn build_create_mutations(
     namespace: &Namespace,
     ops: &[OpSnapshot<'_>],
-    link_cache: &mut HashMap<LinkKind, LinkMetadata>,
+    link_cache: &HashMap<LinkKind, LinkMetadata>,
     tx: &LinksTx<'_>,
     ownership: &ReferenceOwnership,
     mut acc: LinkMutations,
-) -> Result<LinkMutations, TxError> {
+) -> Result<LinkMutations, Error> {
     for op in ops {
         let OpSnapshot::Create {
             link,
@@ -743,25 +725,13 @@ fn build_create_mutations(
 
             // The pin: one write-once key per referring manifest, always
             // written (idempotent), never merged, so concurrent pushes
-            // sharing a blob cannot clobber each other's references.
+            // sharing a blob cannot clobber each other's references. No
+            // legacy link file is written; scrub retires the existing ones.
             if let Some(manifest_digest) = referrer {
                 acc.push_blob_op(
                     target,
                     BlobIndexOperation::Insert(LinkKind::ReferencedBy((*manifest_digest).clone())),
                 );
-            }
-
-            // The legacy link file is advisory only: written once when
-            // absent, never rewritten, cleaned up by the collector.
-            if !link_cache.contains_key(*link) {
-                let metadata = tracked_link_metadata(
-                    target,
-                    referrer.as_ref(),
-                    media_type.as_ref(),
-                    descriptor.as_deref(),
-                    tx,
-                );
-                acc.put_link(namespace, link, metadata)?;
             }
         } else {
             // Non-tracked link.
@@ -791,9 +761,13 @@ fn build_create_mutations(
                     // The entry key is the write: the same digest in the same
                     // millisecond is the same key, so a re-push is naturally
                     // idempotent and concurrent writers never contend.
-                    let mutation =
-                        tag_set_mutation(namespace, tag, created_at, target, (*media_type).clone())
-                            .map_err(TxError::Serde)?;
+                    let mutation = tag_set_mutation(
+                        namespace,
+                        tag,
+                        created_at,
+                        target,
+                        (*media_type).clone(),
+                    )?;
                     acc.finals.push(mutation);
                     let created_at =
                         path_builder::tag_ord_ts(path_builder::tag_ord(Some(created_at)))
@@ -808,8 +782,7 @@ fn build_create_mutations(
                         digest,
                         Some(created_at),
                         (*media_type).clone(),
-                    )
-                    .map_err(TxError::Serde)?;
+                    )?;
                     acc.records.push(mutation);
                     let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
                         .with_media_type((*media_type).clone());
@@ -817,8 +790,7 @@ fn build_create_mutations(
                 }
                 LinkKind::Referrer { subject, referrer } => {
                     let mutation =
-                        referrer_set_mutation(namespace, subject, referrer, descriptor.as_deref())
-                            .map_err(TxError::Serde)?;
+                        referrer_set_mutation(namespace, subject, referrer, descriptor.as_deref())?;
                     acc.finals.push(mutation);
                     let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
                         .with_media_type((*media_type).clone())
@@ -837,25 +809,6 @@ fn build_create_mutations(
     Ok(acc)
 }
 
-/// The advisory metadata of a freshly-written tracked link file: the target,
-/// media type, descriptor, and referrer of its `Create` op.
-fn tracked_link_metadata(
-    target: &Digest,
-    referrer: Option<&Digest>,
-    media_type: Option<&MediaType>,
-    descriptor: Option<&Descriptor>,
-    tx: &LinksTx<'_>,
-) -> LinkMetadata {
-    let mut metadata =
-        LinkMetadata::from_digest_at(target.clone(), tx.created_at().unwrap_or_else(Utc::now))
-            .with_media_type(media_type.cloned())
-            .with_descriptor(descriptor.cloned());
-    if let Some(manifest_digest) = referrer {
-        metadata.add_referrer(manifest_digest.clone());
-    }
-    metadata
-}
-
 /// The delete half of mutation planning: for each `Delete` op whose link
 /// exists, either prune one referrer (a tracked link with references left
 /// becomes a `Put`), append a tag tombstone, or remove the link outright (a
@@ -865,7 +818,7 @@ fn build_delete_mutations(
     ops: &[OpSnapshot<'_>],
     tx: &LinksTx<'_>,
     mut acc: LinkMutations,
-) -> Result<LinkMutations, TxError> {
+) -> Result<LinkMutations, Error> {
     for op in ops {
         let OpSnapshot::Delete {
             link,
@@ -887,8 +840,7 @@ fn build_delete_mutations(
                 created_at,
                 &metadata.target,
                 metadata.media_type.clone(),
-            )
-            .map_err(TxError::Serde)?;
+            )?;
             acc.records.push(mutation);
             acc.deleted_links.push((*link).clone());
             continue;
@@ -932,7 +884,7 @@ async fn preread_reference_ownership(
     namespace: &Namespace,
     ops: &[OpSnapshot<'_>],
     tx: &LinksTx<'_>,
-) -> Result<ReferenceOwnership, TxError> {
+) -> Result<ReferenceOwnership, Error> {
     let mut ownership = ReferenceOwnership::new();
     if !matches!(
         tx.reference_policy(),
@@ -959,16 +911,11 @@ async fn preread_reference_ownership(
         {
             continue;
         }
-        let entries = namespace_entries_merged(m.store(), namespace, target)
-            .await
-            .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?;
+        let entries = namespace_entries_merged(m.object_store(), namespace, target).await?;
         let mut owned = entries.contains(&LinkKind::Blob((*target).clone()));
         if !owned {
             for entry in &entries {
-                if m.reference_backed(namespace, entry, target)
-                    .await
-                    .map_err(|e| TxError::Storage(StorageError::Backend(e.to_string())))?
-                {
+                if m.reference_backed(namespace, entry, target).await? {
                     owned = true;
                     break;
                 }

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use angos_oci::{Digest, Namespace, UploadSessionId};
-use angos_tx_engine::StorageError;
+use angos_storage::Error as StorageError;
 
 use crate::registry::{
     Error,
@@ -113,7 +113,7 @@ impl<'a> BlobOwnership<'a> {
         // The own key grants directly, so one head answers the common case
         // before the full reference listing and legacy shard read.
         let own = path_builder::blob_ref_own_path(digest, namespace);
-        match self.metadata_store.store().object_store().head(&own).await {
+        match self.metadata_store.object_store().head(&own).await {
             Ok(_) => return Ok(true),
             Err(StorageError::NotFound) => {}
             Err(error) => return Err(error.into()),

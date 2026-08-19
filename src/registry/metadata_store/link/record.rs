@@ -14,7 +14,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use angos_oci::{Descriptor, Digest, MediaType, Namespace};
-use angos_tx_engine::{StorageError, transaction::Mutation};
+use angos_storage::Error as StorageError;
+
+use crate::registry::metadata_store::mutation::Mutation;
 
 use crate::registry::{
     Error,
@@ -58,7 +60,6 @@ pub fn revision_set_mutation(
     Ok(Mutation::Put {
         key: path_builder::revision_record_path(namespace, digest),
         body: Bytes::from(body),
-        expected: None,
     })
 }
 
@@ -78,7 +79,6 @@ pub fn referrer_set_mutation(
     Ok(Mutation::Put {
         key: path_builder::referrer_record_path(namespace, subject, referrer),
         body: Bytes::from(body),
-        expected: None,
     })
 }
 
@@ -91,7 +91,7 @@ impl MetadataStore {
         digest: &Digest,
     ) -> Result<LinkMetadata, Error> {
         let key = path_builder::revision_record_path(namespace, digest);
-        match self.store().object_store().get(&key).await {
+        match self.object_store().get(&key).await {
             Ok(body) => {
                 let record: RevisionRecord = serde_json::from_slice(&body)
                     .map_err(|e| Error::Internal(format!("corrupt revision record {key}: {e}")))?;
@@ -114,7 +114,7 @@ impl MetadataStore {
         referrer: &Digest,
     ) -> Result<LinkMetadata, Error> {
         let key = path_builder::referrer_record_path(namespace, subject, referrer);
-        match self.store().object_store().get(&key).await {
+        match self.object_store().get(&key).await {
             Ok(body) => Ok(LinkMetadata {
                 target: referrer.clone(),
                 created_at: None,
@@ -145,7 +145,7 @@ impl MetadataStore {
         namespace: &Namespace,
     ) -> Result<LinkMetadata, Error> {
         let link_path = path_builder::link_path(link, namespace);
-        match self.store().object_store().get(&link_path).await {
+        match self.object_store().get(&link_path).await {
             Ok(data) => serde_json::from_slice(&data).map_err(|e| Error::Internal(e.to_string())),
             Err(StorageError::NotFound) => Err(Error::NotFound),
             Err(e) => Err(e.into()),
@@ -160,7 +160,7 @@ impl MetadataStore {
         digest: &Digest,
     ) -> Result<Option<DateTime<Utc>>, Error> {
         let key = path_builder::revision_atime_path(namespace, digest);
-        match self.store().object_store().get(&key).await {
+        match self.object_store().get(&key).await {
             Ok(raw) => Ok(std::str::from_utf8(&raw)
                 .ok()
                 .and_then(|text| DateTime::parse_from_rfc3339(text.trim()).ok())
@@ -178,8 +178,7 @@ impl MetadataStore {
         digest: &Digest,
     ) -> Result<(), Error> {
         let key = path_builder::revision_atime_path(namespace, digest);
-        self.store()
-            .object_store()
+        self.object_store()
             .put(&key, Bytes::from(Utc::now().to_rfc3339()))
             .await
             .map_err(Error::from)
@@ -203,15 +202,13 @@ impl MetadataStore {
             media_type: metadata.media_type,
             created_at: metadata.created_at,
         })?;
-        self.store()
-            .object_store()
+        self.object_store()
             .put(
                 &path_builder::revision_record_path(namespace, digest),
                 Bytes::from(record),
             )
             .await?;
-        self.store()
-            .object_store()
+        self.object_store()
             .delete(&path_builder::link_path(&link, namespace))
             .await?;
         self.cache_invalidate(namespace, &link).await;
@@ -238,15 +235,13 @@ impl MetadataStore {
             Some(descriptor) => serde_json::to_vec(descriptor)?,
             None => b"{}".to_vec(),
         };
-        self.store()
-            .object_store()
+        self.object_store()
             .put(
                 &path_builder::referrer_record_path(namespace, subject, referrer),
                 Bytes::from(body),
             )
             .await?;
-        self.store()
-            .object_store()
+        self.object_store()
             .delete(&path_builder::link_path(&link, namespace))
             .await?;
         self.cache_invalidate(namespace, &link).await;

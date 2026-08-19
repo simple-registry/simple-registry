@@ -23,7 +23,6 @@ use crate::jobs::store::{
     serialize_dead_letter, serialize_lock_key_index, should_cancel_claim,
 };
 use crate::metrics_provider;
-use crate::registry::test_utils::build_store;
 
 struct Harness {
     store: Arc<JobStore>,
@@ -45,8 +44,7 @@ fn harness_memory() -> Harness {
 }
 
 fn build_harness(raw: Arc<dyn ObjectStore>) -> Harness {
-    let facade = build_store(raw.clone());
-    let store = Arc::new(JobStore::new(facade, "test-worker"));
+    let store = Arc::new(JobStore::new(raw.clone(), "test-worker"));
     Harness { store, raw }
 }
 
@@ -507,7 +505,7 @@ async fn orphan_index_transient_delete_failure_does_not_drop_enqueue() {
         index_path: index_path.clone(),
     };
     let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(inner.clone(), hook));
-    let store = Arc::new(JobStore::new(build_store(hooked), "test-worker"));
+    let store = Arc::new(JobStore::new(hooked, "test-worker"));
 
     // Seed an orphan index (index present, pending file absent) through the
     // inner store so the fault hook does not intercept the fixture write.
@@ -570,7 +568,7 @@ async fn claim_rechecks_pending_under_lock_and_skips_a_vanished_job() {
             pending_reads: AtomicUsize::new(0),
         },
     ));
-    let store = Arc::new(JobStore::new(build_store(hooked), "test-worker"));
+    let store = Arc::new(JobStore::new(hooked, "test-worker"));
 
     store
         .enqueue(dummy_envelope("cache.ns:sha256:vanish"))
@@ -603,7 +601,7 @@ async fn claim_is_skipped_when_the_dedup_index_cannot_be_retired() {
             index_path: index_path.clone(),
         },
     ));
-    let store = Arc::new(JobStore::new(build_store(hooked), "test-worker"));
+    let store = Arc::new(JobStore::new(hooked, "test-worker"));
 
     store
         .enqueue(dummy_envelope(lock_key.as_str()))
@@ -1429,8 +1427,7 @@ async fn ensure_claim_support_probe_succeeds_and_cleans_up() {
         Arc::new(MemoryObjectStore::new()),
     ];
     for raw in backends {
-        let facade = build_store(raw.clone());
-        ensure_claim_support(&facade).await.expect("probe");
+        ensure_claim_support(&raw).await.expect("probe");
         let page = raw
             .list(&format!("{JOBS_ROOT}/claims/"), 10, None)
             .await
@@ -1476,7 +1473,7 @@ async fn complete_cleanup_failure_fails_over_to_retry() {
             remaining: AtomicUsize::new(1),
         },
     ));
-    let store = Arc::new(JobStore::new(build_store(hooked), "test-worker"));
+    let store = Arc::new(JobStore::new(hooked, "test-worker"));
 
     store
         .enqueue(dummy_envelope("cache.ns:sha256:cleanup"))
@@ -1530,7 +1527,7 @@ async fn claim_ttl_knob_stamps_the_claim_lease() {
     metrics_provider::init_for_tests();
     let raw: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
     let store = Arc::new(JobStore::with_retry_policy(
-        build_store(raw.clone()),
+        raw.clone(),
         "test-worker",
         JobRetryPolicy {
             claim_ttl_secs: 7,

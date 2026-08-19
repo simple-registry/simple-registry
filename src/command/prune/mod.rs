@@ -176,7 +176,10 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
         )
         .await,
         orphan_jobs::sweep_orphan_jobs(
-            &Arc::new(JobStore::new(metadata_store.store_arc(), "prune-orphans")),
+            &Arc::new(JobStore::new(
+                metadata_store.object_store().clone(),
+                "prune-orphans",
+            )),
             &repositories,
             sink.as_ref(),
             options.concurrency,

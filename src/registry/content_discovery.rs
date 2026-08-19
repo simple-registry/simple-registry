@@ -460,7 +460,8 @@ mod tests {
             let namespace = Namespace::new("test-repo").unwrap();
 
             let test_content = b"test content";
-            let test_digest = put_blob_direct(registry.metadata_store.store(), test_content).await;
+            let test_digest =
+                put_blob_direct(registry.metadata_store.object_store(), test_content).await;
             let ops: Vec<LinkOperation> = ["latest", "v1.0", "v2.0"]
                 .iter()
                 .map(|&tag| {
@@ -542,7 +543,7 @@ mod tests {
         ];
 
         let blob_content = b"pagination-test-blob";
-        let digest = put_blob_direct(registry.metadata_store.store(), blob_content).await;
+        let digest = put_blob_direct(registry.metadata_store.object_store(), blob_content).await;
 
         for ns_str in &namespaces {
             let ns = Namespace::new(ns_str).unwrap();
@@ -621,7 +622,8 @@ mod tests {
         let registry = test_case.registry();
         let namespace = Namespace::new("test-repo").unwrap();
 
-        let digest = put_blob_direct(registry.metadata_store.store(), b"revision body").await;
+        let digest =
+            put_blob_direct(registry.metadata_store.object_store(), b"revision body").await;
         registry
             .metadata_store
             .update_links(

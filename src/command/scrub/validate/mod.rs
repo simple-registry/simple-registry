@@ -14,19 +14,16 @@ mod shard;
 mod tests;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     future::Future,
     sync::{Arc, Mutex, atomic::Ordering},
-    time::Duration,
 };
 
-use chrono::{DateTime, TimeDelta, Utc};
-use tokio::time::sleep;
+use chrono::Utc;
 use tracing::warn;
 
-use angos_backoff::Backoff;
 use angos_oci::Digest;
-use angos_tx_engine::{INTENT_LOG_PREFIX, StorageError, intent::IntentRecord};
+use angos_storage::Error as StorageError;
 
 use crate::{
     command::maintenance::{
@@ -38,22 +35,6 @@ use crate::{
     },
     registry::{Error as RegistryError, blob_store::BlobStore, metadata_store::MetadataStore},
 };
-
-/// Intent records fetched per `.tx-log/` listing page while confirming a
-/// candidate repair.
-const INTENT_PAGE: u16 = 100;
-
-/// How many settle re-checks a candidate repair gets before it is left for a
-/// later run. Budgeting in attempts rather than wall-clock keeps the check
-/// S3-latency-independent: each intent-log scan runs to completion, so a slow
-/// scan over a large log no longer burns the whole budget before a single real
-/// re-check.
-const INTENT_SETTLE_ATTEMPTS: u32 = 8;
-/// Jittered backoff between settle re-checks, decorrelating scrub from the
-/// in-flight writers it is waiting on. Small because each re-check already
-/// includes a full intent-log scan, which dominates the wait on S3.
-const INTENT_SETTLE_BACKOFF: Backoff =
-    Backoff::exponential(Duration::from_millis(20), Duration::from_millis(200)).with_jitter();
 
 /// One of the three walk passes. Later passes rely on earlier repairs:
 /// links are healed and grants reconciled (M1) before shard entries are
@@ -90,10 +71,6 @@ pub struct Validator {
     /// Digests the shard walk read live references for (see
     /// [`Self::record_shard_reference`]).
     shard_refs: Mutex<HashSet<Digest>>,
-    /// Intent records already fetched this run, keyed by log file name. An
-    /// intent's expiry and mutation keys never change once written, so a
-    /// cached entry stays valid for the whole run.
-    intent_cache: Mutex<HashMap<String, CachedIntent>>,
 }
 
 impl Validator {
@@ -113,7 +90,6 @@ impl Validator {
             handled: Mutex::new(HashSet::new()),
             gc_holds: Mutex::new(HashSet::new()),
             shard_refs: Mutex::new(HashSet::new()),
-            intent_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -129,17 +105,15 @@ impl Validator {
 
     async fn dispatch(&self, pass: Pass, key: &str) -> Result<(), Error> {
         let category = categorize(key);
-        // Engine-owned and already-quarantined keys are never touched. A
-        // leaked probe object is left alone too: deleting it could race a
-        // concurrent server startup's CAS probe and flip its verdict.
-        if matches!(
-            category,
-            KeyCategory::EngineInternal | KeyCategory::LostAndFound | KeyCategory::Probe
-        ) {
+        // Already-quarantined keys are never touched. A leaked probe object
+        // is left alone too: deleting it could race a previous binary's
+        // startup CAS probe during a rolling upgrade and flip its verdict.
+        if matches!(category, KeyCategory::LostAndFound | KeyCategory::Probe) {
             return Ok(());
         }
 
         match (pass, category) {
+            (Pass::MetadataLinks, KeyCategory::TxLeftover) => self.reclaim_tx_leftover(key).await,
             (Pass::MetadataLinks, KeyCategory::Link { namespace, link }) => {
                 self.validate_link(key, &namespace, link).await
             }
@@ -210,7 +184,7 @@ impl Validator {
     /// (or applied to) it; a missing timestamp never reads in favour of one.
     /// A missing key is not young: its absence is the caller's evidence.
     pub async fn younger_than_grace(&self, key: &str) -> Result<bool, Error> {
-        let meta = match self.metadata_store.store().object_store().head(key).await {
+        let meta = match self.metadata_store.object_store().head(key).await {
             Ok(meta) => meta,
             Err(StorageError::NotFound) => return Ok(false),
             Err(e) => return Err(RegistryError::from(e).into()),
@@ -222,104 +196,30 @@ impl Validator {
         Ok(Utc::now().signed_duration_since(modified).num_seconds() < grace)
     }
 
-    /// Confirm a cross-key inconsistency before repairing it, so a
-    /// transaction caught mid-apply is never mistaken for settled damage.
-    ///
-    /// A live intent listing any of `evidence_keys` marks the state as still
-    /// moving (a server write, or one of this run's own repairs on a
-    /// neighbouring key), so the check backs off and retries until it settles.
-    /// Once settled, the repair proceeds only when `reverify` still observes
-    /// the inconsistency; checking intents again after the re-read closes the
-    /// race with a transaction that started in between. A candidate that never
-    /// settles is left for the next run.
-    pub async fn confirm_repair<F, Fut>(
-        &self,
-        evidence_keys: &[String],
-        reverify: F,
-    ) -> Result<bool, Error>
+    /// Confirm a cross-key inconsistency before repairing it: the repair
+    /// proceeds only when `reverify` still observes the inconsistency against
+    /// fresh reads, so a first read raced by a write between its waves is
+    /// never mistaken for settled damage. Mid-write windows beyond that are
+    /// covered by the age gates on every reclaim.
+    pub async fn confirm_repair<F, Fut>(&self, reverify: F) -> Result<bool, Error>
     where
         F: Fn() -> Fut,
         Fut: Future<Output = Result<bool, Error>>,
     {
-        for attempt in 0..INTENT_SETTLE_ATTEMPTS {
-            if self.live_intent_touches(evidence_keys).await? {
-                sleep(INTENT_SETTLE_BACKOFF.delay(attempt)).await;
-                continue;
-            }
-            if !reverify().await? {
-                return Ok(false);
-            }
-            if !self.live_intent_touches(evidence_keys).await? {
-                return Ok(true);
-            }
-            sleep(INTENT_SETTLE_BACKOFF.delay(attempt)).await;
+        reverify().await
+    }
+
+    /// Reclaim one leftover key of the removed transaction engine. Age-gated
+    /// like every other reclaim: a young key may still belong to a live
+    /// previous binary during a rolling upgrade.
+    async fn reclaim_tx_leftover(&self, key: &str) -> Result<(), Error> {
+        if self.younger_than_grace(key).await? {
+            return Ok(());
         }
-        warn!("scrub: repair candidate on {evidence_keys:?} never settled; leaving to a later run");
-        Ok(false)
-    }
-
-    /// Whether a live (non-expired) transaction intent lists any of `keys`
-    /// among its mutation targets. An unreadable intent record suppresses the
-    /// repair too: its transaction is recovery's to settle first.
-    ///
-    /// The listing is always fresh (reaping must be observed), but records
-    /// already fetched this run are answered from the intent cache.
-    async fn live_intent_touches(&self, keys: &[String]) -> Result<bool, Error> {
-        let store = self.metadata_store.store().object_store();
-        let mut token = None;
-        loop {
-            let page = store
-                .list(INTENT_LOG_PREFIX, INTENT_PAGE, token)
-                .await
-                .map_err(RegistryError::from)?;
-            for name in &page.items {
-                if let Some(touches) = self.cached_intent_touches(name, keys) {
-                    if touches {
-                        return Ok(true);
-                    }
-                    continue;
-                }
-                let raw = match store.get(&format!("{INTENT_LOG_PREFIX}/{name}")).await {
-                    Ok(raw) => raw,
-                    // Reaped between the listing and the read: not in flight.
-                    Err(StorageError::NotFound) => continue,
-                    Err(e) => return Err(RegistryError::from(e).into()),
-                };
-                // An unreadable record is never cached, so it keeps
-                // suppressing repairs until it becomes readable or is reaped.
-                let Ok(intent) = serde_json::from_slice::<IntentRecord>(&raw) else {
-                    return Ok(true);
-                };
-                let cached = CachedIntent::from(&intent);
-                let touches = cached.touches(keys);
-                self.cache_intent(name.clone(), cached);
-                if touches {
-                    return Ok(true);
-                }
-            }
-            token = page.next_token;
-            if token.is_none() {
-                return Ok(false);
-            }
-        }
-    }
-
-    /// The cached intent's verdict against `keys`, or `None` when the record
-    /// has not been fetched this run.
-    fn cached_intent_touches(&self, name: &str, keys: &[String]) -> Option<bool> {
-        let cache = match self.intent_cache.lock() {
-            Ok(cache) => cache,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        cache.get(name).map(|cached| cached.touches(keys))
-    }
-
-    /// Remember a fetched intent record for the rest of the run.
-    fn cache_intent(&self, name: String, cached: CachedIntent) {
-        match self.intent_cache.lock() {
-            Ok(mut cache) => cache.insert(name, cached),
-            Err(poisoned) => poisoned.into_inner().insert(name, cached),
-        };
+        self.emit(Action::ReclaimTxLeftover {
+            key: key.to_string(),
+        })
+        .await
     }
 
     /// Handle a key that matches no known layout: quarantined by default,
@@ -398,43 +298,6 @@ impl Validator {
         match self.shard_refs.lock() {
             Ok(refs) => refs.contains(digest),
             Err(poisoned) => poisoned.into_inner().contains(digest),
-        }
-    }
-}
-
-/// The immutable facts of one intent record: when it expires and which keys
-/// its mutations touch. Only an intent's progress slots change after it is
-/// written, so these never go stale.
-struct CachedIntent {
-    expires_at: DateTime<Utc>,
-    touched_keys: HashSet<String>,
-}
-
-impl CachedIntent {
-    /// Whether the intent is still live and lists any of `keys`. An expired
-    /// intent's leftovers are scrub's to repair rather than recovery's to
-    /// replay, so it suppresses nothing.
-    fn touches(&self, keys: &[String]) -> bool {
-        Utc::now() < self.expires_at && keys.iter().any(|key| self.touched_keys.contains(key))
-    }
-}
-
-impl From<&IntentRecord> for CachedIntent {
-    fn from(intent: &IntentRecord) -> Self {
-        let ttl = i64::try_from(intent.ttl_secs).unwrap_or(i64::MAX);
-        let expires_at = intent
-            .created_at
-            .checked_add_signed(TimeDelta::seconds(ttl))
-            .unwrap_or(DateTime::<Utc>::MAX_UTC);
-        let touched_keys = intent
-            .mutations
-            .iter()
-            .flat_map(|planned| planned.record.all_keys())
-            .map(str::to_string)
-            .collect();
-        Self {
-            expires_at,
-            touched_keys,
         }
     }
 }

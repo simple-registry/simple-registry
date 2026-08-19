@@ -14,7 +14,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use angos_oci::{Digest, MediaType, Namespace, Tag};
-use angos_tx_engine::{StorageError, transaction::Mutation};
+use angos_storage::Error as StorageError;
+
+use crate::registry::metadata_store::mutation::Mutation;
 
 use crate::registry::{
     Error,
@@ -59,7 +61,6 @@ pub fn tag_set_mutation(
     Ok(Mutation::Put {
         key,
         body: Bytes::from(body),
-        expected: None,
     })
 }
 
@@ -83,7 +84,6 @@ pub fn tag_del_mutation(
     Ok(Mutation::Put {
         key,
         body: Bytes::from(body),
-        expected: None,
     })
 }
 
@@ -106,7 +106,7 @@ impl MetadataStore {
                     path_builder::tag_entry_dir(namespace, tag),
                     winner.entry
                 );
-                let media_type = match self.store().object_store().get(&entry_path).await {
+                let media_type = match self.object_store().get(&entry_path).await {
                     Ok(body) => serde_json::from_slice::<TagEntryBody>(&body)
                         .ok()
                         .and_then(|body| body.media_type),
@@ -138,7 +138,7 @@ impl MetadataStore {
         let mut group: Vec<TagWinner> = Vec::new();
         let mut token = None;
         'pages: loop {
-            let page = self.store().object_store().list(&dir, 1000, token).await?;
+            let page = self.object_store().list(&dir, 1000, token).await?;
             for name in &page.items {
                 let Some((ord, deletion, digest)) = path_builder::parse_tag_entry(name) else {
                     continue;
@@ -187,8 +187,7 @@ impl MetadataStore {
         let body = serde_json::to_vec(&TagEntryBody {
             media_type: metadata.media_type.clone(),
         })?;
-        self.store()
-            .object_store()
+        self.object_store()
             .put(&key, Bytes::from(body))
             .await
             .map_err(Error::from)
@@ -205,7 +204,7 @@ impl MetadataStore {
             "{}/current/link",
             path_builder::manifest_tag_dir(namespace, tag.as_ref())
         );
-        match self.store().object_store().get(&link_path).await {
+        match self.object_store().get(&link_path).await {
             Ok(data) => serde_json::from_slice(&data).map_err(|e| Error::Internal(e.to_string())),
             Err(StorageError::NotFound) => Err(Error::NotFound),
             Err(e) => Err(e.into()),
@@ -219,7 +218,7 @@ impl MetadataStore {
         tag: &Tag,
     ) -> Result<Option<DateTime<Utc>>, Error> {
         let key = path_builder::tag_atime_path(namespace, tag);
-        match self.store().object_store().get(&key).await {
+        match self.object_store().get(&key).await {
             Ok(raw) => Ok(std::str::from_utf8(&raw)
                 .ok()
                 .and_then(|text| DateTime::parse_from_rfc3339(text.trim()).ok())
@@ -238,8 +237,7 @@ impl MetadataStore {
         tag: &Tag,
     ) -> Result<(), Error> {
         let key = path_builder::tag_atime_path(namespace, tag);
-        self.store()
-            .object_store()
+        self.object_store()
             .put(&key, Bytes::from(Utc::now().to_rfc3339()))
             .await
             .map_err(Error::from)
@@ -272,15 +270,14 @@ impl MetadataStore {
         let body = serde_json::to_vec(&TagEntryBody {
             media_type: metadata.media_type,
         })?;
-        self.store()
-            .object_store()
+        self.object_store()
             .put(&entry_key, Bytes::from(body))
             .await?;
         let link_path = format!(
             "{}/current/link",
             path_builder::manifest_tag_dir(namespace, tag.as_ref())
         );
-        match self.store().object_store().head(&link_path).await {
+        match self.object_store().head(&link_path).await {
             Ok(meta) => {
                 // A missing timestamp reads as young: never delete a file an
                 // old-shape writer may just have rewritten.
@@ -288,7 +285,7 @@ impl MetadataStore {
                     .last_modified
                     .map_or(0, |m| Utc::now().signed_duration_since(m).num_seconds());
                 if age >= i64::try_from(self.gc_grace_secs).unwrap_or(i64::MAX) {
-                    self.store().object_store().delete(&link_path).await?;
+                    self.object_store().delete(&link_path).await?;
                 }
             }
             Err(StorageError::NotFound) => {}

@@ -3,9 +3,6 @@ use std::str::FromStr;
 
 use bytes::Bytes;
 
-use angos_oci::{Digest, Namespace, Tag};
-use angos_tx_engine::lock::{LockStrategy, S3LockConfig};
-
 use crate::registry::metadata_store::tests::test_config;
 use crate::registry::{
     Error,
@@ -15,11 +12,12 @@ use crate::registry::{
     path_builder,
     test_utils::fs_test_stack,
 };
+use angos_oci::{Digest, Namespace, Tag};
 
 #[tokio::test]
 async fn test_blob_index_updates_multiple_digests() {
     let config = test_config();
-    let backend = config.to_backend(false, None).unwrap();
+    let backend = config.to_backend(None).unwrap();
     let namespace = Namespace::new("blob-index-multi-digest-test").unwrap();
 
     let digests: Vec<Digest> = (0..5)
@@ -59,7 +57,7 @@ async fn test_blob_index_updates_multiple_digests() {
 #[tokio::test]
 async fn test_tracked_link_creates_with_referrers() {
     let config = test_config();
-    let backend = config.to_backend(false, None).unwrap();
+    let backend = config.to_backend(None).unwrap();
     let namespace = Namespace::new("tracked-creates-referrer-test").unwrap();
 
     let referrer_digest =
@@ -100,35 +98,25 @@ async fn test_tracked_link_creates_with_referrers() {
 
     backend.update_links(&namespace, &ops).await.unwrap();
 
-    for layer_digest in &layer_digests {
-        let link = LinkKind::Layer(layer_digest.clone());
-        let meta = backend
-            .read_link_reference(&namespace, &link)
-            .await
-            .unwrap();
-        assert_eq!(meta.target, *layer_digest);
+    // Pushes write no tracked link files; the pin is the per-referrer
+    // reference entry on each referenced blob.
+    let entry = LinkKind::ReferencedBy(referrer_digest.clone());
+    for target in layer_digests.iter().chain([&config_digest]) {
+        let index = backend.read_blob_index(target).await.unwrap();
         assert!(
-            meta.referenced_by.contains(&referrer_digest),
-            "Layer link {link} should have referrer {referrer_digest}"
+            index
+                .namespace
+                .get(&namespace)
+                .is_some_and(|links| links.contains(&entry)),
+            "blob {target} should carry the per-referrer entry for {referrer_digest}"
         );
     }
-
-    let config_link = LinkKind::Config(config_digest.clone());
-    let meta = backend
-        .read_link_reference(&namespace, &config_link)
-        .await
-        .unwrap();
-    assert_eq!(meta.target, config_digest);
-    assert!(
-        meta.referenced_by.contains(&referrer_digest),
-        "Config link should have referrer {referrer_digest}"
-    );
 }
 
 #[tokio::test]
 async fn test_tracked_link_deletes_with_referrers() {
     let config = test_config();
-    let backend = config.to_backend(false, None).unwrap();
+    let backend = config.to_backend(None).unwrap();
     let namespace = Namespace::new("tracked-deletes-referrer-test").unwrap();
 
     let referrer_digest =
@@ -156,13 +144,16 @@ async fn test_tracked_link_deletes_with_referrers() {
         .collect();
     backend.update_links(&namespace, &create_ops).await.unwrap();
 
+    let entry = LinkKind::ReferencedBy(referrer_digest.clone());
     for d in &layer_digests {
-        let link = LinkKind::Layer(d.clone());
-        let meta = backend
-            .read_link_reference(&namespace, &link)
-            .await
-            .unwrap();
-        assert_eq!(meta.target, *d);
+        let index = backend.read_blob_index(d).await.unwrap();
+        assert!(
+            index
+                .namespace
+                .get(&namespace)
+                .is_some_and(|links| links.contains(&entry)),
+            "blob {d} should carry the per-referrer entry before the delete"
+        );
     }
 
     let delete_ops: Vec<LinkOperation> = layer_digests
@@ -199,7 +190,7 @@ async fn test_tracked_link_deletes_with_referrers() {
 #[tokio::test]
 async fn test_mixed_creates_and_deletes_across_digests() {
     let config = test_config();
-    let backend = config.to_backend(false, None).unwrap();
+    let backend = config.to_backend(None).unwrap();
     let namespace = Namespace::new("mixed-ops-across-digests-test").unwrap();
 
     let digest_keep =
@@ -281,7 +272,7 @@ async fn test_mixed_creates_and_deletes_across_digests() {
 #[tokio::test]
 async fn writes_land_as_reference_keys_not_shards() {
     let config = test_config();
-    let backend = config.to_backend(false, None).unwrap();
+    let backend = config.to_backend(None).unwrap();
     let namespace = Namespace::new("ref-key-shape-test").unwrap();
     let digest =
         Digest::from_str("sha256:abab000000000000000000000000000000000000000000000000000000000000")
@@ -298,13 +289,11 @@ async fn writes_land_as_reference_keys_not_shards() {
     backend.update_links(&namespace, &ops).await.unwrap();
 
     backend
-        .store()
         .object_store()
         .head(&path_builder::blob_ref_path(&digest, &namespace, &link))
         .await
         .expect("the tag's reference key must exist");
     let shards = backend
-        .store()
         .object_store()
         .list(&path_builder::blob_index_refs_dir(&digest), 10, None)
         .await
@@ -318,7 +307,7 @@ async fn writes_land_as_reference_keys_not_shards() {
 #[tokio::test]
 async fn legacy_shards_merge_into_every_read() {
     let config = test_config();
-    let backend = config.to_backend(false, None).unwrap();
+    let backend = config.to_backend(None).unwrap();
     let legacy_ns = Namespace::new("legacy-merge-old").unwrap();
     let new_ns = Namespace::new("legacy-merge-new").unwrap();
     let digest =
@@ -327,7 +316,6 @@ async fn legacy_shards_merge_into_every_read() {
 
     let shard = serde_json::to_vec(&[LinkKind::Blob(digest.clone())]).unwrap();
     backend
-        .store()
         .object_store()
         .put(
             &path_builder::blob_index_shard_path(&digest, &legacy_ns),
@@ -365,12 +353,8 @@ async fn legacy_shards_merge_into_every_read() {
 /// directly here: it is the only way to reach the tolerance branch.
 #[tokio::test]
 async fn test_has_blob_references_ignores_empty_cas_shards() {
-    // CAS shard updates only run when the backend's coordinator is `Cas`,
-    // which the constructor selects exclusively for `LockStrategy::S3` with
-    // CAS-capable conditional caps.
-    let mut config = test_config();
-    config.lock_strategy = LockStrategy::S3(S3LockConfig::default());
-    let backend = config.to_backend(true, None).unwrap();
+    let config = test_config();
+    let backend = config.to_backend(None).unwrap();
 
     let digest =
         Digest::from_str("sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
@@ -379,7 +363,6 @@ async fn test_has_blob_references_ignores_empty_cas_shards() {
     let shard_path = path_builder::blob_index_shard_path(&digest, &namespace);
 
     backend
-        .store()
         .object_store()
         .put(&shard_path, Bytes::from_static(b"[]"))
         .await
@@ -405,7 +388,6 @@ async fn test_has_blob_references_ignores_empty_cas_shards() {
     );
 
     backend
-        .store()
         .object_store()
         .delete_prefix(&config.connection.key_prefix)
         .await
@@ -419,7 +401,7 @@ async fn test_has_blob_references_ignores_empty_cas_shards() {
 #[tokio::test]
 async fn legacy_shards_gate_collector_liveness() {
     let config = test_config();
-    let backend = config.to_backend(false, None).unwrap();
+    let backend = config.to_backend(None).unwrap();
     let theirs = Namespace::new("theirs").unwrap();
     let digest =
         Digest::from_str("sha256:ff00000000000000000000000000000000000000000000000000000000000002")
@@ -427,7 +409,6 @@ async fn legacy_shards_gate_collector_liveness() {
     let theirs_shard = path_builder::blob_index_shard_path(&digest, &theirs);
 
     backend
-        .store()
         .object_store()
         .put(&theirs_shard, Bytes::from_static(b"[]"))
         .await
@@ -439,7 +420,6 @@ async fn legacy_shards_gate_collector_liveness() {
 
     let links = serde_json::to_vec(&[LinkKind::Blob(digest.clone())]).unwrap();
     backend
-        .store()
         .object_store()
         .put(&theirs_shard, Bytes::from(links))
         .await
@@ -457,7 +437,6 @@ async fn legacy_shards_gate_collector_liveness() {
     let refs_dir = path_builder::blob_index_refs_dir(&bad_digest);
     let links = serde_json::to_vec(&[LinkKind::Blob(bad_digest.clone())]).unwrap();
     backend
-        .store()
         .object_store()
         .put(&format!("{refs_dir}/BAD.json"), Bytes::from(links))
         .await
@@ -473,7 +452,7 @@ async fn legacy_shards_gate_collector_liveness() {
 #[tokio::test]
 async fn corrupt_shard_fails_reclaim_read_instead_of_parsing_empty() {
     let stack = fs_test_stack();
-    let store = stack.store.as_ref();
+    let store = &stack.store;
     let namespace = Namespace::new("corrupt-shard-test").unwrap();
     let digest =
         Digest::from_str("sha256:ff00000000000000000000000000000000000000000000000000000000000001")
@@ -481,7 +460,6 @@ async fn corrupt_shard_fails_reclaim_read_instead_of_parsing_empty() {
 
     let shard_path = path_builder::blob_index_shard_path(&digest, &namespace);
     store
-        .object_store()
         .put(&shard_path, Bytes::from_static(b"not json"))
         .await
         .unwrap();
@@ -509,7 +487,6 @@ async fn legacy_tracked_entry_reads_unbacked_once_its_referrer_is_gone() {
     let link = LinkKind::Layer(layer.clone());
     let shard = serde_json::to_vec(slice::from_ref(&link)).unwrap();
     store
-        .store()
         .object_store()
         .put(
             &path_builder::blob_index_shard_path(&layer, &namespace),

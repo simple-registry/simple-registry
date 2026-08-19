@@ -5,10 +5,7 @@ mod gc;
 mod list_namespaces;
 mod tag_entries;
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use chrono::{Duration, Utc};
@@ -18,8 +15,7 @@ use angos_oci::request::GetReferrersRequest;
 use angos_oci::{Algorithm, Descriptor, Digest, MediaType, Namespace, Tag};
 use angos_s3_client::Backend as S3HttpBackend;
 use angos_storage::Page;
-use angos_storage::{ConditionalStore, ObjectStore, s3::Backend as StorageS3Backend};
-use angos_tx_engine::{lock::LockStrategy, store::Store};
+use angos_storage::{ObjectStore, s3::Backend as StorageS3Backend};
 
 use crate::{
     cache::Cache,
@@ -40,46 +36,19 @@ use crate::{
 #[derive(Clone)]
 pub struct TestS3Config {
     pub connection: S3ConnectionConfig,
-    pub lock_strategy: LockStrategy,
     pub link_cache_ttl: u64,
     pub access_time_debounce_secs: u64,
 }
 
 impl TestS3Config {
-    pub fn to_backend(
-        &self,
-        conditional_operations: bool,
-        cache: Option<Arc<Cache>>,
-    ) -> Result<MetadataStore, Error> {
+    pub fn to_backend(&self, cache: Option<Arc<Cache>>) -> Result<MetadataStore, Error> {
         let http = Arc::new(
             S3HttpBackend::new(&self.connection.to_client_config())
                 .map_err(|e| Error::Internal(e.to_string()))?,
         );
-        let raw_storage = Arc::new(StorageS3Backend::builder(http.clone()).build());
-        let object_store: Arc<dyn ObjectStore> = raw_storage.clone();
-        let cond_store: Option<Arc<dyn ConditionalStore>> =
-            conditional_operations.then_some(raw_storage as Arc<dyn ConditionalStore>);
+        let object_store: Arc<dyn ObjectStore> = Arc::new(StorageS3Backend::builder(http).build());
 
-        let s3_lock_store: Option<Arc<dyn ConditionalStore>> = match &self.lock_strategy {
-            LockStrategy::S3(cfg) => {
-                let lock_http = S3HttpBackend::new(&self.connection.to_lock_client_config(cfg))
-                    .map_err(|e| Error::Internal(e.to_string()))?;
-                let lock_backend = StorageS3Backend::builder(Arc::new(lock_http)).build();
-                Some(Arc::new(lock_backend))
-            }
-            _ => None,
-        };
-
-        let facade = Arc::new(
-            Store::new(
-                object_store,
-                cond_store,
-                self.lock_strategy.clone(),
-                s3_lock_store,
-            )
-            .map_err(|e| Error::Internal(e.to_string()))?,
-        );
-        let mut builder = MetadataStore::builder(facade)
+        let mut builder = MetadataStore::builder(object_store)
             .link_cache_ttl(self.link_cache_ttl)
             .access_time_debounce_secs(self.access_time_debounce_secs)
             .gc_grace_secs(0);
@@ -96,7 +65,6 @@ pub fn test_config() -> TestS3Config {
     metrics_provider::init_for_tests();
     TestS3Config {
         connection: s3_test_connection(format!("test-backend-{}", uuid::Uuid::new_v4())),
-        lock_strategy: LockStrategy::Memory,
         link_cache_ttl: 30,
         access_time_debounce_secs: 0,
     }
@@ -104,16 +72,14 @@ pub fn test_config() -> TestS3Config {
 
 pub fn test_backend_with_cache(config: &TestS3Config) -> (MetadataStore, Arc<Cache>) {
     let cache = Arc::new(Cache::Memory(CacheMemoryBackend::new()));
-    let backend = config.to_backend(true, Some(cache.clone())).unwrap();
+    let backend = config.to_backend(Some(cache.clone())).unwrap();
     (backend, cache)
 }
 
-/// Debounce applies to lock-coordinated deployments only (CAS stamps access
-/// times inline), so this builds without conditional operations.
 pub fn test_backend_with_debounce(config: &TestS3Config, debounce_secs: u64) -> MetadataStore {
     let mut cfg = config.clone();
     cfg.access_time_debounce_secs = debounce_secs;
-    cfg.to_backend(false, None).unwrap()
+    cfg.to_backend(None).unwrap()
 }
 
 // Integration tests
@@ -137,7 +103,7 @@ async fn delete_link(m: &Arc<MetadataStore>, namespace: &str, link: &LinkKind) {
 
 pub async fn test_datastore_list_namespaces(m: Arc<MetadataStore>) {
     let namespaces = ["repo1", "repo2", "repo3/nested"];
-    let digest = put_blob_direct(m.store(), b"test blob content").await;
+    let digest = put_blob_direct(m.object_store(), b"test blob content").await;
 
     for namespace in &namespaces {
         let tag_link = LinkKind::Tag(Tag::new("latest").unwrap());
@@ -190,7 +156,7 @@ pub async fn test_datastore_list_namespaces(m: Arc<MetadataStore>) {
 
 pub async fn test_datastore_list_tags(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("test-repo").unwrap();
-    let digest = put_blob_direct(m.store(), b"test blob content").await;
+    let digest = put_blob_direct(m.object_store(), b"test blob content").await;
 
     let tags = ["latest", "v1.0", "v2.0"];
     for tag in tags {
@@ -254,7 +220,7 @@ pub async fn test_datastore_list_tags(m: Arc<MetadataStore>) {
 
 pub async fn test_datastore_list_tag_names_includes_malformed(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("test-repo/raw-tags").unwrap();
-    let digest = put_blob_direct(m.store(), b"raw tag test blob").await;
+    let digest = put_blob_direct(m.object_store(), b"raw tag test blob").await;
 
     // A valid tag via the normal link path.
     let valid = LinkKind::Tag(Tag::new("v1.0").unwrap());
@@ -262,8 +228,7 @@ pub async fn test_datastore_list_tag_names_includes_malformed(m: Arc<MetadataSto
 
     // A directory whose name fails the tag grammar (leading '-'), planted by
     // writing a raw `current/link` object so validation is bypassed.
-    m.store()
-        .object_store()
+    m.object_store()
         .put(
             &format!(
                 "{}/current/link",
@@ -305,8 +270,7 @@ pub async fn test_datastore_delete_tag_directory_guards_unsafe_names(m: Arc<Meta
 
     // Positive case: a safe but grammar-invalid name (leading '-') is the normal
     // invalid-tag scrub target and must be deleted, proving no over-rejection.
-    m.store()
-        .object_store()
+    m.object_store()
         .put(
             &format!(
                 "{}/current/link",
@@ -334,7 +298,7 @@ pub async fn test_datastore_delete_tag_directory_guards_unsafe_names(m: Arc<Meta
 pub async fn test_datastore_list_referrers(registry: &Registry) {
     let m = registry.metadata_store.clone();
     let namespace = &Namespace::new("test-repo").unwrap();
-    let base_digest = put_blob_direct(m.store(), b"base manifest content").await;
+    let base_digest = put_blob_direct(m.object_store(), b"base manifest content").await;
     let base_link = LinkKind::Digest(base_digest.clone());
 
     create_link(&m, namespace, &base_link, &base_digest).await;
@@ -359,7 +323,7 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
         }}"#
     );
 
-    let referrer_digest = put_blob_direct(m.store(), referrer_content.as_bytes()).await;
+    let referrer_digest = put_blob_direct(m.object_store(), referrer_content.as_bytes()).await;
     let link = LinkKind::Digest(referrer_digest.clone());
 
     create_link(&m, namespace, &link, &referrer_digest).await;
@@ -425,7 +389,7 @@ pub async fn test_datastore_stream_revisions(m: Arc<MetadataStore>) {
 
     let mut digests = Vec::new();
     for content in &manifest_contents {
-        let digest = put_blob_direct(m.store(), content).await;
+        let digest = put_blob_direct(m.object_store(), content).await;
         digests.push(digest.clone());
 
         let digest_link = LinkKind::Digest(digest.clone());
@@ -461,7 +425,7 @@ pub async fn test_datastore_stream_revisions_across_algorithms(m: Arc<MetadataSt
 
 pub async fn test_datastore_link_operations(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("test-namespace").unwrap();
-    let digest = put_blob_direct(m.store(), b"test blob content").await;
+    let digest = put_blob_direct(m.object_store(), b"test blob content").await;
 
     let tag = "latest";
     let tag_link = LinkKind::Tag(Tag::new(tag).unwrap());
@@ -542,7 +506,7 @@ async fn test_link_operations() {
 
 pub async fn test_datastore_list_namespaces_deduplication(m: Arc<MetadataStore>) {
     let namespace = "dedup-repo";
-    let digest = put_blob_direct(m.store(), b"dedup test content").await;
+    let digest = put_blob_direct(m.object_store(), b"dedup test content").await;
 
     // Create multiple link types within the same namespace
     let tag_link = LinkKind::Tag(Tag::new("latest").unwrap());
@@ -565,7 +529,7 @@ pub async fn test_datastore_list_namespaces_deduplication(m: Arc<MetadataStore>)
 }
 
 pub async fn test_datastore_list_namespaces_many_namespaces_pagination(m: Arc<MetadataStore>) {
-    let digest = put_blob_direct(m.store(), b"pagination test content").await;
+    let digest = put_blob_direct(m.object_store(), b"pagination test content").await;
 
     let namespace_names: Vec<String> = (0..10).map(|i| format!("ns-{i:02}")).collect();
 
@@ -615,7 +579,7 @@ pub async fn test_datastore_list_namespaces_many_namespaces_pagination(m: Arc<Me
 }
 
 pub async fn test_datastore_list_namespaces_single_item_pages(m: Arc<MetadataStore>) {
-    let digest = put_blob_direct(m.store(), b"single page test content").await;
+    let digest = put_blob_direct(m.object_store(), b"single page test content").await;
 
     let namespace_names: Vec<String> = (0..5).map(|i| format!("single-{i:02}")).collect();
 
@@ -687,7 +651,7 @@ async fn test_list_namespaces_single_item_pages() {
 
 pub async fn test_datastore_list_tags_many_tags_pagination(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("test-repo-name").unwrap();
-    let digest = put_blob_direct(m.store(), b"content").await;
+    let digest = put_blob_direct(m.object_store(), b"content").await;
 
     let tag_names: Vec<String> = (0..10).map(|i| format!("tag-{i:02}")).collect();
 
@@ -740,7 +704,7 @@ pub async fn test_datastore_list_tags_many_tags_pagination(m: Arc<MetadataStore>
 
 pub async fn test_datastore_list_tags_single_item_pages(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("test-repo-name").unwrap();
-    let digest = put_blob_direct(m.store(), b"content").await;
+    let digest = put_blob_direct(m.object_store(), b"content").await;
 
     let tag_names: Vec<String> = (0..5).map(|i| format!("single-tag-{i:02}")).collect();
 
@@ -804,8 +768,8 @@ async fn test_list_tags_single_item_pages() {
 
 pub async fn test_update_links(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("test-update-links").unwrap();
-    let digest1 = put_blob_direct(m.store(), b"content1").await;
-    let digest2 = put_blob_direct(m.store(), b"content2").await;
+    let digest1 = put_blob_direct(m.object_store(), b"content1").await;
+    let digest2 = put_blob_direct(m.object_store(), b"content2").await;
 
     let tag1 = LinkKind::Tag(Tag::new("v1").unwrap());
     let tag2 = LinkKind::Tag(Tag::new("v2").unwrap());
@@ -849,7 +813,7 @@ async fn test_update_links_batched() {
 
 pub async fn test_datastore_read_link_access_time_update(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("test-access-time").unwrap();
-    let digest = put_blob_direct(m.store(), b"access time test content").await;
+    let digest = put_blob_direct(m.object_store(), b"access time test content").await;
 
     let tag_link = LinkKind::Tag(Tag::new("latest").unwrap());
     create_link(&m, namespace, &tag_link, &digest).await;
@@ -890,7 +854,7 @@ async fn test_read_link_access_time_update() {
 
 pub async fn test_datastore_read_link_concurrent_readonly(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("test-concurrent-read").unwrap();
-    let digest = put_blob_direct(m.store(), b"concurrent read test content").await;
+    let digest = put_blob_direct(m.object_store(), b"concurrent read test content").await;
 
     let tag_link = LinkKind::Tag(Tag::new("latest").unwrap());
     create_link(&m, namespace, &tag_link, &digest).await;
@@ -921,7 +885,7 @@ async fn test_read_link_concurrent_readonly() {
 pub async fn test_datastore_list_referrers_parallel_correctness(registry: &Registry) {
     let m = registry.metadata_store.clone();
     let namespace = &Namespace::new("test-referrers-parallel").unwrap();
-    let subject_digest = put_blob_direct(m.store(), b"subject manifest content").await;
+    let subject_digest = put_blob_direct(m.object_store(), b"subject manifest content").await;
     let subject_link = LinkKind::Digest(subject_digest.clone());
     create_link(&m, namespace, &subject_link, &subject_digest).await;
 
@@ -947,7 +911,7 @@ pub async fn test_datastore_list_referrers_parallel_correctness(registry: &Regis
             }}"#
         );
 
-        let referrer_digest = put_blob_direct(m.store(), referrer_content.as_bytes()).await;
+        let referrer_digest = put_blob_direct(m.object_store(), referrer_content.as_bytes()).await;
         let digest_link = LinkKind::Digest(referrer_digest.clone());
         create_link(&m, namespace, &digest_link, &referrer_digest).await;
 
@@ -985,7 +949,8 @@ pub async fn test_datastore_list_referrers_parallel_correctness(registry: &Regis
 pub async fn test_datastore_list_referrers_with_artifact_type_filter(registry: &Registry) {
     let m = registry.metadata_store.clone();
     let namespace = &Namespace::new("test-referrers-filter").unwrap();
-    let subject_digest = put_blob_direct(m.store(), b"subject manifest for filter test").await;
+    let subject_digest =
+        put_blob_direct(m.object_store(), b"subject manifest for filter test").await;
     let subject_link = LinkKind::Digest(subject_digest.clone());
     create_link(&m, namespace, &subject_link, &subject_digest).await;
 
@@ -1010,7 +975,7 @@ pub async fn test_datastore_list_referrers_with_artifact_type_filter(registry: &
             }}"#
         );
 
-        let referrer_digest = put_blob_direct(m.store(), referrer_content.as_bytes()).await;
+        let referrer_digest = put_blob_direct(m.object_store(), referrer_content.as_bytes()).await;
         let digest_link = LinkKind::Digest(referrer_digest.clone());
         create_link(&m, namespace, &digest_link, &referrer_digest).await;
 
@@ -1042,7 +1007,7 @@ pub async fn test_datastore_list_referrers_with_artifact_type_filter(registry: &
             }}"#
         );
 
-        let referrer_digest = put_blob_direct(m.store(), referrer_content.as_bytes()).await;
+        let referrer_digest = put_blob_direct(m.object_store(), referrer_content.as_bytes()).await;
         let digest_link = LinkKind::Digest(referrer_digest.clone());
         create_link(&m, namespace, &digest_link, &referrer_digest).await;
 
@@ -1083,7 +1048,8 @@ pub async fn test_datastore_list_referrers_with_artifact_type_filter(registry: &
 pub async fn test_datastore_list_referrers_deterministic_order(registry: &Registry) {
     let m = registry.metadata_store.clone();
     let namespace = &Namespace::new("test-referrers-order").unwrap();
-    let subject_digest = put_blob_direct(m.store(), b"subject manifest for order test").await;
+    let subject_digest =
+        put_blob_direct(m.object_store(), b"subject manifest for order test").await;
     let subject_link = LinkKind::Digest(subject_digest.clone());
     create_link(&m, namespace, &subject_link, &subject_digest).await;
 
@@ -1108,7 +1074,7 @@ pub async fn test_datastore_list_referrers_deterministic_order(registry: &Regist
             }}"#
         );
 
-        let referrer_digest = put_blob_direct(m.store(), referrer_content.as_bytes()).await;
+        let referrer_digest = put_blob_direct(m.object_store(), referrer_content.as_bytes()).await;
         let digest_link = LinkKind::Digest(referrer_digest.clone());
         create_link(&m, namespace, &digest_link, &referrer_digest).await;
 
@@ -1186,7 +1152,7 @@ pub async fn test_datastore_parallel_multiple_creates(m: Arc<MetadataStore>) {
 
     let mut digests = Vec::new();
     for i in 0..5 {
-        let digest = put_blob_direct(m.store(), format!("content-{i}").as_bytes()).await;
+        let digest = put_blob_direct(m.object_store(), format!("content-{i}").as_bytes()).await;
         digests.push(digest);
     }
 
@@ -1249,9 +1215,9 @@ async fn test_parallel_multiple_creates() {
 pub async fn test_datastore_parallel_mixed_create_delete(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("parallel-mixed-ns").unwrap();
 
-    let digest_a = put_blob_direct(m.store(), b"content-a").await;
-    let digest_b = put_blob_direct(m.store(), b"content-b").await;
-    let digest_c = put_blob_direct(m.store(), b"content-c").await;
+    let digest_a = put_blob_direct(m.object_store(), b"content-a").await;
+    let digest_b = put_blob_direct(m.object_store(), b"content-b").await;
+    let digest_c = put_blob_direct(m.object_store(), b"content-c").await;
 
     create_link(
         &m,
@@ -1338,7 +1304,7 @@ pub async fn test_datastore_parallel_blob_index_correctness(m: Arc<MetadataStore
 
     let mut digests = Vec::new();
     for i in 0..4 {
-        let digest = put_blob_direct(m.store(), format!("content-{i}").as_bytes()).await;
+        let digest = put_blob_direct(m.object_store(), format!("content-{i}").as_bytes()).await;
         digests.push(digest);
     }
 
@@ -1396,8 +1362,8 @@ async fn test_parallel_blob_index_correctness() {
 pub async fn test_datastore_tracked_create_with_referrer(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("tracked-create-referrer-ns").unwrap();
 
-    let digest_layer = put_blob_direct(m.store(), b"layer content").await;
-    let digest_manifest = put_blob_direct(m.store(), b"manifest content").await;
+    let digest_layer = put_blob_direct(m.object_store(), b"layer content").await;
+    let digest_manifest = put_blob_direct(m.object_store(), b"manifest content").await;
 
     m.update_links(
         namespace,
@@ -1410,17 +1376,14 @@ pub async fn test_datastore_tracked_create_with_referrer(m: Arc<MetadataStore>) 
     .await
     .unwrap();
 
-    let metadata = m
+    // The pin is the per-referrer entry alone; no legacy link file is written.
+    let err = m
         .read_link(namespace, &LinkKind::Layer(digest_layer.clone()))
         .await
-        .unwrap();
-    assert_eq!(
-        metadata.target, digest_layer,
-        "Link target should be the layer digest"
-    );
+        .unwrap_err();
     assert!(
-        metadata.referenced_by.contains(&digest_manifest),
-        "referenced_by should contain the manifest digest"
+        matches!(err, Error::NotFound),
+        "a tracked create must not write the legacy link file, got: {err:?}"
     );
 
     let blob_index = m.read_blob_index(&digest_layer).await.unwrap();
@@ -1445,9 +1408,9 @@ async fn test_tracked_create_with_referrer() {
 pub async fn test_datastore_tracked_delete_with_referrer(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("tracked-delete-referrer-ns").unwrap();
 
-    let layer_digest = put_blob_direct(m.store(), b"layer for delete test").await;
-    let first_manifest_digest = put_blob_direct(m.store(), b"manifest a content").await;
-    let second_manifest_digest = put_blob_direct(m.store(), b"manifest b content").await;
+    let layer_digest = put_blob_direct(m.object_store(), b"layer for delete test").await;
+    let first_manifest_digest = put_blob_direct(m.object_store(), b"manifest a content").await;
+    let second_manifest_digest = put_blob_direct(m.object_store(), b"manifest b content").await;
 
     m.update_links(
         namespace,
@@ -1471,8 +1434,7 @@ pub async fn test_datastore_tracked_delete_with_referrer(m: Arc<MetadataStore>) 
     .await
     .unwrap();
 
-    // The pins live as one per-referrer entry each; the link file is written
-    // once (by the first push) and never merged.
+    // The pins live as one per-referrer entry each; no link file is written.
     let blob_index = m.read_blob_index(&layer_digest).await.unwrap();
     let links = blob_index
         .namespace
@@ -1482,15 +1444,6 @@ pub async fn test_datastore_tracked_delete_with_referrer(m: Arc<MetadataStore>) 
         links.contains(&LinkKind::ReferencedBy(first_manifest_digest.clone()))
             && links.contains(&LinkKind::ReferencedBy(second_manifest_digest.clone())),
         "both pushes must leave their per-referrer entry"
-    );
-    let metadata = m
-        .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
-        .await
-        .unwrap();
-    assert_eq!(
-        metadata.referenced_by,
-        HashSet::from([first_manifest_digest.clone()]),
-        "the advisory link file carries only the referrer that created it"
     );
 
     m.update_links(
@@ -1503,14 +1456,14 @@ pub async fn test_datastore_tracked_delete_with_referrer(m: Arc<MetadataStore>) 
     .await
     .unwrap();
 
-    // The collector-path delete emptied the advisory file's set, so the file
-    // is gone; the reference entries are never removed by writers.
+    // No link file exists in either direction; the reference entries are
+    // never removed by writers.
     let result = m
         .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
         .await;
     assert!(
         matches!(result, Err(Error::NotFound)),
-        "the emptied advisory link file must be removed"
+        "no legacy link file may exist after a tracked delete"
     );
     let blob_index = m.read_blob_index(&layer_digest).await.unwrap();
     let links = blob_index
@@ -1534,9 +1487,9 @@ async fn test_tracked_delete_with_referrer() {
 pub async fn test_datastore_duplicated_layer_keeps_other_referrers(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("tracked-duplicate-layer-ns").unwrap();
 
-    let layer_digest = put_blob_direct(m.store(), b"layer listed twice").await;
-    let first_manifest_digest = put_blob_direct(m.store(), b"manifest c content").await;
-    let second_manifest_digest = put_blob_direct(m.store(), b"manifest d content").await;
+    let layer_digest = put_blob_direct(m.object_store(), b"layer listed twice").await;
+    let first_manifest_digest = put_blob_direct(m.object_store(), b"manifest c content").await;
+    let second_manifest_digest = put_blob_direct(m.object_store(), b"manifest d content").await;
 
     m.update_links(
         namespace,
@@ -1581,13 +1534,15 @@ pub async fn test_datastore_duplicated_layer_keeps_other_referrers(m: Arc<Metada
     ];
     m.update_links(namespace, &duplicated_delete).await.unwrap();
 
-    let metadata = m
-        .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
-        .await
-        .unwrap();
-    assert_eq!(
-        metadata.referenced_by,
-        HashSet::from([first_manifest_digest]),
+    // With no link file, a tracked delete is a no-op on the reference
+    // entries: the first manifest's pin must survive the duplicated delete.
+    let blob_index = m.read_blob_index(&layer_digest).await.unwrap();
+    let links = blob_index
+        .namespace
+        .get(namespace)
+        .expect("Blob index should still have an entry for the namespace");
+    assert!(
+        links.contains(&LinkKind::ReferencedBy(first_manifest_digest.clone())),
         "deleting the duplicating manifest should leave the first manifest's reference"
     );
 }
@@ -1603,8 +1558,8 @@ async fn test_duplicated_layer_keeps_other_referrers() {
 pub async fn test_datastore_tracked_delete_removes_when_no_referrers(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("tracked-delete-no-referrers-ns").unwrap();
 
-    let layer_digest = put_blob_direct(m.store(), b"layer for removal test").await;
-    let manifest_digest = put_blob_direct(m.store(), b"manifest for removal test").await;
+    let layer_digest = put_blob_direct(m.object_store(), b"layer for removal test").await;
+    let manifest_digest = put_blob_direct(m.object_store(), b"manifest for removal test").await;
 
     m.update_links(
         namespace,
@@ -1660,9 +1615,9 @@ async fn test_tracked_delete_removes_when_no_referrers() {
 pub async fn test_datastore_shared_blob_pin_survives_other_manifest_delete(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("shared-config-delete-ns").unwrap();
 
-    let config_digest = put_blob_direct(m.store(), b"shared config bytes").await;
-    let first_manifest = put_blob_direct(m.store(), b"first sharing manifest").await;
-    let second_manifest = put_blob_direct(m.store(), b"second sharing manifest").await;
+    let config_digest = put_blob_direct(m.object_store(), b"shared config bytes").await;
+    let first_manifest = put_blob_direct(m.object_store(), b"first sharing manifest").await;
+    let second_manifest = put_blob_direct(m.object_store(), b"second sharing manifest").await;
 
     for manifest in [&first_manifest, &second_manifest] {
         m.update_links(
@@ -1733,10 +1688,10 @@ async fn test_shared_blob_pin_survives_other_manifest_delete() {
 pub async fn test_datastore_mixed_tracked_untracked_operations(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("mixed-tracked-untracked-ns").unwrap();
 
-    let tag_digest = put_blob_direct(m.store(), b"tag content").await;
-    let layer_digest = put_blob_direct(m.store(), b"layer content mixed").await;
-    let digest_link_digest = put_blob_direct(m.store(), b"digest link content").await;
-    let manifest_digest = put_blob_direct(m.store(), b"manifest content mixed").await;
+    let tag_digest = put_blob_direct(m.object_store(), b"tag content").await;
+    let layer_digest = put_blob_direct(m.object_store(), b"layer content mixed").await;
+    let digest_link_digest = put_blob_direct(m.object_store(), b"digest link content").await;
+    let manifest_digest = put_blob_direct(m.object_store(), b"manifest content mixed").await;
 
     let ops = [
         LinkOperation::create(LinkKind::Tag(Tag::new("v1").unwrap()), tag_digest.clone()),
@@ -1765,17 +1720,13 @@ pub async fn test_datastore_mixed_tracked_untracked_operations(m: Arc<MetadataSt
         "Tag link should have empty referenced_by"
     );
 
-    let layer_meta = m
+    let layer_err = m
         .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
         .await
-        .unwrap();
-    assert_eq!(
-        layer_meta.target, layer_digest,
-        "Layer link should target layer_digest"
-    );
+        .unwrap_err();
     assert!(
-        layer_meta.referenced_by.contains(&manifest_digest),
-        "Layer link referenced_by should contain manifest_digest"
+        matches!(layer_err, Error::NotFound),
+        "a tracked create must not write the legacy link file, got: {layer_err:?}"
     );
 
     let digest_meta = m
@@ -1832,7 +1783,7 @@ async fn test_mixed_tracked_untracked_operations() {
 
 pub async fn test_datastore_batch_deduplicates_same_digest_operations(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("batch-dedup-ns").unwrap();
-    let digest = put_blob_direct(m.store(), b"dedup content").await;
+    let digest = put_blob_direct(m.object_store(), b"dedup content").await;
 
     let tag_link = LinkKind::Tag(Tag::new("latest").unwrap());
     let digest_link = LinkKind::Digest(digest.clone());
@@ -1873,7 +1824,7 @@ async fn test_batch_deduplicates_same_digest_operations() {
 
 pub async fn test_datastore_batch_handles_mixed_insert_remove_same_digest(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("batch-mixed-ns").unwrap();
-    let digest = put_blob_direct(m.store(), b"mixed content").await;
+    let digest = put_blob_direct(m.object_store(), b"mixed content").await;
 
     let tag_v1 = LinkKind::Tag(Tag::new("v1").unwrap());
     create_link(&m, namespace, &tag_v1, &digest).await;
@@ -1911,7 +1862,7 @@ async fn test_batch_handles_mixed_insert_remove_same_digest() {
 
 pub async fn test_datastore_batch_deletes_empty_blob_container(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("batch-empty-container-ns").unwrap();
-    let digest = put_blob_direct(m.store(), b"ephemeral content").await;
+    let digest = put_blob_direct(m.object_store(), b"ephemeral content").await;
 
     let tag_link = LinkKind::Tag(Tag::new("v1").unwrap());
     create_link(&m, namespace, &tag_link, &digest).await;
@@ -1942,10 +1893,10 @@ async fn test_batch_deletes_empty_blob_container() {
 
 pub async fn test_datastore_batch_multiple_unique_digests(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("batch-multi-digest-ns").unwrap();
-    let layer1_digest = put_blob_direct(m.store(), b"layer1 data").await;
-    let layer2_digest = put_blob_direct(m.store(), b"layer2 data").await;
-    let layer3_digest = put_blob_direct(m.store(), b"layer3 data").await;
-    let config_digest = put_blob_direct(m.store(), b"config data").await;
+    let layer1_digest = put_blob_direct(m.object_store(), b"layer1 data").await;
+    let layer2_digest = put_blob_direct(m.object_store(), b"layer2 data").await;
+    let layer3_digest = put_blob_direct(m.object_store(), b"layer3 data").await;
+    let config_digest = put_blob_direct(m.object_store(), b"config data").await;
 
     let layer1_link = LinkKind::Layer(layer1_digest.clone());
     let layer2_link = LinkKind::Layer(layer2_digest.clone());
@@ -1998,7 +1949,7 @@ async fn test_batch_multiple_unique_digests() {
 pub async fn test_datastore_batch_preserves_existing_blob_index_entries(m: Arc<MetadataStore>) {
     let other_ns = &Namespace::new("other-ns").unwrap();
     let my_ns = &Namespace::new("my-ns").unwrap();
-    let digest = put_blob_direct(m.store(), b"shared content").await;
+    let digest = put_blob_direct(m.object_store(), b"shared content").await;
 
     let other_tag = LinkKind::Tag(Tag::new("stable").unwrap());
     create_link(&m, other_ns, &other_tag, &digest).await;
@@ -2066,7 +2017,7 @@ async fn test_link_metadata_media_type() {
     for_each_backend(async |test_case| {
         let m = test_case.metadata_store();
         let namespace = Namespace::new("media-type-test").unwrap();
-        let digest = put_blob_direct(m.store(), b"test content").await;
+        let digest = put_blob_direct(m.object_store(), b"test content").await;
 
         let media_type = "application/vnd.docker.distribution.manifest.v2+json";
 
@@ -2094,7 +2045,7 @@ async fn test_link_without_media_type_has_none() {
     for_each_backend(async |test_case| {
         let m = test_case.metadata_store();
         let namespace = Namespace::new("no-media-type-test").unwrap();
-        let digest = put_blob_direct(m.store(), b"test content 2").await;
+        let digest = put_blob_direct(m.object_store(), b"test content 2").await;
 
         create_link(
             &m,
@@ -2119,7 +2070,7 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
     let namespace = &Namespace::new("test-stored-descriptor").unwrap();
 
     // Create a base manifest blob that the referrers will reference
-    let base_digest = put_blob_direct(m.store(), b"base manifest content").await;
+    let base_digest = put_blob_direct(m.object_store(), b"base manifest content").await;
     let base_link = LinkKind::Digest(base_digest.clone());
     create_link(&m, namespace, &base_link, &base_digest).await;
 

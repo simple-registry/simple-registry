@@ -174,6 +174,17 @@ impl Probes {
         )
     }
 
+    /// The stale referrer's would-be per-referrer entry: scrub must never
+    /// mint one from the damaged file's `referenced_by` set.
+    pub fn gate2_config_stale_ref_entry(&self) -> String {
+        format!(
+            "v2/ref/sha256/{}/{}/{GATE2_NS}!r/sha256.{}",
+            &self.gate_config_digest[..2],
+            self.gate_config_digest,
+            self.missing_digest
+        )
+    }
+
     /// Canonical data key of the gate image's layer, the audit-teeth target.
     pub fn gate_layer_data(&self) -> String {
         blob_data_key(&self.gate_layer_digest)

@@ -154,7 +154,7 @@ impl From<auth::Error> for Error {
 impl From<bootstrap::Error> for Error {
     fn from(e: bootstrap::Error) -> Self {
         match e {
-            bootstrap::Error::StorageBackend(inner) | bootstrap::Error::Coordination(inner) => {
+            bootstrap::Error::StorageBackend(inner) => {
                 Error::Initialization(format!("Failed to initialize storage handles: {inner}"))
             }
             bootstrap::Error::Cache(inner) => {

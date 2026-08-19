@@ -2,11 +2,11 @@
 //! merge them in as a fallback and scrub converts each one into reference
 //! keys, so everything here is read-side and disappears with the last shard.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use bytes::Bytes;
 
-use angos_tx_engine::{StorageError, store::Store};
+use angos_storage::{Error as StorageError, ObjectStore};
 
 use crate::registry::{Error, metadata_store::LinkKind};
 
@@ -32,10 +32,10 @@ pub fn non_empty_links_or_not_found(links: HashSet<LinkKind>) -> Result<HashSet<
 /// when absent. A present shard that fails to parse is an error, never an
 /// empty set: the reclaim decisions built on this read must fail closed.
 pub async fn read_shard(
-    store: &Store,
+    store: &Arc<dyn ObjectStore>,
     shard_path: &str,
 ) -> Result<Option<(Bytes, HashSet<LinkKind>)>, StorageError> {
-    match store.object_store().get(shard_path).await {
+    match store.get(shard_path).await {
         Ok(data) => {
             let links: HashSet<LinkKind> = serde_json::from_slice(&data).map_err(|e| {
                 StorageError::Backend(format!("corrupt blob-index shard {shard_path}: {e}"))

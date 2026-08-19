@@ -596,7 +596,8 @@ async fn mount_emits_blob_push_event() {
     let source = &Namespace::new("test-repo/source").unwrap();
     let target = &Namespace::new("test-repo/target").unwrap();
 
-    let digest = put_blob_direct(fixture.registry.metadata_store.store(), b"mountable").await;
+    let digest =
+        put_blob_direct(fixture.registry.metadata_store.object_store(), b"mountable").await;
     BlobOwnership::new(fixture.registry.metadata_store.as_ref())
         .grant(source, &digest)
         .await
@@ -642,7 +643,8 @@ async fn mount_fallback_still_emits_intent_event() {
     let target = &Namespace::new("test-repo/target").unwrap();
 
     // Present but unowned by `source` -> the mount falls back to a session.
-    let digest = put_blob_direct(fixture.registry.metadata_store.store(), b"not owned").await;
+    let digest =
+        put_blob_direct(fixture.registry.metadata_store.object_store(), b"not owned").await;
     let mount = BlobMount {
         digest: digest.clone(),
         from: Some(source.clone()),

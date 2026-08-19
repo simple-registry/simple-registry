@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Once},
+    sync::{Arc, Once},
 };
 
 use tempfile::TempDir;
@@ -103,8 +103,7 @@ async fn test_build_metadata_store_filesystem_success() {
         &auth_cache,
         config.global.namespace_walk_concurrency,
         config.global.gc_grace_secs,
-    )
-    .await;
+    );
 
     assert!(result.is_ok());
 }
@@ -221,8 +220,6 @@ async fn test_build_registry_minimal_config() {
     let result = setup::build_registry(
         &config,
         &bootstrap::auth_cache(&config.cache).expect("auth cache"),
-        &Arc::new(Mutex::new(None)),
-        None,
     )
     .await;
 
@@ -235,8 +232,6 @@ async fn test_build_registry_with_repositories() {
     let result = setup::build_registry(
         &config,
         &bootstrap::auth_cache(&config.cache).expect("auth cache"),
-        &Arc::new(Mutex::new(None)),
-        None,
     )
     .await;
 
@@ -253,8 +248,6 @@ async fn test_build_registry_with_update_pull_time() {
     let result = setup::build_registry(
         &config,
         &bootstrap::auth_cache(&config.cache).expect("auth cache"),
-        &Arc::new(Mutex::new(None)),
-        None,
     )
     .await;
 
@@ -317,7 +310,6 @@ async fn test_build_registry_components_integration() {
         config.global.namespace_walk_concurrency,
         config.global.gc_grace_secs,
     )
-    .await
     .unwrap();
     let repositories = bootstrap::repositories(
         &config.repository,

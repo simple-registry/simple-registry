@@ -45,9 +45,9 @@ restart), but the server drains them itself rather than a separate worker.
 
 The queue has no storage backend of its own. Durable jobs are written to the
 **same backend you already configured for `[metadata_store]`** (filesystem or
-S3) under a hardcoded top-level `_jobs/` prefix, and the per-`lock_key`
-execution lock uses the lock strategy inherited from `[metadata_store]`. There
-is no `[global.job_queue.fs]` or `[global.job_queue.s3]` sub-table: enabling the
+S3) under a hardcoded top-level `_jobs/` prefix, and workers serialise on
+per-`lock_key` claim keys created atomically on that backend. There is no
+`[global.job_queue.fs]` or `[global.job_queue.s3]` sub-table: enabling the
 queue is just a matter of adding `[global.job_queue]`, which accepts only the
 two tunables below.
 
@@ -62,15 +62,11 @@ pending_ready_horizon_secs = 600     # only jobs ready within this many seconds 
 ```
 
 > **Note:** Because storage is inherited from `[metadata_store]`, the durable
-> queue is drained by separate processes and therefore needs a
-> multi-process-safe lock strategy on the metadata store: `lock_strategy.redis`
-> for the filesystem backend, or the default `lock_strategy = "s3"` for the S3
-> backend. The `"memory"` lock strategy only coordinates within a single
-> process, so **Angos refuses to start** when `[global.job_queue]` is
-> configured with it: set a shared lock strategy, or remove
-> `[global.job_queue]` to use the in-process queue. See
-> [the configuration reference](../reference/configuration.md) for the
-> `[metadata_store]` lock options.
+> queue needs the backend's atomic create-if-absent to be honest (`link(2)`
+> on FS, `If-None-Match: *` on S3). A startup probe creates a scratch claim
+> key twice and **Angos refuses to start** when the second create succeeds;
+> use a compliant backend, or remove `[global.job_queue]` to use the
+> in-process queue.
 
 ## Running the worker
 
@@ -82,8 +78,8 @@ A durable-queue deployment needs both subcommands:
 - `angos worker` polls the queue, fetches blobs from upstream, and writes them
   into the shared blob/metadata store. Each worker processes up to
   `max_concurrent_cache_jobs` jobs in parallel; multiple workers safely share
-  the queue thanks to a per-`lock_key` execution lock held on the lock strategy
-  inherited from `[metadata_store]`. Run at least one.
+  the queue thanks to leased per-`lock_key` claim keys on the
+  `[metadata_store]` backend. Run at least one.
 
 Both subcommands hot-reload `config.toml` on disk: changes to
 `[global.job_queue]`, `[repository.*]`, `[blob_store.*]`, or
@@ -147,25 +143,17 @@ re-execution rename the file with a zero prefix:
 already hit the retry ceiling will still go straight to DLQ on first failure
 unless you also edit the body).
 
-**Filesystem metadata store on shared storage:** When `[metadata_store]` uses
-the filesystem backend, worker coordination is provided by its configured
-`lock_strategy`, not by the filesystem. A shared volume only needs to be
-writable by every replica and to support atomic rename within a directory.
-Multi-process pools require `[metadata_store.fs.lock_strategy.redis]`; the
-default `lock_strategy = "memory"` does not coordinate across processes even on
-a shared mount. If you do not want to run Redis, use the S3 metadata backend
-instead.
+**Filesystem metadata store on shared storage:** worker coordination rides on
+an atomic `link(2)`-based create-if-absent for the claim keys. A shared volume
+must be writable by every replica and must enforce that atomic create; NFS
+implementations get this wrong often enough that the startup probe verifies
+it and refuses the backend otherwise.
 
-**S3 metadata store requirements:** When `[metadata_store]` uses the S3 backend
-with the default `lock_strategy = "s3"`, the per-`lock_key` execution lock is
-held on an S3 object backed by conditional requests: the provider must support
-the full conditional set (`PutObject` with `If-None-Match: *` and with
-`If-Match`, `DeleteObject` with `If-Match`). Endpoints that strip `ETag` from
-PUT responses are not supported. With an explicit `lock_strategy.s3`, angos
-fails fast at startup when any operation is missing; with an unset lock
-strategy it falls back to the in-process memory lock and refuses to start
-while `[global.job_queue]` is configured. On such providers use
-`[metadata_store.s3.lock_strategy.redis]` instead.
+**S3 metadata store requirements:** the claim keys are created with
+`PutObject` + `If-None-Match: *`, so the provider must support that
+conditional write and surface it honestly. The startup probe verifies it and
+refuses the backend otherwise. Endpoints that ignore `If-None-Match` are not
+supported.
 
 **S3 LIST cost:** Each enqueue scans `_jobs/pending/cache/` for duplicate
 `lock_key`s. At the default `pending_refresh_interval_secs = 15` and with N

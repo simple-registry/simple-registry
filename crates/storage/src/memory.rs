@@ -9,11 +9,9 @@
 //! entry in-place (with a fresh etag).
 //!
 //! Test fixture only: no production or configuration path constructs it
-//! (`BlobStoreConfig`/`RegistryStorageConfig` are FS or S3, and the
-//! in-process job queue runs on the metadata store's engine). It is the fast,
-//! deterministic substrate for the tx-engine executor/lock/chaos tests and
-//! the conformance suites in `crate::tests`, which hold it to the same trait
-//! contract as the real backends.
+//! (`BlobStoreConfig`/`RegistryStorageConfig` are FS or S3). It is the fast,
+//! deterministic substrate for the conformance suites in `crate::tests`,
+//! which hold it to the same trait contract as the real backends.
 
 use std::fmt;
 
@@ -102,9 +100,9 @@ impl MemoryObjectStore {
         Etag::new(format!("\"{n}\""))
     }
 
-    /// Rewrite `key`'s stored write time, so age-gated logic (janitors,
-    /// reclamation windows) can be exercised without waiting. Test fixture
-    /// only, like the store itself.
+    /// Rewrite `key`'s stored write time, so age-gated logic (reclamation
+    /// windows) can be exercised without waiting. Test fixture only, like
+    /// the store itself.
     ///
     /// # Errors
     /// Returns [`Error::NotFound`] when `key` holds no object.

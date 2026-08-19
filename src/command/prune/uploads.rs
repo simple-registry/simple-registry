@@ -11,7 +11,7 @@ use futures_util::TryStreamExt;
 use tracing::{debug, error, info, warn};
 
 use angos_oci::{Digest, Namespace, UploadSessionId};
-use angos_tx_engine::StorageError;
+use angos_storage::Error as StorageError;
 
 use crate::{
     command::maintenance::{
@@ -141,7 +141,7 @@ pub async fn sweep_byteless_shards(
     sink: &dyn ActionSink,
     concurrency: usize,
 ) -> Result<(), Error> {
-    let objects = metadata_store.store().object_store();
+    let objects = metadata_store.object_store();
     let ctx = ShardSweep {
         blob_store,
         metadata_store,
@@ -192,7 +192,7 @@ async fn sweep_one_shard(
     let Ok(namespace) = Namespace::new(namespace_raw) else {
         return Ok(());
     };
-    let meta = match ctx.metadata_store.store().object_store().head(key).await {
+    let meta = match ctx.metadata_store.object_store().head(key).await {
         Ok(meta) => meta,
         Err(StorageError::NotFound) => return Ok(()),
         Err(e) => return Err(RegistryError::from(e).into()),
@@ -233,13 +233,7 @@ async fn sweep_one_shard(
 /// missing timestamp reads as young; a gone key reads as old, since its only
 /// record is the already-gated legacy shard.
 async fn entry_is_young(ctx: &ShardSweep<'_>, ref_key: &str) -> Result<bool, Error> {
-    let meta = match ctx
-        .metadata_store
-        .store()
-        .object_store()
-        .head(ref_key)
-        .await
-    {
+    let meta = match ctx.metadata_store.object_store().head(ref_key).await {
         Ok(meta) => meta,
         Err(StorageError::NotFound) => return Ok(false),
         Err(e) => return Err(RegistryError::from(e).into()),
@@ -321,6 +315,7 @@ mod tests {
     use std::time::Duration as StdDuration;
 
     use async_trait::async_trait;
+    use bytes::Bytes;
     use tokio::time::sleep;
 
     use angos_oci::{Digest, Namespace};
@@ -374,6 +369,86 @@ mod tests {
                     .await
                     .is_ok(),
                 "an upload within the window must be kept"
+            );
+        })
+        .await;
+    }
+
+    /// The sweep ages both session shapes on their own record: a backdated
+    /// `session.json` and a backdated legacy `startedat` are reaped past the
+    /// window, while a fresh legacy session survives it (a fresh new-shape
+    /// session is covered above).
+    #[tokio::test]
+    async fn sweep_ages_both_session_shapes() {
+        for_each_backend(async |test_case| {
+            let namespace = Namespace::new("test-repo/shapes").unwrap();
+            let blob_store = test_case.blob_store();
+            let objects = blob_store.object_store();
+            let old_ts = Utc::now() - Duration::hours(2);
+
+            // New shape, backdated by rewriting `session.json` in place.
+            let new_shape = UploadSessionId::generate();
+            blob_store
+                .create_upload(&namespace, &new_shape, None)
+                .await
+                .unwrap();
+            let record = format!(
+                r#"{{"last_activity":"{}","committed_offset":0,"hash_state":""}}"#,
+                old_ts.to_rfc3339()
+            );
+            objects
+                .put(
+                    &path_builder::upload_session_path(&namespace, &new_shape),
+                    Bytes::from(record),
+                )
+                .await
+                .unwrap();
+
+            // Legacy shapes seeded raw: one backdated, one fresh.
+            let old_legacy = UploadSessionId::generate();
+            let fresh_legacy = UploadSessionId::generate();
+            for (id, ts) in [(&old_legacy, old_ts), (&fresh_legacy, Utc::now())] {
+                objects
+                    .put(
+                        &path_builder::upload_start_date_path(&namespace, id),
+                        Bytes::from(ts.to_rfc3339()),
+                    )
+                    .await
+                    .unwrap();
+                objects
+                    .put(
+                        &path_builder::upload_hash_context_path(&namespace, id, 4),
+                        Bytes::from_static(b"raw checkpoint bytes"),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let executor = Executor::new_for_test(blob_store.clone(), test_case.metadata_store());
+            sweep_upload_sessions(&blob_store, Duration::hours(1), &executor, 4)
+                .await
+                .unwrap();
+
+            assert!(
+                blob_store
+                    .upload_summary(&namespace, &new_shape)
+                    .await
+                    .is_err(),
+                "an aged session.json session must be reaped"
+            );
+            assert!(
+                blob_store
+                    .upload_summary(&namespace, &old_legacy)
+                    .await
+                    .is_err(),
+                "an aged legacy session must be reaped"
+            );
+            assert!(
+                blob_store
+                    .upload_summary(&namespace, &fresh_legacy)
+                    .await
+                    .is_ok(),
+                "a fresh legacy session must be kept"
             );
         })
         .await;

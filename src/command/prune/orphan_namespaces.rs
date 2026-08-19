@@ -134,8 +134,8 @@ mod tests {
             // does.
             let ghost = Namespace::new("ghost/app").unwrap();
             let owned = Namespace::new("test-repo/app").unwrap();
-            seed_manifest(metadata_store.store(), &metadata_store, &ghost).await;
-            seed_manifest(metadata_store.store(), &metadata_store, &owned).await;
+            seed_manifest(metadata_store.object_store(), &metadata_store, &ghost).await;
+            seed_manifest(metadata_store.object_store(), &metadata_store, &owned).await;
             let ghost_upload = UploadSessionId::generate();
             blob_store
                 .create_upload(&ghost, &ghost_upload, None)
@@ -179,7 +179,7 @@ mod tests {
             let metadata_store = test_case.metadata_store();
             let blob_store = test_case.blob_store();
             let ghost = Namespace::new("ghost/app").unwrap();
-            seed_manifest(metadata_store.store(), &metadata_store, &ghost).await;
+            seed_manifest(metadata_store.object_store(), &metadata_store, &ghost).await;
 
             let empty = Arc::new(
                 RepositoryResolver::new(Arc::new(std::collections::HashMap::new()))

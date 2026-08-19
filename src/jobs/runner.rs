@@ -89,7 +89,6 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use angos_storage::{ObjectStore, fs::Backend as StorageFsBackend};
-    use angos_tx_engine::{lock::LockStrategy, store::Store};
 
     use crate::{
         jobs::Queue,
@@ -112,9 +111,7 @@ mod tests {
     fn make_store(dir: &TempDir) -> Arc<JobStore> {
         let object: Arc<dyn ObjectStore> =
             Arc::new(StorageFsBackend::builder(dir.path().to_str().expect("valid path")).build());
-        let facade =
-            Arc::new(Store::new(object, None, LockStrategy::Memory, None).expect("build store"));
-        Arc::new(JobStore::new(facade, "test-worker"))
+        Arc::new(JobStore::new(object, "test-worker"))
     }
 
     #[tokio::test]

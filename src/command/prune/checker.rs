@@ -939,7 +939,7 @@ mod tests {
             let namespace = Namespace::new("test-repo/app").unwrap();
             let metadata_store = test_case.metadata_store();
 
-            let digest = put_blob_direct(metadata_store.store(), TEST_MANIFEST).await;
+            let digest = put_blob_direct(metadata_store.object_store(), TEST_MANIFEST).await;
 
             metadata_store
                 .update_links(
@@ -990,7 +990,7 @@ mod tests {
             let namespace = Namespace::new("test-repo/app").unwrap();
             let metadata_store = test_case.metadata_store();
 
-            let digest = put_blob_direct(metadata_store.store(), TEST_MANIFEST).await;
+            let digest = put_blob_direct(metadata_store.object_store(), TEST_MANIFEST).await;
 
             metadata_store
                 .update_links(
@@ -1034,8 +1034,8 @@ mod tests {
             let namespace = Namespace::new("test-repo/app").unwrap();
             let metadata_store = test_case.metadata_store();
 
-            let child_digest = put_blob_direct(metadata_store.store(), TEST_MANIFEST).await;
-            let index_digest = put_blob_direct(metadata_store.store(), TEST_INDEX).await;
+            let child_digest = put_blob_direct(metadata_store.object_store(), TEST_MANIFEST).await;
+            let index_digest = put_blob_direct(metadata_store.object_store(), TEST_INDEX).await;
 
             setup_index_scenario(&metadata_store, &namespace, &index_digest, &child_digest).await;
 
@@ -1267,7 +1267,10 @@ mod tests {
             RepositoryResolver::new(test_utils::create_test_repositories())
                 .expect("test repositories must not have overlapping prefixes"),
         );
-        let job_store = Arc::new(JobStore::new(metadata_store.store_arc(), "retention-test"));
+        let job_store = Arc::new(JobStore::new(
+            metadata_store.object_store().clone(),
+            "retention-test",
+        ));
         let registry = Registry::new(
             test_case.blob_store(),
             metadata_store.clone(),
@@ -1335,7 +1338,8 @@ mod tests {
             let metadata_store = test_case.metadata_store();
 
             // First revision: write blob, then delete it so the executor encounters a missing blob.
-            let digest_missing = put_blob_direct(metadata_store.store(), TEST_MANIFEST).await;
+            let digest_missing =
+                put_blob_direct(metadata_store.object_store(), TEST_MANIFEST).await;
             metadata_store
                 .update_links(
                     &namespace,
@@ -1349,7 +1353,7 @@ mod tests {
             blob_store.delete_blob(&digest_missing).await.unwrap();
 
             // Second revision: healthy manifest blob with a digest link.
-            let digest_healthy = put_blob_direct(metadata_store.store(), TEST_INDEX).await;
+            let digest_healthy = put_blob_direct(metadata_store.object_store(), TEST_INDEX).await;
             metadata_store
                 .update_links(
                     &namespace,
@@ -1593,7 +1597,8 @@ mod tests {
         namespace: &Namespace,
     ) -> Digest {
         let metadata_store = test_case.metadata_store();
-        let blob = put_blob_direct(metadata_store.store(), b"granted-but-unreferenced").await;
+        let blob =
+            put_blob_direct(metadata_store.object_store(), b"granted-but-unreferenced").await;
         metadata_store
             .update_blob_index(
                 namespace,
@@ -1773,7 +1778,7 @@ mod tests {
             .unwrap();
 
         let peak = Arc::new(AtomicUsize::new(0));
-        let inner: Arc<dyn ObjectStore> = case.metadata_store().store().object_store().clone();
+        let inner: Arc<dyn ObjectStore> = case.metadata_store().object_store().clone();
         let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
             inner,
             PeakTagLinkReads {

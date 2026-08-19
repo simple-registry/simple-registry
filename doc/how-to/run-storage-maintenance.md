@@ -38,7 +38,7 @@ Before applying a cross-key repair, scrub confirms the inconsistency is settled 
 | Corrupt content | Deletes links, job records, and index shards whose content does not parse |
 | Orphan blobs | Reclaims blobs with no live references, past a grace period and fenced by a `v2/gc/` run marker at apply time |
 | Unrecognized keys | Moves them to `_lost_and_found/` in the same store, preserving their bytes |
-| Engine housekeeping | Runs the transaction engine's own janitor sweeps: orphaned `.tx-bodies/` staging and expired `.tx-locks/` objects (age-gated by engine thresholds; skipped in dry-run) |
+| Engine leftovers | Deletes `.tx-log/`, `.tx-bodies/`, and `.tx-locks/` keys the removed transaction engine left behind, once past the reclamation grace period |
 
 | Option | Short | Description |
 |---|---|---|
@@ -318,11 +318,9 @@ curl http://localhost:8000/v2/_angos/namespaces/list?repository=<repository> | j
 - A newer angos version may have written key shapes this scrub does not know; restore them by moving them back and re-run scrub from the matching version
 - Anything else under the prefix is junk that never belonged to angos; delete it once inspected
 
-### Lock Errors
+### Concurrent Runs
 
-For multi-replica deployments:
-- Ensure a shared lock strategy is configured. On an S3 metadata store with conditional-write support, an unset `lock_strategy` defaults to the S3 CAS lock; otherwise configure `lock_strategy.redis`
-- Only run one scrub instance at a time
+- Only run one scrub instance at a time; scrub is safe alongside live traffic, but concurrent scrubs duplicate work and log noise
 
 ### S3 Errors
 
@@ -338,8 +336,7 @@ For multi-replica deployments:
 2. **Run during low-traffic periods** to minimize impact
 3. **Monitor storage trends** after scheduled runs
 4. **Keep retention policies conservative** initially
-5. **Use a shared lock strategy** for multi-replica deployments: the S3 CAS lock (the default on S3 metadata stores with conditional-write support) or Redis
-6. **Re-run scrub from the same binary version as the fleet**, especially right after upgrades
+5. **Re-run scrub from the same binary version as the fleet**, especially right after upgrades
 
 ## Reference
 

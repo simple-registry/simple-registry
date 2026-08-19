@@ -6,8 +6,6 @@ use toml::{
     de::{DeTable, Deserializer as TomlDeserializer},
 };
 
-use angos_tx_engine::lock::LockStrategy;
-
 pub mod base64_string;
 mod error;
 pub mod global;
@@ -194,7 +192,6 @@ impl Configuration {
         validate_global(&self.global, &self.auth.webhook, &self.event_webhook)?;
         validate_blob_store(&self.blob_store)?;
         validate_repositories(&self.repository, &self.auth.webhook, &self.event_webhook)?;
-        validate_durable_queue_lock(&self)?;
         Ok(self)
     }
 }
@@ -260,38 +257,6 @@ fn validate_global(
     )
 }
 
-/// Rejects `[global.job_queue]` combined with the in-process `memory` lock
-/// strategy: the durable queue coordinates multiple processes through the
-/// per-job execution lock, and a non-shared lock would let each worker claim
-/// and run the same job. The in-process queue, used when `[global.job_queue]`
-/// is absent, is unaffected.
-fn validate_durable_queue_lock(config: &Configuration) -> Result<(), Error> {
-    if config.global.job_queue.is_none() {
-        return Ok(());
-    }
-    let memory_locked = match config.resolve_registry_storage() {
-        ResolvedStorageConfig::FS(fs) => matches!(fs.lock_strategy, LockStrategy::Memory),
-        // An unset S3 lock strategy resolves against the provider's
-        // conditional-write support at startup, so only a declared
-        // `conditional_operations = false` makes the memory fallback certain
-        // here; the probed no-CAS case is rejected at startup instead.
-        ResolvedStorageConfig::S3(s3) => matches!(
-            s3.resolved_lock_strategy(s3.conditional_operations.unwrap_or(true)),
-            LockStrategy::Memory
-        ),
-    };
-    if memory_locked {
-        return Err(Error::InvalidFormat(
-            "[global.job_queue] needs a shared lock strategy so workers serialize on the \
-             same jobs across processes; the in-process 'memory' lock cannot coordinate \
-             across processes. Set the metadata store's lock_strategy to \"s3\" or \"redis\", \
-             or remove [global.job_queue] to use the in-process queue."
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_repositories(
     repositories: &HashMap<String, repository::Config>,
     auth_webhooks: &HashMap<String, webhook::Config>,
@@ -344,8 +309,6 @@ fn validate_event_webhook_refs(
 mod metadata_resolver_tests {
     use std::path::PathBuf;
 
-    use angos_tx_engine::lock::LockStrategy;
-
     use crate::configuration::{Configuration, RegistryStorageConfig, ResolvedStorageConfig};
 
     #[test]
@@ -370,7 +333,6 @@ mod metadata_resolver_tests {
             ResolvedStorageConfig::FS(fs_config) => {
                 assert_eq!(fs_config.root_dir, PathBuf::from("/data/blobs"));
                 assert!(fs_config.sync_to_disk);
-                assert_eq!(fs_config.lock_strategy, LockStrategy::Memory);
             }
             other @ ResolvedStorageConfig::S3(_) => {
                 panic!("expected FS storage config from Inherit, got {other:?}")

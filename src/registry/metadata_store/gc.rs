@@ -23,7 +23,7 @@ use uuid::Uuid;
 use angos_backoff::Backoff;
 
 use angos_oci::Digest;
-use angos_tx_engine::StorageError;
+use angos_storage::Error as StorageError;
 
 use crate::registry::{Error, metadata_store::MetadataStore, path_builder};
 
@@ -73,13 +73,12 @@ impl MetadataStore {
         let mut token = None;
         loop {
             let page = self
-                .store()
                 .object_store()
                 .list(path_builder::GC_ROOT, 100, token)
                 .await?;
             for run in &page.items {
                 let key = path_builder::gc_run_path(run);
-                let raw = match self.store().object_store().get(&key).await {
+                let raw = match self.object_store().get(&key).await {
                     Ok(raw) => raw,
                     // Released between the listing and the read.
                     Err(StorageError::NotFound) => continue,
@@ -125,7 +124,7 @@ impl MetadataStore {
     /// means the marker was lost or overwritten: stop collecting, because a
     /// writer may already have read it as expired and skipped its check.
     pub async fn gc_refresh(&self, claim: &GcClaim) -> Result<bool, Error> {
-        match self.store().object_store().get(&claim.key).await {
+        match self.object_store().get(&claim.key).await {
             Ok(raw) => {
                 let Ok(run) = serde_json::from_slice::<GcRun>(&raw) else {
                     return Ok(false);
@@ -143,8 +142,7 @@ impl MetadataStore {
 
     /// Remove the claim once the range is done.
     pub async fn gc_release(&self, claim: GcClaim) -> Result<(), Error> {
-        self.store()
-            .object_store()
+        self.object_store()
             .delete(&claim.key)
             .await
             .map_err(Error::from)
@@ -163,8 +161,7 @@ impl MetadataStore {
             expires_at: Utc::now() + Duration::seconds(ttl),
             instance: claim.instance.clone(),
         };
-        self.store()
-            .object_store()
+        self.object_store()
             .put(&claim.key, Bytes::from(serde_json::to_vec(&run)?))
             .await
             .map_err(Error::from)

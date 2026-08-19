@@ -22,7 +22,6 @@ use angos_s3_client::test_util::{
 use angos_storage::{
     ObjectStore, fs::Backend as StorageFsBackend, s3::Backend as StorageS3Backend,
 };
-use angos_tx_engine::{lock::LockStrategy, store::Store};
 
 use crate::http_response::ResponseBody;
 use crate::{
@@ -60,19 +59,13 @@ pub fn s3_test_connection(key_prefix: String) -> S3ConnectionConfig {
     }
 }
 
-/// Wrap an object store into a [`Store`] façade for tests, using a locked
-/// executor serialising on a fresh in-memory lock.
-pub fn build_store(object: Arc<dyn ObjectStore>) -> Arc<Store> {
-    Arc::new(Store::new(object, None, LockStrategy::Memory, None).expect("test store"))
-}
-
-/// FS-backed test stack over a fresh temp directory: one [`Store`] façade
+/// FS-backed test stack over a fresh temp directory: one object store
 /// shared by a cache-less [`MetadataStore`] and a presign-less [`BlobStore`].
 /// Keep the stack alive for the test's duration; dropping it deletes the
 /// directory.
 pub struct FsTestStack {
     pub dir: TempDir,
-    pub store: Arc<Store>,
+    pub store: Arc<dyn ObjectStore>,
     pub metadata_store: Arc<MetadataStore>,
     pub blob_store: Arc<BlobStore>,
 }
@@ -80,15 +73,14 @@ pub struct FsTestStack {
 pub fn fs_test_stack() -> FsTestStack {
     metrics_provider::init_for_tests();
     let dir = TempDir::new().expect("temp dir for fs test stack");
-    let object: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(dir.path()).build());
-    let store = build_store(object);
+    let store: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(dir.path()).build());
     let metadata_store = Arc::new(
         MetadataStore::builder(store.clone())
             .link_cache_ttl(0)
             .access_time_debounce_secs(0)
             .build(),
     );
-    let blob_store = Arc::new(BlobStore::new(store.object_store().clone(), None));
+    let blob_store = Arc::new(BlobStore::new(store.clone(), None));
     FsTestStack {
         dir,
         store,
@@ -132,7 +124,7 @@ pub fn metadata_store_over_cached(
     link_cache_ttl_secs: u64,
 ) -> Arc<MetadataStore> {
     Arc::new(
-        MetadataStore::builder(build_store(object))
+        MetadataStore::builder(object)
             .cache(cache::Config::Memory.to_backend().expect("memory cache"))
             .link_cache_ttl(link_cache_ttl_secs)
             .access_time_debounce_secs(0)
@@ -195,9 +187,13 @@ pub fn create_test_registry_with(
 /// Write raw bytes at the canonical link path for `link` in `namespace`,
 /// bypassing the transactional `update_links` path so tests can seed
 /// hand-crafted or deliberately corrupt link files.
-pub async fn put_link_raw(store: &Store, namespace: &Namespace, link: &LinkKind, body: &[u8]) {
+pub async fn put_link_raw(
+    store: &Arc<dyn ObjectStore>,
+    namespace: &Namespace,
+    link: &LinkKind,
+    body: &[u8],
+) {
     store
-        .object_store()
         .put(
             &path_builder::link_path(link, namespace),
             Bytes::copy_from_slice(body),
@@ -267,10 +263,9 @@ pub async fn put_blob_body(blob_store: &BlobStore, content: &[u8]) -> Digest {
 /// Test-only helper that writes `content` directly at the canonical blob path
 /// via the underlying `ObjectStore` (no upload state machine, no namespace),
 /// returning its SHA-256 digest.
-pub async fn put_blob_direct(store: &Store, content: &[u8]) -> Digest {
+pub async fn put_blob_direct(store: &Arc<dyn ObjectStore>, content: &[u8]) -> Digest {
     let digest = Digest::sha256_of_bytes(content);
     store
-        .object_store()
         .put(
             &path_builder::blob_path(&digest),
             Bytes::copy_from_slice(content),
@@ -622,7 +617,7 @@ pub async fn sole_pending_payload(job_store: &JobStore) -> ReplicationJob {
 /// Seed a config blob, a layer blob, a manifest referencing both, and a `v1`
 /// tag link under `namespace`, returning the (manifest, config, layer) digests.
 pub async fn seed_manifest(
-    store: &Store,
+    store: &Arc<dyn ObjectStore>,
     metadata_store: &MetadataStore,
     namespace: &Namespace,
 ) -> (Digest, Digest, Digest) {

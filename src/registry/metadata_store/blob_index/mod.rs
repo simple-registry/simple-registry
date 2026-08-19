@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::pin::pin;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use chrono::Utc;
@@ -16,12 +17,11 @@ use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
 use angos_oci::{Digest, Namespace};
-use angos_storage::paginated;
-use angos_tx_engine::{StorageError, store::Store, transaction::Mutation};
+use angos_storage::{Error as StorageError, ObjectStore, paginated};
 
 use crate::registry::{
     Error,
-    metadata_store::{LinkKind, LinksTx, MetadataStore},
+    metadata_store::{LinkKind, LinksTx, MetadataStore, mutation::Mutation},
     path_builder,
 };
 
@@ -60,11 +60,9 @@ pub fn ref_mutation(
         BlobIndexOperation::Insert(link) => Mutation::Put {
             key: path_builder::blob_ref_path(digest, namespace, link),
             body: Bytes::new(),
-            expected: None,
         },
         BlobIndexOperation::Remove(link) => Mutation::Delete {
             key: path_builder::blob_ref_path(digest, namespace, link),
-            expected: None,
         },
     }
 }
@@ -72,13 +70,13 @@ pub fn ref_mutation(
 /// `namespace`'s reference entries for `digest` under the new key shape: the
 /// `!own` leaf plus the `!r/` subtree.
 pub async fn namespace_ref_entries(
-    store: &Store,
+    store: &Arc<dyn ObjectStore>,
     namespace: &Namespace,
     digest: &Digest,
 ) -> Result<HashSet<LinkKind>, Error> {
     let mut links = HashSet::new();
     let own = path_builder::blob_ref_own_path(digest, namespace);
-    match store.object_store().head(&own).await {
+    match store.head(&own).await {
         Ok(_) => {
             links.insert(LinkKind::Blob(digest.clone()));
         }
@@ -88,10 +86,7 @@ pub async fn namespace_ref_entries(
     let dir = path_builder::blob_ref_namespace_dir(digest, namespace);
     let mut token = None;
     loop {
-        let page = store
-            .object_store()
-            .list(&dir, REF_LIST_PAGE, token)
-            .await?;
+        let page = store.list(&dir, REF_LIST_PAGE, token).await?;
         links.extend(
             page.items
                 .iter()
@@ -109,7 +104,7 @@ pub async fn namespace_ref_entries(
 /// shard. A corrupt shard fails the read rather than parsing as empty, since
 /// reclaim decisions built on this must fail closed.
 pub async fn namespace_entries_merged(
-    store: &Store,
+    store: &Arc<dyn ObjectStore>,
     namespace: &Namespace,
     digest: &Digest,
 ) -> Result<HashSet<LinkKind>, Error> {
@@ -134,11 +129,8 @@ impl MetadataStore {
         operation: BlobIndexOperation,
     ) -> Result<(), Error> {
         match ref_mutation(namespace, digest, &operation) {
-            Mutation::Put { key, body, .. } => self.store().object_store().put(&key, body).await,
-            Mutation::Delete { key, .. } => self.store().object_store().delete(&key).await,
-            other => Err(StorageError::Backend(format!(
-                "ref_mutation produced an unexpected mutation: {other:?}"
-            ))),
+            Mutation::Put { key, body } => self.object_store().put(&key, body).await,
+            Mutation::Delete { key } => self.object_store().delete(&key).await,
         }
         .map_err(Error::from)
     }
@@ -169,7 +161,6 @@ impl MetadataStore {
     ) -> impl Stream<Item = Result<(String, Vec<u8>), Error>> + 'a {
         paginated(move |token| async move {
             let page = self
-                .store()
                 .object_store()
                 .list_children(refs_dir, 1000, token, None)
                 .await?;
@@ -177,7 +168,7 @@ impl MetadataStore {
         })
         .map_ok(move |obj| async move {
             let shard_path = format!("{refs_dir}/{obj}");
-            match self.store().object_store().get(&shard_path).await {
+            match self.object_store().get(&shard_path).await {
                 Ok(data) => Ok(Some((obj, data))),
                 Err(StorageError::NotFound) => Ok(None),
                 Err(e) => Err(Error::from(e)),
@@ -193,11 +184,7 @@ impl MetadataStore {
         let dir = path_builder::blob_ref_dir(digest);
         let mut token = None;
         loop {
-            let page = self
-                .store()
-                .object_store()
-                .list(&dir, REF_LIST_PAGE, token)
-                .await?;
+            let page = self.object_store().list(&dir, REF_LIST_PAGE, token).await?;
             for key in &page.items {
                 // Foreign key shapes and invalid namespaces are skipped, the
                 // way undecodable shard names always were.
@@ -241,7 +228,7 @@ impl MetadataStore {
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<HashSet<LinkKind>, Error> {
-        let links = namespace_entries_merged(self.store(), namespace, digest).await?;
+        let links = namespace_entries_merged(self.object_store(), namespace, digest).await?;
         non_empty_links_or_not_found(links)
     }
 
@@ -307,7 +294,7 @@ impl MetadataStore {
         let dir = path_builder::blob_ref_dir(digest);
         let mut token = None;
         loop {
-            let page = self.store().object_store().list(&dir, 1000, token).await?;
+            let page = self.object_store().list(&dir, 1000, token).await?;
             for key in &page.items {
                 let Some((raw, link)) = path_builder::parse_blob_ref(digest, key) else {
                     continue;
@@ -316,7 +303,7 @@ impl MetadataStore {
                     return Ok(true);
                 }
                 let full_key = format!("{dir}/{key}");
-                match self.store().object_store().head(&full_key).await {
+                match self.object_store().head(&full_key).await {
                     Ok(meta) => {
                         // No timestamp to gate on: live, never guess in
                         // favour of deletion.
@@ -367,7 +354,7 @@ impl MetadataStore {
             path_builder::blob_ref_dir(digest),
             path_builder::blob_index_refs_dir(digest),
         ] {
-            self.store().object_store().delete_prefix(&prefix).await?;
+            self.object_store().delete_prefix(&prefix).await?;
         }
         Ok(())
     }

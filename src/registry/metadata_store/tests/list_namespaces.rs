@@ -5,7 +5,7 @@ use angos_oci::{Namespace, Tag, UploadSessionId};
 use crate::registry::{
     metadata_store::{LinkKind, LinkOperation},
     path_builder,
-    test_utils::{self, FSRegistryTestCase, RegistryTestCase, for_each_backend},
+    test_utils::{self, FSRegistryTestCase, RegistryTestCase, for_each_backend, put_link_raw},
 };
 
 /// The catalog is derived directly from stored content: a namespace appears in
@@ -69,7 +69,6 @@ async fn list_namespaces_excludes_upload_only_namespace() {
 
         let upload_data_path = path_builder::upload_path(&namespace, &session_id);
         metadata_store
-            .store()
             .object_store()
             .put(&upload_data_path, Bytes::from_static(b"partial"))
             .await
@@ -152,6 +151,53 @@ async fn collect_upload_namespaces_keys_off_uploads_not_manifests() {
     .await;
 }
 
+/// The catalog is served from the `v2/cat/` index alone: a namespace that
+/// exists only as a raw legacy tree does not list until the scrub backfill
+/// (here `ensure_catalog_index` directly, the same write) lands its index
+/// key, the documented migration contract.
+#[tokio::test]
+async fn legacy_only_namespace_lists_after_index_backfill() {
+    for_each_backend(async |test_case| {
+        let metadata_store = test_case.metadata_store();
+        let namespace = Namespace::new("legacy-only/repo").unwrap();
+
+        // A raw legacy tag link, bypassing the write path that indexes; the
+        // content probe keys off the tag directory, not the link body.
+        let digest = angos_oci::Digest::sha256_of_bytes(b"legacy-only-content");
+        let link = LinkKind::Tag(Tag::new("v1").unwrap());
+        put_link_raw(
+            metadata_store.object_store(),
+            &namespace,
+            &link,
+            digest.to_string().as_bytes(),
+        )
+        .await;
+
+        let listed = metadata_store
+            .list_namespaces(1000, None)
+            .await
+            .unwrap()
+            .items;
+        assert!(
+            !listed.contains(&namespace),
+            "a legacy-only namespace must not list before the index backfill; got: {listed:?}"
+        );
+
+        metadata_store.ensure_catalog_index(&namespace).await;
+
+        let listed = metadata_store
+            .list_namespaces(1000, None)
+            .await
+            .unwrap()
+            .items;
+        assert!(
+            listed.contains(&namespace),
+            "a legacy-only namespace must list once its index key is backfilled; got: {listed:?}"
+        );
+    })
+    .await;
+}
+
 /// Nested repositories `a` and `a/b` coexist on FS: the catalog index key's
 /// `!` terminator keeps `a`'s leaf beside `a/b`'s directory, and both list in
 /// lexical order.
@@ -173,7 +219,6 @@ async fn nested_namespaces_coexist_in_the_catalog_on_fs() {
             .await
             .unwrap();
         store
-            .store()
             .object_store()
             .head(&path_builder::catalog_index_path(&namespace))
             .await

@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use tracing::warn;
 
 use angos_oci::{Digest, Namespace};
-use angos_tx_engine::StorageError;
+use angos_storage::Error as StorageError;
 
 use crate::{
     command::{
@@ -17,7 +17,9 @@ use crate::{
         },
         scrub::validate::Validator,
     },
-    registry::{Error as RegistryError, path_builder},
+    registry::{
+        Error as RegistryError, blob_store::upload_session::decode_session_file, path_builder,
+    },
 };
 
 impl Validator {
@@ -86,9 +88,10 @@ impl Validator {
     }
 
     /// One upload-session artifact seen by the blob walk. Session aging and
-    /// orphan-namespace clearing are prune's job; scrub validates the
-    /// `startedat` marker's content and reclaims invalid-name upload
-    /// directories (deduped per name), which no angos API can address.
+    /// orphan-namespace clearing are prune's job; scrub validates the session
+    /// record's content (`session.json`, or the legacy `startedat` marker)
+    /// and reclaims invalid-name upload directories (deduped per name), which
+    /// no angos API can address.
     pub async fn validate_upload_artifact(
         &self,
         key: &str,
@@ -106,14 +109,30 @@ impl Validator {
                 })
                 .await;
         }
-        if artifact == UploadArtifact::StartedAt {
-            self.validate_started_at(key).await?;
+        match artifact {
+            UploadArtifact::SessionJson => self.validate_session_json(key).await,
+            UploadArtifact::StartedAt => self.validate_started_at(key).await,
+            UploadArtifact::Data | UploadArtifact::HashState | UploadArtifact::Staged => Ok(()),
+        }
+    }
+
+    /// An undecodable `session.json` is deleted; the session then reads as
+    /// broken and prune's upload sweep reaps it.
+    async fn validate_session_json(&self, key: &str) -> Result<(), Error> {
+        let raw = match self.blob_store.object_store().get(key).await {
+            Ok(raw) => raw,
+            Err(StorageError::NotFound) => return Ok(()),
+            Err(e) => return Err(RegistryError::from(e).into()),
+        };
+        if decode_session_file(&raw).is_err() {
+            warn!("scrub: upload session record '{key}' does not parse; deleting");
+            self.delete_corrupt(WalkedStore::Blob, key).await?;
         }
         Ok(())
     }
 
-    /// An unreadable `startedat` marker is deleted; the session then reads
-    /// as broken and prune's upload sweep reaps it.
+    /// An unreadable legacy `startedat` marker is deleted; the session then
+    /// reads as broken and prune's upload sweep reaps it.
     async fn validate_started_at(&self, key: &str) -> Result<(), Error> {
         let raw = match self.blob_store.object_store().get(key).await {
             Ok(raw) => raw,

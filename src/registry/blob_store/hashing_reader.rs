@@ -12,7 +12,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use angos_tx_engine::ByteStream;
+use angos_storage::ByteStream;
 
 use crate::registry::{Error, blob_store::resumable_hasher::Hasher};
 

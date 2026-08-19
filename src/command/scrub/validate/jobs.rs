@@ -5,7 +5,7 @@
 
 use tracing::warn;
 
-use angos_tx_engine::StorageError;
+use angos_storage::Error as StorageError;
 
 use crate::{
     command::{
@@ -57,7 +57,7 @@ impl Validator {
 
     /// Raw metadata-store read tolerating a concurrent deletion.
     async fn read_metadata_object(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
-        match self.metadata_store.store().object_store().get(key).await {
+        match self.metadata_store.object_store().get(key).await {
             Ok(raw) => Ok(Some(raw)),
             Err(StorageError::NotFound) => Ok(None),
             Err(e) => Err(RegistryError::from(e).into()),

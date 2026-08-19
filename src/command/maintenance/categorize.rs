@@ -12,9 +12,6 @@
 use std::str::FromStr;
 
 use angos_oci::{Algorithm, Digest, Namespace, Tag, UploadSessionId};
-use angos_tx_engine::{
-    INTENT_BODIES_PREFIX, INTENT_LOG_PREFIX, LOCK_OBJECTS_PREFIX, PROBE_KEY_PREFIX,
-};
 
 use crate::command::maintenance::action::LOST_AND_FOUND_PREFIX;
 use crate::{
@@ -85,10 +82,10 @@ pub enum KeyCategory {
     /// writer and the collector must both observe; the walk recognizes it and
     /// never touches it (a crashed run's marker expires by its own TTL).
     GcMarker,
-    /// Transaction-engine state (`.tx-log/`, `.tx-bodies/`, `.tx-locks/`).
-    /// Engine-owned: the walk never touches these keys directly; scrub
-    /// reclaims their garbage only through the engine's own janitor sweep.
-    EngineInternal,
+    /// A leftover of the removed transaction engine (`.tx-log/`,
+    /// `.tx-bodies/`, `.tx-locks/`). Garbage a previous binary left behind;
+    /// scrub reclaims it once it is older than the grace period.
+    TxLeftover,
     /// Already quarantined; never re-processed.
     LostAndFound,
     /// A leaked startup CAS-probe object at the store root.
@@ -124,13 +121,24 @@ pub enum ParsedLink {
 pub enum UploadArtifact {
     /// `data`: the assembled upload bytes.
     Data,
-    /// `startedat`: RFC3339 last-activity marker.
+    /// `session.json`: the session's single durable record.
+    SessionJson,
+    /// `startedat`: legacy RFC3339 last-activity marker.
     StartedAt,
-    /// `hashstates/{offset}`: a resumable-hash checkpoint.
+    /// `hashstates/{offset}`: a legacy resumable-hash checkpoint.
     HashState,
     /// `staged/{offset}`: an S3 multipart sub-part remainder.
     Staged,
 }
+
+/// Prefixes the removed transaction engine wrote its intent log, staged
+/// bodies, and lock objects under. No writer produces these keys any more;
+/// scrub reclaims the leftovers, age-gated like every other reclaim.
+pub const TX_LEFTOVER_PREFIXES: [&str; 3] = [".tx-log", ".tx-bodies", ".tx-locks"];
+
+/// Prefix of the startup CAS-probe objects previous angos versions wrote at
+/// the store root.
+const PROBE_KEY_PREFIX: &str = "_angos_probe_";
 
 /// Namespace markers: the reserved first path segment after the namespace in
 /// a repository key. Valid namespace components never start with `_`, so the
@@ -149,11 +157,11 @@ pub fn categorize(key: &str) -> KeyCategory {
         return KeyCategory::Unknown;
     }
 
-    if strip_prefix_dir(key, INTENT_LOG_PREFIX).is_some()
-        || strip_prefix_dir(key, INTENT_BODIES_PREFIX).is_some()
-        || strip_prefix_dir(key, LOCK_OBJECTS_PREFIX).is_some()
+    if TX_LEFTOVER_PREFIXES
+        .iter()
+        .any(|prefix| strip_prefix_dir(key, prefix).is_some())
     {
-        return KeyCategory::EngineInternal;
+        return KeyCategory::TxLeftover;
     }
     if strip_prefix_dir(key, LOST_AND_FOUND_PREFIX).is_some() {
         return KeyCategory::LostAndFound;
@@ -407,11 +415,12 @@ fn categorize_repository(rest: &str) -> KeyCategory {
     }
 }
 
-/// `{uuid}/data`, `{uuid}/startedat`, `{uuid}/hashstates/{offset}`, or
-/// `{uuid}/staged/{offset}`.
+/// `{uuid}/data`, `{uuid}/session.json`, `{uuid}/startedat`,
+/// `{uuid}/hashstates/{offset}`, or `{uuid}/staged/{offset}`.
 fn categorize_upload(namespace: String, tail: &[&str]) -> KeyCategory {
     let (session_id, artifact) = match tail {
         [session_id, "data"] => (session_id, UploadArtifact::Data),
+        [session_id, "session.json"] => (session_id, UploadArtifact::SessionJson),
         [session_id, "startedat"] => (session_id, UploadArtifact::StartedAt),
         [session_id, "hashstates", offset] if offset.parse::<u64>().is_ok() => {
             (session_id, UploadArtifact::HashState)
@@ -511,7 +520,7 @@ mod tests {
             path_builder::{
                 blob_index_shard_path, blob_path, blob_ref_own_path, blob_ref_path, link_path,
                 tag_atime_path, tag_entry_path, tag_hist_path, upload_hash_context_path,
-                upload_path, upload_start_date_path,
+                upload_path, upload_session_path, upload_start_date_path,
             },
         },
     };
@@ -710,6 +719,10 @@ mod tests {
         let cases = [
             (upload_path(&ns, &session()), UploadArtifact::Data),
             (
+                upload_session_path(&ns, &session()),
+                UploadArtifact::SessionJson,
+            ),
+            (
                 upload_start_date_path(&ns, &session()),
                 UploadArtifact::StartedAt,
             ),
@@ -787,13 +800,10 @@ mod tests {
     fn engine_and_reserved_prefixes_are_recognized() {
         assert_eq!(
             categorize(".tx-log/0000-uuid.json"),
-            KeyCategory::EngineInternal
+            KeyCategory::TxLeftover
         );
-        assert_eq!(categorize(".tx-bodies/uuid/0"), KeyCategory::EngineInternal);
-        assert_eq!(
-            categorize(".tx-locks/aa/some-key"),
-            KeyCategory::EngineInternal
-        );
+        assert_eq!(categorize(".tx-bodies/uuid/0"), KeyCategory::TxLeftover);
+        assert_eq!(categorize(".tx-locks/aa/some-key"), KeyCategory::TxLeftover);
         assert_eq!(
             categorize("_lost_and_found/foo/bar"),
             KeyCategory::LostAndFound

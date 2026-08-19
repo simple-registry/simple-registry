@@ -215,7 +215,6 @@ pub async fn push_manifest(
     if let Some(body) = fallback_body.filter(|_| subject.is_none()) {
         push_referrers_fallback(
             &ctx.downstream.registry_client,
-            ctx.metadata_store,
             ctx.namespace,
             ctx.downstream_namespace,
             digest,
@@ -472,10 +471,9 @@ async fn cancel_upload_session(downstream: &RegistryClient, session_url: &str) {
 ///
 /// Returns [`Error::Client`] when the delete fails with anything other than
 /// a 404, an LWW-superseded 409, or a 405.
-#[instrument(skip(downstream, metadata_store))]
+#[instrument(skip(downstream))]
 pub async fn delete_manifest(
     downstream: &RegistryClient,
-    metadata_store: &Arc<MetadataStore>,
     namespace: &Namespace,
     downstream_namespace: &Namespace,
     reference: &Reference,
@@ -536,15 +534,9 @@ pub async fn delete_manifest(
     // than replaying the whole job.
     if matches!(push_outcome, PushOutcome::Pushed | PushOutcome::Converged)
         && let (Reference::Digest(digest), Some(subject)) = (reference, &fallback_subject)
-        && let Err(e) = remove_referrers_fallback(
-            downstream,
-            metadata_store,
-            namespace,
-            downstream_namespace,
-            subject,
-            digest,
-        )
-        .await
+        && let Err(e) =
+            remove_referrers_fallback(downstream, namespace, downstream_namespace, subject, digest)
+                .await
     {
         warn!(
             namespace = %namespace,

@@ -261,39 +261,14 @@ sudo chown -R $(id -u):$(id -g) /data/registry
 
 3. Verify region is correct
 
-### "lock already held"
+### Leftover `.tx-` keys after an upgrade
 
-**Cause**: Concurrent operations on same resource.
+**Cause**: A previous angos version's transaction engine kept its journal,
+staged bodies, and lock objects under `.tx-log/`, `.tx-bodies/`, and
+`.tx-locks/`. Nothing writes them any more.
 
-**Solutions for Redis locking**:
-1. Configure Redis locking:
-   ```toml
-   [metadata_store.fs.lock_strategy.redis]
-   url = "redis://localhost:6379"
-   ttl = 10
-   ```
-
-2. For high contention, increase `max_retries` and `retry_delay_ms`. Redis retries use exponential backoff capped at 1s, plus jitter.
-3. Increase TTL if operations take longer
-4. Check for stuck processes
-
-**Solutions for S3 locking**:
-1. Stale locks under the `.tx-locks/` prefix are automatically recovered after TTL expiry
-2. If operations take longer than the TTL, increase `ttl_secs` (minimum: 9):
-   ```toml
-   [metadata_store.s3.lock_strategy.s3]
-   ttl_secs = 60
-   ```
-   The heartbeat interval is automatically set to `ttl_secs / 3`, so this example will heartbeat every 20 seconds.
-
-3. For high contention, increase `max_retries` and `retry_delay_ms`:
-   ```toml
-   [metadata_store.s3.lock_strategy.s3]
-   max_retries = 200
-   retry_delay_ms = 100
-   ```
-
-4. If the startup probe fails, your S3 provider may not support conditional writes; fall back to Redis locking instead. S3 locking is only supported when using S3 for metadata storage; it cannot be used with filesystem metadata stores.
+**Solution**: Run `angos scrub`; it reclaims the leftovers once they are
+older than the reclamation grace period (`[global] gc_grace_secs`).
 
 ---
 

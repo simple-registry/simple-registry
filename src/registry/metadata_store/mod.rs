@@ -4,7 +4,7 @@ use std::{
 };
 
 use angos_oci::Namespace;
-use angos_tx_engine::store::Store;
+use angos_storage::ObjectStore;
 
 use crate::{cache::Cache, registry::pagination};
 
@@ -13,6 +13,7 @@ mod blob_index;
 mod catalog;
 mod gc;
 mod link;
+mod mutation;
 
 #[cfg(test)]
 mod tests;
@@ -25,9 +26,8 @@ pub use link::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, LinksTx, Refe
 
 #[derive(Clone)]
 pub struct MetadataStore {
-    /// Storage façade owning the object store and transaction executor; all
-    /// reads, reads-for-update, and coordinated writes flow through it.
-    store: Arc<Store>,
+    /// The object store all reads and writes flow through.
+    object: Arc<dyn ObjectStore>,
     cache: Option<Arc<Cache>>,
     link_cache_ttl: u64,
     /// Concurrent directory scans a catalog namespace walk keeps in flight.
@@ -51,7 +51,7 @@ pub struct MetadataStore {
 pub const DEFAULT_GC_GRACE_SECS: u64 = 300;
 
 pub struct Builder {
-    store: Arc<Store>,
+    object: Arc<dyn ObjectStore>,
     cache: Option<Arc<Cache>>,
     link_cache_ttl: u64,
     access_time_debounce_secs: u64,
@@ -60,9 +60,9 @@ pub struct Builder {
 }
 
 impl Builder {
-    fn new(store: Arc<Store>) -> Self {
+    fn new(object: Arc<dyn ObjectStore>) -> Self {
         Self {
-            store,
+            object,
             cache: None,
             link_cache_ttl: 30,
             access_time_debounce_secs: 0,
@@ -105,10 +105,10 @@ impl Builder {
     #[must_use]
     pub fn build(self) -> MetadataStore {
         let (access_time_writer, flush_handle) =
-            access_time::build_writer(&self.store, self.access_time_debounce_secs);
+            access_time::build_writer(&self.object, self.access_time_debounce_secs);
 
         MetadataStore {
-            store: self.store,
+            object: self.object,
             cache: self.cache,
             link_cache_ttl: self.link_cache_ttl,
             namespace_walk_concurrency: self.namespace_walk_concurrency,
@@ -121,27 +121,21 @@ impl Builder {
 }
 
 impl MetadataStore {
-    /// Return a builder over the storage façade `store` (object store for reads
-    /// plus the transaction executor). `cache`, `link_cache_ttl` and
-    /// `access_time_debounce_secs` are optional fluent setters.
-    pub fn builder(store: Arc<Store>) -> Builder {
-        Builder::new(store)
+    /// Return a builder over the object store all reads and writes flow
+    /// through. `cache`, `link_cache_ttl` and `access_time_debounce_secs`
+    /// are optional fluent setters.
+    pub fn builder(object: Arc<dyn ObjectStore>) -> Builder {
+        Builder::new(object)
     }
 
-    /// Returns the storage façade used for all reads and coordinated writes.
-    pub fn store(&self) -> &Store {
-        self.store.as_ref()
+    /// The object store all reads and writes flow through.
+    pub fn object_store(&self) -> &Arc<dyn ObjectStore> {
+        &self.object
     }
 
     /// The reclamation grace period, shared by writers and collectors built
     /// over this store.
     pub fn gc_grace_secs(&self) -> u64 {
         self.gc_grace_secs
-    }
-
-    /// Returns an owned handle to the storage façade, for closures and helpers
-    /// that need to capture it across `await` points.
-    pub fn store_arc(&self) -> Arc<Store> {
-        self.store.clone()
     }
 }

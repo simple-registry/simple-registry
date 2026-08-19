@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use tracing::{debug, warn};
 
 use angos_oci::{Digest, Namespace};
-use angos_tx_engine::StorageError;
+use angos_storage::Error as StorageError;
 
 use crate::{
     command::{
@@ -19,7 +19,7 @@ use crate::{
         },
         scrub::validate::Validator,
     },
-    registry::{Error as RegistryError, metadata_store::LinkKind, path_builder},
+    registry::{Error as RegistryError, metadata_store::LinkKind},
 };
 
 impl Validator {
@@ -34,7 +34,7 @@ impl Validator {
         digest: &Digest,
         namespace_raw: &str,
     ) -> Result<(), Error> {
-        let raw = match self.metadata_store.store().object_store().get(key).await {
+        let raw = match self.metadata_store.object_store().get(key).await {
             Ok(raw) => raw,
             Err(StorageError::NotFound) => return Ok(()),
             Err(e) => return Err(RegistryError::from(e).into()),
@@ -133,11 +133,10 @@ impl Validator {
         {
             return Ok(());
         }
-        let evidence = [key.to_string(), path_builder::link_path(&link, &namespace)];
         let namespace_ref = &namespace;
         let link_ref = &link;
         let reverify = move || self.ref_still_dangling(key, namespace_ref, link_ref, digest);
-        if !self.confirm_repair(&evidence, reverify).await? {
+        if !self.confirm_repair(reverify).await? {
             return Ok(());
         }
         self.emit(Action::RemoveBlobIndexLink {
@@ -157,7 +156,7 @@ impl Validator {
         link: &LinkKind,
         blob: &Digest,
     ) -> Result<bool, Error> {
-        match self.metadata_store.store().object_store().head(key).await {
+        match self.metadata_store.object_store().head(key).await {
             Ok(_) => {}
             Err(StorageError::NotFound) => return Ok(false),
             Err(e) => return Err(RegistryError::from(e).into()),

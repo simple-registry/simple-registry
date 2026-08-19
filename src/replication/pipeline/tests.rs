@@ -20,7 +20,7 @@ use angos_oci::{
     Reference, Tag,
     constants::{DOCKER_MANIFEST_LIST_MEDIA_TYPE, DOCKER_MANIFEST_MEDIA_TYPE},
 };
-use angos_tx_engine::store::Store;
+use angos_storage::ObjectStore;
 
 use crate::{
     metrics_provider,
@@ -53,7 +53,12 @@ fn instant(rfc3339: &str) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
-fn test_blob_store() -> (Arc<BlobStore>, Arc<MetadataStore>, Arc<Store>, TempDir) {
+fn test_blob_store() -> (
+    Arc<BlobStore>,
+    Arc<MetadataStore>,
+    Arc<dyn ObjectStore>,
+    TempDir,
+) {
     let FsTestStack {
         dir,
         store,
@@ -912,7 +917,7 @@ async fn push_blob_falls_back_to_upload_when_mount_is_rejected() {
 
 /// Seeds a minimal blob-less image manifest locally, returning its digest
 /// and serialized body.
-async fn seed_blobless_manifest(store: &Arc<Store>) -> (Digest, Vec<u8>) {
+async fn seed_blobless_manifest(store: &Arc<dyn ObjectStore>) -> (Digest, Vec<u8>) {
     let manifest = json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
@@ -1670,10 +1675,9 @@ async fn delete_manifest_stamps_header_and_distinguishes_superseded() {
         .mount(&mock_server)
         .await;
 
-    let (_, metadata_store, _, _dir) = test_blob_store();
+    let (_, _metadata_store, _, _dir) = test_blob_store();
     delete_manifest(
         &downstream_client(&mock_server.uri()),
-        &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
         &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Tag(Tag::new("v1").unwrap()),
@@ -1698,10 +1702,9 @@ async fn delete_manifest_of_absent_target_is_converged_not_pushed() {
         .mount(&mock_server)
         .await;
 
-    let (_, metadata_store, _, _dir) = test_blob_store();
+    let (_, _metadata_store, _, _dir) = test_blob_store();
     let outcome = delete_manifest(
         &downstream_client(&mock_server.uri()),
-        &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
         &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Tag(Tag::new("gone").unwrap()),
@@ -1731,10 +1734,9 @@ async fn delete_manifest_of_unsupported_downstream_is_unsupported_not_error() {
         .mount(&mock_server)
         .await;
 
-    let (_, metadata_store, _, _dir) = test_blob_store();
+    let (_, _metadata_store, _, _dir) = test_blob_store();
     let outcome = delete_manifest(
         &downstream_client(&mock_server.uri()),
-        &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
         &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Tag(Tag::new("v1").unwrap()),
@@ -1759,10 +1761,9 @@ async fn delete_manifest_propagates_non_superseded_409_as_error() {
         .mount(&mock_server)
         .await;
 
-    let (_, metadata_store, _, _dir) = test_blob_store();
+    let (_, _metadata_store, _, _dir) = test_blob_store();
     let result = delete_manifest(
         &downstream_client(&mock_server.uri()),
-        &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
         &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Tag(Tag::new("v1").unwrap()),
@@ -1825,7 +1826,7 @@ fn referrer_manifest(subject: &Digest) -> (Vec<u8>, Digest) {
 async fn deleting_last_referrer_removes_the_fallback_tag() {
     metrics_provider::init_for_tests();
     let mock_server = MockServer::start().await;
-    let (_, metadata_store, _, _dir) = test_blob_store();
+    let (_, _metadata_store, _, _dir) = test_blob_store();
 
     let subject = Digest::sha256_of_bytes(b"the-subject");
     let (referrer_body, referrer) = referrer_manifest(&subject);
@@ -1875,7 +1876,6 @@ async fn deleting_last_referrer_removes_the_fallback_tag() {
 
     let outcome = delete_manifest(
         &downstream_client(&mock_server.uri()),
-        &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
         &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Digest(referrer.clone()),
@@ -1893,7 +1893,7 @@ async fn deleting_last_referrer_removes_the_fallback_tag() {
 async fn deleting_a_referrer_keeps_its_siblings_in_the_fallback_index() {
     metrics_provider::init_for_tests();
     let mock_server = MockServer::start().await;
-    let (_, metadata_store, _, _dir) = test_blob_store();
+    let (_, _metadata_store, _, _dir) = test_blob_store();
 
     let subject = Digest::sha256_of_bytes(b"shared-subject");
     let (referrer_body, referrer) = referrer_manifest(&subject);
@@ -1944,7 +1944,6 @@ async fn deleting_a_referrer_keeps_its_siblings_in_the_fallback_index() {
 
     delete_manifest(
         &downstream_client(&mock_server.uri()),
-        &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
         &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Digest(referrer.clone()),
@@ -1985,7 +1984,7 @@ async fn deleting_a_referrer_keeps_its_siblings_in_the_fallback_index() {
 async fn a_retried_delete_prunes_the_fallback_index_from_the_carried_subject() {
     metrics_provider::init_for_tests();
     let mock_server = MockServer::start().await;
-    let (_, metadata_store, _, _dir) = test_blob_store();
+    let (_, _metadata_store, _, _dir) = test_blob_store();
 
     let subject = Digest::sha256_of_bytes(b"retried-subject");
     let (_, referrer) = referrer_manifest(&subject);
@@ -2029,7 +2028,6 @@ async fn a_retried_delete_prunes_the_fallback_index_from_the_carried_subject() {
 
     delete_manifest(
         &downstream_client(&mock_server.uri()),
-        &metadata_store,
         &Namespace::new(NAMESPACE).unwrap(),
         &Namespace::new(NAMESPACE).unwrap(),
         &Reference::Digest(referrer.clone()),

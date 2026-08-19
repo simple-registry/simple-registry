@@ -114,8 +114,9 @@ pub async fn healthy(ctx: &GateContext) -> GateResult<()> {
         })?;
     }
 
-    // A real scrub on a healthy store may touch only engine-owned prefixes
-    // (janitor reclaim); everything else must be byte-identical.
+    // A real scrub on a healthy store may touch only leftover `.tx-` keys of
+    // the removed transaction engine (reclaimed as garbage); everything else
+    // must be byte-identical.
     let real = ctx.scrub_logged("scrub-real.log").await?;
     println!("{real}");
     ensure(real.is_all_zero(), || {
@@ -215,16 +216,23 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
             format!("quarantined bytes wrong for {}", alien.key)
         })?;
     }
-    // The damaged legacy link carried only the stale referrer, so pruning it
-    // empties the set and the collector reclaims the file; the live pin is
-    // gate2's per-referrer reference entry on the config blob.
+    // The damaged legacy link carried only the stale referrer: pruning it
+    // empties the set and scrub retires the file. The live pin is gate2's
+    // per-referrer reference entry on the config blob, and no entry may be
+    // minted for the stale referrer.
     ensure(
         !ctx.store.exists(&probes.gate2_config_link()).await?,
-        || "stale legacy config link was not reclaimed".to_string(),
+        || "stale legacy config link was not retired".to_string(),
     )?;
     ensure(
         ctx.store.exists(&probes.gate2_config_ref_entry()).await?,
         || "gate2's per-referrer config entry is missing".to_string(),
+    )?;
+    ensure(
+        !ctx.store
+            .exists(&probes.gate2_config_stale_ref_entry())
+            .await?,
+        || "a per-referrer entry was minted for the stale referrer".to_string(),
     )?;
 
     // Ownership boundary: scrub must have left every age-gated and
@@ -292,26 +300,50 @@ pub async fn corruption(ctx: &GateContext) -> GateResult<()> {
         })?;
     }
 
-    // Prune window pin: a session backdated past the window is reaped, the
-    // fresh decoy survives.
-    let old_uuid = "33333333-0000-4000-8000-000000000000";
-    let started_at = format!("v2/repositories/{GATE_NS}/_uploads/{old_uuid}/startedat");
+    // Prune window pin: a session backdated past the window is reaped in
+    // both shapes (`session.json`, and the legacy `startedat` plus a
+    // checkpoint), the fresh decoy survives.
     let old_ts = (Utc::now() - TimeDelta::hours(2))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
-    ctx.store.put(&started_at, old_ts).await?;
+    let old_uuid = "33333333-0000-4000-8000-000000000000";
+    let session_json = format!("v2/repositories/{GATE_NS}/_uploads/{old_uuid}/session.json");
+    ctx.store
+        .put(
+            &session_json,
+            format!(r#"{{"last_activity":"{old_ts}","committed_offset":18,"hash_state":""}}"#),
+        )
+        .await?;
     ctx.store
         .put(
             &format!("v2/repositories/{GATE_NS}/_uploads/{old_uuid}/data"),
             "stale upload bytes",
         )
         .await?;
+    let legacy_uuid = "55555555-0000-4000-8000-000000000000";
+    let legacy_started_at = format!("v2/repositories/{GATE_NS}/_uploads/{legacy_uuid}/startedat");
+    ctx.store.put(&legacy_started_at, old_ts.clone()).await?;
+    ctx.store
+        .put(
+            &format!("v2/repositories/{GATE_NS}/_uploads/{legacy_uuid}/hashstates/18"),
+            "raw checkpoint bytes",
+        )
+        .await?;
+    ctx.store
+        .put(
+            &format!("v2/repositories/{GATE_NS}/_uploads/{legacy_uuid}/data"),
+            "stale legacy bytes",
+        )
+        .await?;
     let prune_log = ctx
         .runner
         .run_logged(&["prune"], &ctx.state_path("prune.log"))
         .await?;
-    ensure(!ctx.store.exists(&started_at).await?, || {
+    ensure(!ctx.store.exists(&session_json).await?, || {
         "prune kept an upload past the -u window".to_string()
+    })?;
+    ensure(!ctx.store.exists(&legacy_started_at).await?, || {
+        "prune kept a legacy-shaped upload past the -u window".to_string()
     })?;
     let decoy = ctx
         .registry

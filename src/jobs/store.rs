@@ -1,5 +1,5 @@
 //! [`JobStore`]: unified job-queue storage, producer, and consumer backed by
-//! a storage façade (`Store`) carrying the object store.
+//! the shared object store.
 //!
 //! The queue is lock-free and collector-free. Every mutation is an ordered
 //! sequence of idempotent object writes: enqueue dedup and claims rest on
@@ -30,8 +30,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use angos_backoff::Backoff;
-use angos_storage::Page;
-use angos_tx_engine::{StorageError, store::Store};
+use angos_storage::{Error as StorageError, ObjectStore, Page};
 
 use crate::{
     jobs::{JobState, Queue},
@@ -186,9 +185,9 @@ impl From<StorageError> for Error {
 /// from the backend. Probed once at startup with a scratch key: the second
 /// create of the same key must fail, or the provider would let two workers
 /// hold one claim.
-pub async fn ensure_claim_support(store: &Store) -> Result<(), Error> {
+pub async fn ensure_claim_support(store: &Arc<dyn ObjectStore>) -> Result<(), Error> {
     let key = format!("{JOBS_ROOT}/claims/.probe-{}", Uuid::new_v4());
-    let objects = store.object_store();
+    let objects = store;
     let first = objects
         .create_if_absent(&key, Bytes::from_static(b"probe"))
         .await;
@@ -693,7 +692,7 @@ impl ClaimOutcome {
 /// log entries from `claim_one`; supply an empty string or any identifier when
 /// constructing for producer-only use.
 pub struct JobStore {
-    store: Arc<Store>,
+    store: Arc<dyn ObjectStore>,
     worker_id: String,
     retry_backoff: Backoff,
     claim_error_backoff: Backoff,
@@ -712,14 +711,14 @@ impl JobStore {
     /// string for producer-only instances. The retry policy defaults to
     /// [`JobRetryPolicy::default`]; the durable queue overrides it with
     /// [`Self::with_retry_policy`].
-    pub fn new(store: Arc<Store>, worker_id: impl Into<String>) -> Self {
+    pub fn new(store: Arc<dyn ObjectStore>, worker_id: impl Into<String>) -> Self {
         Self::with_retry_policy(store, worker_id, JobRetryPolicy::default())
     }
 
     /// [`Self::new`] with an operator-configured retry policy (see
     /// [`JobQueueConfig::retry_policy`]).
     pub fn with_retry_policy(
-        store: Arc<Store>,
+        store: Arc<dyn ObjectStore>,
         worker_id: impl Into<String>,
         retry: JobRetryPolicy,
     ) -> Self {
@@ -751,7 +750,7 @@ impl JobStore {
     /// at the first key whose prefix is in the future.
     pub async fn list_pending(&self, queue: Queue, n: u16) -> Result<Vec<String>, Error> {
         let prefix = job_pending_dir(queue.as_str());
-        let page = self.store.object_store().list(&prefix, n, None).await?;
+        let page = self.store.list(&prefix, n, None).await?;
 
         Ok(page
             .items
@@ -766,7 +765,7 @@ impl JobStore {
         storage_key: &str,
     ) -> Result<JobEnvelope, Error> {
         let key = job_pending_path(queue.as_str(), storage_key);
-        let data = self.store.object_store().get(&key).await?;
+        let data = self.store.get(&key).await?;
         serde_json::from_slice(&data)
             .map_err(|e| Error::Corrupt(format!("failed to parse envelope: {e}")))
     }
@@ -779,7 +778,7 @@ impl JobStore {
         storage_key: &str,
     ) -> Result<DeadLetterRead, Error> {
         let key = job_failed_path(queue.as_str(), storage_key);
-        let data = self.store.object_store().get(&key).await?;
+        let data = self.store.get(&key).await?;
         serde_json::from_slice(&data)
             .map_err(|e| Error::Corrupt(format!("failed to parse dead-letter: {e}")))
     }
@@ -821,11 +820,7 @@ impl JobStore {
         after: Option<&str>,
     ) -> Result<Page<String>, Error> {
         let start_after = after.map(|k| format!("{k}.json"));
-        let page = self
-            .store
-            .object_store()
-            .list_children(dir, n, None, start_after)
-            .await?;
+        let page = self.store.list_children(dir, n, None, start_after).await?;
         let keys: Vec<String> = page
             .objects
             .into_iter()
@@ -852,7 +847,7 @@ impl JobStore {
         let mut count: u64 = 0;
         let mut token: Option<String> = None;
         loop {
-            let page = self.store.object_store().list(&prefix, 1000, token).await?;
+            let page = self.store.list(&prefix, 1000, token).await?;
             for name in &page.items {
                 let Some(stem) = name.strip_suffix(".json") else {
                     continue;
@@ -886,7 +881,7 @@ impl JobStore {
         let mut count: u64 = 0;
         let mut token: Option<String> = None;
         loop {
-            let page = self.store.object_store().list(&prefix, 1000, token).await?;
+            let page = self.store.list(&prefix, 1000, token).await?;
             for name in &page.items {
                 if name.strip_suffix(".json").is_none() {
                     continue;
@@ -919,7 +914,7 @@ impl JobStore {
         lock_key: &LockKey,
     ) -> Result<bool, Error> {
         let index_path = job_lock_key_index_path(queue.as_str(), lock_key);
-        let data = match self.store.object_store().get(&index_path).await {
+        let data = match self.store.get(&index_path).await {
             Ok(d) => d,
             Err(StorageError::NotFound) => return Ok(false),
             Err(e) => return Err(Error::from(e)),
@@ -927,7 +922,7 @@ impl JobStore {
         let index = parse_lock_key_index(&data)?;
 
         let pending_key = job_pending_path(queue.as_str(), &index.storage_key);
-        match self.store.object_store().head(&pending_key).await {
+        match self.store.head(&pending_key).await {
             Ok(_) => Ok(true),
             Err(StorageError::NotFound) => {
                 // Orphan: pending file vanished but the index lingers. Remove
@@ -935,7 +930,7 @@ impl JobStore {
                 // create and drop a distinct job as a false dedup hit. A
                 // concurrent enqueue refreshing the index in the window loses
                 // its entry, which only costs a missed dedup later.
-                match self.store.object_store().delete(&index_path).await {
+                match self.store.delete(&index_path).await {
                     Ok(()) => Ok(false),
                     Err(e) => {
                         warn!(
@@ -952,11 +947,7 @@ impl JobStore {
     }
 
     pub async fn get_raw(&self, key: &str) -> Result<Vec<u8>, Error> {
-        self.store
-            .object_store()
-            .get(key)
-            .await
-            .map_err(Error::from)
+        self.store.get(key).await.map_err(Error::from)
     }
 
     /// Retire the dedup index of a just-claimed job so a same-`lock_key`
@@ -1009,7 +1000,7 @@ impl JobStore {
             Err(e) => return Err(e),
         };
         if ours {
-            self.store.object_store().delete(&index_path).await?;
+            self.store.delete(&index_path).await?;
         }
         Ok(())
     }
@@ -1034,7 +1025,7 @@ impl JobStore {
             if !self.claim_is_stale(&key).await? {
                 return Ok(None);
             }
-            self.store.object_store().delete(&key).await?;
+            self.store.delete(&key).await?;
             stamped_until = self.put_claim_if_absent(&key, &instance).await?;
         }
         let Some(stamped_until) = stamped_until else {
@@ -1072,18 +1063,14 @@ impl JobStore {
             serde_json::to_vec(&record)
                 .map_err(|e| Error::Storage(format!("claim serialization failed: {e}")))?,
         );
-        let created = self
-            .store
-            .object_store()
-            .create_if_absent(key, body)
-            .await?;
+        let created = self.store.create_if_absent(key, body).await?;
         Ok(created.then_some(record.expires_at))
     }
 
     /// Whether the claim at `key` is safe to take over: its lease lapsed, or
     /// it is unreadable and old enough that no live refresher can own it.
     async fn claim_is_stale(&self, key: &str) -> Result<bool, Error> {
-        match self.store.object_store().get(key).await {
+        match self.store.get(key).await {
             Ok(raw) => {
                 if let Ok(record) = serde_json::from_slice::<ClaimRecord>(&raw) {
                     return Ok(record.expires_at < Utc::now());
@@ -1094,7 +1081,7 @@ impl JobStore {
         }
         // Unreadable: age it on its mtime so a corrupt claim cannot wedge
         // the lock key forever, with double the lease as the safety margin.
-        let meta = match self.store.object_store().head(key).await {
+        let meta = match self.store.head(key).await {
             Ok(meta) => meta,
             Err(StorageError::NotFound) => return Ok(true),
             Err(e) => return Err(Error::from(e)),
@@ -1116,11 +1103,11 @@ impl JobStore {
         if claim.lost() {
             return;
         }
-        match self.store.object_store().get(&claim.key).await {
+        match self.store.get(&claim.key).await {
             Ok(raw) => {
                 if serde_json::from_slice::<ClaimRecord>(&raw)
                     .is_ok_and(|record| record.instance == claim.instance)
-                    && let Err(e) = self.store.object_store().delete(&claim.key).await
+                    && let Err(e) = self.store.delete(&claim.key).await
                 {
                     warn!("job queue: failed to release claim '{}': {e}", claim.key);
                 }
@@ -1178,7 +1165,7 @@ impl JobStore {
         );
         let index_body = Bytes::from(serialize_lock_key_index(&storage_key)?);
 
-        let objects = self.store.object_store();
+        let objects = &self.store;
         let outcome = if objects.create_if_absent(&index_path, index_body).await? {
             objects
                 .create_if_absent(&pending_path, pending_body)
@@ -1237,7 +1224,7 @@ impl JobStore {
     /// `prune`'s orphan-job sweep.
     async fn discard_poison_pending(&self, queue: Queue, storage_key: &str, reason: &str) {
         let path = job_pending_path(queue.as_str(), storage_key);
-        match self.store.object_store().delete(&path).await {
+        match self.store.delete(&path).await {
             Ok(()) => {
                 warn!("job queue: discarded unreadable pending job '{storage_key}': {reason}");
             }
@@ -1344,7 +1331,7 @@ impl JobStore {
         }
         let pending_path = job_pending_path(envelope.queue.as_str(), &storage_key);
         let cleanup = async {
-            self.store.object_store().delete(&pending_path).await?;
+            self.store.delete(&pending_path).await?;
             self.cleanup_index_if_ours(envelope.queue, &envelope.lock_key, &storage_key)
                 .await
         };
@@ -1450,21 +1437,14 @@ impl JobStore {
         let index_body = Bytes::from(serialize_lock_key_index(&new_storage_key)?);
 
         let rewrite = async {
-            self.store
-                .object_store()
-                .put(&new_pending_path, pending_body)
-                .await?;
-            self.store.object_store().delete(&old_pending_path).await?;
+            self.store.put(&new_pending_path, pending_body).await?;
+            self.store.delete(&old_pending_path).await?;
             // Point the index at the rescheduled job only while it is
             // absent: a producer that indexed a fresh job in the meantime
             // keeps its entry, and this retry stays unindexed until an
             // enqueue self-heals it. A missed dedup hit costs a duplicate
             // job; clobbering the entry would strand that producer's file.
-            let _ = self
-                .store
-                .object_store()
-                .create_if_absent(&index_path, index_body)
-                .await?;
+            let _ = self.store.create_if_absent(&index_path, index_body).await?;
             Ok::<_, StorageError>(())
         };
         let result = rewrite.await;
@@ -1499,11 +1479,8 @@ impl JobStore {
         let failed_body = Bytes::from(serialize_dead_letter(&envelope, err)?);
 
         let bury = async {
-            self.store
-                .object_store()
-                .put(&failed_path, failed_body)
-                .await?;
-            self.store.object_store().delete(&pending_path).await?;
+            self.store.put(&failed_path, failed_body).await?;
+            self.store.delete(&pending_path).await?;
             self.cleanup_index_if_ours(envelope.queue, &envelope.lock_key, &storage_key)
                 .await
         };
@@ -1533,7 +1510,7 @@ impl JobStore {
         let failed_path = job_failed_path(queue.as_str(), storage_key);
         // Surface a stale key as `NotFound` before touching any state; a
         // double-retry stays safe because it collides on the atomic create.
-        self.store.object_store().head(&failed_path).await?;
+        self.store.head(&failed_path).await?;
 
         let mut envelope = self.read_failed(queue, storage_key).await?.envelope;
         envelope.attempts = 0;
@@ -1550,10 +1527,9 @@ impl JobStore {
         // create and both observe the job back in flight.
         let _ = self
             .store
-            .object_store()
             .create_if_absent(&pending_path, pending_body)
             .await?;
-        self.store.object_store().delete(&failed_path).await?;
+        self.store.delete(&failed_path).await?;
         Ok(())
     }
 
@@ -1578,12 +1554,8 @@ impl JobStore {
             JobState::Failed => {
                 let failed_path = job_failed_path(queue.as_str(), storage_key);
                 // Surface a stale key as `NotFound` before the idempotent delete.
-                self.store.object_store().head(&failed_path).await?;
-                self.store
-                    .object_store()
-                    .delete(&failed_path)
-                    .await
-                    .map_err(Error::from)
+                self.store.head(&failed_path).await?;
+                self.store.delete(&failed_path).await.map_err(Error::from)
             }
             JobState::Pending => self.delete_pending(queue, storage_key).await,
         }
@@ -1605,8 +1577,8 @@ impl JobStore {
             Err(e) => return Err(e),
         };
         // Surface a stale key as `NotFound` before the idempotent delete.
-        self.store.object_store().head(&pending_path).await?;
-        self.store.object_store().delete(&pending_path).await?;
+        self.store.head(&pending_path).await?;
+        self.store.delete(&pending_path).await?;
         if let Some(lock_key) = lock_key {
             self.cleanup_index_if_ours(queue, &lock_key, storage_key)
                 .await?;
@@ -1650,7 +1622,7 @@ fn should_cancel_claim(
 /// idempotent handler, detected within one refresh period, and never a lost
 /// job.
 async fn refresh_claim_loop(
-    store: Arc<Store>,
+    store: Arc<dyn ObjectStore>,
     key: String,
     instance: String,
     stamped_until: DateTime<Utc>,
@@ -1661,7 +1633,7 @@ async fn refresh_claim_loop(
     let mut last_verified_expiry = stamped_until;
     loop {
         sleep(period).await;
-        let check = match store.object_store().get(&key).await {
+        let check = match store.get(&key).await {
             Ok(raw) => match serde_json::from_slice::<ClaimRecord>(&raw) {
                 Ok(record) if record.instance == instance && record.expires_at >= Utc::now() => {
                     ClaimCheck::Owned {
@@ -1693,12 +1665,7 @@ async fn refresh_claim_loop(
         };
         // A missed stamp is survivable inside the lease; the next tick
         // retries, and a lapse is what `lost` reports.
-        if store
-            .object_store()
-            .put(&key, Bytes::from(body))
-            .await
-            .is_ok()
-        {
+        if store.put(&key, Bytes::from(body)).await.is_ok() {
             last_verified_expiry = record.expires_at;
         }
     }

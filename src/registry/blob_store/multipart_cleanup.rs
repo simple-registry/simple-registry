@@ -4,7 +4,8 @@
 //! *primitives* ([`ObjectStore::list_multipart_uploads`](angos_storage::ObjectStore::list_multipart_uploads)
 //! and the keyed [`ObjectStore::abort_upload`](angos_storage::ObjectStore::abort_upload)):
 //! it walks in-flight multipart uploads, applies an age threshold, and skips
-//! any upload that still has a live session (its `startedat` marker exists).
+//! any upload that still has a live session (its `session.json` record, or
+//! the legacy `startedat` marker, exists).
 //! The engine stays oblivious to upload-session semantics; the policy lives
 //! here. An orphan is cleaned with `abort_upload(key)`, which aborts every
 //! in-flight multipart at the key and removes any staged remainder.
@@ -59,8 +60,9 @@ pub fn is_orphan(initiated: DateTime<Utc>, now: DateTime<Utc>, timeout: Duration
 #[async_trait]
 pub trait MultipartCleanup: Send + Sync {
     /// Lists multipart uploads that have exceeded `timeout` and are not
-    /// associated with a live upload session (i.e., the `startedat` marker is
-    /// gone). Pure discovery: does not modify any state.
+    /// associated with a live upload session (i.e., neither the `session.json`
+    /// record nor the legacy `startedat` marker exists). Pure discovery: does
+    /// not modify any state.
     async fn list_orphan_multipart_uploads(
         &self,
         timeout: Duration,
@@ -102,17 +104,28 @@ impl MultipartCleanup for BlobStore {
                 // A key naming no session was never opened by angos, so it has
                 // no marker to probe and no session of ours to abort.
                 let session_id: UploadSessionId = session_id.parse().ok()?;
-                let startedat_path = path_builder::upload_start_date_path(&namespace, &session_id);
-                Some((upload, startedat_path))
+                let session_path = path_builder::upload_session_path(&namespace, &session_id);
+                let legacy_path = path_builder::upload_start_date_path(&namespace, &session_id);
+                Some((upload, session_path, legacy_path))
             });
             let page_orphans = stream::iter(candidates)
-                .map(|(upload, startedat_path)| async move {
-                    // A live session (its `startedat` marker exists) is not an
-                    // orphan. Only absence proves it is gone: aborting on a
-                    // transient failure destroys a progressing upload's parts.
-                    match self.object.head(&startedat_path).await {
-                        Ok(_) => None,
-                        Err(StorageError::NotFound) => Some(OrphanMultipartUpload {
+                .map(|(upload, session_path, legacy_path)| async move {
+                    // A live session (its `session.json` record, or the legacy
+                    // `startedat` marker, exists) is not an orphan. Only proven
+                    // absence of both condemns it: aborting on a transient
+                    // failure destroys a progressing upload's parts.
+                    let alive = match self.object.head(&session_path).await {
+                        Ok(_) => Ok(true),
+                        Err(StorageError::NotFound) => match self.object.head(&legacy_path).await {
+                            Ok(_) => Ok(true),
+                            Err(StorageError::NotFound) => Ok(false),
+                            Err(e) => Err(e),
+                        },
+                        Err(e) => Err(e),
+                    };
+                    match alive {
+                        Ok(true) => None,
+                        Ok(false) => Some(OrphanMultipartUpload {
                             key: upload.key,
                             upload_id: upload.upload_id,
                         }),

@@ -81,9 +81,6 @@ access_key_id = "YOUR_ACCESS_KEY"
 secret_key = "YOUR_SECRET_KEY"
 link_cache_ttl = 30
 
-[metadata_store.s3.lock_strategy.s3]
-ttl_secs = 30
-
 [ui]
 enabled = true
 name = "My Registry"
@@ -317,10 +314,6 @@ spec:
 Add Redis to `config.toml`:
 
 ```toml
-[metadata_store.s3.lock_strategy.redis]
-url = "redis://redis:6379"
-ttl = 10
-
 [cache.redis]
 url = "redis://redis:6379"
 key_prefix = "angos"

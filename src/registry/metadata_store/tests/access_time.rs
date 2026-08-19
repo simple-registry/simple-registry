@@ -415,7 +415,7 @@ async fn test_read_link_with_access_time_debounce_uses_cache() {
     let mut cfg = config.clone();
     cfg.access_time_debounce_secs = 60;
     let cache = Arc::new(CacheEnum::Memory(CacheMemoryBackend::new()));
-    let backend = cfg.to_backend(false, Some(cache.clone())).unwrap();
+    let backend = cfg.to_backend(Some(cache.clone())).unwrap();
     let namespace = Namespace::new("cache-debounce-hit-ns").unwrap();
     let digest =
         Digest::from_str("sha256:db01a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6")
@@ -439,12 +439,7 @@ async fn test_read_link_with_access_time_debounce_uses_cache() {
 
     // Delete the storage object to prove the next read must come from cache.
     let link_path = path_builder::link_path(&tag, &namespace);
-    backend
-        .store()
-        .object_store()
-        .delete(&link_path)
-        .await
-        .unwrap();
+    backend.object_store().delete(&link_path).await.unwrap();
 
     let meta = backend
         .read_link_recording_access(&namespace, &tag)
@@ -468,7 +463,7 @@ async fn test_cas_inline_stamp_writes_immediately() {
     let config = test_config();
     let mut cfg = config.clone();
     cfg.access_time_debounce_secs = 0;
-    let backend = cfg.to_backend(true, None).unwrap();
+    let backend = cfg.to_backend(None).unwrap();
     let namespace = Namespace::new("cas-inline-stamp").unwrap();
     let digest =
         Digest::from_str("sha256:ca01a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6")
@@ -514,7 +509,7 @@ async fn test_cas_debounce_defers_stamp() {
     let config = test_config();
     let mut cfg = config.clone();
     cfg.access_time_debounce_secs = 60;
-    let backend = cfg.to_backend(true, None).unwrap();
+    let backend = cfg.to_backend(None).unwrap();
     let namespace = Namespace::new("cas-debounce").unwrap();
     let digest =
         Digest::from_str("sha256:ca03c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
@@ -558,7 +553,7 @@ async fn test_cas_debounce_defers_stamp() {
 #[tokio::test]
 async fn test_cas_concurrent_stamps_lose_races_silently() {
     let config = test_config();
-    let backend = config.to_backend(true, None).unwrap();
+    let backend = config.to_backend(None).unwrap();
     let namespace = Namespace::new("cas-stamp-race").unwrap();
     let digest =
         Digest::from_str("sha256:ca02b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1")

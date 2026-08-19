@@ -217,7 +217,6 @@ async fn a_push_interrupted_between_waves_reads_consistently() {
 
     // Rewind wave D: the tag entry is gone, the revision stays resolvable.
     store
-        .store()
         .object_store()
         .delete_prefix(&path_builder::tag_entry_dir(
             &namespace,
@@ -246,7 +245,6 @@ async fn a_push_interrupted_between_waves_reads_consistently() {
     // Rewind wave C: nothing resolves, only over-approximated references
     // remain for the collector.
     store
-        .store()
         .object_store()
         .delete(&path_builder::revision_record_path(&namespace, &digest))
         .await

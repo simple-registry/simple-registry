@@ -230,10 +230,6 @@ root_dir = "/data"
 [metadata_store.fs]
 root_dir = "/data"
 
-[metadata_store.fs.lock_strategy.redis]
-url = "redis://redis:6379"
-ttl = 10
-
 [cache.redis]
 url = "redis://redis:6379"
 key_prefix = "angos"
@@ -283,14 +279,12 @@ endpoint = "https://s3.amazonaws.com"
 region = "us-east-1"
 access_key_id = "YOUR_ACCESS_KEY"
 secret_key = "YOUR_SECRET_KEY"
-
-[metadata_store.s3.lock_strategy.s3]
-ttl_secs = 30
-max_retries = 100
-retry_delay_ms = 50
 ```
 
-At startup, Angos probes the S3 provider to verify conditional write and delete support. If the probe fails, check that your provider supports `If-None-Match`/`If-Match` on PUT and `If-Match` on DELETE, or fall back to the Redis-based setup above.
+Coordination is lock-free: no lock backend needs configuring. When
+`[global.job_queue]` is enabled, a startup probe verifies the provider's
+atomic create-if-absent (`PutObject` with `If-None-Match: *`) before the
+durable queue is served.
 
 ---
 

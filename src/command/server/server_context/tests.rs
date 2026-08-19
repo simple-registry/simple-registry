@@ -31,7 +31,7 @@ use crate::{
         blob_store::{BlobStoreConfig, FsBackendConfig as BlobFsConfig},
         metadata_store::{LinkKind, LinkOperation, MetadataStore},
         repository_resolver::RepositoryResolver,
-        test_utils::{build_store, s3_test_connection},
+        test_utils::s3_test_connection,
     },
     test_fixtures::configuration::{load_config, minimal_config},
 };
@@ -100,9 +100,7 @@ pub async fn create_test_registry(config: &Configuration) -> Arc<Registry> {
     let blob_backend = std::sync::Arc::new(config.blob_store.build_backend().unwrap());
     let auth_cache = config.cache.to_backend().unwrap();
     let storage_config = config.resolve_registry_storage();
-    let store = crate::command::bootstrap::build_store(&storage_config)
-        .await
-        .unwrap();
+    let store = crate::command::bootstrap::build_object_store(&storage_config).unwrap();
     let metadata_store = Arc::new(MetadataStore::builder(store).build());
 
     let mut repositories_map = HashMap::new();
@@ -702,9 +700,8 @@ fn build_shutdown_flush_harness(unique_prefix: &str) -> ShutdownFlushHarness {
     let conn = s3_test_connection(unique_prefix.to_string());
     let http = Arc::new(S3HttpBackend::new(&conn.to_client_config()).expect("s3 http client"));
     let object_store: Arc<dyn ObjectStore> = Arc::new(StorageS3Backend::builder(http).build());
-    let facade = build_store(object_store);
     let metadata_store: Arc<MetadataStore> = Arc::new(
-        MetadataStore::builder(facade)
+        MetadataStore::builder(object_store)
             .access_time_debounce_secs(3600)
             .link_cache_ttl(0)
             .build(),

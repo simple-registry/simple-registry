@@ -1,5 +1,3 @@
-use angos_tx_engine::lock;
-
 use crate::{cache, command::bootstrap::Error as BootstrapError, policy, registry};
 
 /// Errors raised by the maintenance machinery shared by `scrub`, `prune`, and
@@ -41,12 +39,6 @@ impl From<policy::Error> for Error {
     }
 }
 
-impl From<lock::Error> for Error {
-    fn from(e: lock::Error) -> Self {
-        Error::Registry(e.into())
-    }
-}
-
 impl From<BootstrapError> for Error {
     fn from(e: BootstrapError) -> Self {
         match e {
@@ -56,9 +48,7 @@ impl From<BootstrapError> for Error {
             )),
             BootstrapError::Overlap(inner) => Error::Initialization(inner.to_string()),
             BootstrapError::JobQueue(inner) => Error::Initialization(inner.to_string()),
-            BootstrapError::StorageBackend(inner) | BootstrapError::Coordination(inner) => {
-                Error::Initialization(inner)
-            }
+            BootstrapError::StorageBackend(inner) => Error::Initialization(inner),
             BootstrapError::EventWebhook(inner) => Error::Initialization(inner.to_string()),
             BootstrapError::Registry(inner) => Error::from(inner),
         }

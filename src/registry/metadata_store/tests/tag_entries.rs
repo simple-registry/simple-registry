@@ -12,7 +12,7 @@ use crate::registry::{
     Error,
     metadata_store::{LinkKind, LinkMetadata, LinkOperation, MetadataStore, ReferencePolicy},
     path_builder,
-    test_utils::{build_store, metadata_store_over_cached},
+    test_utils::metadata_store_over_cached,
 };
 
 fn entry_ms(ts: DateTime<Utc>) -> DateTime<Utc> {
@@ -51,7 +51,6 @@ async fn concurrent_same_tag_pushes_from_two_processes_lose_nothing() {
     rb.unwrap();
 
     let entries = a
-        .store()
         .object_store()
         .list(
             &path_builder::tag_entry_dir(&namespace, &Tag::new("latest").unwrap()),
@@ -77,7 +76,7 @@ async fn concurrent_same_tag_pushes_from_two_processes_lose_nothing() {
 #[tokio::test]
 async fn legacy_link_answers_until_a_tombstone_shadows_it() {
     let config = test_config();
-    let backend = config.to_backend(false, None).unwrap();
+    let backend = config.to_backend(None).unwrap();
     let namespace = Namespace::new("legacy-tag-fallback").unwrap();
     let tag = Tag::new("v1").unwrap();
     let link = LinkKind::Tag(tag.clone());
@@ -86,7 +85,6 @@ async fn legacy_link_answers_until_a_tombstone_shadows_it() {
     let legacy_path = path_builder::link_path(&link, &namespace);
     let metadata = LinkMetadata::from_digest_at(target.clone(), entry_ms(Utc::now()));
     backend
-        .store()
         .object_store()
         .put(
             &legacy_path,
@@ -114,7 +112,6 @@ async fn legacy_link_answers_until_a_tombstone_shadows_it() {
         "the tombstone must shadow the legacy link, got: {result:?}"
     );
     backend
-        .store()
         .object_store()
         .head(&legacy_path)
         .await
@@ -134,7 +131,7 @@ async fn a_young_legacy_tag_link_survives_conversion_under_grace() {
             .sync_to_disk(false)
             .build(),
     );
-    let store = MetadataStore::builder(build_store(backend))
+    let store = MetadataStore::builder(backend)
         .link_cache_ttl(0)
         .access_time_debounce_secs(0)
         .gc_grace_secs(300)
@@ -147,7 +144,6 @@ async fn a_young_legacy_tag_link_survives_conversion_under_grace() {
     let legacy_path = path_builder::link_path(&link, &namespace);
     let metadata = LinkMetadata::from_digest_at(target.clone(), entry_ms(Utc::now()));
     store
-        .store()
         .object_store()
         .put(
             &legacy_path,
@@ -164,7 +160,6 @@ async fn a_young_legacy_tag_link_survives_conversion_under_grace() {
     let resolved = store.read_link_reference(&namespace, &link).await.unwrap();
     assert_eq!(resolved.target, target, "the converted entry must resolve");
     store
-        .store()
         .object_store()
         .head(&legacy_path)
         .await

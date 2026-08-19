@@ -503,3 +503,27 @@ A media type now carries no parameter section anywhere but a `Content-Type` head
 #### Migration
 
 None. A client sending parameters on a manifest `Content-Type` still has them ignored, as before. A media type an older angos recorded with its parameters, which it did when a push carried them and the body declared no `mediaType` of its own, is read bare on the way out, so stored content keeps serving and is rewritten bare on its next push.
+
+---
+
+## 1.5.x → 1.5.2
+
+### Transaction Engine Removed
+
+The internal transaction engine (its intent log, crash-recovery loop,
+janitors, and lock backends) is gone: every write path now uses write-once
+ordered keys, blob reclamation is fenced by the `v2/gc/` marker protocol, and
+the durable queue serialises workers with atomically created claim keys.
+
+The coordination keys that configured it, `lock_strategy` (with its
+`redis`/`s3` sub-tables), a bare `[metadata_store.*.redis]` table, and
+`conditional_operations`, are accepted and silently ignored, so existing
+configs keep loading. Remove them at your convenience.
+
+**Upgrade honesty:** recovery is gone, so a store carrying a previous
+binary's mid-crash transaction is not replayed after the upgrade. Leftover
+`.tx-log/`, `.tx-bodies/`, and `.tx-locks/` keys are reclaimed as garbage by
+`angos scrub` once past the reclamation grace period, and any torn legacy
+write surfaces as a scrub-repairable inconsistency the validators repair
+from content. Upgrade from a cleanly stopped (or already-recovered) 1.5.x;
+run `angos scrub` once after the upgrade.

@@ -8,6 +8,7 @@ use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
 use angos_storage::test_util::frame;
 
 use crate::registry::Error;
+use crate::registry::blob_store::resumable_hasher::Hasher;
 use crate::registry::blob_store::*;
 
 pub async fn test_datastore_stream_uploads(store: &BlobStore) {
@@ -391,12 +392,22 @@ async fn complete_upload_fails_on_rerun() {
     .await;
 }
 
-/// FS-only: the assertion is about object count under one prefix, which the
-/// shared backends agree on, and this keeps the check independent of a live S3.
+/// FS-only: the assertions are about the exact keys under one prefix, which
+/// the shared backends agree on, and this keeps the check independent of a
+/// live S3.
 #[tokio::test]
-async fn checkpoints_supersede_rather_than_accumulate() {
+async fn session_state_is_one_json_record() {
     let tc = FSRegistryTestCase::new();
-    test_checkpoints_supersede_rather_than_accumulate(tc.blob_store().as_ref()).await;
+    test_session_state_is_one_json_record(tc.blob_store().as_ref()).await;
+}
+
+/// FS-only: the legacy artifacts are seeded raw, and only the FS backend
+/// accepts appends to a data file it did not open through `create_upload`'s
+/// multipart machinery.
+#[tokio::test]
+async fn legacy_session_resumes_and_completes() {
+    let tc = FSRegistryTestCase::new();
+    test_legacy_session_resumes_and_completes(tc.blob_store().as_ref()).await;
 }
 
 #[tokio::test]
@@ -455,11 +466,11 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
     );
 }
 
-/// Each PATCH replaces the checkpoint rather than adding one: they are read by
-/// listing the whole set, so accumulating them makes every later PATCH and the
-/// finalize progressively more expensive.
-pub async fn test_checkpoints_supersede_rather_than_accumulate(store: &BlobStore) {
-    let namespace = &Namespace::new("checkpoint-supersede").unwrap();
+/// A chunked upload keeps its whole state in one `session.json`, rewritten
+/// per chunk: no `hashstates/` or `startedat` keys appear, the checkpoint
+/// resumes across chunks, and completion leaves no session keys behind.
+pub async fn test_session_state_is_one_json_record(store: &BlobStore) {
+    let namespace = &Namespace::new("session-single-record").unwrap();
     let session_id = &UploadSessionId::generate();
     store
         .create_upload(namespace, session_id, None)
@@ -479,15 +490,127 @@ pub async fn test_checkpoints_supersede_rather_than_accumulate(store: &BlobStore
             .unwrap();
     }
 
-    let dir = format!(
+    let container = format!(
         "{}/",
-        path_builder::upload_hash_context_dir(namespace, session_id)
+        path_builder::upload_container_path(namespace, session_id)
     );
-    let page = store.object.list(&dir, 100, None).await.unwrap();
+    let keys = store
+        .object
+        .list(&container, 100, None)
+        .await
+        .unwrap()
+        .items;
     assert_eq!(
-        page.items.len(),
+        keys.iter().filter(|k| k.contains("session.json")).count(),
         1,
-        "one live checkpoint expected, got: {:?}",
-        page.items
+        "exactly one session record expected, got: {keys:?}"
+    );
+    assert!(
+        !keys
+            .iter()
+            .any(|k| k.contains("hashstates") || k.contains("startedat")),
+        "no legacy artifacts may be written: {keys:?}"
+    );
+
+    // The checkpoint resumed across chunks iff the digest of the whole body
+    // verifies at completion.
+    let content = b"onetwothreefour";
+    let digest = Digest::sha256_of_bytes(content);
+    store
+        .complete_upload(namespace, session_id, &digest, content.len() as u64)
+        .await
+        .unwrap();
+    assert_eq!(store.read(&digest).await.unwrap(), content);
+    let leftover = store
+        .object
+        .list(&container, 100, None)
+        .await
+        .unwrap()
+        .items;
+    assert!(
+        leftover.is_empty(),
+        "completion must leave no session keys: {leftover:?}"
+    );
+}
+
+/// A session persisted by a previous binary (raw `startedat` marker, a
+/// `hashstates/<offset>` checkpoint, and partial data) resumes under the new
+/// code, which writes `session.json` on the first activity, and completes.
+pub async fn test_legacy_session_resumes_and_completes(store: &BlobStore) {
+    let namespace = &Namespace::new("legacy-session").unwrap();
+    let session_id = &UploadSessionId::generate();
+    let first = b"first half ";
+    let rest = b"second half";
+
+    let upload_path = path_builder::upload_path(namespace, session_id);
+    store.object.create_upload(&upload_path).await.unwrap();
+    store
+        .object
+        .write_upload(
+            &upload_path,
+            frame(first.to_vec()),
+            Some(first.len() as u64),
+        )
+        .await
+        .unwrap();
+    let mut hasher = Hasher::new();
+    hasher.update(first);
+    store
+        .object
+        .put(
+            &path_builder::upload_hash_context_path(namespace, session_id, first.len() as u64),
+            Bytes::from(hasher.state().to_bytes().unwrap()),
+        )
+        .await
+        .unwrap();
+    store
+        .object
+        .put(
+            &path_builder::upload_start_date_path(namespace, session_id),
+            Bytes::from(Utc::now().to_rfc3339()),
+        )
+        .await
+        .unwrap();
+
+    let (digest, size) = store
+        .write_upload(
+            namespace,
+            session_id,
+            Box::new(Cursor::new(rest.to_vec())),
+            Some(rest.len() as u64),
+            Algorithm::Sha256,
+        )
+        .await
+        .unwrap();
+    let content = b"first half second half";
+    assert_eq!(size, content.len() as u64);
+    assert_eq!(digest, Digest::sha256_of_bytes(content));
+    assert!(
+        store
+            .object
+            .head(&path_builder::upload_session_path(namespace, session_id))
+            .await
+            .is_ok(),
+        "the first activity on a legacy session must write session.json"
+    );
+
+    store
+        .complete_upload(namespace, session_id, &digest, size)
+        .await
+        .unwrap();
+    assert_eq!(store.read(&digest).await.unwrap(), content);
+    let container = format!(
+        "{}/",
+        path_builder::upload_container_path(namespace, session_id)
+    );
+    let leftover = store
+        .object
+        .list(&container, 100, None)
+        .await
+        .unwrap()
+        .items;
+    assert!(
+        leftover.is_empty(),
+        "completion must sweep the legacy artifacts too: {leftover:?}"
     );
 }

@@ -3,7 +3,7 @@
 //! serialized value types without depending on the queue machinery itself.
 //!
 //! The machinery itself lives beneath: [`store`] persists and claims durable
-//! jobs over the storage façade, and [`runner`] drives one claimed job
+//! jobs over the shared object store, and [`runner`] drives one claimed job
 //! through its handler. Domain handlers (cache fill, replication push) stay
 //! with their domains; only the queue subsystem lives here.
 

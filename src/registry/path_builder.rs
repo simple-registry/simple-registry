@@ -342,15 +342,20 @@ pub fn upload_path(namespace: &Namespace, session_id: &UploadSessionId) -> Strin
     format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/data")
 }
 
-/// Directory holding an upload's hasher-state checkpoints, one file per offset.
-/// Used to enumerate checkpoints and pick the most recent.
+/// The upload session's single durable record: last activity, committed
+/// offset, and the serialised hasher checkpoint, rewritten on every activity.
+pub fn upload_session_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
+    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/session.json")
+}
+
+/// Legacy directory of per-offset hasher-state checkpoints, written by
+/// previous versions; read only as a fallback when `session.json` is absent.
 pub fn upload_hash_context_dir(namespace: &Namespace, session_id: &UploadSessionId) -> String {
     format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/hashstates")
 }
 
-/// An upload's serialised hasher-state checkpoint after consuming its bytes up
-/// to `offset`. One file per offset, allowing hash resumption after a crash
-/// without re-reading the uploaded bytes.
+/// One legacy hasher-state checkpoint after consuming the upload's bytes up to
+/// `offset`.
 pub fn upload_hash_context_path(
     namespace: &Namespace,
     session_id: &UploadSessionId,
@@ -359,8 +364,8 @@ pub fn upload_hash_context_path(
     format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/hashstates/{offset}")
 }
 
-/// RFC3339 timestamp marking when the upload session was created. Used for
-/// age-based orphan detection during scrub.
+/// Legacy RFC3339 last-activity marker, written by previous versions; read
+/// only as a fallback when `session.json` is absent.
 pub fn upload_start_date_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
     format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/startedat")
 }
@@ -499,6 +504,10 @@ mod tests {
             format!("v2/repositories/ns/_uploads/{id}/data")
         );
         assert_eq!(uploads_root_dir(&ns), "v2/repositories/ns/_uploads");
+        assert_eq!(
+            upload_session_path(&ns, &id),
+            format!("v2/repositories/ns/_uploads/{id}/session.json")
+        );
         assert_eq!(
             upload_hash_context_path(&ns, &id, 42),
             format!("v2/repositories/ns/_uploads/{id}/hashstates/42")

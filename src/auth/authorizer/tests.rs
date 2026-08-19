@@ -244,7 +244,7 @@ async fn create_pull_through_registry(config: &Configuration) -> Arc<Registry> {
     let blob_backend = Arc::new(config.blob_store.build_backend().unwrap());
     let auth_cache = config.cache.to_backend().unwrap();
     let storage_config = config.resolve_registry_storage();
-    let handles = bootstrap::build_store(&storage_config).await.unwrap();
+    let handles = bootstrap::build_object_store(&storage_config).unwrap();
     let metadata_store = Arc::new(MetadataStore::builder(handles).build());
 
     let mut repositories_map = HashMap::new();
@@ -733,7 +733,7 @@ async fn authorize_mount_source_requires_read_on_the_source() {
         let content = b"mount authorization blob";
 
         let metadata_store = test_case.metadata_store();
-        let digest = put_blob_direct(metadata_store.store(), content).await;
+        let digest = put_blob_direct(metadata_store.object_store(), content).await;
         registry
             .blob_ownership()
             .grant(source, &digest)

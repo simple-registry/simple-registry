@@ -108,6 +108,13 @@ pub enum Action {
         link: LinkKind,
         referrer: Digest,
     },
+    /// Delete a legacy tracked link file whose live pins are re-homed to
+    /// per-referrer reference keys. The executor re-checks the file's age
+    /// before deleting, so a concurrently rewritten (young) file is kept.
+    RetireTrackedLink {
+        namespace: Namespace,
+        link: LinkKind,
+    },
     DeleteTag {
         namespace: Namespace,
         tag: Tag,
@@ -185,6 +192,11 @@ pub enum Action {
     /// so it can never be read successfully again.
     DeleteCorruptObject {
         store: WalkedStore,
+        key: String,
+    },
+    /// Delete a leftover of the removed transaction engine (`.tx-log/`,
+    /// `.tx-bodies/`, `.tx-locks/`), already age-gated by the walk.
+    ReclaimTxLeftover {
         key: String,
     },
 }
@@ -289,6 +301,12 @@ impl fmt::Display for Action {
                     "remove referrer {referrer} from link {link} in namespace '{namespace}'"
                 )
             }
+            Action::RetireTrackedLink { namespace, link } => {
+                write!(
+                    f,
+                    "retire legacy link file '{link}' in namespace '{namespace}'"
+                )
+            }
             Action::DeleteTag { namespace, tag } => {
                 write!(f, "delete tag '{namespace}:{tag}' (policy)")
             }
@@ -371,6 +389,9 @@ impl fmt::Display for Action {
             }
             Action::DeleteCorruptObject { store, key } => {
                 write!(f, "delete corrupt {store} object '{key}'")
+            }
+            Action::ReclaimTxLeftover { key } => {
+                write!(f, "reclaim transaction-engine leftover '{key}'")
             }
         }
     }

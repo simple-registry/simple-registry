@@ -296,7 +296,6 @@ impl Registry {
     /// walk the namespace tree.
     pub async fn check_ready(&self) -> Result<(), Error> {
         self.metadata_store
-            .store()
             .object_store()
             .list_children(path_builder::REPOS_ROOT, 1, None, None)
             .await
@@ -337,11 +336,11 @@ pub fn repository_name(repository: Option<&Repository>) -> String {
 
 /// Construct the in-process job queue used when `[global.job_queue]` is absent.
 ///
-/// The queue runs on the metadata store's coordinated `Store`: job records
-/// under its `_jobs/` prefix are committed through its transaction executor and
-/// survive restarts. The cache-fill handler resolves blob bytes and metadata
-/// grants directly through their own stores as idempotent work, so the queue
-/// needs no co-location with the blob backend.
+/// The queue runs on the metadata store's object store: job records under
+/// its `_jobs/` prefix are ordered idempotent writes and survive restarts.
+/// The cache-fill handler resolves blob bytes and metadata grants directly
+/// through their own stores as idempotent work, so the queue needs no
+/// co-location with the blob backend.
 fn build_in_process_queue(
     resolver: &Arc<RepositoryResolver>,
     blob_store: &Arc<BlobStore>,
@@ -350,8 +349,10 @@ fn build_in_process_queue(
     replication_concurrency: NonZeroUsize,
     event_dispatcher: Option<Arc<EventDispatcher>>,
 ) -> (Arc<JobStore>, CancellationToken) {
-    let job_store: Arc<JobStore> =
-        Arc::new(JobStore::new(metadata_store.store_arc(), "in-process"));
+    let job_store: Arc<JobStore> = Arc::new(JobStore::new(
+        metadata_store.object_store().clone(),
+        "in-process",
+    ));
 
     let cache_handler: Arc<dyn JobHandler> = Arc::new(CacheFillJobHandler::new(
         resolver.clone(),
@@ -535,7 +536,7 @@ mod in_process_replication_tests {
         let namespace = Namespace::new(NAMESPACE).unwrap();
 
         let (manifest_digest, config_digest, layer_digest) =
-            seed_manifest(metadata_store.store(), &metadata_store, &namespace).await;
+            seed_manifest(metadata_store.object_store(), &metadata_store, &namespace).await;
 
         // Downstream is missing both blobs (404 on HEAD) -> upload sequence runs.
         for blob in [&config_digest, &layer_digest] {
@@ -608,7 +609,7 @@ mod in_process_replication_tests {
         .await
         .unwrap_or(false);
 
-        let inspector = JobStore::new(metadata_store.store_arc(), "inspector");
+        let inspector = JobStore::new(metadata_store.object_store().clone(), "inspector");
 
         if !saw_put {
             let received = mock_server.received_requests().await.unwrap_or_default();

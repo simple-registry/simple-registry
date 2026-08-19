@@ -722,7 +722,7 @@ mod tests {
                 )
             );
 
-            let digest = put_blob_direct(registry.metadata_store.store(), content).await;
+            let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
             let response = registry
                 .start_upload(
                     None,
@@ -783,7 +783,7 @@ mod tests {
             let target = &Namespace::new("test-repo/target").unwrap();
             let content = b"cross-repo mountable blob";
 
-            let digest = put_blob_direct(registry.metadata_store.store(), content).await;
+            let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
             registry
                 .blob_ownership()
                 .grant(source, &digest)
@@ -838,7 +838,7 @@ mod tests {
             let target = &Namespace::new("test-repo/target").unwrap();
             let content = b"blob present but not owned by source";
 
-            let digest = put_blob_direct(registry.metadata_store.store(), content).await;
+            let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
 
             let mount = BlobMount {
                 digest: digest.clone(),
@@ -926,7 +926,7 @@ mod tests {
             let target = &Namespace::new("test-repo/target").unwrap();
             let content = b"automatically discoverable blob";
 
-            let digest = put_blob_direct(registry.metadata_store.store(), content).await;
+            let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
             registry
                 .blob_ownership()
                 .grant(owner, &digest)
@@ -975,7 +975,7 @@ mod tests {
             let source = &Namespace::new("test-repo/source").unwrap();
             let content = b"orphan blob present but unreferenced";
 
-            let digest = put_blob_direct(registry.metadata_store.store(), content).await;
+            let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
 
             let mount = BlobMount {
                 digest: digest.clone(),
@@ -1013,7 +1013,7 @@ mod tests {
 
             // Guards the authorize-then-grant TOCTOU: the grant is conditioned
             // on the authorized source, not on `owner`.
-            let digest = put_blob_direct(registry.metadata_store.store(), content).await;
+            let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
             registry
                 .blob_ownership()
                 .grant(owner, &digest)
@@ -1062,7 +1062,7 @@ mod tests {
             let target = &Namespace::new("test-repo/target").unwrap();
             let content = b"candidate resolution blob";
 
-            let digest = put_blob_direct(registry.metadata_store.store(), content).await;
+            let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
             let ownership = registry.blob_ownership();
             ownership.grant(source, &digest).await.unwrap();
             ownership.grant(other, &digest).await.unwrap();
@@ -1378,7 +1378,7 @@ mod tests {
         let registry = test_case.registry();
         let namespace = &Namespace::new("test-repo").unwrap();
         let content = b"body whose 201 never reached the client";
-        let digest = put_blob_direct(test_case.metadata_store().store(), content).await;
+        let digest = put_blob_direct(test_case.metadata_store().object_store(), content).await;
 
         let response = registry
             .complete_upload(
@@ -1931,7 +1931,7 @@ mod tests {
         let first_namespace = &Namespace::new("test-repo/first").unwrap();
         let second_namespace = &Namespace::new("test-repo/second").unwrap();
         let content = b"shared upload content";
-        let digest = put_blob_direct(registry.metadata_store.store(), content).await;
+        let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
 
         registry
             .blob_ownership()
@@ -2005,7 +2005,7 @@ mod tests {
         let first_namespace = &Namespace::new("test-repo/first").unwrap();
         let second_namespace = &Namespace::new("test-repo/second").unwrap();
         let content = b"shared monolithic upload content";
-        let digest = put_blob_direct(registry.metadata_store.store(), content).await;
+        let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
 
         registry
             .blob_ownership()
@@ -2261,7 +2261,7 @@ mod tests {
             let registry = test_case.registry();
             let namespace = &Namespace::new("test-repo").unwrap();
             let content = vec![b'x'; 100];
-            let digest = put_blob_direct(registry.metadata_store.store(), &content).await;
+            let digest = put_blob_direct(registry.metadata_store.object_store(), &content).await;
 
             let session_id = UploadSessionId::generate();
             registry
@@ -2413,21 +2413,13 @@ mod tests {
 
         assert_eq!(summary.size, content.len() as u64);
 
-        // Corrupt every `hashstates/<offset>` checkpoint so that
-        // `complete_upload` cannot reconstruct the final digest from the
-        // persisted hasher state.
-        let hashstates_dir =
-            test_case
-                .temp_dir()
-                .path()
-                .join(path_builder::upload_hash_context_dir(
-                    namespace,
-                    &session_id,
-                ));
-        for entry in std::fs::read_dir(&hashstates_dir).unwrap() {
-            let checkpoint = entry.unwrap().path();
-            std::fs::write(&checkpoint, b"not-a-valid-hasher-state").unwrap();
-        }
+        // Corrupt the session record so that `complete_upload` cannot
+        // reconstruct the final digest from the persisted hasher state.
+        let session_file = test_case
+            .temp_dir()
+            .path()
+            .join(path_builder::upload_session_path(namespace, &session_id));
+        std::fs::write(&session_file, b"not-a-valid-session-record").unwrap();
 
         let empty_stream = Cursor::new(Vec::new());
         let result = registry
@@ -2622,7 +2614,7 @@ mod tests {
         let store = test_case.metadata_store();
         let namespace = &Namespace::new("test-repo").unwrap();
         let content = b"existing bytes under a collector run";
-        let digest = put_blob_direct(store.store(), content).await;
+        let digest = put_blob_direct(store.object_store(), content).await;
 
         let session_id = UploadSessionId::generate();
         registry

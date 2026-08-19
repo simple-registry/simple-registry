@@ -6,7 +6,7 @@ use sha2::digest::common::hazmat::DeserializeStateError;
 use tracing::warn;
 
 use angos_oci::{Error as OciError, http_range};
-use angos_tx_engine::{StorageError, error::Error as TxError, lock};
+use angos_storage::Error as StorageError;
 
 use crate::{configuration, jobs::store as job_store, policy, registry::cache, registry_client};
 
@@ -95,14 +95,6 @@ pub enum Error {
     Serialization(#[from] SerializationError),
 }
 
-// Every lock failure is opaque coordination work with no client-actionable
-// detail, so all variants collapse to `Internal` (HTTP 500).
-impl From<lock::Error> for Error {
-    fn from(error: lock::Error) -> Self {
-        Error::Internal(error.to_string())
-    }
-}
-
 // A raw storage outcome carries no domain context. `NotFound` becomes the
 // generic `NotFound`; call sites that know a miss means a specific
 // blob/upload/manifest 404 intercept `StorageError::NotFound` explicitly before
@@ -115,23 +107,6 @@ impl From<StorageError> for Error {
                 Error::Internal("storage precondition failed".to_string())
             }
             StorageError::Backend(msg) => Error::Internal(msg),
-        }
-    }
-}
-
-// A transaction-engine error routes by variant: storage/lock/serde failures
-// reuse their own conversions, while a CAS conflict, precondition mismatch, or
-// partial commit is a concurrent-writer race surfaced as HTTP 409.
-impl From<TxError> for Error {
-    fn from(error: TxError) -> Self {
-        match error {
-            TxError::Storage(e) => Error::from(e),
-            TxError::Lock(e) => Error::from(e),
-            TxError::Serde(e) => Error::from(e),
-            TxError::Conflict | TxError::Precondition | TxError::PartialCommit => {
-                Error::Conflict("transaction conflict".to_string())
-            }
-            TxError::Build(msg) => Error::Internal(format!("engine build error: {msg}")),
         }
     }
 }
@@ -275,25 +250,6 @@ mod tests {
     fn from_storage_precondition_routes_to_internal() {
         let err: Error = StorageError::PreconditionFailed.into();
         assert!(matches!(err, Error::Internal(_)));
-    }
-
-    #[test]
-    fn from_tx_conflict_routes_to_conflict() {
-        assert!(matches!(Error::from(TxError::Conflict), Error::Conflict(_)));
-        assert!(matches!(
-            Error::from(TxError::Precondition),
-            Error::Conflict(_)
-        ));
-        assert!(matches!(
-            Error::from(TxError::PartialCommit),
-            Error::Conflict(_)
-        ));
-    }
-
-    #[test]
-    fn from_tx_storage_not_found_routes_to_not_found() {
-        let err: Error = TxError::Storage(StorageError::NotFound).into();
-        assert!(matches!(err, Error::NotFound));
     }
 
     #[test]
