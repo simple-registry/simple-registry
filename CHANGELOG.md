@@ -4,25 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.5.2 - UNRELEASED
+
+### Changed
+
+- Registry metadata is stored as write-once keys (references under `v2/ref/`, tag entries, revision and referrer records under `v2/ns/`, a catalog index under `v2/cat/`), replacing the metadata transaction, its locks, and every read-modify-write; legacy shapes keep answering reads until `angos scrub` converts them, so no migration step is required.
+- Blob reclamation moves entirely to `angos scrub`, fenced by a `v2/gc/` run-marker protocol and the new `[global] gc_grace_secs` knob (default 300): deletes answer `202 Accepted` while bytes wait for the sweep, and a write racing an active reclamation answers 503 `RECLAMATION_IN_PROGRESS` with `Retry-After`.
+- The durable job queue serialises workers with leased claim keys (atomic create-if-absent, probed at startup) instead of distributed locks; `[global.job_queue] claim_ttl_secs` (default 60) sets how quickly a crashed worker's jobs are taken over.
+- Tag history is retained: timestamps carry millisecond precision and scrub demotes superseded entries to a per-namespace `!hist/` prefix, keeping the hot tag listing at one entry per tag.
+- The catalog and tag listings serve ordered pages straight off key listings, with the catalog derived from the `v2/cat/` index merged with the legacy tree walk.
+
 ## 1.5.1
 
 ### Added
 
 - `auth.oidc.<name>.bearer_token_file` presents a token on those fetches instead, read per fetch and sent only to the issuer's own origin, so angos reaches a closed kube-apiserver with its own service-account token.
-
-### Changed
-
-- Blob references are stored as one write-once key per (namespace, link) under `v2/ref/`, replacing the per-namespace shard JSON and its read-modify-write; legacy shards keep answering reads until `angos scrub` converts them, so no migration step is required.
-- Tags are stored as ordered write-once entries under `v2/ns/`, replacing the mutable `current/link` and its read-modify-write: concurrent same-tag pushes and replicas never contend, and a tag's last-pull timestamp moves to its own advisory key. Legacy links keep answering reads until `angos scrub` converts them; tag timestamps now carry millisecond precision.
-- Manifest revisions and referrers are stored as immutable records under `v2/ns/`, and `v2/cat/` gains one index key per namespace so the catalog serves ordered pages straight off a listing; legacy links keep answering reads until `angos scrub` converts them.
-- Registry pushes and deletes are ordered waves of unconditional writes: the metadata transaction and the `blob-data` lock are gone, blob reclamation moves entirely to `angos scrub` fenced by a `v2/gc/` run-marker protocol, and deletes answer `202 Accepted` while the bytes wait for the sweep.
-- The durable job queue serialises workers with leased claim keys under `_jobs/claims/` (atomic create-if-absent on every backend, `link(2)` on FS) instead of distributed locks and transactions; `[global.job_queue]` now requires a backend whose create-if-absent is honest, probed once at startup.
-- Blob reads and every scrub repair that races a live writer (dangling-reference removal, orphan-blob reclamation, link repairs derived from a fresh revision) honour the reclamation grace period, now configurable as `[global] gc_grace_secs` (default 300), so a stale reference entry cannot resurrect a deleted blob and scrub under load reports zeros.
-- A manifest's layer and config references are pinned by per-manifest reference keys instead of the link files' rewritten `referenced_by` sets, removing the last read-modify-write from the push path; the legacy link files become advisory and the collector reclaims them.
-- Scrub demotes superseded tag entries to a per-namespace `!hist/` prefix, keeping the hot tag listing at one entry per tag while retaining full tag history.
-- `[global.job_queue] claim_ttl_secs` configures the job-claim lease (default 60), setting how quickly a crashed worker's jobs are taken over.
-- A write racing an active blob reclamation answers 503 `RECLAMATION_IN_PROGRESS` with `Retry-After` instead of a 409, so clients back off and retry instead of treating it as a refusal.
-- The catalog is served from the `v2/cat/` index merged with the legacy tree walk; a namespace whose index write was lost to a crash lists again after the next scrub backfill.
 
 ## 1.5.0
 
