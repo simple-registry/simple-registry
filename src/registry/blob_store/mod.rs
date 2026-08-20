@@ -24,7 +24,6 @@ use std::{
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::stream::{self, Stream, StreamExt, TryStreamExt};
-use tokio::io::AsyncRead;
 use tracing::instrument;
 
 use angos_oci::{Algorithm, Digest};
@@ -39,7 +38,7 @@ pub use config::BlobStoreConfig;
 pub use config::{FsBackendConfig, S3BackendConfig, TransportFields};
 pub use multipart_cleanup::{MultipartCleanup, OrphanMultipartUpload};
 
-pub type BoxedReader = Box<dyn AsyncRead + Unpin + Send + Sync>;
+pub use angos_storage::BoxedReader;
 
 /// Fan-out for the per-shard page chains behind [`BlobStore::stream_blobs`].
 const BLOB_LIST_CONCURRENCY: usize = 32;

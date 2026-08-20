@@ -69,7 +69,7 @@ pub fn ref_mutation(
 
 /// `namespace`'s reference entries for `digest` under the new key shape: the
 /// `!own` leaf plus the `!r/` subtree.
-pub async fn namespace_ref_entries(
+async fn namespace_ref_entries(
     store: &Arc<dyn ObjectStore>,
     namespace: &Namespace,
     digest: &Digest,
@@ -133,6 +133,22 @@ impl MetadataStore {
             Mutation::Delete { key } => self.object_store().delete(&key).await,
         }
         .map_err(Error::from)
+    }
+
+    /// Whether `namespace` holds the `_own` grant for `digest`: one head of
+    /// the key `namespace_ref_entries` probes first, without the reference
+    /// listing behind it.
+    pub async fn has_own_grant(
+        &self,
+        namespace: &Namespace,
+        digest: &Digest,
+    ) -> Result<bool, Error> {
+        let own = path_builder::blob_ref_own_path(digest, namespace);
+        match self.object_store().head(&own).await {
+            Ok(_) => Ok(true),
+            Err(StorageError::NotFound) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Revoke `namespace`'s ownership of `digest`: one delete of the `_own`

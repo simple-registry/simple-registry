@@ -2,10 +2,10 @@
 //!
 //! [`HookedStore`] replaces the hand-rolled delegating store decorators the
 //! workspace's tests used for fault injection: it forwards every
-//! [`ObjectStore`]/[`ConditionalStore`] method to the wrapped store after
-//! consulting a [`StoreHook`], so a test only writes the hook logic (crash on
-//! the N-th write, gate a specific key, force `PreconditionFailed`) instead
-//! of seventeen delegation methods.
+//! [`ObjectStore`] method to the wrapped store after consulting a
+//! [`StoreHook`], so a test only writes the hook logic (crash on the N-th
+//! write, gate a specific key, fail a named key) instead of seventeen
+//! delegation methods.
 //!
 //! Enabled for this crate's own tests and, through the `test-util` feature,
 //! for downstream crates' dev-dependencies.
@@ -17,8 +17,8 @@ use bytes::Bytes;
 use futures_util::stream;
 
 use crate::{
-    BoxedReader, ByteStream, ChildrenPage, ConditionalStore, Error, Etag, MultipartUploadPage,
-    ObjectMeta, ObjectStore, Page,
+    BoxedReader, ByteStream, ChildrenPage, Error, MultipartUploadPage, ObjectMeta, ObjectStore,
+    Page,
 };
 
 /// Single-frame [`ByteStream`] over `body`.
@@ -73,40 +73,6 @@ pub enum StoreOp<'a> {
         key: &'a str,
     },
     ListMultipartUploads,
-    GetWithEtag {
-        key: &'a str,
-    },
-    PutIfAbsent {
-        key: &'a str,
-        data: &'a Bytes,
-    },
-    PutIfMatch {
-        key: &'a str,
-        etag: &'a Etag,
-        data: &'a Bytes,
-    },
-    DeleteIfMatch {
-        key: &'a str,
-        etag: &'a Etag,
-    },
-}
-
-impl StoreOp<'_> {
-    /// Whether the op mutates stored objects (the write set the chaos tests
-    /// inject crashes into; upload-session appends are not part of it).
-    #[must_use]
-    pub fn is_write(&self) -> bool {
-        matches!(
-            self,
-            StoreOp::Put { .. }
-                | StoreOp::Delete { .. }
-                | StoreOp::DeletePrefix { .. }
-                | StoreOp::Copy { .. }
-                | StoreOp::PutIfAbsent { .. }
-                | StoreOp::PutIfMatch { .. }
-                | StoreOp::DeleteIfMatch { .. }
-        )
-    }
 }
 
 /// Interception point run before every delegated call of a [`HookedStore`].
@@ -129,10 +95,10 @@ pub trait StoreHook: Send + Sync {
 /// A store decorator that consults a [`StoreHook`] before delegating to the
 /// wrapped store.
 ///
-/// Implemented for `Arc<dyn ObjectStore>` and `Arc<dyn ConditionalStore>`
-/// inners; coerce the wrapped store accordingly at construction.
-/// `move_object` is intentionally left on the trait default (copy plus
-/// delete), so hooks observe moves through their constituent writes.
+/// Implemented for an `Arc<dyn ObjectStore>` inner; coerce the wrapped store
+/// accordingly at construction. `move_object` is intentionally left on the
+/// trait default (copy plus delete), so hooks observe moves through their
+/// constituent writes.
 #[derive(Debug)]
 pub struct HookedStore<S, H> {
     inner: S,
@@ -142,11 +108,6 @@ pub struct HookedStore<S, H> {
 impl<S, H> HookedStore<S, H> {
     pub fn new(inner: S, hook: H) -> Self {
         Self { inner, hook }
-    }
-
-    /// The hook, for test assertions on its recorded state.
-    pub fn hook(&self) -> &H {
-        &self.hook
     }
 }
 
@@ -277,42 +238,3 @@ macro_rules! delegate_object_store {
 }
 
 delegate_object_store!(Arc<dyn ObjectStore>);
-delegate_object_store!(Arc<dyn ConditionalStore>);
-
-#[async_trait]
-impl<H: StoreHook> ConditionalStore for HookedStore<Arc<dyn ConditionalStore>, H> {
-    async fn get_with_etag(&self, key: &str) -> Result<(Vec<u8>, Option<Etag>), Error> {
-        self.hook.before(StoreOp::GetWithEtag { key }).await?;
-        self.inner.get_with_etag(key).await
-    }
-
-    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<Option<Etag>, Error> {
-        self.hook
-            .before(StoreOp::PutIfAbsent { key, data: &data })
-            .await?;
-        self.inner.put_if_absent(key, data).await
-    }
-
-    async fn put_if_match(
-        &self,
-        key: &str,
-        etag: &Etag,
-        data: Bytes,
-    ) -> Result<Option<Etag>, Error> {
-        self.hook
-            .before(StoreOp::PutIfMatch {
-                key,
-                etag,
-                data: &data,
-            })
-            .await?;
-        self.inner.put_if_match(key, etag, data).await
-    }
-
-    async fn delete_if_match(&self, key: &str, etag: &Etag) -> Result<(), Error> {
-        self.hook
-            .before(StoreOp::DeleteIfMatch { key, etag })
-            .await?;
-        self.inner.delete_if_match(key, etag).await
-    }
-}

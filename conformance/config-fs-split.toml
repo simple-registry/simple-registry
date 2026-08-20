@@ -1,0 +1,14 @@
+[server]
+bind_address = "0.0.0.0"
+port = 8000
+
+[blob_store.fs]
+root_dir = "./conformance/fs-split-data"
+
+[metadata_store.fs]
+root_dir = "./conformance/fs-split-data"
+
+[global.access_policy]
+default = "allow"
+
+[repository."conformance"]

@@ -1,22 +1,17 @@
 //! Backend-agnostic conformance suites for the storage traits.
 //!
-//! [`object_store_conformance!`] and [`conditional_store_conformance!`] stamp
-//! out one named `#[tokio::test]` per contract clause, so every backend runs
-//! the identical suite under its own module path and a failure names the
-//! backend. Each backend's own test module instantiates the suites it
-//! qualifies for (FS has no [`ConditionalStore`]) and keeps only
-//! backend-specific tests next to them.
+//! [`object_store_conformance!`] stamps out one named `#[tokio::test]` per
+//! contract clause, so every backend runs the identical suite under its own
+//! module path and a failure names the backend. Each backend's own test module
+//! instantiates the suite and keeps only backend-specific tests next to them.
 //!
-//! This module instantiates both suites against the in-memory backend as
-//! trait objects (`Arc<dyn ObjectStore>`, `Arc<dyn ConditionalStore>`), which
-//! also pins that the traits stay object-safe and that the
-//! `ConditionalStore: ObjectStore` supertrait bound composes.
+//! This module instantiates the suite against the in-memory backend as a trait
+//! object (`Arc<dyn ObjectStore>`), which also pins that the trait stays
+//! object-safe.
 
 use std::sync::Arc;
 
-use bytes::Bytes;
-
-use crate::{ConditionalStore, MemoryObjectStore};
+use crate::MemoryObjectStore;
 
 /// Stamp out the [`ObjectStore`](crate::ObjectStore) contract tests against
 /// one backend, in a child module named `object_store_suite`.
@@ -551,152 +546,9 @@ macro_rules! object_store_conformance {
     };
 }
 
-/// Stamp out the [`ConditionalStore`](crate::ConditionalStore) contract tests
-/// against one CAS-capable backend, in a child module named
-/// `conditional_store_suite`. Same fixture contract as
-/// [`object_store_conformance!`].
-macro_rules! conditional_store_conformance {
-    ($fixture:expr) => {
-        mod conditional_store_suite {
-            use bytes::Bytes;
-
-            use super::*;
-            // Resolves trait methods on concrete backends; redundant when the
-            // fixture is already a trait object.
-            #[allow(unused_imports)]
-            use crate::{ConditionalStore, ObjectStore};
-            use crate::{Error, Etag};
-
-            #[tokio::test]
-            async fn put_if_absent_returns_etag_on_fresh_key() {
-                let (store, _guard) = $fixture;
-                let etag = store
-                    .put_if_absent("cas/fresh", Bytes::from_static(b"v"))
-                    .await
-                    .unwrap();
-                assert!(etag.is_some());
-            }
-
-            #[tokio::test]
-            async fn put_if_absent_rejects_existing_key_and_preserves_content() {
-                let (store, _guard) = $fixture;
-                store
-                    .put_if_absent("cas/dup", Bytes::from_static(b"first"))
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    store
-                        .put_if_absent("cas/dup", Bytes::from_static(b"second"))
-                        .await
-                        .unwrap_err(),
-                    Error::PreconditionFailed
-                );
-                assert_eq!(store.get("cas/dup").await.unwrap(), b"first");
-            }
-
-            #[tokio::test]
-            async fn put_if_match_replaces_with_current_etag() {
-                let (store, _guard) = $fixture;
-                let first = store
-                    .put_if_absent("cas/upd", Bytes::from_static(b"v1"))
-                    .await
-                    .unwrap()
-                    .unwrap();
-                let second = store
-                    .put_if_match("cas/upd", &first, Bytes::from_static(b"v2"))
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert_ne!(first, second);
-                assert_eq!(store.get("cas/upd").await.unwrap(), b"v2");
-            }
-
-            #[tokio::test]
-            async fn put_if_match_rejects_stale_etag() {
-                let (store, _guard) = $fixture;
-                let etag = store
-                    .put_if_absent("cas/stale", Bytes::from_static(b"v1"))
-                    .await
-                    .unwrap()
-                    .unwrap();
-                store
-                    .put_if_match("cas/stale", &etag, Bytes::from_static(b"v2"))
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    store
-                        .put_if_match("cas/stale", &etag, Bytes::from_static(b"v3"))
-                        .await
-                        .unwrap_err(),
-                    Error::PreconditionFailed
-                );
-                assert_eq!(store.get("cas/stale").await.unwrap(), b"v2");
-            }
-
-            #[tokio::test]
-            async fn delete_if_match_removes_with_current_etag() {
-                let (store, _guard) = $fixture;
-                let etag = store
-                    .put_if_absent("cas/del", Bytes::from_static(b"v"))
-                    .await
-                    .unwrap()
-                    .unwrap();
-                store.delete_if_match("cas/del", &etag).await.unwrap();
-                assert_eq!(store.get("cas/del").await.unwrap_err(), Error::NotFound);
-            }
-
-            #[tokio::test]
-            async fn delete_if_match_rejects_stale_etag() {
-                let (store, _guard) = $fixture;
-                store
-                    .put_if_absent("cas/del-stale", Bytes::from_static(b"v"))
-                    .await
-                    .unwrap();
-                let stale = Etag::new("\"stale\"");
-                assert_eq!(
-                    store
-                        .delete_if_match("cas/del-stale", &stale)
-                        .await
-                        .unwrap_err(),
-                    Error::PreconditionFailed
-                );
-                assert_eq!(store.get("cas/del-stale").await.unwrap(), b"v");
-            }
-        }
-    };
-}
-
-pub(crate) use {conditional_store_conformance, object_store_conformance};
+pub(crate) use object_store_conformance;
 
 object_store_conformance!({
     let store: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
     (store, ())
 });
-
-conditional_store_conformance!({
-    let store: Arc<dyn ConditionalStore> = Arc::new(MemoryObjectStore::new());
-    (store, ())
-});
-
-#[tokio::test]
-async fn delete_if_match_missing_key_is_success() {
-    // Consistent with `ObjectStore::delete`: a missing object counts as
-    // success regardless of the etag supplied. Memory-scoped: rustfs answers
-    // `PreconditionFailed` for a conditional delete of a missing key, so the
-    // S3 backend cannot honour this clause of the trait contract (consumers
-    // tolerate the difference through the CAS executor's reconcile mode).
-    let store: Arc<dyn ConditionalStore> = Arc::new(MemoryObjectStore::new());
-    let etag = store
-        .put_if_absent("cas/del-missing", Bytes::from_static(b"v"))
-        .await
-        .unwrap()
-        .unwrap();
-    store
-        .delete_if_match("cas/del-missing", &etag)
-        .await
-        .unwrap();
-    store
-        .delete_if_match("cas/del-missing", &etag)
-        .await
-        .unwrap();
-}

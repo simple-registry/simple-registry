@@ -1,7 +1,6 @@
 use std::{num::TryFromIntError, string::FromUtf8Error};
 
-use cel_interpreter::SerializationError;
-use hyper::{header::InvalidHeaderValue, http::uri::InvalidUri};
+use hyper::header::InvalidHeaderValue;
 use sha2::digest::common::hazmat::DeserializeStateError;
 use tracing::warn;
 
@@ -85,27 +84,18 @@ pub enum Error {
     Http(#[from] hyper::http::Error),
     #[error("(de)serialization error during operations: {0}")]
     Serde(#[from] serde_json::Error),
-    #[error("policy evaluation error: {0}")]
-    PolicyExecution(#[from] cel_interpreter::ExecutionError),
     #[error("invalid header value: {0}")]
     InvalidHeader(#[from] InvalidHeaderValue),
-    #[error("invalid URI: {0}")]
-    InvalidUri(#[from] InvalidUri),
-    #[error("serialization error during operations: {0}")]
-    Serialization(#[from] SerializationError),
 }
 
 // A raw storage outcome carries no domain context. `NotFound` becomes the
 // generic `NotFound`; call sites that know a miss means a specific
 // blob/upload/manifest 404 intercept `StorageError::NotFound` explicitly before
-// `?` reaches this impl. A precondition or backend failure is an opaque 500.
+// `?` reaches this impl. A backend failure is an opaque 500.
 impl From<StorageError> for Error {
     fn from(error: StorageError) -> Self {
         match error {
             StorageError::NotFound => Error::NotFound,
-            StorageError::PreconditionFailed => {
-                Error::Internal("storage precondition failed".to_string())
-            }
             StorageError::Backend(msg) => Error::Internal(msg),
         }
     }
@@ -244,12 +234,6 @@ mod tests {
     fn from_storage_not_found_routes_to_not_found() {
         let err: Error = StorageError::NotFound.into();
         assert!(matches!(err, Error::NotFound));
-    }
-
-    #[test]
-    fn from_storage_precondition_routes_to_internal() {
-        let err: Error = StorageError::PreconditionFailed.into();
-        assert!(matches!(err, Error::Internal(_)));
     }
 
     #[test]

@@ -1,13 +1,11 @@
 use std::collections::HashSet;
 
 use angos_oci::{Digest, Namespace, UploadSessionId};
-use angos_storage::Error as StorageError;
 
 use crate::registry::{
     Error,
     blob_store::BlobStore,
     metadata_store::{BlobIndexOperation, LinkKind, MetadataStore},
-    path_builder,
 };
 
 /// Promote the upload session's staged bytes to the canonical blob path and
@@ -109,11 +107,8 @@ impl<'a> BlobOwnership<'a> {
     pub async fn can_read(&self, namespace: &Namespace, digest: &Digest) -> Result<bool, Error> {
         // The own key grants directly, so one head answers the common case
         // before the full reference listing and legacy shard read.
-        let own = path_builder::blob_ref_own_path(digest, namespace);
-        match self.metadata_store.object_store().head(&own).await {
-            Ok(_) => return Ok(true),
-            Err(StorageError::NotFound) => {}
-            Err(error) => return Err(error.into()),
+        if self.metadata_store.has_own_grant(namespace, digest).await? {
+            return Ok(true);
         }
         // Writers never remove reference entries, so a non-own entry counts
         // only while its backing link still resolves: a stale manifest

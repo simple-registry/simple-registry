@@ -6,7 +6,10 @@ use std::{
 use angos_oci::Namespace;
 use angos_storage::ObjectStore;
 
-use crate::{cache::Cache, registry::pagination};
+use crate::{
+    cache::Cache,
+    registry::{Error, pagination, path_builder},
+};
 
 mod access_time;
 mod blob_index;
@@ -121,5 +124,15 @@ impl MetadataStore {
     /// over this store.
     pub fn gc_grace_secs(&self) -> u64 {
         self.gc_grace_secs
+    }
+
+    /// One bounded listing probes the backend; readiness must not walk the
+    /// namespace tree.
+    pub async fn check_ready(&self) -> Result<(), Error> {
+        self.object
+            .list_children(path_builder::REPOS_ROOT, 1, None, None)
+            .await
+            .map_err(|e| Error::Internal(format!("storage backend not ready: {e}")))?;
+        Ok(())
     }
 }

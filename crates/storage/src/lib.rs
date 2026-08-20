@@ -10,17 +10,14 @@
 //!   protocol, hiding the wire details (upload IDs, parts, staged remainders)
 //!   from callers, recovering them from S3 on each call). Every backend
 //!   implements this.
-//! - [`ConditionalStore`]: CAS extension: `put_if_absent`, `put_if_match`,
-//!   `delete_if_match`. S3 implements this; FS does not.
 //! - [`PresignedStore`]: signed download URLs. Only S3 implements this.
 //!
 //! # Backends
 //!
 //! - [`fs::Backend`]: [`ObjectStore`] on top of `tokio::fs`.
-//! - [`s3::Backend`]: [`ObjectStore`] + [`ConditionalStore`]
-//!   + [`PresignedStore`] wrapping [`angos_s3_client::Backend`].
+//! - [`s3::Backend`]: [`ObjectStore`] + [`PresignedStore`] wrapping
+//!   [`angos_s3_client::Backend`].
 
-mod conditional;
 mod error;
 #[cfg(any(test, feature = "test-util"))]
 mod memory;
@@ -40,17 +37,15 @@ mod tests;
 
 use tokio::io::AsyncRead;
 
-pub use crate::conditional::ConditionalStore;
 pub use crate::error::Error;
 #[cfg(any(test, feature = "test-util"))]
 pub use crate::memory::MemoryObjectStore;
 pub use crate::object::{KeyStream, ObjectStore};
 pub use crate::pagination::paginated;
 pub use crate::presigned::PresignedStore;
-pub use crate::types::{Children, ChildrenPage, Etag, ObjectMeta, Page};
-pub use crate::upload_session::{
-    ByteStream, MultipartUploadPage, PendingMultipartUpload, channel_stream,
-};
+pub use crate::types::{Children, ChildrenPage, ObjectMeta, Page};
+pub use crate::upload_session::channel_stream;
+pub use crate::upload_session::{ByteStream, MultipartUploadPage, PendingMultipartUpload};
 
 /// Boxed `AsyncRead` returned by [`ObjectStore::get_stream`]. Matches the
 /// shape `blob_store` already uses so future migrations don't need a

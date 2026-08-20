@@ -1,12 +1,10 @@
-//! In-process memory-backed [`ObjectStore`] and [`ConditionalStore`].
+//! In-process memory-backed [`ObjectStore`].
 //!
-//! Stores objects in a `HashMap<String, (Bytes, Etag, DateTime<Utc>)>` (body,
-//! fingerprint, write time) guarded by a `Mutex`.
-//! Every write generates a fresh monotonic etag so the store can also serve
-//! as a [`ConditionalStore`] for CAS-based testing.
+//! Stores objects in a `HashMap<String, (Bytes, DateTime<Utc>)>` (body, write
+//! time) guarded by a `Mutex`.
 //!
 //! `get_stream` returns a cursor over an in-memory clone; `copy` clones the
-//! entry in-place (with a fresh etag).
+//! entry in-place.
 //!
 //! Test fixture only: no production or configuration path constructs it
 //! (`BlobStoreConfig`/`RegistryStorageConfig` are FS or S3). It is the fast,
@@ -18,10 +16,7 @@ use std::fmt;
 use std::{
     collections::{BTreeSet, HashMap},
     io::Cursor,
-    sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 use async_trait::async_trait;
@@ -30,13 +25,12 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 
 use crate::{
-    BoxedReader, ByteStream, ChildrenPage, ConditionalStore, Error, Etag, ObjectMeta, ObjectStore,
-    Page, object::dir_prefix,
+    BoxedReader, ByteStream, ChildrenPage, Error, ObjectMeta, ObjectStore, Page, object::dir_prefix,
 };
 
 /// Inner shared state.
 struct Inner {
-    data: HashMap<String, (Bytes, Etag, DateTime<Utc>)>,
+    data: HashMap<String, (Bytes, DateTime<Utc>)>,
 }
 
 impl Inner {
@@ -78,7 +72,6 @@ impl fmt::Debug for Inner {
 #[derive(Debug, Clone)]
 pub struct MemoryObjectStore {
     inner: Arc<Mutex<Inner>>,
-    counter: Arc<AtomicU64>,
 }
 
 impl MemoryObjectStore {
@@ -87,33 +80,11 @@ impl MemoryObjectStore {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner::new())),
-            counter: Arc::new(AtomicU64::new(0)),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn next_etag(&self) -> Etag {
-        let n = self.counter.fetch_add(1, Ordering::Relaxed);
-        Etag::new(format!("\"{n}\""))
-    }
-
-    /// Rewrite `key`'s stored write time, so age-gated logic (reclamation
-    /// windows) can be exercised without waiting. Test fixture only, like
-    /// the store itself.
-    ///
-    /// # Errors
-    /// Returns [`Error::NotFound`] when `key` holds no object.
-    pub fn backdate(&self, key: &str, last_modified: DateTime<Utc>) -> Result<(), Error> {
-        match self.lock().data.get_mut(key) {
-            Some(entry) => {
-                entry.2 = last_modified;
-                Ok(())
-            }
-            None => Err(Error::NotFound),
-        }
     }
 }
 
@@ -129,7 +100,7 @@ impl ObjectStore for MemoryObjectStore {
         self.lock()
             .data
             .get(key)
-            .map(|(b, _, _)| b.to_vec())
+            .map(|(b, _)| b.to_vec())
             .ok_or(Error::NotFound)
     }
 
@@ -142,7 +113,7 @@ impl ObjectStore for MemoryObjectStore {
             .lock()
             .data
             .get(key)
-            .map(|(b, _, _)| b.clone())
+            .map(|(b, _)| b.clone())
             .ok_or(Error::NotFound)?;
 
         let total = bytes.len() as u64;
@@ -153,20 +124,16 @@ impl ObjectStore for MemoryObjectStore {
     }
 
     async fn put(&self, key: &str, data: Bytes) -> Result<(), Error> {
-        let etag = self.next_etag();
-        self.lock()
-            .data
-            .insert(key.to_string(), (data, etag, Utc::now()));
+        self.lock().data.insert(key.to_string(), (data, Utc::now()));
         Ok(())
     }
 
     async fn create_if_absent(&self, key: &str, data: Bytes) -> Result<bool, Error> {
-        let etag = self.next_etag();
         let mut guard = self.lock();
         if guard.data.contains_key(key) {
             return Ok(false);
         }
-        guard.data.insert(key.to_string(), (data, etag, Utc::now()));
+        guard.data.insert(key.to_string(), (data, Utc::now()));
         Ok(true)
     }
 
@@ -196,9 +163,8 @@ impl ObjectStore for MemoryObjectStore {
         self.lock()
             .data
             .get(key)
-            .map(|(b, e, t)| ObjectMeta {
+            .map(|(b, t)| ObjectMeta {
                 size: b.len() as u64,
-                etag: Some(e.clone()),
                 last_modified: Some(*t),
             })
             .ok_or(Error::NotFound)
@@ -346,12 +312,11 @@ impl ObjectStore for MemoryObjectStore {
             .lock()
             .data
             .get(source)
-            .map(|(b, _, _)| b.clone())
+            .map(|(b, _)| b.clone())
             .ok_or(Error::NotFound)?;
-        let etag = self.next_etag();
         self.lock()
             .data
-            .insert(destination.to_string(), (bytes, etag, Utc::now()));
+            .insert(destination.to_string(), (bytes, Utc::now()));
         Ok(())
     }
 
@@ -411,74 +376,6 @@ impl ObjectStore for MemoryObjectStore {
     // backend has no multipart protocol.
 }
 
-#[async_trait]
-impl ConditionalStore for MemoryObjectStore {
-    async fn get_with_etag(&self, key: &str) -> Result<(Vec<u8>, Option<Etag>), Error> {
-        self.lock()
-            .data
-            .get(key)
-            .map(|(b, e, _)| (b.to_vec(), Some(e.clone())))
-            .ok_or(Error::NotFound)
-    }
-
-    /// Surfaces the stored write time, like S3's `Last-Modified`, so age-gated
-    /// callers behave here as they do in a deployment. The trait default would
-    /// report no timestamp at all.
-    async fn get_with_metadata(
-        &self,
-        key: &str,
-    ) -> Result<(Vec<u8>, Option<Etag>, Option<DateTime<Utc>>), Error> {
-        self.lock()
-            .data
-            .get(key)
-            .map(|(b, e, t)| (b.to_vec(), Some(e.clone()), Some(*t)))
-            .ok_or(Error::NotFound)
-    }
-
-    async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<Option<Etag>, Error> {
-        let etag = self.next_etag();
-        let mut guard = self.lock();
-        if guard.data.contains_key(key) {
-            return Err(Error::PreconditionFailed);
-        }
-        guard
-            .data
-            .insert(key.to_string(), (data, etag.clone(), Utc::now()));
-        Ok(Some(etag))
-    }
-
-    async fn put_if_match(
-        &self,
-        key: &str,
-        etag: &Etag,
-        data: Bytes,
-    ) -> Result<Option<Etag>, Error> {
-        let new_etag = self.next_etag();
-        let mut guard = self.lock();
-        match guard.data.get(key) {
-            Some((_, current, _)) if current == etag => {
-                guard
-                    .data
-                    .insert(key.to_string(), (data, new_etag.clone(), Utc::now()));
-                Ok(Some(new_etag))
-            }
-            Some(_) | None => Err(Error::PreconditionFailed),
-        }
-    }
-
-    async fn delete_if_match(&self, key: &str, etag: &Etag) -> Result<(), Error> {
-        let mut guard = self.lock();
-        match guard.data.get(key) {
-            Some((_, current, _)) if current == etag => {
-                guard.data.remove(key);
-                Ok(())
-            }
-            Some(_) => Err(Error::PreconditionFailed),
-            None => Ok(()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
@@ -521,15 +418,5 @@ mod tests {
             .unwrap();
         assert_eq!(after.sub_prefixes, vec!["v3".to_string(), "v4".to_string()]);
         assert!(after.next_token.is_none());
-    }
-
-    #[tokio::test]
-    async fn head_returns_etag_that_changes_after_put() {
-        let s = store();
-        s.put("k", Bytes::from("v1")).await.unwrap();
-        let e1 = s.head("k").await.unwrap().etag.unwrap();
-        s.put("k", Bytes::from("v2")).await.unwrap();
-        let e2 = s.head("k").await.unwrap().etag.unwrap();
-        assert_ne!(e1, e2, "etag must change on overwrite");
     }
 }

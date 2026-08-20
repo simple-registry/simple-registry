@@ -126,10 +126,7 @@ impl From<registry::Error> for Error {
             | registry::Error::Io(_)
             | registry::Error::Http(_)
             | registry::Error::Serde(_)
-            | registry::Error::PolicyExecution(_)
-            | registry::Error::InvalidHeader(_)
-            | registry::Error::InvalidUri(_)
-            | registry::Error::Serialization(_) => angos_error(
+            | registry::Error::InvalidHeader(_) => angos_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 INTERNAL_ERROR_CODE,
                 Some(error.to_string()),

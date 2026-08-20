@@ -7,10 +7,6 @@
 //! directories) that stays internal to this backend. Listings sort
 //! lexicographically because `read_dir` returns entries in arbitrary order.
 //!
-//! Does **not** implement [`ConditionalStore`](crate::ConditionalStore): on
-//! FS conditional updates are handled one layer up via the metadata store's
-//! lock backend.
-//!
 //! Uploads use an append-mode file at the upload `key`: no staging artifacts,
 //! no multipart protocol, no caller-held session. `complete_upload` is a no-op
 //! because the data is already at `key`; the caller's transactional move to the
@@ -425,7 +421,6 @@ impl ObjectStore for Backend {
         let last_modified = meta.modified().ok().map(Into::into);
         Ok(ObjectMeta {
             size: meta.len(),
-            etag: None,
             last_modified,
         })
     }

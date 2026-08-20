@@ -134,46 +134,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: fs-memory-variable-parts
-            description: filesystem backend with memory lock and variable parts
-            config: config-fs-memory-variable-parts.toml
+          - variant: fs-inherit
+            description: filesystem backend, metadata store inherited (single store)
+            config: config-fs-inherit.toml
             s3: false
-            redis: false
-          - variant: s3-memory-variable-parts
-            description: s3 backend with memory lock and variable parts
-            config: config-s3-memory-variable-parts.toml
-            s3: true
-            redis: false
-          - variant: s3-cas-variable-parts
-            description: s3 CAS backend with variable parts
-            config: config-s3-cas-variable-parts.toml
-            s3: true
-            redis: false
-          - variant: s3-redis-variable-parts
-            description: s3 backend with redis lock and variable parts
-            config: config-s3-redis-variable-parts.toml
-            s3: true
-            redis: true
-          - variant: s3-memory-uniform-parts
-            description: s3 backend with memory lock and uniform parts
-            config: config-s3-memory-uniform-parts.toml
-            s3: true
-            redis: false
-          - variant: s3-cas-uniform-parts
-            description: s3 CAS backend with uniform parts
-            config: config-s3-cas-uniform-parts.toml
-            s3: true
-            redis: false
-          - variant: s3-redis-uniform-parts
-            description: s3 backend with redis lock, uniform parts
-            config: config-s3-redis-uniform-parts.toml
-            s3: true
-            redis: true
-          - variant: fs-redis-variable-parts
-            description: filesystem backend with redis lock and variable parts
-            config: config-fs-redis-variable-parts.toml
+          - variant: fs-split
+            description: filesystem backend with an explicit metadata store
+            config: config-fs-split.toml
             s3: false
-            redis: true
+          - variant: s3-variable-parts
+            description: s3 backend with variable multipart parts
+            config: config-s3-variable-parts.toml
+            s3: true
+          - variant: s3-uniform-parts
+            description: s3 backend with uniform multipart parts
+            config: config-s3-uniform-parts.toml
+            s3: true
     steps:
       - uses: actions/checkout@v7
 
@@ -189,18 +165,6 @@ jobs:
 
       - name: Start backend services
         run: |
-          if [[ "${{ matrix.redis }}" == "true" ]]; then
-            docker run --rm -d \
-              --network host \
-              --name redis-server \
-              redis
-
-            while ! nc -z localhost 6379; do
-              echo "Waiting for redis to start..."
-              sleep 1
-            done
-          fi
-
           if [[ "${{ matrix.s3 }}" == "true" ]]; then
             docker run --rm -d \
               -e RUSTFS_ACCESS_KEY=root \
@@ -236,11 +200,10 @@ jobs:
           cat /tmp/backend.toml conformance/e2e/overlay-replication-a.toml > /tmp/e2e-replication-a.toml
 
           # Instance B gets an isolated backend: a distinct port plus, when the
-          # backend is shared across instances (S3 bucket, redis lock keyspace),
-          # a distinct bucket and lock prefix. FS data is per-container already.
+          # backend is shared across instances (the S3 bucket), a distinct
+          # bucket. FS data is per-container already.
           sed -e 's/^port = 8000$/port = 8001/' \
               -e 's/bucket = "registry"/bucket = "registry-b"/' \
-              -e 's/\(key_prefix = "[^"]*\)"/\1b"/' \
               /tmp/backend.toml > /tmp/backend-b.toml
           cat /tmp/backend-b.toml conformance/e2e/overlay-replication-b.toml > /tmp/e2e-replication-b.toml
 
@@ -254,7 +217,7 @@ jobs:
           # conformance backend's fs root is host-mounted and shared, so the fs
           # blob root must move just like the S3 bucket does.
           # Only meaningful when the variant configures an explicit metadata
-          # store; the "memory" variants inherit the blob store (single store).
+          # store; the fs-inherit variant inherits the blob store (single store).
           if grep -q '^\[metadata_store\.' /tmp/backend.toml; then
             if [[ "${{ matrix.s3 }}" == "true" ]]; then
               sed -e '/^\[blob_store\.s3\]$/,/^\[/ s/^bucket = .*/bucket = "registry-split-blob"/' \
@@ -597,11 +560,6 @@ jobs:
               docker stop "$svc" || true
             fi
           done
-
-          if [[ "${{ matrix.redis }}" == "true" ]]; then
-            docker logs redis-server || true
-            docker stop redis-server || true
-          fi
 
   build-binary:
     strategy:

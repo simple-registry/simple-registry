@@ -74,13 +74,11 @@ pub async fn build_registry(
     // When [global.job_queue] is present, route cache-fill jobs through the
     // durable backend (so they survive restarts and let `angos worker` drain
     // them) and surface the pending count on this server's /metrics for
-    // autoscaling. The job store shares the metadata store's object store,
-    // so no second backend is wired.
+    // autoscaling.
     let pending = if let Some(jq_config) = &config.global.job_queue {
-        let storage = metadata_store.object_store().clone();
-        let claim_mode = job_store::ensure_claim_support(&storage).await?;
-        let job_store: Arc<JobStore> = Arc::new(JobStore::with_retry_policy(
-            storage,
+        let claim_mode = job_store::ensure_claim_support(metadata_store.object_store()).await?;
+        let job_store: Arc<JobStore> = Arc::new(JobStore::alongside_with_retry_policy(
+            &metadata_store,
             "server",
             claim_mode,
             jq_config.retry_policy(),

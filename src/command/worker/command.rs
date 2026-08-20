@@ -12,8 +12,6 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
-use angos_storage::ObjectStore;
-
 use crate::{
     cache_fill::CacheFillJobHandler,
     command::bootstrap::{self, Error},
@@ -213,7 +211,6 @@ impl ConfigNotifier for Command {
 /// Queue-independent worker resources, built once and shared so draining N
 /// queues does not rebuild storage and stores N times.
 struct WorkerContext {
-    storage: Arc<dyn ObjectStore>,
     blob_store: Arc<BlobStore>,
     metadata_store: Arc<MetadataStore>,
     repositories: Arc<RepositoryResolver>,
@@ -239,17 +236,14 @@ impl WorkerContext {
         };
         let retry_policy = job_queue.retry_policy();
 
-        // Share the metadata store's object store instead of wiring a
-        // second backend over the same storage.
-        let storage = metadata_store.object_store().clone();
-        let claim_mode = job_store::ensure_claim_support(&storage).await?;
+        let claim_mode = job_store::ensure_claim_support(metadata_store.object_store()).await?;
         let registry = bootstrap::registry(
             config,
             blob_store.clone(),
             metadata_store.clone(),
             repositories.clone(),
-            Arc::new(JobStore::with_retry_policy(
-                storage.clone(),
+            Arc::new(JobStore::alongside_with_retry_policy(
+                &metadata_store,
                 "worker",
                 claim_mode,
                 retry_policy,
@@ -257,7 +251,6 @@ impl WorkerContext {
         )?;
 
         Ok(Self {
-            storage,
             blob_store,
             metadata_store,
             repositories,
@@ -270,8 +263,8 @@ impl WorkerContext {
     /// Builds the [`Components`] for one queue: a fresh `JobStore` consumer
     /// over the shared storage plus the handler bound to that queue.
     fn components_for(&self, queue: Queue) -> Components {
-        let consumer = Arc::new(JobStore::with_retry_policy(
-            self.storage.clone(),
+        let consumer = Arc::new(JobStore::alongside_with_retry_policy(
+            &self.metadata_store,
             Uuid::new_v4().to_string(),
             self.claim_mode,
             self.retry_policy,
@@ -375,8 +368,8 @@ mod tests {
             metadata_store.clone(),
             repositories.clone(),
             RegistryConfig {
-                job_queue: Some(Arc::new(JobStore::new(
-                    storage.clone(),
+                job_queue: Some(Arc::new(JobStore::alongside(
+                    &metadata_store,
                     "worker-test",
                     ClaimMode::Atomic,
                 ))),
@@ -386,7 +379,6 @@ mod tests {
         let context = WorkerContext {
             retry_policy: JobRetryPolicy::default(),
             claim_mode: ClaimMode::Atomic,
-            storage,
             blob_store,
             metadata_store,
             repositories,

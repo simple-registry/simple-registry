@@ -286,15 +286,9 @@ impl Registry {
         }
     }
 
-    /// One bounded listing probes the metadata backend; readiness must not
-    /// walk the namespace tree.
+    /// Probes the metadata backend.
     pub async fn check_ready(&self) -> Result<(), Error> {
-        self.metadata_store
-            .object_store()
-            .list_children(path_builder::REPOS_ROOT, 1, None, None)
-            .await
-            .map_err(|e| Error::Internal(format!("storage backend not ready: {e}")))?;
-        Ok(())
+        self.metadata_store.check_ready().await
     }
 
     /// The repository mirroring `ns`, the registry namespace a proxying client
@@ -330,8 +324,6 @@ pub fn repository_name(repository: Option<&Repository>) -> String {
 
 /// Construct the in-process job queue used when `[global.job_queue]` is absent.
 ///
-/// The queue runs on the metadata store's object store: job records under
-/// its `_jobs/` prefix are ordered idempotent writes and survive restarts.
 /// The cache-fill handler resolves blob bytes and metadata grants directly
 /// through their own stores as idempotent work, so the queue needs no
 /// co-location with the blob backend.
@@ -345,8 +337,8 @@ fn build_in_process_queue(
 ) -> (Arc<JobStore>, CancellationToken) {
     // In-process draining is not preceded by the startup probe; atomic mode
     // preserves the historical unconditional `create_if_absent` behaviour.
-    let job_store: Arc<JobStore> = Arc::new(JobStore::new(
-        metadata_store.object_store().clone(),
+    let job_store: Arc<JobStore> = Arc::new(JobStore::alongside(
+        metadata_store,
         "in-process",
         ClaimMode::Atomic,
     ));
@@ -606,11 +598,7 @@ mod in_process_replication_tests {
         .await
         .unwrap_or(false);
 
-        let inspector = JobStore::new(
-            metadata_store.object_store().clone(),
-            "inspector",
-            ClaimMode::Atomic,
-        );
+        let inspector = JobStore::alongside(&metadata_store, "inspector", ClaimMode::Atomic);
 
         if !saw_put {
             let received = mock_server.received_requests().await.unwrap_or_default();

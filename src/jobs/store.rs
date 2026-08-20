@@ -36,6 +36,7 @@ use angos_storage::{Error as StorageError, ObjectStore, Page};
 use crate::{
     jobs::{JobState, Queue},
     metrics_provider::metrics_provider,
+    registry::metadata_store::MetadataStore,
 };
 
 // Storage layout of the durable queues.
@@ -68,7 +69,7 @@ pub fn job_lock_key_index_path(queue: &str, lock_key: &LockKey) -> String {
 /// Path of the claim key serialising execution of one `lock_key` across
 /// workers. Created with `create_if_absent`, leased, refreshed by the holder,
 /// and deleted on release; a lapsed lease is taken over by deletion.
-pub fn job_claim_path(lock_key: &LockKey) -> String {
+fn job_claim_path(lock_key: &LockKey) -> String {
     format!("{JOBS_ROOT}/claims/{}.json", lock_key.encode())
 }
 
@@ -176,7 +177,7 @@ impl From<StorageError> for Error {
     fn from(error: StorageError) -> Self {
         match error {
             StorageError::NotFound => Error::NotFound,
-            other => Error::Storage(other.to_string()),
+            StorageError::Backend(msg) => Error::Storage(msg),
         }
     }
 }
@@ -361,7 +362,7 @@ fn default_pending_ready_horizon_secs() -> u64 {
 ///
 /// Note: `not_before` is **not** stored on the envelope. It is encoded in the
 /// storage key (the filename stem) as a sortable hex unix-millis prefix; see
-/// [`make_storage_key`]. The filename is the single source of truth so a
+/// `make_storage_key`. The filename is the single source of truth so a
 /// claim loop can decide readiness from a LIST result alone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobEnvelope {
@@ -417,7 +418,7 @@ impl JobEnvelope {
 /// Width of the hex unix-millis prefix in a storage key. 16 hex chars cover
 /// `u64::MAX` milliseconds (well past year 5 billion), so the prefix is
 /// fixed-width and lexicographic sort always matches time order.
-pub const STORAGE_KEY_PREFIX_LEN: usize = 16;
+const STORAGE_KEY_PREFIX_LEN: usize = 16;
 
 /// Build a storage key (filename stem) encoding `not_before` as a sortable
 /// hex unix-millis prefix followed by `-<id>`. Lexicographic sort of these
@@ -427,7 +428,7 @@ pub const STORAGE_KEY_PREFIX_LEN: usize = 16;
 ///
 /// Negative timestamps (pre-1970) clamp to 0; the queue is not meaningful
 /// before unix epoch.
-pub fn make_storage_key(not_before: DateTime<Utc>, id: &str) -> String {
+fn make_storage_key(not_before: DateTime<Utc>, id: &str) -> String {
     let millis = u64::try_from(not_before.timestamp_millis()).unwrap_or(0);
     format!("{millis:016x}-{id}")
 }
@@ -452,7 +453,7 @@ pub fn parse_not_before(storage_key: &str) -> Option<DateTime<Utc>> {
 ///
 /// `horizon_secs` is sourced from
 /// [`JobQueueConfig::pending_ready_horizon_secs`].
-pub fn pending_ready_cutoff_prefix(horizon_secs: u64) -> String {
+fn pending_ready_cutoff_prefix(horizon_secs: u64) -> String {
     let cutoff =
         Utc::now() + ChronoDuration::seconds(i64::try_from(horizon_secs).unwrap_or(i64::MAX));
     let millis = u64::try_from(cutoff.timestamp_millis()).unwrap_or(u64::MAX);
@@ -478,14 +479,14 @@ pub struct LockKeyIndex {
     pub storage_key: String,
 }
 
-pub fn serialize_lock_key_index(storage_key: &str) -> Result<Vec<u8>, Error> {
+fn serialize_lock_key_index(storage_key: &str) -> Result<Vec<u8>, Error> {
     serde_json::to_vec(&LockKeyIndex {
         storage_key: storage_key.to_string(),
     })
     .map_err(|e| Error::Storage(format!("failed to serialize lock-key index: {e}")))
 }
 
-pub fn parse_lock_key_index(bytes: &[u8]) -> Result<LockKeyIndex, Error> {
+fn parse_lock_key_index(bytes: &[u8]) -> Result<LockKeyIndex, Error> {
     serde_json::from_slice(bytes)
         .map_err(|e| Error::Storage(format!("failed to parse lock-key index: {e}")))
 }
@@ -506,7 +507,7 @@ struct DeadLetterRecord<'a> {
 /// Owned, deserializable view of a dead-letter record. The borrowing
 /// [`DeadLetterRecord`] is write-only; this is its read counterpart. The
 /// flattened envelope plus `last_error`/`failed_at` round-trip the JSON
-/// written by [`serialize_dead_letter`].
+/// written by `serialize_dead_letter`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeadLetterRead {
     #[serde(flatten)]
@@ -515,7 +516,7 @@ pub struct DeadLetterRead {
     pub failed_at: DateTime<Utc>,
 }
 
-pub fn serialize_dead_letter(envelope: &JobEnvelope, last_error: &str) -> Result<Vec<u8>, Error> {
+fn serialize_dead_letter(envelope: &JobEnvelope, last_error: &str) -> Result<Vec<u8>, Error> {
     serde_json::to_vec(&DeadLetterRecord {
         envelope,
         last_error,
@@ -549,7 +550,7 @@ pub trait JobHandler: Send + Sync {
 
 /// Maximum number of pending envelopes inspected per scan. Deeper queues fall
 /// back to lock-based serialization, which is the actual correctness primitive.
-pub const MAX_SCAN: u16 = 1000;
+const MAX_SCAN: u16 = 1000;
 
 /// Maximum value reported by [`JobStore::count_pending`]. The gauge feeds KEDA
 /// autoscaling, which only needs ordinal granularity at high queue depths:
@@ -557,7 +558,7 @@ pub const MAX_SCAN: u16 = 1000;
 /// Capping here bounds S3 `LIST` cost per refresh tick to ~10 paginated calls
 /// regardless of how deep the queue actually is. Operators reading the gauge
 /// should treat the cap value as "at least this many".
-pub const MAX_REPORTED_PENDING: u64 = 10_000;
+const MAX_REPORTED_PENDING: u64 = 10_000;
 
 // ---------------------------------------------------------------------------
 // Consumer types
@@ -768,6 +769,32 @@ impl JobStore {
         }
     }
 
+    /// [`Self::new`] over the metadata store's backend. The job queue and the
+    /// metadata store always share one backend: job records live under that
+    /// store's `_jobs/` prefix, so no second backend is ever wired.
+    pub fn alongside(
+        metadata: &MetadataStore,
+        worker_id: impl Into<String>,
+        claim_mode: ClaimMode,
+    ) -> Self {
+        Self::new(metadata.object_store().clone(), worker_id, claim_mode)
+    }
+
+    /// [`Self::alongside`] with an operator-configured retry policy.
+    pub fn alongside_with_retry_policy(
+        metadata: &MetadataStore,
+        worker_id: impl Into<String>,
+        claim_mode: ClaimMode,
+        retry: JobRetryPolicy,
+    ) -> Self {
+        Self::with_retry_policy(
+            metadata.object_store().clone(),
+            worker_id,
+            claim_mode,
+            retry,
+        )
+    }
+
     // -----------------------------------------------------------------------
     // Storage primitives
     // -----------------------------------------------------------------------
@@ -867,7 +894,7 @@ impl JobStore {
     }
 
     /// Count pending envelopes ready for handling within
-    /// `[..., now + ready_horizon_secs]`. Capped at [`MAX_REPORTED_PENDING`].
+    /// `[..., now + ready_horizon_secs]`. Capped at `MAX_REPORTED_PENDING`.
     pub async fn count_pending(&self, queue: Queue, ready_horizon_secs: u64) -> Result<u64, Error> {
         let prefix = job_pending_dir(queue.as_str());
         let cutoff_prefix = pending_ready_cutoff_prefix(ready_horizon_secs);
@@ -900,7 +927,7 @@ impl JobStore {
     }
 
     /// Count dead-lettered envelopes in `queue`, capped at
-    /// [`MAX_REPORTED_PENDING`]. Feeds the server-published
+    /// `MAX_REPORTED_PENDING`. Feeds the server-published
     /// `angos_job_queue_failed` gauge so dead-letters stay observable even when
     /// `angos worker` (which has no metrics endpoint) drains the queue.
     pub async fn count_failed(&self, queue: Queue) -> Result<u64, Error> {
@@ -973,7 +1000,7 @@ impl JobStore {
         }
     }
 
-    pub async fn get_raw(&self, key: &str) -> Result<Vec<u8>, Error> {
+    async fn get_raw(&self, key: &str) -> Result<Vec<u8>, Error> {
         self.store.get(key).await.map_err(Error::from)
     }
 

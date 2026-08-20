@@ -281,10 +281,7 @@ mod tests {
         }
 
         async fn head(&self, _key: &str) -> Result<ObjectMeta, StorageError> {
-            Err(match &self.head_error {
-                StorageError::NotFound => StorageError::NotFound,
-                other => StorageError::Backend(other.to_string()),
-            })
+            Err(self.head_error.clone())
         }
 
         async fn get(&self, _key: &str) -> Result<Vec<u8>, StorageError> {

@@ -611,8 +611,8 @@ mod tests {
             ReplicationMode::EventReconcile,
             true,
         ));
-        let job_store = Arc::new(JobStore::new(
-            metadata_store.object_store().clone(),
+        let job_store = Arc::new(JobStore::alongside(
+            &metadata_store,
             "scrub-test",
             ClaimMode::Atomic,
         ));
@@ -1406,8 +1406,8 @@ mod tests {
             false,
         ));
 
-        let job_store = Arc::new(JobStore::new(
-            metadata_store.object_store().clone(),
+        let job_store = Arc::new(JobStore::alongside(
+            &metadata_store,
             "scrub-test",
             ClaimMode::Atomic,
         ));
@@ -1530,8 +1530,8 @@ mod tests {
             ReplicationMode::EventReconcile,
             true,
         ));
-        let job_store = Arc::new(JobStore::new(
-            metadata_store.object_store().clone(),
+        let job_store = Arc::new(JobStore::alongside(
+            &metadata_store,
             "scrub-test",
             ClaimMode::Atomic,
         ));

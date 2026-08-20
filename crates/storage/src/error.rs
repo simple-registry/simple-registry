@@ -15,11 +15,6 @@ pub enum Error {
     #[error("object not found")]
     NotFound,
 
-    /// A conditional operation (`put_if_absent`, `put_if_match`,
-    /// `delete_if_match`) was rejected because the precondition was not met.
-    #[error("precondition failed")]
-    PreconditionFailed,
-
     /// The backend reported an error that does not map onto a typed variant.
     /// Carries the backend's own error message.
     #[error("storage backend error: {0}")]
@@ -40,7 +35,6 @@ impl From<S3Error> for Error {
     fn from(error: S3Error) -> Self {
         match error {
             S3Error::NotFound(_) => Error::NotFound,
-            S3Error::PreconditionFailed => Error::PreconditionFailed,
             other => Error::Backend(other.to_string()),
         }
     }
@@ -53,11 +47,6 @@ mod tests {
     #[test]
     fn not_found_display() {
         assert_eq!(Error::NotFound.to_string(), "object not found");
-    }
-
-    #[test]
-    fn precondition_failed_display() {
-        assert_eq!(Error::PreconditionFailed.to_string(), "precondition failed");
     }
 
     #[test]

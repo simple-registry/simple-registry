@@ -43,10 +43,7 @@ fn owes_a_spec_code(error: &registry::Error) -> bool {
         | registry::Error::Io(_)
         | registry::Error::Http(_)
         | registry::Error::Serde(_)
-        | registry::Error::PolicyExecution(_)
-        | registry::Error::InvalidHeader(_)
-        | registry::Error::InvalidUri(_)
-        | registry::Error::Serialization(_) => false,
+        | registry::Error::InvalidHeader(_) => false,
     }
 }
 
