@@ -527,3 +527,48 @@ binary's mid-crash transaction is not replayed after the upgrade. Leftover
 write surfaces as a scrub-repairable inconsistency the validators repair
 from content. Upgrade from a cleanly stopped (or already-recovered) 1.5.x;
 run `angos scrub` once after the upgrade.
+
+### Reclaiming Space Now Requires Scrub
+
+Both delete endpoints answer `202 Accepted` and leave the bytes in place:
+a manifest or blob delete removes the metadata that references content, and
+`angos scrub` is what reclaims the content itself. A deployment that deletes
+regularly and never sweeps grows without bound, so schedule `angos scrub`
+(see [Run storage maintenance](run-storage-maintenance.md)). Operators
+watching disk immediately after a delete see the lag this introduces.
+
+### New Knobs
+
+`[global] gc_grace_secs` (default 300) is the reclamation grace period: scrub
+leaves keys and bytes younger than it alone, so it can never race an
+in-flight push. Raise it if pushes routinely stall longer than five minutes;
+lower it only for offline maintenance against a store with no live traffic.
+
+`[global.job_queue] claim_ttl_secs` (default 60) is the job-claim lease, and
+bounds how quickly a crashed worker's jobs are taken over.
+
+`access_time_debounce_secs` joins the ignored keys: access times are written
+inline, one entry per stamped pull.
+
+### A New Transient Response
+
+A write racing an active reclamation answers `503 RECLAMATION_IN_PROGRESS`
+with `Retry-After`, where previous versions blocked on a lock. Clients that
+honour `Retry-After` (docker, containerd, oras) retry without intervention;
+custom clients should treat it as retryable rather than fatal.
+
+### Backend Requirements
+
+The job queue prefers a backend whose create-if-absent is atomic and probes
+for one at startup (`link(2)` on a filesystem, `If-None-Match: *` on S3). A
+backend that cannot enforce it still runs, with a logged warning: claim races
+may then execute an idempotent job more than once. Nothing else in the write
+path needs a conditional write.
+
+### No Action Needed
+
+Upload sessions begun by an earlier version resume and complete unchanged,
+their metadata rewritten to the current shape on the next chunk. Legacy tag,
+revision, referrer, shard, and layer/config link shapes keep answering reads
+until scrub converts them, and the catalog lists a namespace that predates
+the index once scrub backfills its key.
