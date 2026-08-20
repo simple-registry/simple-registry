@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use angos_oci::{Digest, MediaType, Namespace, Tag};
 use angos_storage::Error as StorageError;
 
-use crate::registry::metadata_store::mutation::Mutation;
+use crate::registry::metadata_store::{access_time::put_access_entry, mutation::Mutation};
 
 use crate::registry::{
     Error,
@@ -211,36 +211,35 @@ impl MetadataStore {
         }
     }
 
-    /// The tag's advisory last-pull timestamp, from its sibling atime key.
+    /// The tag's advisory last-pull timestamp: its newest access entry, or
+    /// the legacy sibling atime key when no entries exist.
     pub async fn read_tag_access_time(
         &self,
         namespace: &Namespace,
         tag: &Tag,
     ) -> Result<Option<DateTime<Utc>>, Error> {
-        let key = path_builder::tag_atime_path(namespace, tag);
-        match self.object_store().get(&key).await {
-            Ok(raw) => Ok(std::str::from_utf8(&raw)
-                .ok()
-                .and_then(|text| DateTime::parse_from_rfc3339(text.trim()).ok())
-                .map(Into::into)),
-            Err(StorageError::NotFound) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        self.newest_access_time(
+            &path_builder::tag_atime_entry_dir(namespace, tag),
+            &path_builder::tag_atime_path(namespace, tag),
+        )
+        .await
     }
 
-    /// Overwrite the tag's atime key with the current time. Advisory: the
-    /// newest arriving timestamp is the correct value, so this is a plain put
-    /// with no transaction and no read.
+    /// Append one access entry to the tag's atime directory, recording
+    /// `client` and the current time. A plain put with no transaction and no
+    /// read.
     pub async fn write_tag_access_time(
         &self,
         namespace: &Namespace,
         tag: &Tag,
+        client: &str,
     ) -> Result<(), Error> {
-        let key = path_builder::tag_atime_path(namespace, tag);
-        self.object_store()
-            .put(&key, Bytes::from(Utc::now().to_rfc3339()))
-            .await
-            .map_err(Error::from)
+        put_access_entry(
+            self.object_store(),
+            &path_builder::tag_atime_entry_dir(namespace, tag),
+            client,
+        )
+        .await
     }
 
     /// Convert one legacy `current/link` into a `set` entry stamped with the

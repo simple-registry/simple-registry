@@ -19,8 +19,8 @@ use crate::{
     registry::{
         metadata_store::{LinkKind, decode_blob_index_shard_namespace},
         path_builder::{
-            BLOBS_ROOT, CAT_ROOT, GC_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT, parse_blob_ref,
-            parse_tag_entry,
+            BLOBS_ROOT, CAT_ROOT, GC_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT, parse_atime_entry,
+            parse_blob_ref, parse_tag_entry,
         },
     },
 };
@@ -48,9 +48,15 @@ pub enum KeyCategory {
     /// one demoted tag-history entry, write-once and never validated.
     TagHistory,
     /// `v2/ns/{ns}!atime/tag/{tag}` or `v2/ns/{ns}!atime/rev/{alg}/{hash}`
-    /// (metadata store): an advisory last-pull timestamp, overwritten in
-    /// place.
+    /// (metadata store): a legacy advisory last-pull timestamp, overwritten
+    /// in place. No longer written; retired once an access entry exists.
     TagAccessTime,
+    /// `v2/ns/{ns}!atime/tag/{tag}!/{ord}.{suffix}` (metadata store): one
+    /// append-only tag access entry. Grammars are checked at categorization.
+    TagAtimeEntry { namespace: String, tag: String },
+    /// `v2/ns/{ns}!atime/rev/{alg}/{hash}!/{ord}.{suffix}` (metadata store):
+    /// one append-only revision access entry.
+    RevisionAtimeEntry { namespace: String, digest: Digest },
     /// `v2/ns/{ns}!rev/{alg}/{prefix}/{hash}` (metadata store): the immutable
     /// record of a stored manifest revision.
     RevisionRecord { namespace: String, digest: Digest },
@@ -295,19 +301,8 @@ fn categorize_ns(rest: &str) -> KeyCategory {
         }
         return KeyCategory::Unknown;
     }
-    if let Some(tag) = marker.strip_prefix("atime/tag/")
-        && Tag::new(tag).is_ok()
-    {
-        return KeyCategory::TagAccessTime;
-    }
-    if let Some(rest) = marker.strip_prefix("atime/rev/") {
-        let mut parts = rest.splitn(2, '/');
-        if let (Some(algorithm), Some(hash)) = (parts.next(), parts.next())
-            && parse_digest(algorithm, hash).is_some()
-        {
-            return KeyCategory::TagAccessTime;
-        }
-        return KeyCategory::Unknown;
+    if let Some(rest) = marker.strip_prefix("atime/") {
+        return categorize_atime(namespace, rest);
     }
     if let Some(rest) = marker.strip_prefix("rev/") {
         let segments: Vec<&str> = rest.split('/').collect();
@@ -347,6 +342,49 @@ fn categorize_ns(rest: &str) -> KeyCategory {
             subject,
             referrer,
         };
+    }
+    KeyCategory::Unknown
+}
+
+/// `tag/{tag}!/{ord}.{suffix}` or `rev/{alg}/{hash}!/{ord}.{suffix}` (one
+/// append-only access entry), or the legacy single keys `tag/{tag}` and
+/// `rev/{alg}/{hash}`.
+fn categorize_atime(namespace: &str, rest: &str) -> KeyCategory {
+    if let Some(tag_rest) = rest.strip_prefix("tag/") {
+        if let Some((tag, entry)) = tag_rest.split_once("!/") {
+            if Tag::new(tag).is_ok() && parse_atime_entry(entry).is_some() {
+                return KeyCategory::TagAtimeEntry {
+                    namespace: namespace.to_string(),
+                    tag: tag.to_string(),
+                };
+            }
+            return KeyCategory::Unknown;
+        }
+        if Tag::new(tag_rest).is_ok() {
+            return KeyCategory::TagAccessTime;
+        }
+        return KeyCategory::Unknown;
+    }
+    if let Some(rev_rest) = rest.strip_prefix("rev/") {
+        if let Some((target, entry)) = rev_rest.split_once("!/") {
+            let mut parts = target.splitn(2, '/');
+            if let (Some(algorithm), Some(hash)) = (parts.next(), parts.next())
+                && let Some(digest) = parse_digest(algorithm, hash)
+                && parse_atime_entry(entry).is_some()
+            {
+                return KeyCategory::RevisionAtimeEntry {
+                    namespace: namespace.to_string(),
+                    digest,
+                };
+            }
+            return KeyCategory::Unknown;
+        }
+        let mut parts = rev_rest.splitn(2, '/');
+        if let (Some(algorithm), Some(hash)) = (parts.next(), parts.next())
+            && parse_digest(algorithm, hash).is_some()
+        {
+            return KeyCategory::TagAccessTime;
+        }
     }
     KeyCategory::Unknown
 }
@@ -518,9 +556,10 @@ mod tests {
         registry::{
             metadata_store::LinkKind,
             path_builder::{
-                blob_index_shard_path, blob_path, blob_ref_own_path, blob_ref_path, link_path,
-                tag_atime_path, tag_entry_path, tag_hist_path, upload_hash_context_path,
-                upload_path, upload_session_path, upload_start_date_path,
+                atime_client_suffix, atime_entry_name, blob_index_shard_path, blob_path,
+                blob_ref_own_path, blob_ref_path, link_path, revision_atime_entry_dir,
+                tag_atime_entry_dir, tag_atime_path, tag_entry_path, tag_hist_path,
+                upload_hash_context_path, upload_path, upload_session_path, upload_start_date_path,
             },
         },
     };
@@ -613,6 +652,43 @@ mod tests {
             categorize(&tag_atime_path(&ns, &tag)),
             KeyCategory::TagAccessTime
         );
+    }
+
+    #[test]
+    fn atime_entry_paths_round_trip() {
+        let ns = Namespace::new("org/app").unwrap();
+        let tag = Tag::new("v1.0").unwrap();
+        let name = atime_entry_name(u64::MAX - 1, &atime_client_suffix("alice"));
+        assert_eq!(
+            categorize(&format!("{}/{name}", tag_atime_entry_dir(&ns, &tag))),
+            KeyCategory::TagAtimeEntry {
+                namespace: "org/app".to_string(),
+                tag: "v1.0".to_string(),
+            }
+        );
+        assert_eq!(
+            categorize(&format!(
+                "{}/{name}",
+                revision_atime_entry_dir(&ns, &digest_a())
+            )),
+            KeyCategory::RevisionAtimeEntry {
+                namespace: "org/app".to_string(),
+                digest: digest_a(),
+            }
+        );
+        assert_eq!(
+            categorize(&format!("v2/ns/org/app!atime/rev/sha256/{HASH_A}")),
+            KeyCategory::TagAccessTime
+        );
+        let unknown = [
+            format!("v2/ns/org/app!atime/tag/-bad!/{name}"),
+            "v2/ns/org/app!atime/tag/v1.0!/junk".to_string(),
+            format!("v2/ns/org/app!atime/rev/sha3/{HASH_A}!/{name}"),
+            format!("v2/ns/org/app!atime/rev/sha256/{HASH_A}!/junk.entry"),
+        ];
+        for key in unknown {
+            assert_eq!(categorize(&key), KeyCategory::Unknown, "key {key:?}");
+        }
     }
 
     #[test]

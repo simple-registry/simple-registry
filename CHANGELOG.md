@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - The catalog and tag listings serve ordered pages straight off key listings, with the catalog served from the `v2/cat/` index alone; a namespace whose index key is missing, whether its write was lost to a crash or its content predates the index, lists again after the next scrub backfill.
 - Pushes no longer write the legacy layer/config/index-child link files, and `angos scrub` retires the existing ones once their references are re-homed to per-referrer reference keys, leaving `v2/repositories/` to upload sessions only.
 - Upload-session metadata collapses into one `session.json` per session (one atomic put per chunk), replacing the `startedat` marker and per-offset `hashstates/` checkpoints; sessions begun by an earlier version still resume, complete, and age out.
+- Access times are append-only entries written inline on each stamped pull, carrying the pulling client's identity and forming a rolling one-hour audit window; `angos scrub` collects superseded entries past it while always keeping the newest, retires the legacy overwritten atime keys, and the `access_time_debounce_secs` knob is accepted and silently ignored.
 
 ## 1.5.1
 

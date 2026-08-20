@@ -140,6 +140,5 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
     if let Some(drain) = &drain {
         drain.drain().await;
     }
-    metadata_store.flush_access_times().await;
     Ok(())
 }

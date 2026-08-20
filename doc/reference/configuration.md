@@ -293,13 +293,13 @@ Same connection options as `blob_store.s3`, plus:
 | Option                      | Type         | Default    | Description                                                                 |
 |-----------------------------|--------------|------------|-----------------------------------------------------------------------------|
 | `link_cache_ttl`            | u64          | `30`       | Read-through cache TTL for link metadata, in seconds (0 to disable)         |
-| `access_time_debounce_secs` | u64          | `60`       | Buffer access time writes and flush periodically, in seconds (0 to disable) |
+| `access_time_debounce_secs` | u64          | -          | Deprecated and ignored: access times are written inline as append-only entries |
 | `lock_strategy`             | string/table | -          | Deprecated and ignored (see [Deprecated Coordination Keys](#deprecated-coordination-keys)) |
 | `conditional_operations`    | bool         | -          | Deprecated and ignored (see [Deprecated Coordination Keys](#deprecated-coordination-keys)) |
 
-The link cache reduces S3 round-trips for repeated tag/layer reads. The access time debounce batches `last_pulled_at` timestamp writes in memory and flushes them periodically, so a pull-heavy workload does not turn every manifest read into an extra storage write.
+The link cache reduces S3 round-trips for repeated tag/layer reads.
 
-> **Warning:** Setting `access_time_debounce_secs = 0` adds one storage write to every manifest pull. At scale with many concurrent pulls this adds latency and API costs; keep the default value of 60 or higher, or disable access time tracking entirely if not needed for retention policies.
+> **Warning:** With `update_pull_time` enabled, every stamped manifest pull adds one storage write (the append-only access entry). At scale with many concurrent pulls this adds latency and API costs; disable access time tracking if it is not needed for retention policies.
 
 ### Distributed Locking
 

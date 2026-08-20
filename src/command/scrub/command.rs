@@ -130,7 +130,6 @@ impl Command {
             .await?;
         self.walk_pass(Pass::Blob, "").await?;
 
-        self.metadata_store.flush_access_times().await;
         if let Some(registry) = &self.registry {
             registry.shutdown().await;
         }

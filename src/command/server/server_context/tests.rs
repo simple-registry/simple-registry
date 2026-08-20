@@ -1,6 +1,4 @@
-use std::{
-    collections::HashMap, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use argon2::{
     Algorithm, Argon2, Params, PasswordHasher, Version,
@@ -11,12 +9,9 @@ use hyper::{
     Request, StatusCode, Uri,
     header::{HOST, HeaderMap, HeaderValue},
 };
-use uuid::Uuid;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
 use angos_oci::{Digest, Namespace, Reference, Tag};
-use angos_s3_client::Backend as S3HttpBackend;
-use angos_storage::{ObjectStore, s3::Backend as StorageS3Backend};
 
 use crate::{
     cache::{self, Cache},
@@ -28,10 +23,7 @@ use crate::{
     policy::AccessPolicyConfig,
     registry::{
         Error as RegistryError, Registry, RegistryConfig, Repository,
-        blob_store::{BlobStoreConfig, FsBackendConfig as BlobFsConfig},
-        metadata_store::{LinkKind, LinkOperation, MetadataStore},
-        repository_resolver::RepositoryResolver,
-        test_utils::s3_test_connection,
+        metadata_store::MetadataStore, repository_resolver::RepositoryResolver,
     },
     test_fixtures::configuration::{load_config, minimal_config},
 };
@@ -686,110 +678,6 @@ async fn test_server_context_shutdown_rejects_new_async_dispatches() {
         requests.len(),
         0,
         "No async deliveries should occur after ServerContext::shutdown()"
-    );
-}
-
-struct ShutdownFlushHarness {
-    registry: Arc<Registry>,
-    metadata_store: Arc<MetadataStore>,
-    namespace: Namespace,
-}
-
-fn build_shutdown_flush_harness(unique_prefix: &str) -> ShutdownFlushHarness {
-    metrics_provider::init_for_tests();
-    let conn = s3_test_connection(unique_prefix.to_string());
-    let http = Arc::new(S3HttpBackend::new(&conn.to_client_config()).expect("s3 http client"));
-    let object_store: Arc<dyn ObjectStore> = Arc::new(StorageS3Backend::builder(http).build());
-    let metadata_store: Arc<MetadataStore> = Arc::new(
-        MetadataStore::builder(object_store)
-            .access_time_debounce_secs(3600)
-            .link_cache_ttl(0)
-            .build(),
-    );
-
-    let blob_backend = Arc::new(
-        BlobStoreConfig::FS(BlobFsConfig {
-            root_dir: PathBuf::from("/tmp/test-blobs-shutdown-flush"),
-            ..Default::default()
-        })
-        .build_backend()
-        .unwrap(),
-    );
-
-    let registry = Registry::new(
-        blob_backend,
-        metadata_store.clone(),
-        Arc::new(RepositoryResolver::new(Arc::new(HashMap::new())).unwrap()),
-        RegistryConfig {
-            update_pull_time: false,
-            enable_blob_redirect: false,
-            enable_manifest_redirect: false,
-            global_immutable_tags: false,
-            global_immutable_tags_exclusions: Vec::new(),
-            ..RegistryConfig::default()
-        },
-    );
-
-    ShutdownFlushHarness {
-        registry,
-        metadata_store,
-        namespace: Namespace::new(&format!("{unique_prefix}/myimage")).unwrap(),
-    }
-}
-
-#[tokio::test]
-async fn test_shutdown_flushes_pending_access_times() {
-    // shutdown() must flush the S3 metadata backend's buffered
-    // access-time writes before returning. With access_time_debounce_secs > 0
-    // those writes sit in a background loop and would be lost on a naïve
-    // shutdown.
-    let unique_prefix = format!("test-shutdown-flush-{}", Uuid::new_v4());
-    let ShutdownFlushHarness {
-        registry,
-        metadata_store,
-        namespace,
-    } = build_shutdown_flush_harness(&unique_prefix);
-
-    let digest =
-        Digest::from_str("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .unwrap();
-    let tag = LinkKind::Tag(Tag::new("v1.0.0").unwrap());
-    let ops = vec![LinkOperation::Create {
-        link: tag.clone(),
-        target: digest.clone(),
-        referrer: None,
-        media_type: None,
-        descriptor: None,
-    }];
-    metadata_store.update_links(&namespace, &ops).await.unwrap();
-    metadata_store
-        .read_link_recording_access(&namespace, &tag)
-        .await
-        .unwrap();
-
-    let tag_name = Tag::new("v1.0.0").unwrap();
-    let before = metadata_store
-        .read_tag_access_time(&namespace, &tag_name)
-        .await
-        .unwrap();
-    assert!(
-        before.is_none(),
-        "accessed_at should not be written yet (debounce is 3600s)"
-    );
-
-    // The config only drives ServerContext auth and webhook wiring here; the
-    // registry under test was already built by the harness above.
-    let config = minimal_config();
-    let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
-    context.shutdown().await;
-
-    let after = metadata_store
-        .read_tag_access_time(&namespace, &tag_name)
-        .await
-        .unwrap();
-    assert!(
-        after.is_some(),
-        "shutdown() must flush pending access times to S3"
     );
 }
 

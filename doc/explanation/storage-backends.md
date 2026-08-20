@@ -372,26 +372,23 @@ When using S3 for metadata, Angos includes several optimizations to reduce round
 
 In single-instance deployments, in-memory cache is sufficient. In multi-instance deployments, each instance maintains its own in-memory cache, so a write on instance A is not visible to instance B until the TTL expires. For consistency, use a shared Redis cache: when instance A writes a tag, all instances see the updated entry immediately.
 
-**Access time updates**: With CAS coordination, every recording pull stamps the access time inline: one read plus one conditional write, and a stamp losing the race to a concurrent writer is a no-op. No buffering is involved and `access_time_debounce_secs` is ignored.
+**Access time updates**: A recording pull appends one write-once entry under the target's `!atime/` directory, named newest-first (inverted-millisecond ordinal plus a short hash of the client identity) with a JSON body carrying the authenticated client and the RFC3339 pull time, so access times double as a rolling audit log. Readers stay O(1): retention and the admin API list only the newest entry, falling back to the legacy overwritten single key, which is no longer written and which scrub retires once an entry exists. Scrub always keeps each target's newest entry (retention needs the last access durably) and collects superseded entries older than a one-hour audit window (hardcoded today, a config knob later).
 
-Without CAS, a synchronous stamp would be a lock-read-write-unlock cycle on every manifest pull, so access time updates are instead buffered in memory and flushed periodically. Configurable interval (default 60 s, `access_time_debounce_secs = 0` to disable). This reduces the critical path per pull from 4 S3 operations to 1. In multi-instance deployments, each instance maintains its own buffer, so access times may lag behind actual pulls and can be overwritten by concurrent instances (last writer wins).
+The stamp is written inline: every stamped pull is one extra storage write, and same-millisecond stamps never contend (distinct clients land as distinct entries; a same-client repeat dedupes by key). Entries accumulate between scrub sweeps proportional to distinct-client pull volume, bounded by the collection window; readers stay O(1) regardless. Disable `update_pull_time` if retention does not need last-pull times.
 
 ```toml
 [metadata_store.s3]
 # ... S3 connection options
 link_cache_ttl = 30               # seconds (0 to disable)
-access_time_debounce_secs = 60    # seconds (0 to disable)
 ```
 
-For retention policies that use `last_pulled_at`, set thresholds in **days rather than minutes** to account for buffering lag:
+For retention policies that use `last_pulled_at`, set thresholds in **days rather than minutes**:
 
 ```toml
 # Safe: keep images pulled within 30 days; the threshold tolerates access time imprecision
 [global.retention_policy]
 rules = ["image.last_pulled_at > now() - days(30)"]
 ```
-
-Avoid `access_time_debounce_secs = 0` on S3 in production: it disables buffering and turns every manifest pull into an extra storage write. Use the default 60 seconds or higher. Access times are advisory plain overwrites, so a lost race between concurrent stamps is harmless either way.
 
 #### Blob Index Reference Keys
 

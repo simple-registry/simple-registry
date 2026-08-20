@@ -361,7 +361,6 @@ mod tests {
         let metadata_store = Arc::new(
             MetadataStore::builder(storage.clone())
                 .link_cache_ttl(0)
-                .access_time_debounce_secs(0)
                 .build(),
         );
         let blob_store = Arc::new(BlobStore::new(storage.clone(), None));

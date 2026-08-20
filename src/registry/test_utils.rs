@@ -77,7 +77,6 @@ pub fn fs_test_stack() -> FsTestStack {
     let metadata_store = Arc::new(
         MetadataStore::builder(store.clone())
             .link_cache_ttl(0)
-            .access_time_debounce_secs(0)
             .build(),
     );
     let blob_store = Arc::new(BlobStore::new(store.clone(), None));
@@ -112,7 +111,7 @@ where
 }
 
 /// Wrap an object store into a cache-less [`MetadataStore`] for tests (link
-/// cache and access-time debounce both disabled).
+/// cache disabled).
 pub fn metadata_store_over(object: Arc<dyn ObjectStore>) -> Arc<MetadataStore> {
     metadata_store_over_cached(object, 0)
 }
@@ -127,7 +126,6 @@ pub fn metadata_store_over_cached(
         MetadataStore::builder(object)
             .cache(cache::Config::Memory.to_backend().expect("memory cache"))
             .link_cache_ttl(link_cache_ttl_secs)
-            .access_time_debounce_secs(0)
             // Tests exercise reclamation immediately; the race tests that
             // need the grace protection set their own.
             .gc_grace_secs(0)

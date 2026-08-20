@@ -250,10 +250,6 @@ impl Registry {
         self.event_dispatcher.clone()
     }
 
-    pub async fn flush_pending_writes(&self) {
-        self.metadata_store.flush_access_times().await;
-    }
-
     #[cfg(test)]
     pub fn has_event_dispatcher(&self) -> bool {
         self.event_dispatcher.is_some()
@@ -283,10 +279,8 @@ impl Registry {
         }
     }
 
-    /// Flushes pending writes and drains in-flight async webhook deliveries
-    /// to completion.
+    /// Drains in-flight async webhook deliveries to completion.
     pub async fn shutdown(&self) {
-        self.flush_pending_writes().await;
         if let Some(dispatcher) = &self.event_dispatcher {
             dispatcher.shutdown().await;
         }

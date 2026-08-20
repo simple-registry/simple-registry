@@ -214,11 +214,14 @@ async fn dispatch_route<'a>(
             namespace,
             reference,
         } => Ok(registry
-            .head_manifest(HeadManifestRequest {
-                namespace,
-                reference,
-                accepted_types: headers.accepted_content_types(),
-            })
+            .head_manifest(
+                actor,
+                HeadManifestRequest {
+                    namespace,
+                    reference,
+                    accepted_types: headers.accepted_content_types(),
+                },
+            )
             .await?),
         Action::PutManifest { namespace, target } => {
             let (reference, tags) = target.into_parts();

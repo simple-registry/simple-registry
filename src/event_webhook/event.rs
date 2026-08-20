@@ -79,6 +79,16 @@ impl EventActor {
     pub fn is_client(&self) -> bool {
         self.internal.is_none()
     }
+
+    /// The name access-time audit entries record for this actor: the
+    /// username, else the token id, else the internal process name.
+    pub fn audit_name(&self) -> &str {
+        self.username
+            .as_deref()
+            .or(self.id.as_deref())
+            .or(self.internal.as_deref())
+            .unwrap_or("anonymous")
+    }
 }
 
 impl From<ClientIdentity> for EventActor {

@@ -807,7 +807,7 @@ impl ActionSink for Executor {
             Action::QuarantineKey { store, key } => self.quarantine_key(store, key).await,
             Action::DeleteCorruptObject { store, key }
             | Action::DeleteUnknownKey { store, key } => self.delete_walked_key(store, key).await,
-            Action::ReclaimTxLeftover { key } => {
+            Action::ReclaimTxLeftover { key } | Action::RetireAtimeKey { key } => {
                 self.delete_walked_key(WalkedStore::Metadata, key).await
             }
         }

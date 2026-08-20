@@ -190,11 +190,10 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
         warn!("prune: sweep failed: {failed}");
     }
 
-    // The registry shutdown flushes pending writes and drains in-flight async
-    // webhook deliveries to completion before the process exits.
-    match registry {
-        Some(registry) => registry.shutdown().await,
-        None => metadata_store.flush_access_times().await,
+    // The registry shutdown drains in-flight async webhook deliveries to
+    // completion before the process exits.
+    if let Some(registry) = registry {
+        registry.shutdown().await;
     }
     Ok(())
 }

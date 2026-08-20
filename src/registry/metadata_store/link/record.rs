@@ -2,8 +2,8 @@
 //!
 //! A stored manifest is one record at [`path_builder::revision_record_path`]:
 //! its existence makes the digest resolvable, its body carries what a HEAD
-//! needs, and it never mutates (the advisory last-pull timestamp lives in a
-//! sibling atime key). A referrer is one record per (subject, referrer) whose
+//! needs, and it never mutates (access times live in a sibling append-only
+//! atime directory). A referrer is one record per (subject, referrer) whose
 //! body is the referring manifest's descriptor. Records with no new-shape key
 //! fall back to the legacy `link` files, which scrub converts.
 
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use angos_oci::{Descriptor, Digest, MediaType, Namespace};
 use angos_storage::Error as StorageError;
 
-use crate::registry::metadata_store::mutation::Mutation;
+use crate::registry::metadata_store::{access_time::put_access_entry, mutation::Mutation};
 
 use crate::registry::{
     Error,
@@ -152,36 +152,35 @@ impl MetadataStore {
         }
     }
 
-    /// The revision's advisory last-pull timestamp, from its sibling atime
-    /// key.
+    /// The revision's advisory last-pull timestamp: its newest access entry,
+    /// or the legacy sibling atime key when no entries exist.
     pub async fn read_revision_access_time(
         &self,
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<Option<DateTime<Utc>>, Error> {
-        let key = path_builder::revision_atime_path(namespace, digest);
-        match self.object_store().get(&key).await {
-            Ok(raw) => Ok(std::str::from_utf8(&raw)
-                .ok()
-                .and_then(|text| DateTime::parse_from_rfc3339(text.trim()).ok())
-                .map(Into::into)),
-            Err(StorageError::NotFound) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        self.newest_access_time(
+            &path_builder::revision_atime_entry_dir(namespace, digest),
+            &path_builder::revision_atime_path(namespace, digest),
+        )
+        .await
     }
 
-    /// Overwrite the revision's atime key with the current time: advisory, a
-    /// plain put with no transaction and no read.
+    /// Append one access entry to the revision's atime directory, recording
+    /// `client` and the current time: a plain put with no transaction and no
+    /// read.
     pub async fn write_revision_access_time(
         &self,
         namespace: &Namespace,
         digest: &Digest,
+        client: &str,
     ) -> Result<(), Error> {
-        let key = path_builder::revision_atime_path(namespace, digest);
-        self.object_store()
-            .put(&key, Bytes::from(Utc::now().to_rfc3339()))
-            .await
-            .map_err(Error::from)
+        put_access_entry(
+            self.object_store(),
+            &path_builder::revision_atime_entry_dir(namespace, digest),
+            client,
+        )
+        .await
     }
 
     /// Convert one legacy revision link into a record, then delete the link.

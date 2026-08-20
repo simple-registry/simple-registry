@@ -37,7 +37,6 @@ use crate::{
 pub struct TestS3Config {
     pub connection: S3ConnectionConfig,
     pub link_cache_ttl: u64,
-    pub access_time_debounce_secs: u64,
 }
 
 impl TestS3Config {
@@ -50,7 +49,6 @@ impl TestS3Config {
 
         let mut builder = MetadataStore::builder(object_store)
             .link_cache_ttl(self.link_cache_ttl)
-            .access_time_debounce_secs(self.access_time_debounce_secs)
             .gc_grace_secs(0);
 
         if let Some(c) = cache {
@@ -66,7 +64,6 @@ pub fn test_config() -> TestS3Config {
     TestS3Config {
         connection: s3_test_connection(format!("test-backend-{}", uuid::Uuid::new_v4())),
         link_cache_ttl: 30,
-        access_time_debounce_secs: 0,
     }
 }
 
@@ -76,10 +73,8 @@ pub fn test_backend_with_cache(config: &TestS3Config) -> (MetadataStore, Arc<Cac
     (backend, cache)
 }
 
-pub fn test_backend_with_debounce(config: &TestS3Config, debounce_secs: u64) -> MetadataStore {
-    let mut cfg = config.clone();
-    cfg.access_time_debounce_secs = debounce_secs;
-    cfg.to_backend(None).unwrap()
+pub fn test_backend(config: &TestS3Config) -> MetadataStore {
+    config.to_backend(None).unwrap()
 }
 
 // Integration tests
@@ -820,7 +815,7 @@ pub async fn test_datastore_read_link_access_time_update(m: Arc<MetadataStore>) 
 
     // A tracked read records accessed_at.
     let meta = m
-        .read_link_recording_access(namespace, &tag_link)
+        .read_link_recording_access(namespace, &tag_link, "test-client")
         .await
         .unwrap();
     assert!(

@@ -181,10 +181,12 @@ v2/
 │   │               └── {r-algorithm}.{r-hash}
 │   └── {namespace}!atime/
 │       ├── tag/
-│       │   └── {tag}
+│       │   └── {tag}!/
+│       │       └── {ord}.{suffix}
 │       └── rev/
 │           └── {algorithm}/
-│               └── {hash}
+│               └── {hash}!/
+│                   └── {ord}.{suffix}
 └── cat/
     └── {namespace}!
 ```
@@ -193,9 +195,9 @@ The two stores split this tree by content: the blob store holds the blob `data` 
 
 A tag is an ordered set of write-once entries: `{ord}` inverts the author's unix-millisecond timestamp so a listing yields newest first, `set` entries record a push and `del` entries a deletion (still naming the digest the tag held), and the newest entry group decides the tag's current state. Writers only append, so concurrent pushes and replicas never contend; last-writer-wins is a property of the key names. The `!` terminator sorts below every character the name grammars admit, which keeps flat listings in true lexical order.
 
-A stored manifest revision is one immutable record under `{namespace}!rev/`: its existence makes the digest resolvable and its body carries the media type and creation time. A referrer is one record per (subject, referrer) under `{namespace}!sub/`, whose body is the referring manifest's descriptor. Advisory last-pull timestamps live in their own overwritten keys under `{namespace}!atime/`, so none of the write-once shapes ever mutate, which is what makes them cacheable without staleness. `v2/cat/` holds one empty key per namespace, written once per namespace per process, so the catalog serves ordered pages straight off its listing alone, with no legacy tree walk; content predating the index joins the catalog after scrub backfills its key. The `!` terminator lets nested repositories such as `a` and `a/b` coexist on FS.
+A stored manifest revision is one immutable record under `{namespace}!rev/`: its existence makes the digest resolvable and its body carries the media type and creation time. A referrer is one record per (subject, referrer) under `{namespace}!sub/`, whose body is the referring manifest's descriptor. Access times are append-only entries under `{namespace}!atime/`, named like tag entries (`{ord}` inverts the stamp's millisecond timestamp, `{suffix}` hashes the client identity) with a body recording who pulled and when, so none of the write-once shapes ever mutate, which is what makes them cacheable without staleness. `v2/cat/` holds one empty key per namespace, written once per namespace per process, so the catalog serves ordered pages straight off its listing alone, with no legacy tree walk; content predating the index joins the catalog after scrub backfills its key. The `!` terminator lets nested repositories such as `a` and `a/b` coexist on FS.
 
-Stores written by earlier versions may still hold per-namespace `refs/{namespace}.json` shards under `v2/blobs/` and per-tag `current/link`, revision, referrer, and layer/config/index-child (`_layers/`, `_config/`, `_manifests/index/`) link files under `v2/repositories/`; all are read as a fallback and converted to the new shapes by scrub, which retires each advisory layer/config/index-child file once its live references are re-homed to per-referrer reference keys.
+Stores written by earlier versions may still hold per-namespace `refs/{namespace}.json` shards under `v2/blobs/`, per-tag `current/link`, revision, referrer, and layer/config/index-child (`_layers/`, `_config/`, `_manifests/index/`) link files under `v2/repositories/`, and single overwritten atime keys under `{namespace}!atime/`; all are read as a fallback and converted to the new shapes by scrub, which retires each advisory layer/config/index-child file once its live references are re-homed to per-referrer reference keys and each legacy atime key once an access entry exists.
 
 ### Content Addressing
 

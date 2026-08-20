@@ -133,7 +133,6 @@ async fn a_young_legacy_tag_link_survives_conversion_under_grace() {
     );
     let store = MetadataStore::builder(backend)
         .link_cache_ttl(0)
-        .access_time_debounce_secs(0)
         .gc_grace_secs(300)
         .build();
     let namespace = Namespace::new("legacy-tag-convert-grace").unwrap();

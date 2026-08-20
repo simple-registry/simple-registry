@@ -475,7 +475,6 @@ async fn execute_push_resolves_tag_past_the_link_cache() {
         MetadataStore::builder(store.clone())
             .cache(cache::Config::Memory.to_backend().unwrap())
             .link_cache_ttl(300)
-            .access_time_debounce_secs(0)
             .build(),
     );
     let blob_store = Arc::new(BlobStore::new(store.clone(), None));

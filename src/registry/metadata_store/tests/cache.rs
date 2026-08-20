@@ -234,7 +234,7 @@ async fn test_read_link_with_access_time_update_populates_cache() {
     backend.update_links(&namespace, &ops).await.unwrap();
 
     let meta = backend
-        .read_link_recording_access(&namespace, &tag)
+        .read_link_recording_access(&namespace, &tag, "test-client")
         .await
         .unwrap();
     assert_eq!(meta.target, digest);

@@ -220,10 +220,48 @@ pub fn tag_hist_path(namespace: &Namespace, tag: &Tag, entry_name: &str) -> Stri
     format!("{}/{entry_name}", tag_hist_dir(namespace, tag))
 }
 
-/// Advisory last-pull timestamp for a tag, overwritten in place. Kept apart
-/// from the write-once entries so those never mutate.
+/// Legacy advisory last-pull timestamp for a tag, overwritten in place.
+/// Read as a fallback and retired by scrub; no longer written.
 pub fn tag_atime_path(namespace: &Namespace, tag: &Tag) -> String {
     format!("{NS_ROOT}/{namespace}!atime/tag/{tag}")
+}
+
+/// Directory holding one tag's append-only access entries, `!`-terminated
+/// like [`tag_entry_dir`] so it never collides with the legacy single key.
+pub fn tag_atime_entry_dir(namespace: &Namespace, tag: &Tag) -> String {
+    format!("{NS_ROOT}/{namespace}!atime/tag/{tag}!")
+}
+
+/// Directory holding one revision's append-only access entries.
+pub fn revision_atime_entry_dir(namespace: &Namespace, digest: &Digest) -> String {
+    format!(
+        "{NS_ROOT}/{namespace}!atime/rev/{}/{}!",
+        digest.algorithm(),
+        digest.hash()
+    )
+}
+
+/// One access entry: `<ord>.<suffix>`, where `<ord>` is the inverted-millis
+/// ordinal of [`tag_ord`] (entries list newest first) and `<suffix>` breaks
+/// same-millisecond collisions between clients.
+pub fn atime_entry_name(ord: u64, suffix: &str) -> String {
+    format!("{ord:016x}.{suffix}")
+}
+
+/// The entry-name collision breaker for one client identity: the first 8 hex
+/// of its sha256.
+pub fn atime_client_suffix(client: &str) -> String {
+    Digest::sha256_of_bytes(client.as_bytes()).hash()[..8].to_string()
+}
+
+/// Decode one entry filename of an atime entry directory back into its
+/// ordinal. `None` = not a shape this version writes.
+pub fn parse_atime_entry(name: &str) -> Option<u64> {
+    let (ord, suffix) = name.split_once('.')?;
+    if ord.len() != 16 || suffix.len() != 8 || !suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(ord, 16).ok()
 }
 
 /// One namespace's catalog index key: empty, write-once, one per namespace.
@@ -270,8 +308,8 @@ pub fn referrer_record_path(namespace: &Namespace, subject: &Digest, referrer: &
     )
 }
 
-/// Advisory last-pull timestamp for a manifest revision, overwritten in
-/// place, kept apart from the immutable record it annotates.
+/// Legacy advisory last-pull timestamp for a manifest revision, overwritten
+/// in place. Read as a fallback and retired by scrub; no longer written.
 pub fn revision_atime_path(namespace: &Namespace, digest: &Digest) -> String {
     format!(
         "{NS_ROOT}/{namespace}!atime/rev/{}/{}",
@@ -596,6 +634,35 @@ mod tests {
             tag_ord(None) > tag_ord(Some(DateTime::from_timestamp_millis(0).unwrap())),
             "a missing timestamp must sort after a real epoch one"
         );
+    }
+
+    #[test]
+    fn atime_entries_round_trip_and_sort_newest_first() {
+        let ns = Namespace::new("org/app").unwrap();
+        let tag = Tag::new("v1").unwrap();
+        let digest = Digest::sha256(HASH_A).unwrap();
+        let older = DateTime::from_timestamp_millis(1_000_000).unwrap();
+        let newer = DateTime::from_timestamp_millis(2_000_000).unwrap();
+        let suffix = atime_client_suffix("alice");
+        assert_eq!(suffix.len(), 8);
+        assert_ne!(suffix, atime_client_suffix("bob"));
+
+        let dir = tag_atime_entry_dir(&ns, &tag);
+        assert_eq!(dir, "v2/ns/org/app!atime/tag/v1!");
+        assert_eq!(
+            revision_atime_entry_dir(&ns, &digest),
+            format!("v2/ns/org/app!atime/rev/sha256/{HASH_A}!")
+        );
+        let older_name = atime_entry_name(tag_ord(Some(older)), &suffix);
+        let newer_name = atime_entry_name(tag_ord(Some(newer)), &suffix);
+        assert!(
+            newer_name < older_name,
+            "a newer entry must sort before an older one"
+        );
+        assert_eq!(parse_atime_entry(&newer_name), Some(tag_ord(Some(newer))));
+        for bad in ["", "0123.abcd1234", &format!("{:016x}.short", 1_u64)] {
+            assert_eq!(parse_atime_entry(bad), None, "name {bad:?}");
+        }
     }
 
     #[test]

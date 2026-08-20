@@ -84,16 +84,14 @@ pub fn metadata_store(
 ) -> Result<Arc<MetadataStore>, Error> {
     let store = build_object_store(config)?;
 
-    let (link_cache_ttl, access_time_debounce_secs) =
-        if let ResolvedStorageConfig::S3(s3_cfg) = config {
-            (s3_cfg.link_cache_ttl, s3_cfg.access_time_debounce_secs)
-        } else {
-            (0, 0)
-        };
+    let link_cache_ttl = if let ResolvedStorageConfig::S3(s3_cfg) = config {
+        s3_cfg.link_cache_ttl
+    } else {
+        0
+    };
 
     let mut builder = MetadataStore::builder(store)
         .link_cache_ttl(link_cache_ttl)
-        .access_time_debounce_secs(access_time_debounce_secs)
         .namespace_walk_concurrency(namespace_walk_concurrency)
         .gc_grace_secs(gc_grace_secs);
 

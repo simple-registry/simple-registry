@@ -58,7 +58,6 @@ impl<'de> Deserialize<'de> for MetadataFsConfig {
 pub struct MetadataS3Config {
     pub connection: S3ConnectionConfig,
     pub link_cache_ttl: u64,
-    pub access_time_debounce_secs: u64,
 }
 
 impl Default for MetadataS3Config {
@@ -66,7 +65,6 @@ impl Default for MetadataS3Config {
         Self {
             connection: S3ConnectionConfig::default(),
             link_cache_ttl: default_link_cache_ttl(),
-            access_time_debounce_secs: default_access_time_debounce(),
         }
     }
 }
@@ -91,28 +89,28 @@ impl<'de> Deserialize<'de> for MetadataS3Config {
             lock_strategy: Option<IgnoredAny>,
             #[serde(default = "default_link_cache_ttl")]
             link_cache_ttl: u64,
-            #[serde(default = "default_access_time_debounce")]
-            access_time_debounce_secs: u64,
+            #[serde(default)]
+            access_time_debounce_secs: Option<IgnoredAny>,
             #[serde(default)]
             conditional_operations: Option<IgnoredAny>,
         }
 
         let raw = Raw::deserialize(deserializer)?;
-        let _ = (raw.redis, raw.lock_strategy, raw.conditional_operations);
+        let _ = (
+            raw.redis,
+            raw.lock_strategy,
+            raw.access_time_debounce_secs,
+            raw.conditional_operations,
+        );
         Ok(MetadataS3Config {
             connection: raw.connection,
             link_cache_ttl: raw.link_cache_ttl,
-            access_time_debounce_secs: raw.access_time_debounce_secs,
         })
     }
 }
 
 fn default_link_cache_ttl() -> u64 {
     30
-}
-
-fn default_access_time_debounce() -> u64 {
-    60
 }
 
 // RegistryStorageConfig
@@ -229,8 +227,9 @@ mod tests {
     }
 
     /// `[metadata_store.s3]` round-trip: flat TOML deserialises into a
-    /// `MetadataS3Config` whose `connection` carries the right values and whose
-    /// metadata-specific keys override their defaults.
+    /// `MetadataS3Config` whose `connection` carries the right values, whose
+    /// metadata-specific keys override their defaults, and whose removed
+    /// `access_time_debounce_secs` knob is accepted and ignored.
     #[test]
     fn s3_backend_config_toml_round_trip() {
         let toml = r#"
@@ -252,7 +251,6 @@ mod tests {
         assert_eq!(cfg.connection.region, "eu-central-1");
         assert_eq!(cfg.connection.key_prefix, "_meta");
         assert_eq!(cfg.link_cache_ttl, 60);
-        assert_eq!(cfg.access_time_debounce_secs, 120);
     }
 
     /// Regression: `region` must be required, matching the documented schema

@@ -264,6 +264,7 @@ async fn test_put_manifest() {
                 namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
                 false,
+                "test-client",
             )
             .await
             .unwrap();
@@ -327,11 +328,14 @@ async fn accept_put_manifest_by_sha512_digest_with_tag_params_creates_tags() {
     // `event_emission_tests::digest_push_with_tag_params_emits_tag_create_per_tag`.
     for tag in ["1.2.3", "latest"] {
         let head = registry
-            .head_manifest(HeadManifestRequest {
-                namespace: namespace.clone(),
-                reference: Reference::Tag(Tag::new(tag).unwrap()),
-                accepted_types: vec![MediaRange::from(media_type.clone())],
-            })
+            .head_manifest(
+                None,
+                HeadManifestRequest {
+                    namespace: namespace.clone(),
+                    reference: Reference::Tag(Tag::new(tag).unwrap()),
+                    accepted_types: vec![MediaRange::from(media_type.clone())],
+                },
+            )
             .await
             .expect("each created tag must resolve");
         assert_eq!(
@@ -377,11 +381,14 @@ async fn accept_put_manifest_by_tag_ignores_tag_params() {
     );
 
     let ignored = registry
-        .head_manifest(HeadManifestRequest {
-            namespace: namespace.clone(),
-            reference: Reference::Tag(Tag::new("ignored").unwrap()),
-            accepted_types: vec![MediaRange::from(media_type.clone())],
-        })
+        .head_manifest(
+            None,
+            HeadManifestRequest {
+                namespace: namespace.clone(),
+                reference: Reference::Tag(Tag::new("ignored").unwrap()),
+                accepted_types: vec![MediaRange::from(media_type.clone())],
+            },
+        )
         .await;
     assert!(
         ignored.is_err(),
@@ -755,6 +762,7 @@ async fn permissive_push_does_not_grant_read_of_unowned_child_manifest() {
             &attacker,
             Reference::Digest(child_digest.clone()),
             false,
+            "test-client",
         )
         .await
         .map(|_| ());
@@ -824,6 +832,7 @@ async fn permissive_push_of_owned_references_yields_a_pullable_manifest() {
             &namespace,
             Reference::Tag(Tag::new("latest").unwrap()),
             false,
+            "test-client",
         )
         .await
         .expect("the pushed manifest must be pullable by tag");
@@ -900,6 +909,7 @@ async fn pull_through_computes_the_digest_when_the_upstream_omits_the_header() {
             &namespace,
             Reference::Tag(Tag::new("latest").unwrap()),
             false,
+            "test-client",
         )
         .await
         .expect("an upstream omitting Docker-Content-Digest must not fail the pull");
@@ -933,6 +943,7 @@ async fn pull_through_recomputes_under_the_requested_digest_algorithm() {
             &namespace,
             Reference::Digest(requested.clone()),
             false,
+            "test-client",
         )
         .await
         .expect("a by-digest pull must survive a missing Docker-Content-Digest");
@@ -997,6 +1008,7 @@ async fn a_blob_fault_aborts_a_digest_delete_instead_of_half_committing() {
             namespace,
             Reference::Tag(tag),
             false,
+            "test-client",
         )
         .await
         .expect("the aborted delete must leave the tag resolvable");
@@ -1046,6 +1058,7 @@ async fn a_backend_fault_is_not_reported_as_a_missing_manifest() {
             &namespace,
             Reference::Tag(tag),
             false,
+            "test-client",
         )
         .await
         .err()
@@ -1082,6 +1095,7 @@ async fn test_get_manifest() {
                 namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
                 false,
+                "test-client",
             )
             .await
             .unwrap();
@@ -1097,6 +1111,7 @@ async fn test_get_manifest() {
                 namespace,
                 Reference::Digest(response.digest.clone()),
                 false,
+                "test-client",
             )
             .await
             .unwrap();
@@ -1128,11 +1143,14 @@ async fn test_head_manifest() {
         let pushed_digest = response.digest.clone();
 
         let manifest = registry
-            .head_manifest(HeadManifestRequest {
-                namespace: namespace.clone(),
-                reference: Reference::Tag(Tag::new(tag).unwrap()),
-                accepted_types: vec![MediaRange::from(media_type.clone())],
-            })
+            .head_manifest(
+                None,
+                HeadManifestRequest {
+                    namespace: namespace.clone(),
+                    reference: Reference::Tag(Tag::new(tag).unwrap()),
+                    accepted_types: vec![MediaRange::from(media_type.clone())],
+                },
+            )
             .await
             .unwrap();
 
@@ -1147,11 +1165,14 @@ async fn test_head_manifest() {
         );
 
         let manifest = registry
-            .head_manifest(HeadManifestRequest {
-                namespace: namespace.clone(),
-                reference: Reference::Digest(pushed_digest.clone()),
-                accepted_types: vec![MediaRange::from(media_type.clone())],
-            })
+            .head_manifest(
+                None,
+                HeadManifestRequest {
+                    namespace: namespace.clone(),
+                    reference: Reference::Digest(pushed_digest.clone()),
+                    accepted_types: vec![MediaRange::from(media_type.clone())],
+                },
+            )
             .await
             .unwrap();
 
@@ -1204,6 +1225,7 @@ async fn test_delete_manifest() {
                     namespace,
                     Reference::Tag(Tag::new(tag).unwrap()),
                     false,
+                    "test-client",
                 )
                 .await
                 .is_err()
@@ -1227,6 +1249,7 @@ async fn test_delete_manifest() {
                     namespace,
                     Reference::Digest(response.digest.clone()),
                     false,
+                    "test-client",
                 )
                 .await
                 .is_err()
@@ -1353,6 +1376,7 @@ async fn a_tag_racing_a_digest_delete_reads_as_gone() {
                 namespace,
                 Reference::Tag(fresh),
                 false,
+                "test-client",
             )
             .await;
         assert!(
@@ -1832,6 +1856,7 @@ async fn test_handle_put_manifest() {
                 namespace,
                 Reference::Tag(Tag::new(tag).unwrap()),
                 false,
+                "test-client",
             )
             .await
             .expect("get manifest failed");
@@ -1890,6 +1915,7 @@ async fn test_delete_manifest_by_digest_removes_multiple_tags() {
                     namespace,
                     Reference::Tag(Tag::new("latest").unwrap()),
                     false,
+                    "test-client",
                 )
                 .await
                 .is_err()
@@ -1903,6 +1929,7 @@ async fn test_delete_manifest_by_digest_removes_multiple_tags() {
                     namespace,
                     Reference::Tag(Tag::new("v1.0").unwrap()),
                     false,
+                    "test-client",
                 )
                 .await
                 .is_err()
@@ -1916,6 +1943,7 @@ async fn test_delete_manifest_by_digest_removes_multiple_tags() {
                     namespace,
                     Reference::Digest(response.digest.clone()),
                     false,
+                    "test-client",
                 )
                 .await
                 .is_err()
@@ -1983,6 +2011,7 @@ async fn test_delete_manifest_by_digest_preserves_unrelated_tags() {
                     namespace,
                     Reference::Tag(Tag::new("v1.0").unwrap()),
                     false,
+                    "test-client",
                 )
                 .await
                 .is_err()
@@ -1996,6 +2025,7 @@ async fn test_delete_manifest_by_digest_preserves_unrelated_tags() {
                     namespace,
                     Reference::Tag(Tag::new("v1.1").unwrap()),
                     false,
+                    "test-client",
                 )
                 .await
                 .is_err()
@@ -2008,6 +2038,7 @@ async fn test_delete_manifest_by_digest_preserves_unrelated_tags() {
                 namespace,
                 Reference::Tag(Tag::new("v2.0").unwrap()),
                 false,
+                "test-client",
             )
             .await
             .unwrap();
@@ -2081,6 +2112,7 @@ async fn test_delete_manifest_with_many_tags() {
                         namespace,
                         Reference::Tag(Tag::new(&format!("tag-{i}")).unwrap()),
                         false,
+                        "test-client",
                     )
                     .await
                     .is_err(),
@@ -2097,6 +2129,7 @@ async fn test_delete_manifest_with_many_tags() {
                         namespace,
                         Reference::Tag(Tag::new(&format!("other-{i}")).unwrap()),
                         false,
+                        "test-client",
                     )
                     .await
                     .is_ok(),
@@ -4718,11 +4751,14 @@ async fn backdated_source_ts_loses_to_newer_local_tag() {
     // Kill criterion: the tag must still point at the manifest seeded above. If
     // the source_ts were dropped, the backdated put would have overwritten it.
     let head = registry
-        .head_manifest(HeadManifestRequest {
-            namespace: namespace.clone(),
-            reference: tag(),
-            accepted_types: vec![MediaRange::from(media_type)],
-        })
+        .head_manifest(
+            None,
+            HeadManifestRequest {
+                namespace: namespace.clone(),
+                reference: tag(),
+                accepted_types: vec![MediaRange::from(media_type)],
+            },
+        )
         .await
         .expect("tag must still resolve");
     assert_eq!(

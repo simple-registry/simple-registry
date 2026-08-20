@@ -199,6 +199,12 @@ pub enum Action {
     ReclaimTxLeftover {
         key: String,
     },
+    /// Delete a superseded access-time entry past the audit window, or the
+    /// legacy advisory atime key once an entry exists; already age-gated by
+    /// the walk.
+    RetireAtimeKey {
+        key: String,
+    },
 }
 
 impl fmt::Display for Action {
@@ -392,6 +398,9 @@ impl fmt::Display for Action {
             }
             Action::ReclaimTxLeftover { key } => {
                 write!(f, "reclaim transaction-engine leftover '{key}'")
+            }
+            Action::RetireAtimeKey { key } => {
+                write!(f, "retire access-time key '{key}'")
             }
         }
     }

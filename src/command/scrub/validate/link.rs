@@ -21,10 +21,14 @@ use crate::{
     registry::{
         Error as RegistryError,
         manifest::link_plan,
-        metadata_store::{LinkKind, LinkMetadata},
+        metadata_store::{AccessEntry, LinkKind, LinkMetadata},
         path_builder,
     },
 };
+
+/// How long superseded access entries are retained as a rolling audit log.
+/// A config knob later.
+const ATIME_AUDIT_WINDOW_SECS: u64 = 3600;
 
 impl Validator {
     /// Validate one link file in `namespace_raw`.
@@ -190,6 +194,108 @@ impl Validator {
                 return Ok(());
             }
         }
+    }
+
+    /// One tag's access-entry directory, collected once per (namespace, tag).
+    pub async fn collect_tag_atime_entries(
+        &self,
+        namespace_raw: &str,
+        tag_raw: &str,
+    ) -> Result<(), Error> {
+        let (Ok(namespace), Ok(tag)) = (Namespace::new(namespace_raw), Tag::new(tag_raw)) else {
+            return Ok(());
+        };
+        self.collect_atime_entries(
+            &path_builder::tag_atime_entry_dir(&namespace, &tag),
+            &path_builder::tag_atime_path(&namespace, &tag),
+        )
+        .await
+    }
+
+    /// One revision's access-entry directory, collected once per (namespace,
+    /// digest).
+    pub async fn collect_revision_atime_entries(
+        &self,
+        namespace_raw: &str,
+        digest: &Digest,
+    ) -> Result<(), Error> {
+        let Ok(namespace) = Namespace::new(namespace_raw) else {
+            return Ok(());
+        };
+        self.collect_atime_entries(
+            &path_builder::revision_atime_entry_dir(&namespace, digest),
+            &path_builder::revision_atime_path(&namespace, digest),
+        )
+        .await
+    }
+
+    /// Collect one atime entry directory: the newest decodable entry always
+    /// stays (retention needs the last access durably), an undecodable body
+    /// is deleted, a superseded entry is deleted once its own ordinal
+    /// timestamp is past the audit window, and the legacy single key is
+    /// retired (grace-gated) once an entry exists.
+    async fn collect_atime_entries(&self, dir: &str, legacy_key: &str) -> Result<(), Error> {
+        if !self.claim(format!("atime-entries:{dir}")) {
+            return Ok(());
+        }
+        let window = i64::try_from(ATIME_AUDIT_WINDOW_SECS).unwrap_or(i64::MAX);
+        let mut kept_newest = false;
+        let mut token = None;
+        loop {
+            let page = self
+                .metadata_store
+                .object_store()
+                .list(dir, 1000, token)
+                .await
+                .map_err(RegistryError::from)?;
+            for name in &page.items {
+                let Some(ord) = path_builder::parse_atime_entry(name) else {
+                    continue;
+                };
+                let key = format!("{dir}/{name}");
+                match self.metadata_store.object_store().get(&key).await {
+                    Ok(raw) => {
+                        if serde_json::from_slice::<AccessEntry>(&raw).is_err() {
+                            warn!("scrub: access entry '{key}' does not parse; deleting");
+                            self.delete_corrupt(WalkedStore::Metadata, &key).await?;
+                            continue;
+                        }
+                    }
+                    Err(StorageError::NotFound) => continue,
+                    Err(e) => return Err(RegistryError::from(e).into()),
+                }
+                if !kept_newest {
+                    // The listing sorts newest first: the first decodable
+                    // entry is the last access and always stays.
+                    kept_newest = true;
+                    continue;
+                }
+                let old = path_builder::tag_ord_ts(ord)
+                    .is_some_and(|at| Utc::now().signed_duration_since(at).num_seconds() >= window);
+                if old {
+                    self.emit(Action::RetireAtimeKey { key }).await?;
+                }
+            }
+            token = page.next_token;
+            if token.is_none() {
+                break;
+            }
+        }
+        if !kept_newest {
+            return Ok(());
+        }
+        match self.metadata_store.object_store().head(legacy_key).await {
+            Ok(_) => {}
+            Err(StorageError::NotFound) => return Ok(()),
+            Err(e) => return Err(RegistryError::from(e).into()),
+        }
+        if self.younger_than_grace(legacy_key).await? {
+            return Ok(());
+        }
+        self.emit(Action::RetireAtimeKey {
+            key: legacy_key.to_string(),
+        })
+        .await
     }
 
     /// The shared tail of both tag shapes: the current target must have blob

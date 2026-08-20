@@ -3,8 +3,9 @@ use std::slice;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+use angos_storage::Error as StorageError;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
 use angos_oci::request::{DeleteBlobRequest, PutManifestRequest};
@@ -22,7 +23,7 @@ use crate::{
     registry::{
         Error as RegistryError,
         blob_store::BlobStore,
-        metadata_store::{BlobIndexOperation, LinkKind, LinkMetadata, MetadataStore},
+        metadata_store::{AccessEntry, BlobIndexOperation, LinkKind, LinkMetadata, MetadataStore},
         path_builder,
         test_utils::{
             RegistryTestCase, create_test_registry_with, for_each_backend, fs_test_stack,
@@ -1871,6 +1872,135 @@ async fn young_tracked_link_file_survives_a_graced_scrub() {
                 .await
                 .is_ok(),
             "a link file inside the grace period must be kept"
+        );
+    })
+    .await;
+}
+
+/// Craft one access entry at `at` in `dir`, as a replica's stamp would land.
+async fn put_atime_entry(store: &Arc<MetadataStore>, dir: &str, client: &str, at: DateTime<Utc>) {
+    let name = path_builder::atime_entry_name(
+        path_builder::tag_ord(Some(at)),
+        &path_builder::atime_client_suffix(client),
+    );
+    let body = serde_json::to_vec(&AccessEntry {
+        client: client.to_string(),
+        at,
+    })
+    .expect("entry body");
+    store
+        .object_store()
+        .put(&format!("{dir}/{name}"), Bytes::from(body))
+        .await
+        .expect("entry put");
+}
+
+#[tokio::test]
+async fn atime_collector_keeps_newest_prunes_old_superseded_and_retires_legacy() {
+    for_each_backend(async |test_case| {
+        let namespace = Namespace::new("test-repo/atime").unwrap();
+        let (manifest_digest, _, _) = push_healthy_image(test_case, &namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let tag = Tag::new("v1").unwrap();
+        let now = Utc::now();
+
+        // Tag side: a newest entry, a superseded one inside the audit
+        // window, a superseded one past it, and the legacy single key.
+        let dir = path_builder::tag_atime_entry_dir(&namespace, &tag);
+        put_atime_entry(&metadata_store, &dir, "alice", now).await;
+        put_atime_entry(&metadata_store, &dir, "bob", now - Duration::minutes(10)).await;
+        put_atime_entry(&metadata_store, &dir, "carol", now - Duration::hours(2)).await;
+        let legacy = path_builder::tag_atime_path(&namespace, &tag);
+        metadata_store
+            .object_store()
+            .put(&legacy, Bytes::from(now.to_rfc3339()))
+            .await
+            .unwrap();
+
+        // Revision side: an ancient newest entry alone stays forever, and
+        // the legacy key still retires.
+        let rev_dir = path_builder::revision_atime_entry_dir(&namespace, &manifest_digest);
+        put_atime_entry(&metadata_store, &rev_dir, "alice", now - Duration::days(30)).await;
+        let rev_legacy = path_builder::revision_atime_path(&namespace, &manifest_digest);
+        metadata_store
+            .object_store()
+            .put(&rev_legacy, Bytes::from(now.to_rfc3339()))
+            .await
+            .unwrap();
+
+        scrub_apply(test_case).await;
+
+        let page = metadata_store
+            .object_store()
+            .list(&dir, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items.len(),
+            2,
+            "the newest entry and the young superseded one stay; the one past the window goes"
+        );
+        let rev_page = metadata_store
+            .object_store()
+            .list(&rev_dir, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            rev_page.items.len(),
+            1,
+            "the newest entry always stays, however old"
+        );
+        for retired in [&legacy, &rev_legacy] {
+            assert!(
+                matches!(
+                    metadata_store.object_store().head(retired).await,
+                    Err(StorageError::NotFound)
+                ),
+                "the legacy key '{retired}' must be retired once an entry exists"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_undecodable_atime_entry_is_deleted() {
+    for_each_backend(async |test_case| {
+        let namespace = Namespace::new("test-repo/atime-corrupt").unwrap();
+        push_healthy_image(test_case, &namespace).await;
+        let metadata_store = test_case.metadata_store();
+        let dir = path_builder::tag_atime_entry_dir(&namespace, &Tag::new("v1").unwrap());
+        let now = Utc::now();
+
+        let corrupt_name = path_builder::atime_entry_name(
+            path_builder::tag_ord(Some(now)),
+            &path_builder::atime_client_suffix("mallory"),
+        );
+        metadata_store
+            .object_store()
+            .put(
+                &format!("{dir}/{corrupt_name}"),
+                Bytes::from_static(b"not json"),
+            )
+            .await
+            .unwrap();
+        put_atime_entry(&metadata_store, &dir, "alice", now - Duration::hours(5)).await;
+
+        scrub_apply(test_case).await;
+
+        let page = metadata_store
+            .object_store()
+            .list(&dir, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.items.len(),
+            1,
+            "the undecodable entry goes; the surviving decodable one is the kept newest"
+        );
+        assert!(
+            !page.items.contains(&corrupt_name),
+            "the corrupt entry must be the one deleted"
         );
     })
     .await;

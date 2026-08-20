@@ -120,6 +120,13 @@ impl Validator {
             (Pass::MetadataLinks, KeyCategory::TagEntry { namespace, tag }) => {
                 self.validate_tag_entries(&namespace, &tag).await
             }
+            (Pass::MetadataLinks, KeyCategory::TagAtimeEntry { namespace, tag }) => {
+                self.collect_tag_atime_entries(&namespace, &tag).await
+            }
+            (Pass::MetadataLinks, KeyCategory::RevisionAtimeEntry { namespace, digest }) => {
+                self.collect_revision_atime_entries(&namespace, &digest)
+                    .await
+            }
             (Pass::MetadataLinks, KeyCategory::RevisionRecord { namespace, digest }) => {
                 self.validate_revision_record(&namespace, &digest).await
             }

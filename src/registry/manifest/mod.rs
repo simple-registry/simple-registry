@@ -103,15 +103,17 @@ pub async fn read_manifest(
 }
 
 impl Registry {
-    #[instrument]
+    #[instrument(skip(actor))]
     pub async fn head_manifest(
         &self,
+        actor: Option<EventActor>,
         request: HeadManifestRequest,
     ) -> Result<Response<ResponseBody>, Error> {
+        let client = actor.as_ref().map_or("anonymous", EventActor::audit_name);
         let repository = self.get_repository_for_namespace(&request.namespace).ok();
         let is_tag_immutable = self.is_reference_immutable(repository, &request.reference);
         let local = self
-            .head_local_manifest(&request.namespace, &request.reference)
+            .head_local_manifest(&request.namespace, &request.reference, client)
             .await;
         let serveable = self
             .serveable_local(
@@ -147,6 +149,7 @@ impl Registry {
                 &request.namespace,
                 request.reference,
                 is_tag_immutable,
+                client,
             )
             .await?;
 
@@ -160,15 +163,16 @@ impl Registry {
     }
 
     /// Read a manifest/tag link for a client pull, recording its access time
-    /// when pull-time tracking is enabled.
+    /// under `client`'s identity when pull-time tracking is enabled.
     async fn read_manifest_link(
         &self,
         namespace: &Namespace,
         link: &LinkKind,
+        client: &str,
     ) -> Result<LinkMetadata, Error> {
         if self.update_pull_time {
             self.metadata_store
-                .read_link_recording_access(namespace, link)
+                .read_link_recording_access(namespace, link, client)
                 .await
         } else {
             self.metadata_store.read_link(namespace, link).await
@@ -179,9 +183,12 @@ impl Registry {
         &self,
         namespace: &Namespace,
         reference: &Reference,
+        client: &str,
     ) -> Result<ManifestMeta, Error> {
         let blob_link = LinkKind::from_reference(reference);
-        let link = self.read_manifest_link(namespace, &blob_link).await?;
+        let link = self
+            .read_manifest_link(namespace, &blob_link, client)
+            .await?;
         self.probe_revision_for_tag(namespace, reference, &link.target)
             .await?;
 
@@ -216,8 +223,9 @@ impl Registry {
         namespace: &Namespace,
         reference: Reference,
         is_tag_immutable: bool,
+        client: &str,
     ) -> Result<ManifestBody, Error> {
-        let local = self.get_local_manifest(namespace, &reference).await;
+        let local = self.get_local_manifest(namespace, &reference, client).await;
         let serveable = self
             .serveable_local(
                 namespace,
@@ -357,9 +365,12 @@ impl Registry {
         &self,
         namespace: &Namespace,
         reference: &Reference,
+        client: &str,
     ) -> Result<ManifestBody, Error> {
         let blob_link = LinkKind::from_reference(reference);
-        let link = self.read_manifest_link(namespace, &blob_link).await?;
+        let link = self
+            .read_manifest_link(namespace, &blob_link, client)
+            .await?;
 
         // A tag is history and can outlive the manifest, whose bytes wait
         // for the collector; the revision record is existence, so a tag
@@ -749,9 +760,13 @@ impl Registry {
         &self,
         namespace: &Namespace,
         reference: &Reference,
+        client: &str,
     ) -> Option<GetManifestResponse> {
         let blob_link = LinkKind::from_reference(reference);
-        let link = self.read_manifest_link(namespace, &blob_link).await.ok()?;
+        let link = self
+            .read_manifest_link(namespace, &blob_link, client)
+            .await
+            .ok()?;
         let media_type = link.media_type?;
         let presigned_url = self
             .blob_store
@@ -784,8 +799,8 @@ impl Registry {
         request: GetManifestRequest,
         allow_redirect: bool,
     ) -> Result<Response<ResponseBody>, Error> {
+        let client = actor.as_ref().map_or("anonymous", EventActor::audit_name);
         let repository = self.get_repository_for_namespace(&request.namespace).ok();
-        let is_tag_immutable = self.is_reference_immutable(repository, &request.reference);
         let repository_name = repository_name(repository);
         let event_reference = request.reference.clone();
 
@@ -795,8 +810,8 @@ impl Registry {
                 &request.namespace,
                 request.reference,
                 &request.accepted_types,
-                is_tag_immutable,
                 allow_redirect,
+                client,
             )
             .await?;
 
@@ -827,9 +842,10 @@ impl Registry {
         namespace: &Namespace,
         reference: Reference,
         mime_types: &[MediaRange],
-        is_tag_immutable: bool,
         allow_redirect: bool,
+        client: &str,
     ) -> Result<GetManifestResponse, Error> {
+        let is_tag_immutable = self.is_reference_immutable(repository, &reference);
         let redirect_is_authoritative = !repository.is_some_and(Repository::is_pull_through)
             || matches!(reference, Reference::Digest(_))
             || is_tag_immutable;
@@ -837,7 +853,9 @@ impl Registry {
         if allow_redirect
             && self.enable_manifest_redirect
             && redirect_is_authoritative
-            && let Some(resp) = self.try_redirect_via_link(namespace, &reference).await
+            && let Some(resp) = self
+                .try_redirect_via_link(namespace, &reference, client)
+                .await
         {
             return Ok(resp);
         }
@@ -849,6 +867,7 @@ impl Registry {
                 namespace,
                 reference,
                 is_tag_immutable,
+                client,
             )
             .await?;
 

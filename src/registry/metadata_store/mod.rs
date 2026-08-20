@@ -18,7 +18,7 @@ mod mutation;
 #[cfg(test)]
 mod tests;
 
-use access_time::{AccessTimeWriter, FlushHandle};
+pub use access_time::AccessEntry;
 pub use blob_index::{BlobIndex, BlobIndexOperation, shard::decode_blob_index_shard_namespace};
 pub use link::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, LinksTx, ReferencePolicy};
 
@@ -32,7 +32,6 @@ pub struct MetadataStore {
     link_cache_ttl: u64,
     /// Concurrent directory scans a catalog namespace walk keeps in flight.
     namespace_walk_concurrency: usize,
-    access_time_writer: Option<AccessTimeWriter>,
     /// The reclamation grace period: how long fresh blob data and fresh
     /// reference keys are unconditionally live, and how long a collector's
     /// range marker outlives its last refresh. Writers and collectors built
@@ -41,8 +40,6 @@ pub struct MetadataStore {
     /// Namespaces whose catalog index key this process already ensured; being
     /// wrong only costs one redundant put.
     catalog_indexed: Arc<Mutex<HashSet<Namespace>>>,
-    // Held for Drop side-effect: signals the flush task to exit when the last clone is dropped.
-    _flush_handle: Option<Arc<FlushHandle>>,
 }
 
 /// Default reclamation grace period. It only has to exceed the widest
@@ -54,7 +51,6 @@ pub struct Builder {
     object: Arc<dyn ObjectStore>,
     cache: Option<Arc<Cache>>,
     link_cache_ttl: u64,
-    access_time_debounce_secs: u64,
     namespace_walk_concurrency: usize,
     gc_grace_secs: u64,
 }
@@ -65,7 +61,6 @@ impl Builder {
             object,
             cache: None,
             link_cache_ttl: 30,
-            access_time_debounce_secs: 0,
             namespace_walk_concurrency: pagination::NAMESPACE_WALK_CONCURRENCY,
             gc_grace_secs: DEFAULT_GC_GRACE_SECS,
         }
@@ -90,11 +85,6 @@ impl Builder {
         self
     }
 
-    pub fn access_time_debounce_secs(mut self, secs: u64) -> Self {
-        self.access_time_debounce_secs = secs;
-        self
-    }
-
     /// Concurrent directory-scan fan-out for catalog namespace walks.
     #[must_use]
     pub fn namespace_walk_concurrency(mut self, concurrency: usize) -> Self {
@@ -104,26 +94,20 @@ impl Builder {
 
     #[must_use]
     pub fn build(self) -> MetadataStore {
-        let (access_time_writer, flush_handle) =
-            access_time::build_writer(&self.object, self.access_time_debounce_secs);
-
         MetadataStore {
             object: self.object,
             cache: self.cache,
             link_cache_ttl: self.link_cache_ttl,
             namespace_walk_concurrency: self.namespace_walk_concurrency,
-            access_time_writer,
             gc_grace_secs: self.gc_grace_secs,
             catalog_indexed: Arc::new(Mutex::new(HashSet::new())),
-            _flush_handle: flush_handle,
         }
     }
 }
 
 impl MetadataStore {
     /// Return a builder over the object store all reads and writes flow
-    /// through. `cache`, `link_cache_ttl` and `access_time_debounce_secs`
-    /// are optional fluent setters.
+    /// through. `cache` and `link_cache_ttl` are optional fluent setters.
     pub fn builder(object: Arc<dyn ObjectStore>) -> Builder {
         Builder::new(object)
     }
