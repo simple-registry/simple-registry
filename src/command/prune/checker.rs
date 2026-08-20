@@ -145,8 +145,8 @@ fn decide_orphan_fate(
 ///
 /// `in_flight_window` guards the push race, not the decision: a push grants
 /// ownership before it links the manifest, so bytes younger than the window
-/// are never considered. The executor still re-checks under the blob-data
-/// lock before revoking.
+/// are never considered. The executor re-checks the references and the own
+/// key's age at apply time before revoking.
 pub async fn sweep_orphan_grants(
     blob_store: &Arc<BlobStore>,
     metadata_store: &Arc<MetadataStore>,

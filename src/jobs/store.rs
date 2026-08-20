@@ -1343,10 +1343,10 @@ impl JobStore {
                 Err(e) => return Err(e),
             };
             if let Some(claim) = self.try_claim(&envelope.lock_key).await? {
-                // Re-read under the execution lock: another worker may have
-                // completed this job (deleting the pending file) between our
-                // first read and the lock acquisition. Without this the stale
-                // envelope would be re-run and could dead-letter a finished job.
+                // Re-read under the claim: another worker may have completed
+                // this job (deleting the pending file) between the first read
+                // and the claim. Without this the stale envelope would be
+                // re-run and could dead-letter a finished job.
                 let envelope = match self.read_pending(queue, &storage_key).await {
                     Ok(envelope) => envelope,
                     Err(Error::NotFound) => {

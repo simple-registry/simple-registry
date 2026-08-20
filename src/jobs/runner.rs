@@ -6,12 +6,11 @@ use crate::{
     jobs::store::{ClaimedJob, CompleteOutcome, Error, FailOutcome, JobHandler, JobStore},
 };
 
-/// Execute one claimed job: observe the lock session's cancellation
-/// token alongside the handler future, then complete, fail (with retry
-/// or dead-letter), or abort on lock loss. The heartbeat is internal to
-/// the session held in `claimed.session`; it stops automatically when the
-/// session is consumed by `complete`/`fail` or dropped on the lock-lost
-/// branch.
+/// Execute one claimed job: observe the claim's cancellation token
+/// alongside the handler future, then complete, fail (with retry or
+/// dead-letter), or abort on claim loss. The refresher is internal to the
+/// claim; it stops when the claim is consumed by `complete`/`fail` or
+/// dropped on the lost branch.
 pub async fn execute_one(consumer: &JobStore, handler: &dyn JobHandler, claimed: ClaimedJob) {
     let lock_key = claimed.envelope.lock_key.to_string();
     let lock_lost = claimed.lock_lost();
