@@ -2,11 +2,11 @@ use std::{str::FromStr, time::Duration};
 
 use angos_oci::{Digest, Namespace, Tag};
 
+use crate::registry::keys::NamespaceKeys;
 use crate::registry::metadata_store::tests::{test_backend_with_cache, test_config};
 use crate::registry::{
     Error,
     metadata_store::{LinkKind, LinkMetadata, LinkOperation},
-    path_builder,
 };
 
 #[tokio::test]
@@ -33,7 +33,7 @@ async fn test_read_link_cache_hit_skips_storage() {
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
     assert_eq!(meta.target, digest);
 
-    let entry_dir = path_builder::tag_entry_dir(&namespace, &Tag::new("latest").unwrap());
+    let entry_dir = namespace.tag_entry_dir(&Tag::new("latest").unwrap());
     backend
         .object_store()
         .delete_prefix(&entry_dir)
@@ -153,7 +153,7 @@ async fn test_update_links_populates_cache_on_overwrite() {
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
 
-    let entry_dir = path_builder::tag_entry_dir(&namespace, &Tag::new("latest").unwrap());
+    let entry_dir = namespace.tag_entry_dir(&Tag::new("latest").unwrap());
     backend
         .object_store()
         .delete_prefix(&entry_dir)
@@ -185,7 +185,7 @@ async fn test_update_links_populates_cache_on_create() {
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
 
-    let entry_dir = path_builder::tag_entry_dir(&namespace, &Tag::new("v1").unwrap());
+    let entry_dir = namespace.tag_entry_dir(&Tag::new("v1").unwrap());
     backend
         .object_store()
         .delete_prefix(&entry_dir)
@@ -297,7 +297,7 @@ async fn test_cache_disabled_when_ttl_zero() {
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
     assert_eq!(meta.target, digest);
 
-    let entry_dir = path_builder::tag_entry_dir(&namespace, &Tag::new("latest").unwrap());
+    let entry_dir = namespace.tag_entry_dir(&Tag::new("latest").unwrap());
     backend
         .object_store()
         .delete_prefix(&entry_dir)
@@ -338,7 +338,7 @@ async fn a_revision_record_stays_cached_past_the_tag_ttl() {
     // immutable record is cached without the tag TTL bound.
     backend
         .object_store()
-        .delete(&path_builder::revision_record_path(&namespace, &digest))
+        .delete(&namespace.revision_record_path(&digest))
         .await
         .unwrap();
 

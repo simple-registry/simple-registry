@@ -27,6 +27,7 @@ use angos_oci::{Algorithm, Digest, Namespace, UploadSessionId};
 use angos_storage::Error as StorageError;
 use angos_storage::paginated;
 
+use crate::registry::keys::{DigestKeys, NamespaceKeys};
 use crate::registry::{
     Error,
     blob_store::{
@@ -93,7 +94,7 @@ impl BlobStore {
         namespace: &Namespace,
         session_id: &UploadSessionId,
     ) -> Result<UploadSessionRecord, Error> {
-        let key = path_builder::upload_session_path(namespace, session_id);
+        let key = namespace.upload_session_path(session_id);
         let raw = match self.object.get(&key).await {
             Ok(raw) => raw,
             // An older binary's session carries the legacy artifacts instead.
@@ -115,7 +116,7 @@ impl BlobStore {
     /// Persist `record` as one atomic `session.json` put, superseding any
     /// legacy artifacts, which stay untouched until the container is deleted.
     async fn write_session(&self, record: &UploadSessionRecord) -> Result<(), Error> {
-        let key = path_builder::upload_session_path(&record.namespace, &record.session_id);
+        let key = record.namespace.upload_session_path(&record.session_id);
         let file = SessionFile {
             last_activity: record.started_at,
             committed_offset: record.uploaded_size,
@@ -205,7 +206,7 @@ impl BlobStore {
         &self,
         namespace: &Namespace,
     ) -> impl Stream<Item = Result<UploadSessionId, Error>> + Send + '_ {
-        let root = format!("{}/", path_builder::uploads_root_dir(namespace));
+        let root = format!("{}/", namespace.uploads_root_dir());
         paginated(move |token| {
             let root = root.clone();
             async move {
@@ -256,7 +257,7 @@ impl BlobStore {
         session_id: &UploadSessionId,
         algorithm: Option<Algorithm>,
     ) -> Result<(), Error> {
-        let upload_path = path_builder::upload_path(namespace, session_id);
+        let upload_path = namespace.upload_path(session_id);
         // Also clears any leaked prior multipart and staged remainder.
         self.object.create_upload(&upload_path).await?;
 
@@ -384,7 +385,7 @@ impl BlobStore {
         let hashing_reader = HashingReader::new(stream, hasher);
         let (body_stream, finish) = hashing_stream(hashing_reader, content_length);
 
-        let upload_path = path_builder::upload_path(namespace, session_id);
+        let upload_path = namespace.upload_path(session_id);
         let write_result = self
             .object
             .write_upload(&upload_path, body_stream, content_length)
@@ -437,7 +438,7 @@ impl BlobStore {
         hashed_size: u64,
     ) -> Result<Digest, Error> {
         // The record's existence alone answers liveness, so a HEAD suffices.
-        let session_key = path_builder::upload_session_path(namespace, session_id);
+        let session_key = namespace.upload_session_path(session_id);
         let legacy_marker = path_builder::upload_start_date_path(namespace, session_id);
         match self.object.head(&session_key).await {
             Ok(_) => {
@@ -457,7 +458,7 @@ impl BlobStore {
             Err(e) => return Err(e.into()),
         }
 
-        let upload_key = path_builder::upload_path(namespace, session_id);
+        let upload_key = namespace.upload_path(session_id);
         self.object.complete_upload(&upload_key).await?;
 
         // An append that fails after durably writing bytes leaves staged data
@@ -466,16 +467,16 @@ impl BlobStore {
         let staged_size = self.object.head(&upload_key).await?.size;
         if staged_size != hashed_size {
             warn!("Staged {staged_size} bytes but hashed {hashed_size}, refusing to promote");
-            let container = path_builder::upload_container_path(namespace, session_id);
+            let container = namespace.upload_container_path(session_id);
             let _ = self.object.delete_prefix(&container).await;
             return Err(Error::DigestInvalid);
         }
 
-        let blob_key = path_builder::blob_path(digest);
+        let blob_key = digest.blob_path();
         self.object.move_object(&upload_key, &blob_key).await?;
 
         // Best-effort sweep; scrub reclaims whatever is left.
-        let container = path_builder::upload_container_path(namespace, session_id);
+        let container = namespace.upload_container_path(session_id);
         let _ = self.object.delete_prefix(&container).await;
 
         Ok(digest.clone())
@@ -489,11 +490,11 @@ impl BlobStore {
         namespace: &Namespace,
         session_id: &UploadSessionId,
     ) -> Result<(), Error> {
-        let upload_path = path_builder::upload_path(namespace, session_id);
+        let upload_path = namespace.upload_path(session_id);
         // Discards the backend state the upload owns.
         let _ = self.object.abort_upload(&upload_path).await;
 
-        let container = path_builder::upload_container_path(namespace, session_id);
+        let container = namespace.upload_container_path(session_id);
         self.object.delete_prefix(&container).await?;
         Ok(())
     }

@@ -7,6 +7,7 @@ use tracing::warn;
 use angos_oci::{Digest, Namespace};
 use angos_storage::Error as StorageError;
 
+use crate::registry::keys::DigestKeys;
 use crate::{
     command::{
         maintenance::{
@@ -17,9 +18,7 @@ use crate::{
         },
         scrub::validate::Validator,
     },
-    registry::{
-        Error as RegistryError, blob_store::upload_session::decode_session_file, path_builder,
-    },
+    registry::{Error as RegistryError, blob_store::upload_session::decode_session_file},
 };
 
 impl Validator {
@@ -67,7 +66,7 @@ impl Validator {
         // every walk.
         let young = object_younger_than_grace(
             self.blob_store.object_store().as_ref(),
-            &path_builder::blob_path(digest),
+            &digest.blob_path(),
             self.metadata_store.gc_grace_secs(),
         )
         .await

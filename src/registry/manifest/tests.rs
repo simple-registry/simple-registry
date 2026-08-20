@@ -19,6 +19,7 @@ use angos_storage::{
     test_util::{HookedStore, StoreHook, StoreOp},
 };
 
+use crate::registry::keys::{DigestKeys, NamespaceKeys};
 use crate::registry::manifest::*;
 use crate::{
     cache,
@@ -27,7 +28,7 @@ use crate::{
         Error, Registry,
         blob_ownership::BlobOwnership,
         metadata_store::{LinkKind, LinkOperation, link::tag::TagEntryBody},
-        path_builder::{self, blob_path},
+        path_builder,
         repository::Config as RepositoryConfig,
         test_utils::{
             FSRegistryTestCase, RegistryTestCase, create_test_registry, create_test_registry_with,
@@ -936,7 +937,7 @@ async fn a_blob_fault_aborts_a_digest_delete_instead_of_half_committing() {
     let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
         case.blob_store().object_store().clone(),
         FailReadsOf {
-            key: path_builder::blob_path(&response.digest),
+            key: response.digest.blob_path(),
         },
     ));
     let registry = create_test_registry(
@@ -1002,7 +1003,7 @@ async fn a_backend_fault_is_not_reported_as_a_missing_manifest() {
     let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
         inner,
         FailReadsOf {
-            key: path_builder::link_path(&link, &namespace),
+            key: path_builder::link_path(&link, &namespace).unwrap(),
         },
     ));
     let registry = create_test_registry(case.blob_store(), metadata_store_over(hooked));
@@ -2078,7 +2079,7 @@ async fn manifest_blob_lives_in_blob_store_with_split_backends() {
         test_case
             .metadata_store()
             .object_store()
-            .get(&blob_path(&digest))
+            .get(&digest.blob_path())
             .await
             .is_err(),
         "manifest body must not land in the metadata store",
@@ -2142,7 +2143,7 @@ async fn store_manifest_is_idempotent() {
 }
 
 #[tokio::test]
-async fn delete_manifest_removes_links_and_blob_data() {
+async fn delete_manifest_removes_the_revision_link() {
     let test_case = FSRegistryTestCase::new();
     let registry = test_case.registry();
     let namespace = Namespace::new("test-repo").unwrap();
@@ -4524,7 +4525,7 @@ async fn a_tag_push_persists_descriptor_fields_in_its_entry_body() {
         .unwrap();
 
     let store = test_case.metadata_store();
-    let dir = path_builder::tag_entry_dir(namespace, &tag);
+    let dir = namespace.tag_entry_dir(&tag);
     let entries = store.object_store().list(&dir, 10, None).await.unwrap();
     let entry = entries
         .items

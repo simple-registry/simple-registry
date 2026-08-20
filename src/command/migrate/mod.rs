@@ -582,7 +582,7 @@ mod tests {
         let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
             inner,
             FailReadsOf {
-                key: path_builder::link_path(&broken, &namespace),
+                key: path_builder::link_path(&broken, &namespace).unwrap(),
             },
         ));
         let metadata_store = metadata_store_over_cached(hooked, 0);

@@ -26,7 +26,7 @@ use angos_backoff::Backoff;
 use angos_oci::Digest;
 use angos_storage::Error as StorageError;
 
-use crate::registry::{Error, metadata_store::MetadataStore, path_builder};
+use crate::registry::{Error, metadata_store::MetadataStore, path_builder::GC_ROOT};
 
 /// Attempts and jittered backoff for a writer waiting out a collector run; a
 /// run only covers one batch, so the wait is short.
@@ -43,6 +43,12 @@ pub struct GcRun {
     pub end: Digest,
     pub expires_at: DateTime<Utc>,
     pub instance: String,
+}
+
+/// One collector run's range marker: the only key a writer and the collector
+/// both consult.
+fn gc_run_path(run: &str) -> String {
+    format!("{GC_ROOT}/{run}")
 }
 
 /// A held claim: the marker key plus the token that proves ownership on
@@ -73,12 +79,9 @@ impl MetadataStore {
     pub async fn gc_blocked(&self, digests: &[&Digest]) -> Result<bool, Error> {
         let mut token = None;
         loop {
-            let page = self
-                .object_store()
-                .list(path_builder::GC_ROOT, 100, token)
-                .await?;
+            let page = self.object_store().list(GC_ROOT, 100, token).await?;
             for run in &page.items {
-                let key = path_builder::gc_run_path(run);
+                let key = gc_run_path(run);
                 let raw = match self.object_store().get(&key).await {
                     Ok(raw) => raw,
                     // Released between the listing and the read.
@@ -112,7 +115,7 @@ impl MetadataStore {
     /// on the timer.
     pub async fn gc_claim(&self, start: &Digest, end: &Digest) -> Result<GcClaim, Error> {
         let claim = GcClaim {
-            key: path_builder::gc_run_path(&Uuid::new_v4().to_string()),
+            key: gc_run_path(&Uuid::new_v4().to_string()),
             instance: Uuid::new_v4().to_string(),
             start: start.clone(),
             end: end.clone(),

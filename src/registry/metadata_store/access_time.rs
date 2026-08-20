@@ -13,12 +13,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use angos_oci::Namespace;
+use angos_oci::{Digest, Namespace};
 use angos_storage::{Error as StorageError, ObjectStore};
 
 use crate::registry::{
     Error,
-    metadata_store::{LinkKind, LinkMetadata, MetadataStore},
+    metadata_store::{
+        LinkKind, LinkMetadata, MetadataStore,
+        link::tag::{tag_ord, tag_ord_ts},
+    },
     path_builder,
 };
 
@@ -33,6 +36,29 @@ pub struct AccessEntry {
 /// token claims, which have no length bound of their own.
 const MAX_CLIENT_CHARS: usize = 256;
 
+/// One access entry: `<ord>.<suffix>`, where `<ord>` is the inverted-millis
+/// ordinal of [`tag_ord`] (entries list newest first) and `<suffix>` breaks
+/// same-millisecond collisions between clients.
+pub fn atime_entry_name(ord: u64, suffix: &str) -> String {
+    format!("{ord:016x}.{suffix}")
+}
+
+/// The entry-name collision breaker for one client identity: the first 8 hex
+/// of its sha256.
+pub fn atime_client_suffix(client: &str) -> String {
+    Digest::sha256_of_bytes(client.as_bytes()).hash()[..8].to_string()
+}
+
+/// Decode one entry filename of an atime entry directory back into its
+/// ordinal. `None` = not a shape this version writes.
+pub fn parse_atime_entry(name: &str) -> Option<u64> {
+    let (ord, suffix) = name.split_once('.')?;
+    if ord.len() != 16 || suffix.len() != 8 || !suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(ord, 16).ok()
+}
+
 /// Append one access entry to `dir`, its body recording the client and the
 /// stamp time.
 pub async fn put_access_entry(
@@ -45,10 +71,7 @@ pub async fn put_access_entry(
         None => client,
     };
     let at = Utc::now();
-    let name = path_builder::atime_entry_name(
-        path_builder::tag_ord(Some(at)),
-        &path_builder::atime_client_suffix(client),
-    );
+    let name = atime_entry_name(tag_ord(Some(at)), &atime_client_suffix(client));
     let body = serde_json::to_vec(&AccessEntry {
         client: client.to_string(),
         at,
@@ -99,7 +122,9 @@ impl MetadataStore {
             }
             _ => {}
         }
-        let link_path = path_builder::link_path(link, namespace);
+        let Some(link_path) = path_builder::link_path(link, namespace) else {
+            return Err(Error::NotFound);
+        };
         let body = self.object_store().get(&link_path).await?;
         let link_data = serde_json::from_slice::<LinkMetadata>(&body)?.accessed();
         let serialized = Bytes::from(serde_json::to_vec(&link_data)?);
@@ -116,8 +141,8 @@ impl MetadataStore {
     ) -> Result<Option<DateTime<Utc>>, Error> {
         let page = self.object_store().list(dir, 1, None).await?;
         if let Some(name) = page.items.first()
-            && let Some(ord) = path_builder::parse_atime_entry(name)
-            && let Some(at) = path_builder::tag_ord_ts(ord)
+            && let Some(ord) = parse_atime_entry(name)
+            && let Some(at) = tag_ord_ts(ord)
         {
             return Ok(Some(at));
         }

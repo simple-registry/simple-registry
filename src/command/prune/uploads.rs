@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 use angos_oci::{Digest, Namespace, UploadSessionId};
 use angos_storage::Error as StorageError;
 
+use crate::registry::keys::DigestKeys;
 use crate::{
     command::maintenance::{
         Error,
@@ -209,7 +210,7 @@ async fn sweep_one_shard(
         // The walked key's age gate does not cover its siblings: a fresh
         // `_own` granted before its bytes land is normal, so each entry is
         // gated on its own reference key.
-        if entry_is_young(ctx, &path_builder::blob_ref_path(blob, &namespace, &link)).await? {
+        if entry_is_young(ctx, &blob.blob_ref_path(&namespace, &link)).await? {
             continue;
         }
         ctx.sink
@@ -239,6 +240,7 @@ async fn entry_is_young(ctx: &ShardSweep<'_>, ref_key: &str) -> Result<bool, Err
 
 #[cfg(test)]
 mod tests {
+    use crate::registry::keys::NamespaceKeys;
     use chrono::TimeZone;
 
     use crate::command::prune::uploads::*;
@@ -391,7 +393,7 @@ mod tests {
             );
             objects
                 .put(
-                    &path_builder::upload_session_path(&namespace, &new_shape),
+                    &namespace.upload_session_path(&new_shape),
                     Bytes::from(record),
                 )
                 .await
@@ -595,7 +597,7 @@ mod tests {
                 now,
                 sink: &sink,
             };
-            let walked = path_builder::blob_ref_path(&ghost, &namespace, &stale);
+            let walked = ghost.blob_ref_path(&namespace, &stale);
             sweep_one_shard(&ctx, &walked, &ghost, namespace.as_ref())
                 .await
                 .unwrap();

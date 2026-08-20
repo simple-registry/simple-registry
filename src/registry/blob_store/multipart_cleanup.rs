@@ -11,6 +11,7 @@ use tracing::warn;
 use angos_oci::{Namespace, UploadSessionId};
 use angos_storage::Error as StorageError;
 
+use crate::registry::keys::NamespaceKeys;
 use crate::registry::{Error, blob_store::BlobStore, path_builder};
 
 /// Fan-out for the per-upload session-marker probes.
@@ -22,7 +23,7 @@ pub struct OrphanMultipartUpload {
     pub upload_id: String,
 }
 
-/// Inverse of [`path_builder::upload_path`], parsing an upload's `data` key
+/// Inverse of [`NamespaceKeys::upload_path`], parsing an upload's `data` key
 /// into `(namespace, uuid)`. The coalesce scratch key parses to the same
 /// session too, so a scratch multipart stranded by a crash is reclaimable.
 pub fn parse_upload_key(key: &str) -> Option<(&str, &str)> {
@@ -86,7 +87,7 @@ impl MultipartCleanup for BlobStore {
                 // A key naming no session was never opened by angos, so it is
                 // not ours to abort.
                 let session_id: UploadSessionId = session_id.parse().ok()?;
-                let session_path = path_builder::upload_session_path(&namespace, &session_id);
+                let session_path = namespace.upload_session_path(&session_id);
                 let legacy_path = path_builder::upload_start_date_path(&namespace, &session_id);
                 Some((upload, session_path, legacy_path))
             });
@@ -337,7 +338,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_liveness_probe_does_not_orphan_a_live_upload() {
         let namespace = Namespace::new("test-repo").unwrap();
-        let key = path_builder::upload_path(&namespace, &UploadSessionId::generate());
+        let key = namespace.upload_path(&UploadSessionId::generate());
         let store = BlobStore::new(
             Arc::new(OneStaleUpload {
                 key,
@@ -362,7 +363,7 @@ mod tests {
     #[tokio::test]
     async fn an_absent_marker_still_orphans_a_stale_upload() {
         let namespace = Namespace::new("test-repo").unwrap();
-        let key = path_builder::upload_path(&namespace, &UploadSessionId::generate());
+        let key = namespace.upload_path(&UploadSessionId::generate());
         let store = BlobStore::new(
             Arc::new(OneStaleUpload {
                 key: key.clone(),

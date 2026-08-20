@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use bytes::Bytes;
 
+use crate::registry::keys::DigestKeys;
 use crate::registry::metadata_store::tests::test_config;
 use crate::registry::{
     Error,
@@ -300,7 +301,7 @@ async fn writes_land_as_reference_keys_not_shards() {
 
     backend
         .object_store()
-        .head(&path_builder::blob_ref_path(&digest, &namespace, &link))
+        .head(&digest.blob_ref_path(&namespace, &link))
         .await
         .expect("the tag's reference key must exist");
     let shards = backend

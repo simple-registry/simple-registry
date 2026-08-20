@@ -13,11 +13,11 @@ use crate::command::maintenance::action::LOST_AND_FOUND_PREFIX;
 use crate::{
     jobs::{JobState, Queue, store::JOBS_ROOT},
     registry::{
-        metadata_store::{LinkKind, decode_blob_index_shard_namespace},
-        path_builder::{
-            BLOBS_ROOT, CAT_ROOT, GC_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT, parse_atime_entry,
-            parse_blob_ref, parse_tag_entry,
+        keys::DigestKeys,
+        metadata_store::{
+            LinkKind, decode_blob_index_shard_namespace, parse_atime_entry, parse_tag_entry,
         },
+        path_builder::{BLOBS_ROOT, CAT_ROOT, GC_ROOT, NS_ROOT, REF_ROOT, REPOS_ROOT},
     },
 };
 
@@ -250,7 +250,7 @@ fn categorize_ref(rest: &str) -> KeyCategory {
     if hash.as_bytes().get(..2) != Some(prefix.as_bytes()) {
         return KeyCategory::Unknown;
     }
-    match parse_blob_ref(&digest, tail) {
+    match digest.parse_blob_ref(tail) {
         Some((namespace, link)) => KeyCategory::BlobRef {
             digest,
             namespace,
@@ -544,12 +544,14 @@ mod tests {
     use crate::{
         jobs::store::{LockKey, job_failed_path, job_lock_key_index_path, job_pending_path},
         registry::{
-            metadata_store::LinkKind,
+            keys::NamespaceKeys,
+            metadata_store::{
+                LinkKind,
+                access_time::{atime_client_suffix, atime_entry_name},
+            },
             path_builder::{
-                atime_client_suffix, atime_entry_name, blob_index_shard_path, blob_path,
-                blob_ref_own_path, blob_ref_path, link_path, revision_atime_entry_dir,
-                tag_atime_entry_dir, tag_atime_path, tag_entry_path, tag_hist_path,
-                upload_hash_context_path, upload_path, upload_session_path, upload_start_date_path,
+                blob_index_shard_path, link_path, tag_atime_path, upload_hash_context_path,
+                upload_start_date_path,
             },
         },
     };
@@ -572,7 +574,7 @@ mod tests {
     #[test]
     fn blob_data_path_round_trips() {
         assert_eq!(
-            categorize(&blob_path(&digest_a())),
+            categorize(&digest_a().blob_path()),
             KeyCategory::BlobData { digest: digest_a() }
         );
     }
@@ -607,7 +609,7 @@ mod tests {
         ];
         for link in links {
             assert_eq!(
-                categorize(&blob_ref_path(&digest_a(), &namespace(), &link)),
+                categorize(&digest_a().blob_ref_path(&namespace(), &link)),
                 KeyCategory::BlobRef {
                     digest: digest_a(),
                     namespace: "org/app".to_string(),
@@ -617,7 +619,7 @@ mod tests {
             );
         }
         assert_eq!(
-            categorize(&blob_ref_own_path(&digest_a(), &namespace())),
+            categorize(&digest_a().blob_ref_own_path(&namespace())),
             KeyCategory::BlobRef {
                 digest: digest_a(),
                 namespace: "org/app".to_string(),
@@ -630,7 +632,7 @@ mod tests {
     fn tag_entry_and_atime_paths_round_trip() {
         let ns = Namespace::new("org/app").unwrap();
         let tag = Tag::new("v1.0").unwrap();
-        let key = tag_entry_path(&ns, &tag, u64::MAX - 1, false, &digest_a());
+        let key = ns.tag_entry_path(&tag, u64::MAX - 1, false, &digest_a());
         assert_eq!(
             categorize(&key),
             KeyCategory::TagEntry {
@@ -650,7 +652,7 @@ mod tests {
         let tag = Tag::new("v1.0").unwrap();
         let name = atime_entry_name(u64::MAX - 1, &atime_client_suffix("alice"));
         assert_eq!(
-            categorize(&format!("{}/{name}", tag_atime_entry_dir(&ns, &tag))),
+            categorize(&format!("{}/{name}", ns.tag_atime_entry_dir(&tag))),
             KeyCategory::TagAtimeEntry {
                 namespace: "org/app".to_string(),
                 tag: "v1.0".to_string(),
@@ -659,7 +661,7 @@ mod tests {
         assert_eq!(
             categorize(&format!(
                 "{}/{name}",
-                revision_atime_entry_dir(&ns, &digest_a())
+                ns.revision_atime_entry_dir(&digest_a())
             )),
             KeyCategory::RevisionAtimeEntry {
                 namespace: "org/app".to_string(),
@@ -685,10 +687,10 @@ mod tests {
     fn tag_hist_paths_round_trip() {
         let ns = Namespace::new("org/app").unwrap();
         let tag = Tag::new("v1.0").unwrap();
-        let entry_key = tag_entry_path(&ns, &tag, u64::MAX - 1, false, &digest_a());
+        let entry_key = ns.tag_entry_path(&tag, u64::MAX - 1, false, &digest_a());
         let file = entry_key.rsplit_once('/').unwrap().1;
         assert_eq!(
-            categorize(&tag_hist_path(&ns, &tag, file)),
+            categorize(&ns.tag_hist_path(&tag, file)),
             KeyCategory::TagHistory
         );
         assert_eq!(categorize("v2/ns/org/app!hist/v1.0"), KeyCategory::Unknown);
@@ -763,7 +765,7 @@ mod tests {
         ];
         for (kind, expected) in cases {
             assert_eq!(
-                categorize(&link_path(&kind, &namespace())),
+                categorize(&link_path(&kind, &namespace()).unwrap()),
                 KeyCategory::Link {
                     namespace: "org/app".to_string(),
                     link: expected,
@@ -783,9 +785,9 @@ mod tests {
     fn upload_artifacts_round_trip() {
         let ns = namespace();
         let cases = [
-            (upload_path(&ns, &session()), UploadArtifact::Data),
+            (ns.upload_path(&session()), UploadArtifact::Data),
             (
-                upload_session_path(&ns, &session()),
+                ns.upload_session_path(&session()),
                 UploadArtifact::SessionJson,
             ),
             (
@@ -827,7 +829,7 @@ mod tests {
             );
         }
         assert_eq!(
-            categorize(&upload_path(&ns, &session())),
+            categorize(&ns.upload_path(&session())),
             KeyCategory::UploadArtifact {
                 namespace: "org/app".to_string(),
                 artifact: UploadArtifact::Data,

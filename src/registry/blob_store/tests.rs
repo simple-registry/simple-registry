@@ -10,6 +10,7 @@ use angos_storage::test_util::frame;
 use crate::registry::Error;
 use crate::registry::blob_store::resumable_hasher::Hasher;
 use crate::registry::blob_store::*;
+use crate::registry::keys::NamespaceKeys;
 
 pub async fn test_datastore_stream_uploads(store: &BlobStore) {
     let namespace = &Namespace::new("test-repo").unwrap();
@@ -405,7 +406,7 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
         .unwrap();
 
     // A tail the session never hashed.
-    let upload_key = path_builder::upload_path(&namespace, &session_id);
+    let upload_key = namespace.upload_path(&session_id);
     store
         .object
         .write_upload(&upload_key, frame(tail.clone()), Some(tail.len() as u64))
@@ -451,10 +452,7 @@ pub async fn test_session_state_is_one_json_record(store: &BlobStore) {
             .unwrap();
     }
 
-    let container = format!(
-        "{}/",
-        path_builder::upload_container_path(namespace, session_id)
-    );
+    let container = format!("{}/", namespace.upload_container_path(session_id));
     let keys = store
         .object
         .list(&container, 100, None)
@@ -503,7 +501,7 @@ pub async fn test_legacy_session_resumes_and_completes(store: &BlobStore) {
     let first = b"first half ";
     let rest = b"second half";
 
-    let upload_path = path_builder::upload_path(namespace, session_id);
+    let upload_path = namespace.upload_path(session_id);
     store.object.create_upload(&upload_path).await.unwrap();
     store
         .object
@@ -549,7 +547,7 @@ pub async fn test_legacy_session_resumes_and_completes(store: &BlobStore) {
     assert!(
         store
             .object
-            .head(&path_builder::upload_session_path(namespace, session_id))
+            .head(&namespace.upload_session_path(session_id))
             .await
             .is_ok(),
         "the first activity on a legacy session must write session.json"
@@ -560,10 +558,7 @@ pub async fn test_legacy_session_resumes_and_completes(store: &BlobStore) {
         .await
         .unwrap();
     assert_eq!(store.read(&digest).await.unwrap(), content);
-    let container = format!(
-        "{}/",
-        path_builder::upload_container_path(namespace, session_id)
-    );
+    let container = format!("{}/", namespace.upload_container_path(session_id));
     let leftover = store
         .object
         .list(&container, 100, None)

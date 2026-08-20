@@ -6,11 +6,17 @@ use std::sync::{Arc, Mutex};
 use angos_storage::Error as StorageError;
 use bytes::Bytes;
 use chrono::{DateTime, Duration, Utc};
+use serde_json::json;
 use uuid::Uuid;
 
 use angos_oci::request::{DeleteBlobRequest, PutManifestRequest};
 use angos_oci::{Digest, Namespace, Reference, Tag};
 
+use crate::registry::keys::{DigestKeys, NamespaceKeys};
+use crate::registry::metadata_store::{
+    access_time::{atime_client_suffix, atime_entry_name},
+    tag_ord,
+};
 use crate::{
     command::{
         maintenance::{
@@ -20,6 +26,7 @@ use crate::{
         },
         scrub::validate::{Pass, Validator},
     },
+    jobs::{Queue, store::JobEnvelope},
     registry::{
         Error as RegistryError,
         blob_store::BlobStore,
@@ -209,7 +216,7 @@ async fn scrub_recreates_missing_digest_link_for_tag() {
         let digest_link = LinkKind::Digest(manifest_digest.clone());
         metadata_store
             .object_store()
-            .delete(&path_builder::link_path(&digest_link, namespace))
+            .delete(&path_builder::link_path(&digest_link, namespace).unwrap())
             .await
             .unwrap();
 
@@ -300,7 +307,7 @@ async fn corrupt_link_is_deleted() {
 
         scrub_apply(test_case).await;
 
-        let key = path_builder::link_path(&tag("garbled"), namespace);
+        let key = path_builder::link_path(&tag("garbled"), namespace).unwrap();
         assert!(
             metadata_store.object_store().get(&key).await.is_err(),
             "a link with unreadable content must be deleted"
@@ -566,7 +573,7 @@ async fn young_tag_defers_target_repairs() {
         let (manifest_digest, _, _) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        let record = path_builder::revision_record_path(namespace, &manifest_digest);
+        let record = namespace.revision_record_path(&manifest_digest);
         metadata_store.object_store().delete(&record).await.unwrap();
 
         let graced = Arc::new(
@@ -931,11 +938,23 @@ async fn corrupt_job_record_is_deleted_and_valid_one_kept() {
             .await
             .unwrap();
 
+        let valid = "_jobs/pending/replication/0000000000000000-valid.json";
+        let envelope =
+            JobEnvelope::new(Queue::Replication, "replication.push", "lock", &json!({})).unwrap();
+        objects
+            .put(valid, Bytes::from(serde_json::to_vec(&envelope).unwrap()))
+            .await
+            .unwrap();
+
         scrub_apply(test_case).await;
 
         assert!(
             objects.get(corrupt).await.is_err(),
             "an unparseable job record must be deleted"
+        );
+        assert!(
+            objects.get(valid).await.is_ok(),
+            "a parseable job record must survive"
         );
     })
     .await;
@@ -1041,7 +1060,7 @@ async fn legacy_tag_link_is_converted_to_an_entry() {
         let link = LinkKind::Tag(tag.clone());
         let created_at = DateTime::from_timestamp_millis(1_600_000_000_000).unwrap();
         let metadata = LinkMetadata::from_digest_at(manifest_digest.clone(), created_at);
-        let legacy_path = path_builder::link_path(&link, namespace);
+        let legacy_path = path_builder::link_path(&link, namespace).unwrap();
         metadata_store
             .object_store()
             .put(
@@ -1089,7 +1108,7 @@ async fn legacy_revision_link_is_converted_to_a_record() {
         let link = LinkKind::Digest(manifest_digest.clone());
         let created_at = DateTime::from_timestamp_millis(1_600_000_000_000).unwrap();
         let metadata = LinkMetadata::from_digest_at(manifest_digest.clone(), created_at);
-        let legacy_path = path_builder::link_path(&link, namespace);
+        let legacy_path = path_builder::link_path(&link, namespace).unwrap();
         store
             .put(
                 &legacy_path,
@@ -1097,7 +1116,7 @@ async fn legacy_revision_link_is_converted_to_a_record() {
             )
             .await
             .unwrap();
-        let record_path = path_builder::revision_record_path(namespace, &manifest_digest);
+        let record_path = namespace.revision_record_path(&manifest_digest);
         store.delete(&record_path).await.unwrap();
 
         scrub_apply(test_case).await;
@@ -1135,7 +1154,7 @@ async fn legacy_referrer_link_is_converted_to_a_record() {
             referrer: manifest_digest.clone(),
         };
         let metadata = LinkMetadata::from_digest(manifest_digest.clone());
-        let legacy_path = path_builder::link_path(&link, namespace);
+        let legacy_path = path_builder::link_path(&link, namespace).unwrap();
         store
             .put(
                 &legacy_path,
@@ -1147,11 +1166,7 @@ async fn legacy_referrer_link_is_converted_to_a_record() {
         scrub_apply(test_case).await;
 
         store
-            .head(&path_builder::referrer_record_path(
-                namespace,
-                &subject,
-                &manifest_digest,
-            ))
+            .head(&namespace.referrer_record_path(&subject, &manifest_digest))
             .await
             .expect("the referrer record must be written");
         assert!(
@@ -1259,10 +1274,7 @@ async fn dangling_grant_entry_is_removed() {
         let dangling = Digest::sha256_of_bytes(b"dangling-layer");
         blob_store
             .object_store()
-            .put(
-                &path_builder::blob_path(&dangling),
-                Bytes::from_static(b"dangling-layer"),
-            )
+            .put(&dangling.blob_path(), Bytes::from_static(b"dangling-layer"))
             .await
             .unwrap();
         let phantom = LinkKind::Layer(dangling.clone());
@@ -1385,13 +1397,7 @@ async fn put_tag_entry(
     body: &'static [u8],
 ) -> String {
     let ts = DateTime::from_timestamp_millis(ts_millis).unwrap();
-    let key = path_builder::tag_entry_path(
-        namespace,
-        tag,
-        path_builder::tag_ord(Some(ts)),
-        deletion,
-        digest,
-    );
+    let key = namespace.tag_entry_path(tag, tag_ord(Some(ts)), deletion, digest);
     metadata_store
         .object_store()
         .put(&key, Bytes::from_static(body))
@@ -1442,7 +1448,7 @@ async fn superseded_tag_entries_are_demoted_to_hist() {
                 "superseded entry '{old}' must leave the tag prefix"
             );
             let name = old.rsplit_once('/').unwrap().1;
-            let hist = path_builder::tag_hist_path(namespace, &tag, name);
+            let hist = namespace.tag_hist_path(&tag, name);
             assert!(
                 store.head(&hist).await.is_ok(),
                 "demoted entry must exist at '{hist}'"
@@ -1610,7 +1616,7 @@ async fn demoted_entries_leave_the_listing_and_keep_their_bodies() {
             1,
             "the tag must list exactly once after demotion"
         );
-        let dir = path_builder::tag_entry_dir(namespace, &tag);
+        let dir = namespace.tag_entry_dir(&tag);
         let page = metadata_store
             .object_store()
             .list(&dir, 1000, None)
@@ -1627,7 +1633,7 @@ async fn demoted_entries_leave_the_listing_and_keep_their_bodies() {
             let name = old.rsplit_once('/').unwrap().1;
             let stored = metadata_store
                 .object_store()
-                .get(&path_builder::tag_hist_path(namespace, &tag, name))
+                .get(&namespace.tag_hist_path(&tag, name))
                 .await
                 .unwrap();
             assert_eq!(
@@ -1655,7 +1661,7 @@ async fn push_writes_no_tracked_link_files() {
             LinkKind::Layer(layer_digest.clone()),
             LinkKind::Config(config_digest.clone()),
         ] {
-            let key = path_builder::link_path(&link, namespace);
+            let key = path_builder::link_path(&link, namespace).unwrap();
             assert!(
                 store.head(&key).await.is_err(),
                 "a push must not write the legacy link file '{key}'"
@@ -1742,7 +1748,7 @@ async fn legacy_tracked_link_is_retired_after_rehoming() {
         scrub_apply(test_case).await;
         scrub_apply(test_case).await;
 
-        let key = path_builder::link_path(&layer_link, namespace);
+        let key = path_builder::link_path(&layer_link, namespace).unwrap();
         assert!(
             metadata_store.object_store().head(&key).await.is_err(),
             "the legacy link file must be retired"
@@ -1829,7 +1835,7 @@ async fn young_tracked_link_file_survives_a_graced_scrub() {
         assert!(
             metadata_store
                 .object_store()
-                .head(&path_builder::link_path(&layer_link, namespace))
+                .head(&path_builder::link_path(&layer_link, namespace).unwrap())
                 .await
                 .is_ok(),
             "a link file inside the grace period must be kept"
@@ -1840,10 +1846,7 @@ async fn young_tracked_link_file_survives_a_graced_scrub() {
 
 /// Craft one access entry at `at` in `dir`, as a replica's stamp would land.
 async fn put_atime_entry(store: &Arc<MetadataStore>, dir: &str, client: &str, at: DateTime<Utc>) {
-    let name = path_builder::atime_entry_name(
-        path_builder::tag_ord(Some(at)),
-        &path_builder::atime_client_suffix(client),
-    );
+    let name = atime_entry_name(tag_ord(Some(at)), &atime_client_suffix(client));
     let body = serde_json::to_vec(&AccessEntry {
         client: client.to_string(),
         at,
@@ -1867,7 +1870,7 @@ async fn atime_collector_keeps_newest_prunes_old_superseded_and_retires_legacy()
 
         // Tag side: a newest entry, a superseded one inside the audit window,
         // a superseded one past it, and the legacy single key.
-        let dir = path_builder::tag_atime_entry_dir(&namespace, &tag);
+        let dir = namespace.tag_atime_entry_dir(&tag);
         put_atime_entry(&metadata_store, &dir, "alice", now).await;
         put_atime_entry(&metadata_store, &dir, "bob", now - Duration::minutes(10)).await;
         put_atime_entry(&metadata_store, &dir, "carol", now - Duration::hours(2)).await;
@@ -1880,7 +1883,7 @@ async fn atime_collector_keeps_newest_prunes_old_superseded_and_retires_legacy()
 
         // Revision side: an ancient newest entry alone stays forever, and
         // the legacy key still retires.
-        let rev_dir = path_builder::revision_atime_entry_dir(&namespace, &manifest_digest);
+        let rev_dir = namespace.revision_atime_entry_dir(&manifest_digest);
         put_atime_entry(&metadata_store, &rev_dir, "alice", now - Duration::days(30)).await;
         let rev_legacy = path_builder::revision_atime_path(&namespace, &manifest_digest);
         metadata_store
@@ -1930,13 +1933,10 @@ async fn an_undecodable_atime_entry_is_deleted() {
         let namespace = Namespace::new("test-repo/atime-corrupt").unwrap();
         push_healthy_image(test_case, &namespace).await;
         let metadata_store = test_case.metadata_store();
-        let dir = path_builder::tag_atime_entry_dir(&namespace, &Tag::new("v1").unwrap());
+        let dir = namespace.tag_atime_entry_dir(&Tag::new("v1").unwrap());
         let now = Utc::now();
 
-        let corrupt_name = path_builder::atime_entry_name(
-            path_builder::tag_ord(Some(now)),
-            &path_builder::atime_client_suffix("mallory"),
-        );
+        let corrupt_name = atime_entry_name(tag_ord(Some(now)), &atime_client_suffix("mallory"));
         metadata_store
             .object_store()
             .put(

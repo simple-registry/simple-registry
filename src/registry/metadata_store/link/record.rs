@@ -1,7 +1,7 @@
 //! Immutable revision and referrer records.
 //!
 //! A stored manifest is one never-mutated record at
-//! [`path_builder::revision_record_path`] whose existence makes the digest
+//! [`NamespaceKeys::revision_record_path`] whose existence makes the digest
 //! resolvable; a referrer is one record per (subject, referrer) whose body is
 //! the referring manifest's descriptor. A missing record falls back to the
 //! legacy `link` file, which scrub converts.
@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use angos_oci::{Descriptor, Digest, MediaType, Namespace};
 use angos_storage::Error as StorageError;
 
+use crate::registry::keys::NamespaceKeys;
 use crate::registry::metadata_store::{access_time::put_access_entry, mutation::Mutation};
-
 use crate::registry::{
     Error,
     metadata_store::{LinkKind, LinkMetadata, MetadataStore},
@@ -56,7 +56,7 @@ pub fn revision_set_mutation(
         created_at,
     })?;
     Ok(Mutation::Put {
-        key: path_builder::revision_record_path(namespace, digest),
+        key: namespace.revision_record_path(digest),
         body: Bytes::from(body),
     })
 }
@@ -74,7 +74,7 @@ pub fn referrer_set_mutation(
         None => b"{}".to_vec(),
     };
     Ok(Mutation::Put {
-        key: path_builder::referrer_record_path(namespace, subject, referrer),
+        key: namespace.referrer_record_path(subject, referrer),
         body: Bytes::from(body),
     })
 }
@@ -87,7 +87,7 @@ impl MetadataStore {
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<LinkMetadata, Error> {
-        let key = path_builder::revision_record_path(namespace, digest);
+        let key = namespace.revision_record_path(digest);
         match self.object_store().get(&key).await {
             Ok(body) => {
                 let record: RevisionRecord = serde_json::from_slice(&body)
@@ -109,7 +109,7 @@ impl MetadataStore {
         subject: &Digest,
         referrer: &Digest,
     ) -> Result<LinkMetadata, Error> {
-        let key = path_builder::referrer_record_path(namespace, subject, referrer);
+        let key = namespace.referrer_record_path(subject, referrer);
         match self.object_store().get(&key).await {
             Ok(body) => Ok(LinkMetadata {
                 target: referrer.clone(),
@@ -139,7 +139,9 @@ impl MetadataStore {
         link: &LinkKind,
         namespace: &Namespace,
     ) -> Result<LinkMetadata, Error> {
-        let link_path = path_builder::link_path(link, namespace);
+        let Some(link_path) = path_builder::link_path(link, namespace) else {
+            return Err(Error::NotFound);
+        };
         match self.object_store().get(&link_path).await {
             Ok(data) => serde_json::from_slice(&data).map_err(|e| Error::Internal(e.to_string())),
             Err(StorageError::NotFound) => Err(Error::NotFound),
@@ -155,7 +157,7 @@ impl MetadataStore {
         digest: &Digest,
     ) -> Result<Option<DateTime<Utc>>, Error> {
         self.newest_access_time(
-            &path_builder::revision_atime_entry_dir(namespace, digest),
+            &namespace.revision_atime_entry_dir(digest),
             &path_builder::revision_atime_path(namespace, digest),
         )
         .await
@@ -171,7 +173,7 @@ impl MetadataStore {
     ) -> Result<(), Error> {
         put_access_entry(
             self.object_store(),
-            &path_builder::revision_atime_entry_dir(namespace, digest),
+            &namespace.revision_atime_entry_dir(digest),
             client,
         )
         .await
@@ -196,14 +198,11 @@ impl MetadataStore {
             created_at: metadata.created_at,
         })?;
         self.object_store()
-            .put(
-                &path_builder::revision_record_path(namespace, digest),
-                Bytes::from(record),
-            )
+            .put(&namespace.revision_record_path(digest), Bytes::from(record))
             .await?;
-        self.object_store()
-            .delete(&path_builder::link_path(&link, namespace))
-            .await?;
+        if let Some(key) = path_builder::link_path(&link, namespace) {
+            self.object_store().delete(&key).await?;
+        }
         self.cache_invalidate(namespace, &link).await;
         Ok(())
     }
@@ -230,13 +229,13 @@ impl MetadataStore {
         };
         self.object_store()
             .put(
-                &path_builder::referrer_record_path(namespace, subject, referrer),
+                &namespace.referrer_record_path(subject, referrer),
                 Bytes::from(body),
             )
             .await?;
-        self.object_store()
-            .delete(&path_builder::link_path(&link, namespace))
-            .await?;
+        if let Some(key) = path_builder::link_path(&link, namespace) {
+            self.object_store().delete(&key).await?;
+        }
         self.cache_invalidate(namespace, &link).await;
         Ok(())
     }

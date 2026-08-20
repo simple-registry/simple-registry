@@ -24,6 +24,7 @@ use angos_storage::{
 };
 
 use crate::http_response::ResponseBody;
+use crate::registry::keys::DigestKeys;
 use crate::{
     cache,
     configuration::{GlobalConfig, RegexPattern},
@@ -186,7 +187,7 @@ pub async fn put_link_raw(
 ) {
     store
         .put(
-            &path_builder::link_path(link, namespace),
+            &path_builder::link_path(link, namespace).unwrap(),
             Bytes::copy_from_slice(body),
         )
         .await
@@ -254,10 +255,7 @@ pub async fn put_blob_body(blob_store: &BlobStore, content: &[u8]) -> Digest {
 pub async fn put_blob_direct(store: &Arc<dyn ObjectStore>, content: &[u8]) -> Digest {
     let digest = Digest::sha256_of_bytes(content);
     store
-        .put(
-            &path_builder::blob_path(&digest),
-            Bytes::copy_from_slice(content),
-        )
+        .put(&digest.blob_path(), Bytes::copy_from_slice(content))
         .await
         .unwrap();
     digest

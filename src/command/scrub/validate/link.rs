@@ -8,6 +8,8 @@ use tracing::{debug, warn};
 use angos_oci::{Digest, Manifest, Namespace, Tag};
 use angos_storage::Error as StorageError;
 
+use crate::registry::keys::NamespaceKeys;
+use crate::registry::metadata_store::{parse_atime_entry, parse_tag_entry, tag_ord_ts};
 use crate::{
     command::{
         maintenance::{
@@ -151,7 +153,7 @@ impl Validator {
         namespace: &Namespace,
         tag: &Tag,
     ) -> Result<(), Error> {
-        let dir = path_builder::tag_entry_dir(namespace, tag);
+        let dir = namespace.tag_entry_dir(tag);
         let mut winner_ord = None;
         let mut token = None;
         loop {
@@ -162,7 +164,7 @@ impl Validator {
                 .await
                 .map_err(RegistryError::from)?;
             for name in &page.items {
-                let Some((ord, _, _)) = path_builder::parse_tag_entry(name) else {
+                let Some((ord, _, _)) = parse_tag_entry(name) else {
                     continue;
                 };
                 // The listing sorts newest first, so the first parseable
@@ -198,7 +200,7 @@ impl Validator {
             return Ok(());
         };
         self.collect_atime_entries(
-            &path_builder::tag_atime_entry_dir(&namespace, &tag),
+            &namespace.tag_atime_entry_dir(&tag),
             &path_builder::tag_atime_path(&namespace, &tag),
         )
         .await
@@ -215,7 +217,7 @@ impl Validator {
             return Ok(());
         };
         self.collect_atime_entries(
-            &path_builder::revision_atime_entry_dir(&namespace, digest),
+            &namespace.revision_atime_entry_dir(digest),
             &path_builder::revision_atime_path(&namespace, digest),
         )
         .await
@@ -240,7 +242,7 @@ impl Validator {
                 .await
                 .map_err(RegistryError::from)?;
             for name in &page.items {
-                let Some(ord) = path_builder::parse_atime_entry(name) else {
+                let Some(ord) = parse_atime_entry(name) else {
                     continue;
                 };
                 let key = format!("{dir}/{name}");
@@ -261,7 +263,7 @@ impl Validator {
                     kept_newest = true;
                     continue;
                 }
-                let old = path_builder::tag_ord_ts(ord)
+                let old = tag_ord_ts(ord)
                     .is_some_and(|at| Utc::now().signed_duration_since(at).num_seconds() >= window);
                 if old {
                     self.emit(Action::RetireAtimeKey { key }).await?;
@@ -387,14 +389,14 @@ impl Validator {
         // later waves are still in flight, so repairs derived from it would
         // race them.
         if self
-            .younger_than_grace(&path_builder::revision_record_path(namespace, revision))
+            .younger_than_grace(&namespace.revision_record_path(revision))
             .await?
-            || self
-                .younger_than_grace(&path_builder::link_path(
-                    &LinkKind::Digest(revision.clone()),
-                    namespace,
-                ))
-                .await?
+        {
+            return Ok(false);
+        }
+        if let Some(link_key) =
+            path_builder::link_path(&LinkKind::Digest(revision.clone()), namespace)
+            && self.younger_than_grace(&link_key).await?
         {
             return Ok(false);
         }
@@ -453,13 +455,16 @@ impl Validator {
     /// Whether the revision exists in either shape: its record, or its legacy
     /// link.
     async fn revision_exists(&self, namespace: &Namespace, digest: &Digest) -> Result<bool, Error> {
-        let record_key = path_builder::revision_record_path(namespace, digest);
+        let record_key = namespace.revision_record_path(digest);
         match self.metadata_store.object_store().head(&record_key).await {
             Ok(_) => return Ok(true),
             Err(StorageError::NotFound) => {}
             Err(e) => return Err(RegistryError::from(e).into()),
         }
-        let link_key = path_builder::link_path(&LinkKind::Digest(digest.clone()), namespace);
+        let Some(link_key) = path_builder::link_path(&LinkKind::Digest(digest.clone()), namespace)
+        else {
+            return Ok(false);
+        };
         Ok(self.read_link_body(&link_key).await?.is_some())
     }
 
@@ -469,7 +474,7 @@ impl Validator {
         if !self.claim(format!("catalog:{namespace}")) {
             return Ok(());
         }
-        let key = path_builder::catalog_index_path(namespace);
+        let key = namespace.catalog_index_path();
         match self.metadata_store.object_store().head(&key).await {
             Ok(_) => Ok(()),
             Err(StorageError::NotFound) => {
@@ -556,7 +561,7 @@ impl Validator {
         let Ok(namespace) = Namespace::new(namespace_raw) else {
             return self.handle_invalid_namespace(namespace_raw).await;
         };
-        let key = path_builder::referrer_record_path(&namespace, subject, referrer);
+        let key = namespace.referrer_record_path(subject, referrer);
         match self.metadata_store.object_store().head(&key).await {
             Ok(_) => {}
             Err(StorageError::NotFound) => return Ok(()),
@@ -696,7 +701,10 @@ impl Validator {
         if matches!(link, LinkKind::Digest(_)) && self.revision_exists(namespace, expected).await? {
             return Ok(());
         }
-        let link_key = path_builder::link_path(link, namespace);
+        // A kind with no link file has nothing to recreate.
+        let Some(link_key) = path_builder::link_path(link, namespace) else {
+            return Ok(());
+        };
         if let Some(metadata) = self.read_link_body(&link_key).await?
             && &metadata.target == expected
         {

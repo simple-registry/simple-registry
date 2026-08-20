@@ -18,6 +18,8 @@ use tracing::warn;
 use angos_oci::{Descriptor, Digest, MediaType, Namespace};
 use angos_storage::Error as StorageError;
 
+use crate::registry::keys::NamespaceKeys;
+use crate::registry::metadata_store::{tag_ord, tag_ord_ts};
 use crate::registry::{
     Error,
     metadata_store::{
@@ -207,10 +209,10 @@ impl LinkMutations {
         metadata: LinkMetadata,
     ) -> Result<(), Error> {
         let body = serde_json::to_vec(&metadata).map(Bytes::from)?;
-        self.records.push(Mutation::Put {
-            key: path_builder::link_path(link, namespace),
-            body,
-        });
+        // A kind with no link file leaves the reference keys as its only state.
+        if let Some(key) = path_builder::link_path(link, namespace) {
+            self.records.push(Mutation::Put { key, body });
+        }
         self.written_links.push((link.clone(), metadata));
         Ok(())
     }
@@ -221,10 +223,10 @@ impl LinkMutations {
     /// writer-side removal could unpin a blob a concurrent push is committing.
     fn delete_link(&mut self, namespace: &Namespace, link: &LinkKind) {
         let record_key = match link {
-            LinkKind::Digest(digest) => Some(path_builder::revision_record_path(namespace, digest)),
-            LinkKind::Referrer { subject, referrer } => Some(path_builder::referrer_record_path(
-                namespace, subject, referrer,
-            )),
+            LinkKind::Digest(digest) => Some(namespace.revision_record_path(digest)),
+            LinkKind::Referrer { subject, referrer } => {
+                Some(namespace.referrer_record_path(subject, referrer))
+            }
             _ => None,
         };
         let wave = if matches!(link, LinkKind::Digest(_)) {
@@ -232,9 +234,9 @@ impl LinkMutations {
         } else {
             &mut self.records
         };
-        wave.push(Mutation::Delete {
-            key: path_builder::link_path(link, namespace),
-        });
+        if let Some(key) = path_builder::link_path(link, namespace) {
+            wave.push(Mutation::Delete { key });
+        }
         if let Some(key) = record_key {
             wave.push(Mutation::Delete { key });
         }
@@ -483,8 +485,10 @@ impl MetadataStore {
                 };
                 return Ok((op, metadata, tag_body));
             }
-            let link_path = path_builder::link_path(link, namespace);
-            let metadata = self.read_link_raw(&link_path).await?;
+            let metadata = match path_builder::link_path(link, namespace) {
+                Some(link_path) => self.read_link_raw(&link_path).await?,
+                None => None,
+            };
             Ok::<_, Error>((op, metadata, None))
         }))
         .await;
@@ -550,8 +554,7 @@ fn lww_superseded(snapshot: &LinksSnapshot<'_>, tx: &LinksTx<'_>) -> Option<Stri
     // A stored tag timestamp carries the entry ordinal's millisecond
     // precision, so the incoming side must be compared at that precision or an
     // exact-equality tie would read as strictly newer.
-    let entry_ms =
-        |ts: DateTime<Utc>| path_builder::tag_ord_ts(path_builder::tag_ord(Some(ts))).unwrap_or(ts);
+    let entry_ms = |ts: DateTime<Utc>| tag_ord_ts(tag_ord(Some(ts))).unwrap_or(ts);
     for op in &snapshot.ops {
         match op {
             OpSnapshot::Create { link, target, .. } => {
@@ -708,9 +711,7 @@ fn build_create_mutations(
                         (*annotations).clone(),
                     )?;
                     acc.finals.push(mutation);
-                    let created_at =
-                        path_builder::tag_ord_ts(path_builder::tag_ord(Some(created_at)))
-                            .unwrap_or(created_at);
+                    let created_at = tag_ord_ts(tag_ord(Some(created_at))).unwrap_or(created_at);
                     // No media type, because tag resolution carries none and
                     // the cached write-through must match a fresh resolve.
                     let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at);

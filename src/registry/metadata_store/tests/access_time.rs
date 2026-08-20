@@ -5,7 +5,12 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use angos_oci::{Digest, Namespace, Tag};
 
+use crate::registry::keys::NamespaceKeys;
 use crate::registry::metadata_store::tests::{test_backend, test_config};
+use crate::registry::metadata_store::{
+    access_time::{atime_client_suffix, atime_entry_name},
+    tag_ord,
+};
 use crate::registry::{
     metadata_store::{AccessEntry, LinkKind, LinkOperation, MetadataStore},
     path_builder,
@@ -25,10 +30,7 @@ async fn stored_atime(
 /// Plant one access entry at `at` as a raw put, the way a sibling replica's
 /// stamp would land.
 async fn put_entry_at(backend: &MetadataStore, dir: &str, client: &str, at: DateTime<Utc>) {
-    let name = path_builder::atime_entry_name(
-        path_builder::tag_ord(Some(at)),
-        &path_builder::atime_client_suffix(client),
-    );
+    let name = atime_entry_name(tag_ord(Some(at)), &atime_client_suffix(client));
     let body = serde_json::to_vec(&AccessEntry {
         client: client.to_string(),
         at,
@@ -80,7 +82,7 @@ async fn a_pull_stamps_an_entry_carrying_the_client_and_newest_wins() {
         "the returned metadata carries the fresh stamp"
     );
 
-    let dir = path_builder::tag_atime_entry_dir(&namespace, &tag_name);
+    let dir = namespace.tag_atime_entry_dir(&tag_name);
     let page = backend.object_store().list(&dir, 10, None).await.unwrap();
     assert_eq!(page.items.len(), 1, "one pull appends one entry");
     let raw = backend
@@ -127,7 +129,7 @@ async fn each_pull_appends_one_entry_per_client() {
             .unwrap();
     }
 
-    let dir = path_builder::tag_atime_entry_dir(&namespace, &tag_name);
+    let dir = namespace.tag_atime_entry_dir(&tag_name);
     let page = backend.object_store().list(&dir, 10, None).await.unwrap();
     assert_eq!(page.items.len(), 2, "each client's pull is its own entry");
 }
@@ -212,14 +214,14 @@ async fn last_pulled_reads_newest_entry_and_falls_back_to_legacy() {
     let entry_ts = Utc::now() - ChronoDuration::hours(1);
     put_entry_at(
         &backend,
-        &path_builder::tag_atime_entry_dir(&namespace, &tag_name),
+        &namespace.tag_atime_entry_dir(&tag_name),
         "carol",
         entry_ts,
     )
     .await;
     put_entry_at(
         &backend,
-        &path_builder::revision_atime_entry_dir(&namespace, &digest),
+        &namespace.revision_atime_entry_dir(&digest),
         "carol",
         entry_ts,
     )

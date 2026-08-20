@@ -1,10 +1,14 @@
-use std::str::FromStr;
+//! Legacy storage shapes, read only as a fallback and retired as scrub
+//! converts stores; the whole module goes once conversion completes.
+//!
+//! Current-shape keys live on the type that owns them, in
+//! [`crate::registry::keys`] and beside the structs that write them. The store
+//! roots stay here as shared layout vocabulary because the maintenance walk
+//! matches all six in one dispatch.
 
-use chrono::{DateTime, Utc};
+use angos_oci::{Digest, Namespace, Tag, UploadSessionId};
 
-use angos_oci::{Algorithm, Digest, Namespace, Tag, UploadSessionId};
-
-use crate::registry::metadata_store::LinkKind;
+use crate::registry::{keys::DigestKeys, metadata_store::LinkKind};
 
 pub const BLOBS_ROOT: &str = "v2/blobs";
 pub const REPOS_ROOT: &str = "v2/repositories";
@@ -12,12 +16,6 @@ pub const REF_ROOT: &str = "v2/ref";
 pub const NS_ROOT: &str = "v2/ns";
 pub const CAT_ROOT: &str = "v2/cat";
 pub const GC_ROOT: &str = "v2/gc";
-
-/// One collector run's range marker: the only key a writer and the collector
-/// both consult.
-pub fn gc_run_path(run: &str) -> String {
-    format!("{GC_ROOT}/{run}")
-}
 
 /// Root directory and namespace-name prefix for a namespace tree walk;
 /// `Some(repository)` restricts the walk to that repository's subtree while
@@ -32,344 +30,31 @@ pub fn namespace_walk_root(scope: Option<&str>) -> (String, String) {
     }
 }
 
-/// Storage prefix for a namespace subtree addressed by its raw on-disk name, so
-/// scrub can reclaim a directory whose name fails `Namespace` validation.
-/// `None` when a segment is empty, `.`, or `..`, which could escape the root.
-pub fn namespace_dir(name: &str) -> Option<String> {
-    if name.is_empty()
-        || name
-            .split('/')
-            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-    {
-        return None;
-    }
-    Some(format!("{REPOS_ROOT}/{name}"))
-}
-
-pub fn blob_dir(digest: &Digest) -> String {
-    format!(
-        "{BLOBS_ROOT}/{}/{}/{}",
-        digest.algorithm(),
-        digest.hash_prefix(),
-        digest.hash()
-    )
-}
-
-pub fn blob_path(digest: &Digest) -> String {
-    format!("{}/data", blob_dir(digest))
-}
-
+/// Directory of a blob's legacy per-namespace shard files.
 pub fn blob_index_refs_dir(digest: &Digest) -> String {
-    format!("{}/refs", blob_dir(digest))
+    format!("{}/refs", digest.blob_dir())
 }
 
-/// Directory holding every reference key for `digest`, one key per
-/// (namespace, link), rooted outside the blob store's `v2/blobs/` tree.
-pub fn blob_ref_dir(digest: &Digest) -> String {
-    format!(
-        "{REF_ROOT}/{}/{}/{}",
-        digest.algorithm(),
-        digest.hash_prefix(),
-        digest.hash()
-    )
+/// One namespace's legacy shard file listing its links to a blob.
+pub fn blob_index_shard_path(digest: &Digest, namespace: &Namespace) -> String {
+    // Percent-encoded rather than mapped to '_': namespaces can contain
+    // underscores, so that substitution would not round-trip.
+    let safe_ns = namespace.replace('%', "%25").replace('/', "%2F");
+    format!("{}/refs/{safe_ns}.json", digest.blob_dir())
 }
 
-/// One namespace's reference key for `digest`: ownership is the `<ns>!own`
-/// leaf, every other link kind a leaf under `<ns>!r/`. `!` terminates the
-/// namespace because it is outside the namespace grammar, so the name always
-/// parses back out and `a`'s leaves never collide with `a/b`'s directories.
-pub fn blob_ref_path(digest: &Digest, namespace: &Namespace, link: &LinkKind) -> String {
-    format!("{}/{namespace}!{}", blob_ref_dir(digest), ref_entry(link))
-}
-
-pub fn blob_ref_own_path(digest: &Digest, namespace: &Namespace) -> String {
-    format!("{}/{namespace}!own", blob_ref_dir(digest))
-}
-
-/// Directory holding `namespace`'s non-ownership reference keys for `digest`,
-/// a directory boundary on both backends so it lists without partial-name
-/// prefix support.
-pub fn blob_ref_namespace_dir(digest: &Digest, namespace: &Namespace) -> String {
-    format!("{}/{namespace}!r", blob_ref_dir(digest))
-}
-
-/// The key tail after `<ns>!`. Digest-bearing kinds omit the blob's own digest
-/// and spell out only the foreign one: a referrer entry names its subject, an
-/// index child entry names its index.
-fn ref_entry(link: &LinkKind) -> String {
-    match link {
-        LinkKind::Blob(_) => "own".to_string(),
-        LinkKind::Digest(_) => "r/rev".to_string(),
-        LinkKind::Layer(_) => "r/layer".to_string(),
-        LinkKind::Config(_) => "r/config".to_string(),
-        LinkKind::Tag(tag) => format!("r/tag.{tag}"),
-        LinkKind::Referrer { subject, .. } => {
-            format!("r/sub.{}.{}", subject.algorithm(), subject.hash())
-        }
-        LinkKind::Manifest { index, .. } => {
-            format!("r/idx.{}.{}", index.algorithm(), index.hash())
-        }
-        LinkKind::ReferencedBy(referrer) => {
-            format!("r/{}.{}", referrer.algorithm(), referrer.hash())
-        }
-    }
-}
-
-/// Decode one key of [`blob_ref_dir`], relative to that directory, into its raw
-/// namespace (validity is the caller's concern) and the link it records.
-pub fn parse_blob_ref(digest: &Digest, key: &str) -> Option<(String, LinkKind)> {
-    let (namespace, entry) = key.split_once('!')?;
-    let link = match entry.strip_prefix("r/") {
-        None => (entry == "own").then(|| LinkKind::Blob(digest.clone()))?,
-        Some(entry) => parse_blob_ref_entry(digest, entry)?,
-    };
-    Some((namespace.to_string(), link))
-}
-
-/// Decode one key of [`blob_ref_namespace_dir`] (relative to that directory).
-pub fn parse_blob_ref_entry(digest: &Digest, entry: &str) -> Option<LinkKind> {
-    match entry {
-        "rev" => Some(LinkKind::Digest(digest.clone())),
-        "layer" => Some(LinkKind::Layer(digest.clone())),
-        "config" => Some(LinkKind::Config(digest.clone())),
-        _ => {
-            if let Some(tag) = entry.strip_prefix("tag.") {
-                Some(LinkKind::Tag(Tag::new(tag).ok()?))
-            } else if let Some(subject) = entry.strip_prefix("sub.") {
-                Some(LinkKind::Referrer {
-                    subject: parse_ref_digest(subject)?,
-                    referrer: digest.clone(),
-                })
-            } else if let Some(index) = entry.strip_prefix("idx.") {
-                Some(LinkKind::Manifest {
-                    index: parse_ref_digest(index)?,
-                    child: digest.clone(),
-                })
-            } else {
-                // A bare `<algo>.<hash>` names the referring manifest,
-                // unambiguous against the prefixed shapes because no algorithm
-                // is named `rev`, `layer`, `config`, `tag`, `sub`, or `idx`.
-                Some(LinkKind::ReferencedBy(parse_ref_digest(entry)?))
-            }
-        }
-    }
-}
-
-/// `<algo>.<hash>` inside a reference-key entry; `.` separates unambiguously
-/// because algorithm names never contain it.
-fn parse_ref_digest(s: &str) -> Option<Digest> {
-    let (algorithm, hash) = s.split_once('.')?;
-    Digest::with_algorithm(Algorithm::from_str(algorithm).ok()?, hash).ok()
-}
-
-/// Directory holding every tag-entry directory of `namespace`, `!`-terminated
-/// for the same reasons as the reference keys.
-pub fn tag_entries_root(namespace: &Namespace) -> String {
-    format!("{NS_ROOT}/{namespace}!tag")
-}
-
-/// Directory holding one tag's ordered entries. The `!` suffix keeps a name
-/// that is a prefix of another (`v1`, `v1.1`) sorting first in a flat listing,
-/// which is what lets the tag list serve lexical order straight off it.
-pub fn tag_entry_dir(namespace: &Namespace, tag: &Tag) -> String {
-    format!("{}/{tag}!", tag_entries_root(namespace))
-}
-
-/// One tag event: `<ord>.<kind>.<algo>.<hash>`, where `<ord>` inverts the
-/// author's unix-millisecond timestamp so entries list newest first, and
-/// `<kind>` is `set` or `del` (a deletion still names the digest the tag
-/// held, which tag history requires).
-pub fn tag_entry_path(
-    namespace: &Namespace,
-    tag: &Tag,
-    ord: u64,
-    deletion: bool,
-    digest: &Digest,
-) -> String {
-    let kind = if deletion { "del" } else { "set" };
-    format!(
-        "{}/{ord:016x}.{kind}.{}.{}",
-        tag_entry_dir(namespace, tag),
-        digest.algorithm(),
-        digest.hash()
-    )
-}
-
-/// Directory holding one tag's demoted entries, `!`-terminated like
-/// [`tag_entry_dir`]. Nothing reads `!hist/` yet: it retains superseded entries
-/// for the tag-history endpoint while `!tag/` keeps only the current group.
-pub fn tag_hist_dir(namespace: &Namespace, tag: &Tag) -> String {
-    format!("{NS_ROOT}/{namespace}!hist/{tag}!")
-}
-
-/// A demoted entry keeps its [`tag_entry_path`] file name, so history stays
-/// in newest-first order.
-pub fn tag_hist_path(namespace: &Namespace, tag: &Tag, entry_name: &str) -> String {
-    format!("{}/{entry_name}", tag_hist_dir(namespace, tag))
-}
-
-/// Legacy advisory last-pull timestamp for a tag: read as a fallback,
-/// retired by scrub.
+/// Legacy advisory last-pull timestamp for a tag.
 pub fn tag_atime_path(namespace: &Namespace, tag: &Tag) -> String {
     format!("{NS_ROOT}/{namespace}!atime/tag/{tag}")
 }
 
-/// Directory holding one tag's append-only access entries, `!`-terminated
-/// like [`tag_entry_dir`] so it never collides with the legacy single key.
-pub fn tag_atime_entry_dir(namespace: &Namespace, tag: &Tag) -> String {
-    format!("{NS_ROOT}/{namespace}!atime/tag/{tag}!")
-}
-
-/// Directory holding one revision's append-only access entries.
-pub fn revision_atime_entry_dir(namespace: &Namespace, digest: &Digest) -> String {
-    format!(
-        "{NS_ROOT}/{namespace}!atime/rev/{}/{}!",
-        digest.algorithm(),
-        digest.hash()
-    )
-}
-
-/// One access entry: `<ord>.<suffix>`, where `<ord>` is the inverted-millis
-/// ordinal of [`tag_ord`] (entries list newest first) and `<suffix>` breaks
-/// same-millisecond collisions between clients.
-pub fn atime_entry_name(ord: u64, suffix: &str) -> String {
-    format!("{ord:016x}.{suffix}")
-}
-
-/// The entry-name collision breaker for one client identity: the first 8 hex
-/// of its sha256.
-pub fn atime_client_suffix(client: &str) -> String {
-    Digest::sha256_of_bytes(client.as_bytes()).hash()[..8].to_string()
-}
-
-/// Decode one entry filename of an atime entry directory back into its
-/// ordinal. `None` = not a shape this version writes.
-pub fn parse_atime_entry(name: &str) -> Option<u64> {
-    let (ord, suffix) = name.split_once('.')?;
-    if ord.len() != 16 || suffix.len() != 8 || !suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    u64::from_str_radix(ord, 16).ok()
-}
-
-/// One namespace's catalog index key: empty, write-once, one per namespace.
-/// The `!` terminator is what lets `a` and `a/b` coexist on FS (a file cannot
-/// also be a directory) while keeping the flat listing in lexical order.
-pub fn catalog_index_path(namespace: &Namespace) -> String {
-    format!("{CAT_ROOT}/{namespace}!")
-}
-
-/// The immutable record of a stored manifest revision. Its existence is what
-/// makes the digest resolvable; its body carries what a HEAD needs.
-pub fn revision_record_path(namespace: &Namespace, digest: &Digest) -> String {
-    format!(
-        "{}/{}/{}/{}",
-        revision_records_root(namespace),
-        digest.algorithm(),
-        digest.hash_prefix(),
-        digest.hash()
-    )
-}
-
-/// Directory holding every revision record of `namespace`.
-pub fn revision_records_root(namespace: &Namespace) -> String {
-    format!("{NS_ROOT}/{namespace}!rev")
-}
-
-/// Directory holding `subject`'s referrer records: one key per referring
-/// manifest, whose body is that manifest's descriptor.
-pub fn referrer_record_dir(namespace: &Namespace, subject: &Digest) -> String {
-    format!(
-        "{NS_ROOT}/{namespace}!sub/{}/{}/{}",
-        subject.algorithm(),
-        subject.hash_prefix(),
-        subject.hash()
-    )
-}
-
-pub fn referrer_record_path(namespace: &Namespace, subject: &Digest, referrer: &Digest) -> String {
-    format!(
-        "{}/{}.{}",
-        referrer_record_dir(namespace, subject),
-        referrer.algorithm(),
-        referrer.hash()
-    )
-}
-
-/// Legacy advisory last-pull timestamp for a manifest revision: read as a
-/// fallback, retired by scrub.
+/// Legacy advisory last-pull timestamp for a manifest revision.
 pub fn revision_atime_path(namespace: &Namespace, digest: &Digest) -> String {
     format!(
         "{NS_ROOT}/{namespace}!atime/rev/{}/{}",
         digest.algorithm(),
         digest.hash()
     )
-}
-
-/// The inverted-timestamp ordinal of `ts`: entries sort newest first.
-/// `u64::MAX` is reserved for a missing timestamp: it sorts last, never wins
-/// resolution, and stays distinct from a real epoch timestamp.
-pub fn tag_ord(ts: Option<DateTime<Utc>>) -> u64 {
-    match ts {
-        None => u64::MAX,
-        Some(ts) => u64::MAX - 1 - ts.timestamp_millis().max(0).unsigned_abs(),
-    }
-}
-
-/// The author timestamp `ord` encodes; `None` for the never-wins ordinal.
-pub fn tag_ord_ts(ord: u64) -> Option<DateTime<Utc>> {
-    if ord == u64::MAX {
-        return None;
-    }
-    DateTime::from_timestamp_millis(i64::try_from(u64::MAX - 1 - ord).ok()?)
-}
-
-/// Decode one entry filename of [`tag_entry_dir`] back into
-/// `(ord, deletion, digest)`. `None` = not a shape this version writes.
-pub fn parse_tag_entry(name: &str) -> Option<(u64, bool, Digest)> {
-    let mut parts = name.splitn(4, '.');
-    let (Some(ord), Some(kind), Some(algorithm), Some(hash)) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return None;
-    };
-    if ord.len() != 16 {
-        return None;
-    }
-    let ord = u64::from_str_radix(ord, 16).ok()?;
-    let deletion = match kind {
-        "set" => false,
-        "del" => true,
-        _ => return None,
-    };
-    let digest = Digest::with_algorithm(Algorithm::from_str(algorithm).ok()?, hash).ok()?;
-    Some((ord, deletion, digest))
-}
-
-pub fn blob_index_shard_path(digest: &Digest, namespace: &Namespace) -> String {
-    // Percent-encoded rather than mapped to '_': namespaces can contain
-    // underscores, so that substitution would not round-trip.
-    let safe_ns = namespace.replace('%', "%25").replace('/', "%2F");
-    format!("{}/refs/{safe_ns}.json", blob_dir(digest))
-}
-
-/// Root directory holding a namespace's upload containers, one per session.
-pub fn uploads_root_dir(namespace: &Namespace) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads")
-}
-
-pub fn upload_container_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}")
-}
-
-pub fn upload_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/data")
-}
-
-/// The upload session's single durable record: last activity, committed
-/// offset, and the serialised hasher checkpoint, rewritten on every activity.
-pub fn upload_session_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
-    format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/session.json")
 }
 
 /// Legacy directory of per-offset hasher-state checkpoints, read only as a
@@ -416,12 +101,15 @@ pub fn manifest_referrers_dir(namespace: &Namespace, subject: &Digest) -> String
     )
 }
 
-pub fn link_path(link: &LinkKind, namespace: &Namespace) -> String {
-    format!("{}/link", link_container_path(link, namespace))
+/// `None` for the kinds that have no legacy link file.
+pub fn link_path(link: &LinkKind, namespace: &Namespace) -> Option<String> {
+    Some(format!("{}/link", link_container_path(link, namespace)?))
 }
 
-pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> String {
-    match link {
+/// `None` for [`LinkKind::ReferencedBy`], a reference-key-only kind no writer
+/// ever gave a link file.
+pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> Option<String> {
+    let path = match link {
         LinkKind::Blob(digest) => {
             format!(
                 "{REPOS_ROOT}/{namespace}/_blobs/{}/{}",
@@ -471,64 +159,22 @@ pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> String {
                 child.hash()
             )
         }
-        // No writer creates this path; it exists only so the match is total,
-        // and a read of it yields the NotFound every caller treats as absent.
-        LinkKind::ReferencedBy(referrer) => {
-            format!(
-                "{REPOS_ROOT}/{namespace}/_refs/referenced-by/{}/{}",
-                referrer.algorithm(),
-                referrer.hash()
-            )
-        }
-    }
+        LinkKind::ReferencedBy(_) => return None,
+    };
+    Some(path)
 }
 
 #[cfg(test)]
 mod tests {
-    use angos_oci::Tag;
-
     use crate::registry::path_builder::*;
 
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const HASH_512: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-
-    #[test]
-    fn test_blob_paths() {
-        let digest = Digest::sha256(HASH_A).unwrap();
-        assert_eq!(
-            blob_path(&digest),
-            format!("v2/blobs/sha256/aa/{HASH_A}/data")
-        );
-        assert_eq!(blob_dir(&digest), format!("v2/blobs/sha256/aa/{HASH_A}"));
-    }
-
-    #[test]
-    fn test_blob_paths_sha512() {
-        let digest = Digest::sha512(HASH_512).unwrap();
-        assert_eq!(
-            blob_path(&digest),
-            format!("v2/blobs/sha512/cc/{HASH_512}/data")
-        );
-    }
 
     #[test]
     fn test_upload_paths() {
         let ns = Namespace::new("ns").unwrap();
         let id = UploadSessionId::new("067e6162-3b6f-4ae2-a171-2470b63dff00").unwrap();
-        assert_eq!(
-            upload_container_path(&ns, &id),
-            format!("v2/repositories/ns/_uploads/{id}")
-        );
-        assert_eq!(
-            upload_path(&ns, &id),
-            format!("v2/repositories/ns/_uploads/{id}/data")
-        );
-        assert_eq!(uploads_root_dir(&ns), "v2/repositories/ns/_uploads");
-        assert_eq!(
-            upload_session_path(&ns, &id),
-            format!("v2/repositories/ns/_uploads/{id}/session.json")
-        );
         assert_eq!(
             upload_hash_context_path(&ns, &id, 42),
             format!("v2/repositories/ns/_uploads/{id}/hashstates/42")
@@ -537,20 +183,6 @@ mod tests {
             upload_start_date_path(&ns, &id),
             format!("v2/repositories/ns/_uploads/{id}/startedat")
         );
-    }
-
-    #[test]
-    fn test_namespace_dir() {
-        assert_eq!(namespace_dir("ns").unwrap(), "v2/repositories/ns");
-        assert_eq!(namespace_dir("org/app").unwrap(), "v2/repositories/org/app");
-        // Uppercase fails `Namespace` validation but is safe as a directory.
-        assert_eq!(namespace_dir("BadNS").unwrap(), "v2/repositories/BadNS");
-        for unsafe_name in ["", "..", ".", "a/../b", "a//b", "/a", "a/", "a/."] {
-            assert!(
-                namespace_dir(unsafe_name).is_none(),
-                "'{unsafe_name}' must be rejected"
-            );
-        }
     }
 
     #[test]
@@ -573,162 +205,6 @@ mod tests {
         );
     }
 
-    /// Flat listings stay in lexical order only while `!` sorts below every
-    /// byte the namespace and tag grammars admit; probed against the real
-    /// validators so a grammar relaxation fails here.
-    #[test]
-    fn the_separator_sorts_below_both_grammars() {
-        for byte in 0u8..=127 {
-            let c = byte as char;
-            let admitted =
-                Namespace::new(&format!("a{c}a")).is_ok() || Tag::new(&format!("a{c}a")).is_ok();
-            if admitted {
-                assert!(
-                    b'!' < byte,
-                    "'!' must sort below {c:?} or listings lose lexical order"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn tag_entries_round_trip_and_sort_newest_first() {
-        let ns = Namespace::new("org/app").unwrap();
-        let tag = Tag::new("v1").unwrap();
-        let digest = Digest::sha256(HASH_A).unwrap();
-        let older = DateTime::from_timestamp_millis(1_000_000).unwrap();
-        let newer = DateTime::from_timestamp_millis(2_000_000).unwrap();
-
-        let older_key = tag_entry_path(&ns, &tag, tag_ord(Some(older)), false, &digest);
-        let newer_key = tag_entry_path(&ns, &tag, tag_ord(Some(newer)), true, &digest);
-        assert!(
-            newer_key < older_key,
-            "a newer entry must sort before an older one"
-        );
-
-        let file = newer_key.rsplit_once('/').unwrap().1;
-        assert_eq!(
-            parse_tag_entry(file),
-            Some((tag_ord(Some(newer)), true, digest.clone()))
-        );
-        assert_eq!(tag_ord_ts(tag_ord(Some(newer))), Some(newer));
-        assert_eq!(tag_ord_ts(tag_ord(None)), None, "the never-wins ordinal");
-        assert!(
-            tag_ord(None) > tag_ord(Some(DateTime::from_timestamp_millis(0).unwrap())),
-            "a missing timestamp must sort after a real epoch one"
-        );
-    }
-
-    #[test]
-    fn atime_entries_round_trip_and_sort_newest_first() {
-        let ns = Namespace::new("org/app").unwrap();
-        let tag = Tag::new("v1").unwrap();
-        let digest = Digest::sha256(HASH_A).unwrap();
-        let older = DateTime::from_timestamp_millis(1_000_000).unwrap();
-        let newer = DateTime::from_timestamp_millis(2_000_000).unwrap();
-        let suffix = atime_client_suffix("alice");
-        assert_eq!(suffix.len(), 8);
-        assert_ne!(suffix, atime_client_suffix("bob"));
-
-        let dir = tag_atime_entry_dir(&ns, &tag);
-        assert_eq!(dir, "v2/ns/org/app!atime/tag/v1!");
-        assert_eq!(
-            revision_atime_entry_dir(&ns, &digest),
-            format!("v2/ns/org/app!atime/rev/sha256/{HASH_A}!")
-        );
-        let older_name = atime_entry_name(tag_ord(Some(older)), &suffix);
-        let newer_name = atime_entry_name(tag_ord(Some(newer)), &suffix);
-        assert!(
-            newer_name < older_name,
-            "a newer entry must sort before an older one"
-        );
-        assert_eq!(parse_atime_entry(&newer_name), Some(tag_ord(Some(newer))));
-        for bad in ["", "0123.abcd1234", &format!("{:016x}.short", 1_u64)] {
-            assert_eq!(parse_atime_entry(bad), None, "name {bad:?}");
-        }
-    }
-
-    #[test]
-    fn tag_hist_paths_mirror_tag_entry_paths() {
-        let ns = Namespace::new("org/app").unwrap();
-        let tag = Tag::new("v1").unwrap();
-        let digest = Digest::sha256(HASH_A).unwrap();
-        let entry_key = tag_entry_path(&ns, &tag, 7, true, &digest);
-        let file = entry_key.rsplit_once('/').unwrap().1;
-        let hist_key = tag_hist_path(&ns, &tag, file);
-        assert_eq!(hist_key, format!("v2/ns/org/app!hist/v1!/{file}"));
-        assert_eq!(hist_key, format!("{}/{file}", tag_hist_dir(&ns, &tag)));
-        assert!(hist_key.starts_with("v2/ns/org/app!hist/"));
-        assert_eq!(parse_tag_entry(file), Some((7, true, digest)));
-    }
-
-    #[test]
-    fn blob_ref_paths_round_trip() {
-        let ns = Namespace::new("org/app").unwrap();
-        let digest = Digest::sha256(HASH_A).unwrap();
-        let other = Digest::sha256(HASH_B).unwrap();
-        let links = [
-            LinkKind::Blob(digest.clone()),
-            LinkKind::Digest(digest.clone()),
-            LinkKind::Layer(digest.clone()),
-            LinkKind::Config(digest.clone()),
-            LinkKind::Tag(Tag::new("v1.2-rc.1_x").unwrap()),
-            LinkKind::Referrer {
-                subject: other.clone(),
-                referrer: digest.clone(),
-            },
-            LinkKind::Manifest {
-                index: other.clone(),
-                child: digest.clone(),
-            },
-            LinkKind::ReferencedBy(other.clone()),
-        ];
-        let dir = blob_ref_dir(&digest);
-        for link in links {
-            let key = blob_ref_path(&digest, &ns, &link);
-            let relative = key.strip_prefix(&format!("{dir}/")).unwrap();
-            assert_eq!(
-                parse_blob_ref(&digest, relative),
-                Some(("org/app".to_string(), link.clone())),
-                "{link} must round-trip through its reference key"
-            );
-        }
-    }
-
-    #[test]
-    fn blob_ref_own_and_namespace_dirs_agree_with_the_full_paths() {
-        let ns = Namespace::new("org/app").unwrap();
-        let digest = Digest::sha256(HASH_A).unwrap();
-        assert_eq!(
-            blob_ref_own_path(&digest, &ns),
-            blob_ref_path(&digest, &ns, &LinkKind::Blob(digest.clone()))
-        );
-        let layer_key = blob_ref_path(&digest, &ns, &LinkKind::Layer(digest.clone()));
-        assert_eq!(
-            layer_key,
-            format!("{}/layer", blob_ref_namespace_dir(&digest, &ns))
-        );
-    }
-
-    #[test]
-    fn foreign_ref_shapes_do_not_parse() {
-        let digest = Digest::sha256(HASH_A).unwrap();
-        for key in [
-            "ns",
-            "ns!x",
-            "ns!r/unknown",
-            "ns!r/tag.",
-            "ns!r/sub.sha256",
-            "ns!r/sub.sha3.abcd",
-            &format!("ns!r/idx.sha256.{}", "z".repeat(64)),
-            "ns!r/sha256",
-            "ns!r/sha3.abcd",
-            &format!("ns!r/sha256.{}", "z".repeat(64)),
-        ] {
-            assert_eq!(parse_blob_ref(&digest, key), None, "key {key:?}");
-        }
-    }
-
     #[test]
     fn test_link_paths() {
         let ns = Namespace::new("ns").unwrap();
@@ -736,51 +212,51 @@ mod tests {
 
         let blob = LinkKind::Blob(digest.clone());
         assert_eq!(
-            link_path(&blob, &ns),
+            link_path(&blob, &ns).unwrap(),
             format!("v2/repositories/ns/_blobs/sha256/{HASH_A}/link")
         );
         assert_eq!(
-            link_container_path(&blob, &ns),
+            link_container_path(&blob, &ns).unwrap(),
             format!("v2/repositories/ns/_blobs/sha256/{HASH_A}")
         );
 
         let tag = LinkKind::Tag(Tag::new("v1.0").unwrap());
         assert_eq!(
-            link_path(&tag, &ns),
+            link_path(&tag, &ns).unwrap(),
             "v2/repositories/ns/_manifests/tags/v1.0/current/link"
         );
         assert_eq!(
-            link_container_path(&tag, &ns),
+            link_container_path(&tag, &ns).unwrap(),
             "v2/repositories/ns/_manifests/tags/v1.0/current"
         );
 
         let revision = LinkKind::Digest(digest.clone());
         assert_eq!(
-            link_path(&revision, &ns),
+            link_path(&revision, &ns).unwrap(),
             format!("v2/repositories/ns/_manifests/revisions/sha256/{HASH_A}/link")
         );
         assert_eq!(
-            link_container_path(&revision, &ns),
+            link_container_path(&revision, &ns).unwrap(),
             format!("v2/repositories/ns/_manifests/revisions/sha256/{HASH_A}")
         );
 
         let layer = LinkKind::Layer(digest.clone());
         assert_eq!(
-            link_path(&layer, &ns),
+            link_path(&layer, &ns).unwrap(),
             format!("v2/repositories/ns/_layers/sha256/{HASH_A}/link")
         );
         assert_eq!(
-            link_container_path(&layer, &ns),
+            link_container_path(&layer, &ns).unwrap(),
             format!("v2/repositories/ns/_layers/sha256/{HASH_A}")
         );
 
         let config = LinkKind::Config(digest.clone());
         assert_eq!(
-            link_path(&config, &ns),
+            link_path(&config, &ns).unwrap(),
             format!("v2/repositories/ns/_config/sha256/{HASH_A}/link")
         );
         assert_eq!(
-            link_container_path(&config, &ns),
+            link_container_path(&config, &ns).unwrap(),
             format!("v2/repositories/ns/_config/sha256/{HASH_A}")
         );
 
@@ -788,11 +264,11 @@ mod tests {
         let referrer = Digest::sha256(HASH_B).unwrap();
         let referrer_link = LinkKind::Referrer { subject, referrer };
         assert_eq!(
-            link_path(&referrer_link, &ns),
+            link_path(&referrer_link, &ns).unwrap(),
             format!("v2/repositories/ns/_manifests/referrers/sha256/{HASH_A}/sha256/{HASH_B}/link")
         );
         assert_eq!(
-            link_container_path(&referrer_link, &ns),
+            link_container_path(&referrer_link, &ns).unwrap(),
             format!("v2/repositories/ns/_manifests/referrers/sha256/{HASH_A}/sha256/{HASH_B}")
         );
 
@@ -800,11 +276,11 @@ mod tests {
         let child = Digest::sha256(HASH_B).unwrap();
         let manifest_link = LinkKind::Manifest { index, child };
         assert_eq!(
-            link_path(&manifest_link, &ns),
+            link_path(&manifest_link, &ns).unwrap(),
             format!("v2/repositories/ns/_manifests/index/sha256/{HASH_A}/sha256/{HASH_B}/link")
         );
         assert_eq!(
-            link_container_path(&manifest_link, &ns),
+            link_container_path(&manifest_link, &ns).unwrap(),
             format!("v2/repositories/ns/_manifests/index/sha256/{HASH_A}/sha256/{HASH_B}")
         );
     }

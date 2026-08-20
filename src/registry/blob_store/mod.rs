@@ -26,7 +26,11 @@ use angos_oci::{Algorithm, Digest};
 use angos_storage::Error as StorageError;
 use angos_storage::{ObjectStore, PresignedStore, paginated};
 
-use crate::registry::{Error, pagination, path_builder};
+use crate::registry::{
+    Error,
+    keys::{DigestKeys, namespace_dir},
+    pagination, path_builder,
+};
 pub use config::BlobStoreConfig;
 // Production code builds backends through `BlobStoreConfig`; only tests
 // construct the inner structs.
@@ -168,7 +172,7 @@ impl BlobStore {
 
     #[instrument(skip(self))]
     pub async fn read(&self, digest: &Digest) -> Result<Vec<u8>, Error> {
-        let path = path_builder::blob_path(digest);
+        let path = digest.blob_path();
         match self.object.get(&path).await {
             Ok(data) => Ok(data),
             Err(StorageError::NotFound) => Err(Error::BlobUnknown),
@@ -178,7 +182,7 @@ impl BlobStore {
 
     #[instrument(skip(self))]
     pub async fn size(&self, digest: &Digest) -> Result<u64, Error> {
-        let path = path_builder::blob_path(digest);
+        let path = digest.blob_path();
         match self.object.head(&path).await {
             Ok(meta) => Ok(meta.size),
             Err(StorageError::NotFound) => Err(Error::BlobUnknown),
@@ -191,7 +195,7 @@ impl BlobStore {
     /// ownership before linking the manifest, is never reaped.
     #[instrument(skip(self))]
     pub async fn last_modified(&self, digest: &Digest) -> Result<Option<DateTime<Utc>>, Error> {
-        let path = path_builder::blob_path(digest);
+        let path = digest.blob_path();
         match self.object.head(&path).await {
             Ok(meta) => Ok(meta.last_modified),
             Err(StorageError::NotFound) => Err(Error::BlobUnknown),
@@ -205,7 +209,7 @@ impl BlobStore {
         digest: &Digest,
         start_offset: Option<u64>,
     ) -> Result<(BoxedReader, u64), Error> {
-        let path = path_builder::blob_path(digest);
+        let path = digest.blob_path();
         match self.object.get_stream(&path, start_offset).await {
             Ok((reader, total)) => Ok((reader, total)),
             Err(StorageError::NotFound) => Err(Error::BlobUnknown),
@@ -215,7 +219,7 @@ impl BlobStore {
 
     #[instrument(skip(self))]
     pub async fn delete_blob(&self, digest: &Digest) -> Result<(), Error> {
-        let container = path_builder::blob_dir(digest);
+        let container = digest.blob_dir();
         self.object.delete_prefix(&container).await?;
         Ok(())
     }
@@ -225,7 +229,7 @@ impl BlobStore {
     /// `Namespace` validation.
     #[instrument(skip(self))]
     pub async fn delete_namespace_directory(&self, name: &str) -> Result<(), Error> {
-        let prefix = path_builder::namespace_dir(name)
+        let prefix = namespace_dir(name)
             .ok_or_else(|| Error::Internal(format!("unsafe namespace directory name: '{name}'")))?;
         self.object.delete_prefix(&prefix).await?;
         Ok(())
@@ -237,9 +241,7 @@ impl BlobStore {
     /// no reclaim can race this.
     #[instrument(skip(self, body))]
     pub async fn put_blob(&self, digest: &Digest, body: Bytes) -> Result<(), Error> {
-        self.object
-            .put(&path_builder::blob_path(digest), body)
-            .await?;
+        self.object.put(&digest.blob_path(), body).await?;
         Ok(())
     }
 
@@ -254,7 +256,7 @@ impl BlobStore {
         let Some((presign, ttl)) = &self.presign else {
             return Ok(None);
         };
-        let path = path_builder::blob_path(digest);
+        let path = digest.blob_path();
         let url = presign.presign_get(&path, *ttl, content_type).await?;
         Ok(Some(url))
     }

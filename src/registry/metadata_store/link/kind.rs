@@ -92,6 +92,28 @@ impl LinkKind {
             Reference::Digest(d) => LinkKind::Digest(d.clone()),
         }
     }
+
+    /// The reference-key tail after `<ns>!`. Digest-bearing kinds omit the
+    /// blob's own digest and spell out only the foreign one: a referrer entry
+    /// names its subject, an index child entry names its index.
+    pub fn ref_entry(&self) -> String {
+        match self {
+            LinkKind::Blob(_) => "own".to_string(),
+            LinkKind::Digest(_) => "r/rev".to_string(),
+            LinkKind::Layer(_) => "r/layer".to_string(),
+            LinkKind::Config(_) => "r/config".to_string(),
+            LinkKind::Tag(tag) => format!("r/tag.{tag}"),
+            LinkKind::Referrer { subject, .. } => {
+                format!("r/sub.{}.{}", subject.algorithm(), subject.hash())
+            }
+            LinkKind::Manifest { index, .. } => {
+                format!("r/idx.{}.{}", index.algorithm(), index.hash())
+            }
+            LinkKind::ReferencedBy(referrer) => {
+                format!("r/{}.{}", referrer.algorithm(), referrer.hash())
+            }
+        }
+    }
 }
 
 impl Display for LinkKind {

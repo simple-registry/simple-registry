@@ -12,6 +12,8 @@ use tracing::{debug, instrument, warn};
 use angos_oci::{Algorithm, Digest, Namespace, Tag};
 use angos_storage::{Page, paginated};
 
+use crate::registry::keys::{NamespaceKeys, namespace_dir};
+use crate::registry::metadata_store::parse_tag_entry;
 use crate::registry::{
     Error,
     metadata_store::{LinkKind, MetadataStore},
@@ -35,7 +37,7 @@ struct WinnerFold {
 
 impl WinnerFold {
     fn push(&mut self, group: &str, file: &str) {
-        let Some((ord, deletion, digest)) = path_builder::parse_tag_entry(file) else {
+        let Some((ord, deletion, digest)) = parse_tag_entry(file) else {
             return;
         };
         self.current = Some(match self.current.take() {
@@ -92,7 +94,7 @@ impl MetadataStore {
         if !inserted {
             return;
         }
-        let key = path_builder::catalog_index_path(namespace);
+        let key = namespace.catalog_index_path();
         if let Err(e) = self.object_store().put(&key, Bytes::new()).await {
             warn!("failed to write catalog index for '{namespace}': {e}");
             match self.catalog_indexed.lock() {
@@ -300,7 +302,7 @@ impl MetadataStore {
         &self,
         namespace: &Namespace,
     ) -> Result<HashMap<Tag, Option<Digest>>, Error> {
-        let root = path_builder::tag_entries_root(namespace);
+        let root = namespace.tag_entries_root();
         let mut fold = WinnerFold::default();
         let mut token = None;
         loop {
@@ -409,7 +411,7 @@ impl MetadataStore {
         namespace: &Namespace,
         digest: &Digest,
     ) -> impl Stream<Item = Result<Digest, Error>> + Send + '_ {
-        let record_dir = path_builder::referrer_record_dir(namespace, digest);
+        let record_dir = namespace.referrer_record_dir(digest);
         let legacy_dir = path_builder::manifest_referrers_dir(namespace, digest);
         let records = paginated(move |token| {
             let record_dir = record_dir.clone();
@@ -490,7 +492,7 @@ impl MetadataStore {
         subject: &Digest,
     ) -> Result<bool, Error> {
         for dir in [
-            path_builder::referrer_record_dir(namespace, subject),
+            namespace.referrer_record_dir(subject),
             path_builder::manifest_referrers_dir(namespace, subject),
         ] {
             let page = self.object_store().list(&dir, 1, None).await?;
@@ -519,7 +521,7 @@ impl MetadataStore {
         page_size: u16,
     ) -> impl Stream<Item = Result<Digest, Error>> + Send + 'a {
         let records = paginated(move |token| async move {
-            let root = path_builder::revision_records_root(namespace);
+            let root = namespace.revision_records_root();
             let page = self.object_store().list(&root, page_size, token).await?;
             Ok::<_, Error>((page.items, page.next_token))
         })
@@ -608,7 +610,7 @@ impl MetadataStore {
     /// by scrub for a directory whose name fails `Namespace` validation and
     /// so cannot form typed links for a per-link delete.
     pub async fn delete_namespace_directory(&self, name: &str) -> Result<(), Error> {
-        let prefix = path_builder::namespace_dir(name)
+        let prefix = namespace_dir(name)
             .ok_or_else(|| Error::Internal(format!("unsafe namespace directory name: '{name}'")))?;
         self.object_store().delete_prefix(&prefix).await?;
         for prefix in [

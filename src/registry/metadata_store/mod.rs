@@ -11,7 +11,7 @@ use crate::{
     registry::{Error, pagination, path_builder},
 };
 
-mod access_time;
+pub mod access_time;
 mod blob_index;
 mod catalog;
 mod gc;
@@ -21,8 +21,9 @@ mod mutation;
 #[cfg(test)]
 mod tests;
 
-pub use access_time::AccessEntry;
+pub use access_time::{AccessEntry, parse_atime_entry};
 pub use blob_index::{BlobIndex, BlobIndexOperation, shard::decode_blob_index_shard_namespace};
+pub use link::tag::{parse_tag_entry, tag_ord, tag_ord_ts};
 pub use link::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, LinksTx, ReferencePolicy};
 
 #[derive(Clone)]

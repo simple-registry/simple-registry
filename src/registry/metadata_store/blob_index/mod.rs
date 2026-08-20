@@ -1,7 +1,7 @@
 //! Cross-namespace blob reference tracking.
 //!
 //! One write-once, empty reference key per (namespace, link) under
-//! [`path_builder::blob_ref_dir`] records that a namespace references a blob.
+//! [`DigestKeys::blob_ref_dir`] records that a namespace references a blob.
 //! Legacy per-namespace JSON shards still merge into every read until scrub
 //! finishes converting them ([`shard`]).
 
@@ -18,6 +18,7 @@ use tracing::instrument;
 use angos_oci::{Digest, Namespace};
 use angos_storage::{Error as StorageError, ObjectStore, paginated};
 
+use crate::registry::keys::DigestKeys;
 use crate::registry::{
     Error,
     metadata_store::{LinkKind, LinksTx, MetadataStore, mutation::Mutation},
@@ -54,11 +55,11 @@ pub fn ref_mutation(
 ) -> Mutation {
     match operation {
         BlobIndexOperation::Insert(link) => Mutation::Put {
-            key: path_builder::blob_ref_path(digest, namespace, link),
+            key: digest.blob_ref_path(namespace, link),
             body: Bytes::new(),
         },
         BlobIndexOperation::Remove(link) => Mutation::Delete {
-            key: path_builder::blob_ref_path(digest, namespace, link),
+            key: digest.blob_ref_path(namespace, link),
         },
     }
 }
@@ -71,7 +72,7 @@ async fn namespace_ref_entries(
     digest: &Digest,
 ) -> Result<HashSet<LinkKind>, Error> {
     let mut links = HashSet::new();
-    let own = path_builder::blob_ref_own_path(digest, namespace);
+    let own = digest.blob_ref_own_path(namespace);
     match store.head(&own).await {
         Ok(_) => {
             links.insert(LinkKind::Blob(digest.clone()));
@@ -79,14 +80,14 @@ async fn namespace_ref_entries(
         Err(StorageError::NotFound) => {}
         Err(e) => return Err(e.into()),
     }
-    let dir = path_builder::blob_ref_namespace_dir(digest, namespace);
+    let dir = digest.blob_ref_namespace_dir(namespace);
     let mut token = None;
     loop {
         let page = store.list(&dir, REF_LIST_PAGE, token).await?;
         links.extend(
             page.items
                 .iter()
-                .filter_map(|entry| path_builder::parse_blob_ref_entry(digest, entry)),
+                .filter_map(|entry| digest.parse_blob_ref_entry(entry)),
         );
         token = page.next_token;
         if token.is_none() {
@@ -136,7 +137,7 @@ impl MetadataStore {
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<bool, Error> {
-        let own = path_builder::blob_ref_own_path(digest, namespace);
+        let own = digest.blob_ref_own_path(namespace);
         match self.object_store().head(&own).await {
             Ok(_) => Ok(true),
             Err(StorageError::NotFound) => Ok(false),
@@ -188,12 +189,12 @@ impl MetadataStore {
     #[instrument(skip(self))]
     pub async fn read_blob_index(&self, digest: &Digest) -> Result<BlobIndex, Error> {
         let mut index = BlobIndex::default();
-        let dir = path_builder::blob_ref_dir(digest);
+        let dir = digest.blob_ref_dir();
         let mut token = None;
         loop {
             let page = self.object_store().list(&dir, REF_LIST_PAGE, token).await?;
             for key in &page.items {
-                let Some((raw, link)) = path_builder::parse_blob_ref(digest, key) else {
+                let Some((raw, link)) = digest.parse_blob_ref(key) else {
                     continue;
                 };
                 let Ok(namespace) = Namespace::new(&raw) else {
@@ -293,12 +294,12 @@ impl MetadataStore {
     /// resolves. The blob-data age gate is the caller's, since the bytes live
     /// in the blob store.
     pub async fn blob_references_live(&self, digest: &Digest) -> Result<bool, Error> {
-        let dir = path_builder::blob_ref_dir(digest);
+        let dir = digest.blob_ref_dir();
         let mut token = None;
         loop {
             let page = self.object_store().list(&dir, 1000, token).await?;
             for key in &page.items {
-                let Some((raw, link)) = path_builder::parse_blob_ref(digest, key) else {
+                let Some((raw, link)) = digest.parse_blob_ref(key) else {
                     continue;
                 };
                 if matches!(link, LinkKind::Blob(_)) {
@@ -353,7 +354,7 @@ impl MetadataStore {
     /// fenced the blob-data delete.
     pub async fn delete_blob_references(&self, digest: &Digest) -> Result<(), Error> {
         for prefix in [
-            path_builder::blob_ref_dir(digest),
+            digest.blob_ref_dir(),
             path_builder::blob_index_refs_dir(digest),
         ] {
             self.object_store().delete_prefix(&prefix).await?;

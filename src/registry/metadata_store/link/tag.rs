@@ -1,22 +1,25 @@
 //! Tag state as ordered write-once entries.
 //!
-//! A tag is the set of entries under its [`path_builder::tag_entry_dir`], each
+//! A tag is the set of entries under its [`NamespaceKeys::tag_entry_dir`], each
 //! named `<ord>.<kind>.<algo>.<hash>` with an inverted-timestamp `<ord>` so a
 //! listing yields newest first. Writers only append, so last-writer-wins is a
 //! property of the key names and concurrent writers never contend; a tag with
 //! no entries falls back to the legacy `current/link`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    str::FromStr,
+};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use angos_oci::{Digest, MediaType, Namespace, Tag};
+use angos_oci::{Algorithm, Digest, MediaType, Namespace, Tag};
 use angos_storage::Error as StorageError;
 
+use crate::registry::keys::NamespaceKeys;
 use crate::registry::metadata_store::{access_time::put_access_entry, mutation::Mutation};
-
 use crate::registry::{
     Error,
     metadata_store::{LinkMetadata, MetadataStore},
@@ -33,6 +36,46 @@ pub struct TagEntryBody {
     pub size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<BTreeMap<String, String>>,
+}
+
+/// The inverted-timestamp ordinal of `ts`: entries sort newest first.
+/// `u64::MAX` is reserved for a missing timestamp: it sorts last, never wins
+/// resolution, and stays distinct from a real epoch timestamp.
+pub fn tag_ord(ts: Option<DateTime<Utc>>) -> u64 {
+    match ts {
+        None => u64::MAX,
+        Some(ts) => u64::MAX - 1 - ts.timestamp_millis().max(0).unsigned_abs(),
+    }
+}
+
+/// The author timestamp `ord` encodes; `None` for the never-wins ordinal.
+pub fn tag_ord_ts(ord: u64) -> Option<DateTime<Utc>> {
+    if ord == u64::MAX {
+        return None;
+    }
+    DateTime::from_timestamp_millis(i64::try_from(u64::MAX - 1 - ord).ok()?)
+}
+
+/// Decode one entry filename of [`NamespaceKeys::tag_entry_dir`] back into
+/// `(ord, deletion, digest)`. `None` = not a shape this version writes.
+pub fn parse_tag_entry(name: &str) -> Option<(u64, bool, Digest)> {
+    let mut parts = name.splitn(4, '.');
+    let (Some(ord), Some(kind), Some(algorithm), Some(hash)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    if ord.len() != 16 {
+        return None;
+    }
+    let ord = u64::from_str_radix(ord, 16).ok()?;
+    let deletion = match kind {
+        "set" => false,
+        "del" => true,
+        _ => return None,
+    };
+    let digest = Digest::with_algorithm(Algorithm::from_str(algorithm).ok()?, hash).ok()?;
+    Some((ord, deletion, digest))
 }
 
 /// Annotation keys under the distribution spec's reserved prefix never
@@ -52,7 +95,7 @@ fn persisted_annotations(
 }
 
 /// The resolved winner of a tag's newest entry group; its fields rebuild the
-/// entry key via [`path_builder::tag_entry_path`].
+/// entry key via [`NamespaceKeys::tag_entry_path`].
 struct TagWinner {
     ord: u64,
     deletion: bool,
@@ -70,13 +113,7 @@ pub fn tag_set_mutation(
     size: Option<u64>,
     annotations: Option<BTreeMap<String, String>>,
 ) -> Result<Mutation, serde_json::Error> {
-    let key = path_builder::tag_entry_path(
-        namespace,
-        tag,
-        path_builder::tag_ord(Some(created_at)),
-        false,
-        target,
-    );
+    let key = namespace.tag_entry_path(tag, tag_ord(Some(created_at)), false, target);
     let body = serde_json::to_vec(&TagEntryBody {
         media_type,
         size,
@@ -97,13 +134,7 @@ pub fn tag_del_mutation(
     prior_target: &Digest,
     body: &TagEntryBody,
 ) -> Result<Mutation, serde_json::Error> {
-    let key = path_builder::tag_entry_path(
-        namespace,
-        tag,
-        path_builder::tag_ord(Some(created_at)),
-        true,
-        prior_target,
-    );
+    let key = namespace.tag_entry_path(tag, tag_ord(Some(created_at)), true, prior_target);
     let body = serde_json::to_vec(body)?;
     Ok(Mutation::Put {
         key,
@@ -126,7 +157,7 @@ impl MetadataStore {
             Some(winner) if winner.deletion => Err(Error::NotFound),
             Some(winner) => Ok(LinkMetadata {
                 target: winner.digest,
-                created_at: path_builder::tag_ord_ts(winner.ord),
+                created_at: tag_ord_ts(winner.ord),
                 accessed_at: None,
                 referenced_by: HashSet::new(),
                 media_type: None,
@@ -145,13 +176,8 @@ impl MetadataStore {
         tag: &Tag,
         metadata: &LinkMetadata,
     ) -> Result<TagEntryBody, Error> {
-        let entry_path = path_builder::tag_entry_path(
-            namespace,
-            tag,
-            path_builder::tag_ord(metadata.created_at),
-            false,
-            &metadata.target,
-        );
+        let entry_path =
+            namespace.tag_entry_path(tag, tag_ord(metadata.created_at), false, &metadata.target);
         match self.object_store().get(&entry_path).await {
             Ok(body) => Ok(serde_json::from_slice(&body).unwrap_or_default()),
             Err(StorageError::NotFound) => Ok(TagEntryBody {
@@ -170,13 +196,13 @@ impl MetadataStore {
         namespace: &Namespace,
         tag: &Tag,
     ) -> Result<Option<TagWinner>, Error> {
-        let dir = path_builder::tag_entry_dir(namespace, tag);
+        let dir = namespace.tag_entry_dir(tag);
         let mut group: Vec<TagWinner> = Vec::new();
         let mut token = None;
         'pages: loop {
             let page = self.object_store().list(&dir, 1000, token).await?;
             for name in &page.items {
-                let Some((ord, deletion, digest)) = path_builder::parse_tag_entry(name) else {
+                let Some((ord, deletion, digest)) = parse_tag_entry(name) else {
                     continue;
                 };
                 match group.first() {
@@ -211,13 +237,8 @@ impl MetadataStore {
         tag: &Tag,
         metadata: &LinkMetadata,
     ) -> Result<(), Error> {
-        let key = path_builder::tag_entry_path(
-            namespace,
-            tag,
-            path_builder::tag_ord(metadata.created_at),
-            false,
-            &metadata.target,
-        );
+        let key =
+            namespace.tag_entry_path(tag, tag_ord(metadata.created_at), false, &metadata.target);
         let body = serde_json::to_vec(&TagEntryBody {
             media_type: metadata.media_type.clone(),
             ..TagEntryBody::default()
@@ -253,7 +274,7 @@ impl MetadataStore {
         tag: &Tag,
     ) -> Result<Option<DateTime<Utc>>, Error> {
         self.newest_access_time(
-            &path_builder::tag_atime_entry_dir(namespace, tag),
+            &namespace.tag_atime_entry_dir(tag),
             &path_builder::tag_atime_path(namespace, tag),
         )
         .await
@@ -269,7 +290,7 @@ impl MetadataStore {
     ) -> Result<(), Error> {
         put_access_entry(
             self.object_store(),
-            &path_builder::tag_atime_entry_dir(namespace, tag),
+            &namespace.tag_atime_entry_dir(tag),
             client,
         )
         .await
@@ -290,13 +311,8 @@ impl MetadataStore {
             Err(Error::NotFound) => return Ok(()),
             Err(e) => return Err(e),
         };
-        let entry_key = path_builder::tag_entry_path(
-            namespace,
-            tag,
-            path_builder::tag_ord(metadata.created_at),
-            false,
-            &metadata.target,
-        );
+        let entry_key =
+            namespace.tag_entry_path(tag, tag_ord(metadata.created_at), false, &metadata.target);
         let body = serde_json::to_vec(&TagEntryBody {
             media_type: metadata.media_type,
             ..TagEntryBody::default()

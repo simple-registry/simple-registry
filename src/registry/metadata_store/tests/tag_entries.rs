@@ -8,6 +8,8 @@ use tempfile::TempDir;
 use angos_oci::{Digest, MediaType, Namespace, Tag};
 use angos_storage::{ObjectStore, fs::Backend as StorageFsBackend};
 
+use crate::registry::keys::NamespaceKeys;
+use crate::registry::metadata_store::tag_ord;
 use crate::registry::metadata_store::tests::test_config;
 use crate::registry::{
     Error,
@@ -57,7 +59,7 @@ async fn concurrent_same_tag_pushes_from_two_processes_lose_nothing() {
     let entries = a
         .object_store()
         .list(
-            &path_builder::tag_entry_dir(&namespace, &Tag::new("latest").unwrap()),
+            &namespace.tag_entry_dir(&Tag::new("latest").unwrap()),
             10,
             None,
         )
@@ -86,7 +88,7 @@ async fn legacy_link_answers_until_a_tombstone_shadows_it() {
     let link = LinkKind::Tag(tag.clone());
     let target = Digest::sha256_of_bytes(b"legacy-manifest");
 
-    let legacy_path = path_builder::link_path(&link, &namespace);
+    let legacy_path = path_builder::link_path(&link, &namespace).unwrap();
     let metadata = LinkMetadata::from_digest_at(target.clone(), entry_ms(Utc::now()));
     backend
         .object_store()
@@ -144,7 +146,7 @@ async fn a_young_legacy_tag_link_survives_conversion_under_grace() {
     let link = LinkKind::Tag(tag.clone());
     let target = Digest::sha256_of_bytes(b"legacy-manifest-under-grace");
 
-    let legacy_path = path_builder::link_path(&link, &namespace);
+    let legacy_path = path_builder::link_path(&link, &namespace).unwrap();
     let metadata = LinkMetadata::from_digest_at(target.clone(), entry_ms(Utc::now()));
     store
         .object_store()
@@ -217,7 +219,7 @@ async fn a_tombstone_copies_the_prior_winners_descriptor_fields() {
         .await
         .unwrap();
 
-    let entry_dir = path_builder::tag_entry_dir(&namespace, &tag);
+    let entry_dir = namespace.tag_entry_dir(&tag);
     let entries = store
         .object_store()
         .list(&entry_dir, 10, None)
@@ -258,13 +260,7 @@ async fn an_old_shape_entry_body_still_resolves() {
     let target = Digest::sha256_of_bytes(b"old-shape-manifest");
     let ts = entry_ms(Utc::now());
 
-    let key = path_builder::tag_entry_path(
-        &namespace,
-        &tag,
-        path_builder::tag_ord(Some(ts)),
-        false,
-        &target,
-    );
+    let key = namespace.tag_entry_path(&tag, tag_ord(Some(ts)), false, &target);
     store
         .object_store()
         .put(

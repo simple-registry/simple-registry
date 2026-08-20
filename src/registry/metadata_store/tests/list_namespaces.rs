@@ -2,9 +2,9 @@ use bytes::Bytes;
 
 use angos_oci::{Namespace, Tag, UploadSessionId};
 
+use crate::registry::keys::NamespaceKeys;
 use crate::registry::{
     metadata_store::{LinkKind, LinkOperation},
-    path_builder,
     test_utils::{self, FSRegistryTestCase, RegistryTestCase, for_each_backend, put_link_raw},
 };
 
@@ -62,7 +62,7 @@ async fn list_namespaces_excludes_upload_only_namespace() {
         let namespace = Namespace::new("upload-only/repo").unwrap();
         let session_id = UploadSessionId::generate();
 
-        let upload_data_path = path_builder::upload_path(&namespace, &session_id);
+        let upload_data_path = namespace.upload_path(&session_id);
         metadata_store
             .object_store()
             .put(&upload_data_path, Bytes::from_static(b"partial"))
@@ -207,7 +207,7 @@ async fn nested_namespaces_coexist_in_the_catalog_on_fs() {
             .unwrap();
         store
             .object_store()
-            .head(&path_builder::catalog_index_path(&namespace))
+            .head(&namespace.catalog_index_path())
             .await
             .expect("the catalog index key must exist beside the nested directory");
     }

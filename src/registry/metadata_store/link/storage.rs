@@ -37,7 +37,9 @@ impl MetadataStore {
             }
             _ => {}
         }
-        let link_path = path_builder::link_path(link, namespace);
+        let Some(link_path) = path_builder::link_path(link, namespace) else {
+            return Err(Error::NotFound);
+        };
         match self.object_store().get(&link_path).await {
             Ok(data) => serde_json::from_slice(&data).map_err(|e| Error::Internal(e.to_string())),
             Err(StorageError::NotFound) => Err(Error::NotFound),
@@ -74,7 +76,9 @@ impl MetadataStore {
         if let LinkKind::Tag(tag) = link {
             return self.write_tag_state(namespace, tag, metadata).await;
         }
-        let link_path = path_builder::link_path(link, namespace);
+        let Some(link_path) = path_builder::link_path(link, namespace) else {
+            return Err(Error::NotFound);
+        };
         let serialized = Bytes::from(serde_json::to_vec(metadata)?);
         self.object_store()
             .put(&link_path, serialized)

@@ -4,11 +4,11 @@ use angos_oci::{Digest, MediaType, Namespace, Reference, Tag, UploadSessionId};
 
 use crate::command::maintenance::action::Action;
 use crate::command::maintenance::executor::{ActionSink, Executor};
+use crate::registry::keys::{DigestKeys, NamespaceKeys};
 use crate::registry::{
     Error,
     blob_ownership::{GrantOutcome, promote_and_grant},
     metadata_store::{BlobIndexOperation, LinkKind},
-    path_builder,
     test_utils::{FSRegistryTestCase, RegistryTestCase, upload_blob},
 };
 
@@ -16,10 +16,7 @@ async fn seed_blob(case: &FSRegistryTestCase, content: &[u8]) -> Digest {
     let digest = Digest::sha256_of_bytes(content);
     case.blob_store()
         .object_store()
-        .put(
-            &path_builder::blob_path(&digest),
-            Bytes::copy_from_slice(content),
-        )
+        .put(&digest.blob_path(), Bytes::copy_from_slice(content))
         .await
         .unwrap();
     digest
@@ -188,10 +185,7 @@ async fn a_push_interrupted_between_waves_reads_consistently() {
     // Rewind wave D.
     store
         .object_store()
-        .delete_prefix(&path_builder::tag_entry_dir(
-            &namespace,
-            &Tag::new("latest").unwrap(),
-        ))
+        .delete_prefix(&namespace.tag_entry_dir(&Tag::new("latest").unwrap()))
         .await
         .unwrap();
     assert!(
@@ -212,7 +206,7 @@ async fn a_push_interrupted_between_waves_reads_consistently() {
     // Rewind wave C.
     store
         .object_store()
-        .delete(&path_builder::revision_record_path(&namespace, &digest))
+        .delete(&namespace.revision_record_path(&digest))
         .await
         .unwrap();
     assert!(

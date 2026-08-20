@@ -612,6 +612,7 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use crate::registry::keys::NamespaceKeys;
     use std::{io::Cursor, str::FromStr, sync::Arc};
 
     use async_trait::async_trait;
@@ -635,7 +636,6 @@ mod tests {
         Error, Registry, RegistryConfig,
         blob_store::BlobStore,
         metadata_store::LinkKind,
-        path_builder,
         repository_resolver::RepositoryResolver,
         test_utils::{
             FSRegistryTestCase, RegistryTestCase, create_test_registry, create_test_repositories,
@@ -2395,7 +2395,7 @@ mod tests {
         let session_file = test_case
             .temp_dir()
             .path()
-            .join(path_builder::upload_session_path(namespace, &session_id));
+            .join(namespace.upload_session_path(&session_id));
         std::fs::write(&session_file, b"not-a-valid-session-record").unwrap();
 
         let empty_stream = Cursor::new(Vec::new());
@@ -2418,7 +2418,7 @@ mod tests {
             "complete_upload should return error when hash state is corrupted"
         );
 
-        let upload_path = path_builder::upload_path(namespace, &session_id);
+        let upload_path = namespace.upload_path(&session_id);
         let upload_file_path = test_case.temp_dir().path().join(&upload_path);
         assert!(
             upload_file_path.exists(),

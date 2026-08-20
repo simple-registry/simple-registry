@@ -4,7 +4,8 @@ use angos_oci::response::ErrorCode;
 use hyper::StatusCode;
 
 use crate::{
-    command::server::Error, configuration, event_webhook, registry,
+    command::server::{Error, error::RECLAMATION_IN_PROGRESS_CODE},
+    configuration, event_webhook, registry,
     registry_client::REPLICATION_SUPERSEDED_CODE,
 };
 
@@ -208,6 +209,14 @@ fn registry_answers() -> Vec<Answer> {
             409,
             "DENIED",
             Some("locked"),
+        ),
+        // Transient by construction, so it answers 503 under a code outside the
+        // spec's set; the 5XX body carries no message.
+        answer(
+            registry::Error::ReclamationInProgress("reclaiming".into()),
+            503,
+            RECLAMATION_IN_PROGRESS_CODE,
+            None,
         ),
         // A typed variant routes to a generic 500 with its detail left in the log.
         answer(

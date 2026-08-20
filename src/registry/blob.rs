@@ -373,6 +373,7 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use crate::registry::keys::{DigestKeys, NamespaceKeys};
     use std::{io::Cursor, sync::Arc};
 
     use async_trait::async_trait;
@@ -399,7 +400,6 @@ mod tests {
         registry::{
             manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES,
             metadata_store::{BlobIndexOperation, LinkOperation},
-            path_builder,
             repository::Config,
             test_utils::{
                 RegistryTestCase, create_test_blob, create_test_registry, for_each_backend,
@@ -465,7 +465,7 @@ mod tests {
         let object: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
             inner,
             FailHeadOf {
-                key: path_builder::blob_path(&digest),
+                key: digest.blob_path(),
             },
         ));
         let blob_store = Arc::new(BlobStore::new(object.clone(), None));
@@ -979,7 +979,7 @@ mod tests {
         test_case
             .blob_store()
             .object_store()
-            .list_all_children(&path_builder::uploads_root_dir(namespace))
+            .list_all_children(&namespace.uploads_root_dir())
             .await
             .expect("list upload sessions")
             .sub_prefixes

@@ -10,6 +10,8 @@ use angos_oci::{Digest, Namespace, Reference, Tag, UploadSessionId};
 use angos_storage::Error as StorageError;
 use angos_storage::ObjectStore;
 
+use crate::registry::keys::{DigestKeys, NamespaceKeys};
+
 #[cfg(test)]
 use crate::registry::{
     RegistryConfig, repository_resolver::RepositoryResolver, test_utils::create_test_repositories,
@@ -197,10 +199,7 @@ impl Executor {
         // Fresh bytes are unconditionally live: an upload's `_own` key or a
         // push's reference may still be in flight.
         let Some(fresh) = self
-            .key_younger_than_grace(
-                self.blob_store.object_store().as_ref(),
-                &path_builder::blob_path(&digest),
-            )
+            .key_younger_than_grace(self.blob_store.object_store().as_ref(), &digest.blob_path())
             .await?
         else {
             return Ok(());
@@ -259,7 +258,7 @@ impl Executor {
         }
         // A young reference key may be a concurrent push's re-put between
         // its reference wave and its commit; a gone key needs no removal.
-        let ref_key = path_builder::blob_ref_path(&blob, &namespace, &link);
+        let ref_key = blob.blob_ref_path(&namespace, &link);
         match self
             .key_younger_than_grace(self.metadata_store.object_store().as_ref(), &ref_key)
             .await?
@@ -408,7 +407,7 @@ impl Executor {
         }
         // A young `_own` key may be a concurrent upload completion
         // re-granting ownership; a gone key is already revoked.
-        let own_key = path_builder::blob_ref_own_path(&blob, &namespace);
+        let own_key = blob.blob_ref_own_path(&namespace);
         match self
             .key_younger_than_grace(self.metadata_store.object_store().as_ref(), &own_key)
             .await?
@@ -467,10 +466,7 @@ impl Executor {
         entry_name: String,
     ) -> Result<(), Error> {
         let store = self.metadata_store.object_store();
-        let entry_key = format!(
-            "{}/{entry_name}",
-            path_builder::tag_entry_dir(&namespace, &tag)
-        );
+        let entry_key = format!("{}/{entry_name}", namespace.tag_entry_dir(&tag));
         let body = match store.get(&entry_key).await {
             Ok(body) => body,
             Err(StorageError::NotFound) => return Ok(()),
@@ -480,7 +476,7 @@ impl Executor {
         // the delete below finishes the move either way.
         store
             .create_if_absent(
-                &path_builder::tag_hist_path(&namespace, &tag, &entry_name),
+                &namespace.tag_hist_path(&tag, &entry_name),
                 Bytes::from(body),
             )
             .await
@@ -583,7 +579,9 @@ impl Executor {
     /// for the next run.
     async fn retire_tracked_link(&self, namespace: Namespace, link: LinkKind) -> Result<(), Error> {
         let store = self.metadata_store.object_store();
-        let key = path_builder::link_path(&link, &namespace);
+        let Some(key) = path_builder::link_path(&link, &namespace) else {
+            return Ok(());
+        };
         match self.key_younger_than_grace(store.as_ref(), &key).await? {
             None => Ok(()),
             Some(true) => {
