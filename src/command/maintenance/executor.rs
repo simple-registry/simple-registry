@@ -20,7 +20,7 @@ use crate::{
         error::Error,
     },
     event_webhook::event::EventActor,
-    jobs::store::{Error as JobStoreError, JobEnvelope, JobStore},
+    jobs::store::{ClaimMode, Error as JobStoreError, JobEnvelope, JobStore},
     jobs::{JobState, Queue},
     registry::{
         Error as RegistryError, Registry,
@@ -41,9 +41,12 @@ pub const RETENTION_ACTOR: &str = "prune";
 /// replication-enqueue target and, when a drain is wired, its consumer.
 #[must_use]
 pub fn run_job_store(metadata_store: &MetadataStore, prefix: &str) -> Arc<JobStore> {
+    // Maintenance runs do not probe the backend; atomic mode preserves the
+    // historical unconditional `create_if_absent` behaviour.
     Arc::new(JobStore::new(
         metadata_store.object_store().clone(),
         format!("{prefix}-{}", Uuid::new_v4()),
+        ClaimMode::Atomic,
     ))
 }
 
@@ -120,6 +123,7 @@ impl Executor {
         let job_store = Arc::new(JobStore::new(
             metadata_store.object_store().clone(),
             "scrub-test",
+            ClaimMode::Atomic,
         ));
         let resolver = Arc::new(
             RepositoryResolver::new(create_test_repositories())
@@ -490,8 +494,10 @@ impl Executor {
             Err(StorageError::NotFound) => return Ok(()),
             Err(e) => return Err(Error::from(RegistryError::from(e))),
         };
+        // `false` means an interrupted earlier demotion already wrote the
+        // copy; the delete below finishes the move either way.
         store
-            .put(
+            .create_if_absent(
                 &path_builder::tag_hist_path(&namespace, &tag, &entry_name),
                 Bytes::from(body),
             )
@@ -838,7 +844,7 @@ mod tests {
     use crate::command::maintenance::executor::*;
     use crate::{
         cache_fill::{CACHE_FETCH_BLOB_KIND, CacheFetchBlobPayload},
-        jobs::store::FailOutcome,
+        jobs::store::{ClaimMode, FailOutcome},
         registry::{
             metadata_store::{LinkKind, LinkMetadata, LinkOperation},
             test_utils::{for_each_backend, put_blob_direct, put_link_raw},
@@ -851,7 +857,7 @@ mod tests {
     /// claim loops would otherwise claim the job and race the assertion.
     fn standalone_job_store(worker_id: &str) -> Arc<JobStore> {
         let raw = Arc::new(MemoryObjectStore::new());
-        Arc::new(JobStore::new(raw, worker_id))
+        Arc::new(JobStore::new(raw, worker_id, ClaimMode::Atomic))
     }
 
     #[tokio::test]

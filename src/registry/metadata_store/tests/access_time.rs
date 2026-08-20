@@ -48,6 +48,8 @@ async fn create_tag(backend: &MetadataStore, namespace: &Namespace, tag: &LinkKi
         target: Digest::from_str(hash).unwrap(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(namespace, &ops).await.unwrap();

@@ -10,7 +10,7 @@ mod operation;
 mod ops;
 mod record;
 mod storage;
-mod tag;
+pub mod tag;
 
 pub use kind::LinkKind;
 pub use metadata::LinkMetadata;

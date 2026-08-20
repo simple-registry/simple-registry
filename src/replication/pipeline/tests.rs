@@ -1485,6 +1485,8 @@ async fn push_manifest_recovers_content_type_from_the_link_for_a_typeless_body()
                 LinkKind::Digest(manifest_digest.clone()),
                 manifest_digest.clone(),
                 Some(MediaType::new(media_type).unwrap()),
+                None,
+                None,
             )],
         )
         .await
@@ -1542,6 +1544,8 @@ async fn push_index_recovers_typeless_child_content_type_from_link() {
                 LinkKind::Digest(child_digest.clone()),
                 child_digest.clone(),
                 Some(media_type(OCI_MANIFEST_MEDIA_TYPE)),
+                None,
+                None,
             )],
         )
         .await

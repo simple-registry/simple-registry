@@ -10,7 +10,7 @@
 //! leaves only over-approximated references or a tagless revision, both
 //! legal. Single-link primitives live in [`super::storage`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -27,7 +27,7 @@ use crate::registry::{
         BlobIndexOperation, LinkKind, LinkMetadata, LinkOperation, MetadataStore, ReferencePolicy,
         blob_index::{namespace_entries_merged, ref_mutation},
         link::record::{referrer_set_mutation, revision_set_mutation},
-        link::tag::{tag_del_mutation, tag_set_mutation},
+        link::tag::{TagEntryBody, tag_del_mutation, tag_set_mutation},
         mutation::Mutation,
     },
     path_builder,
@@ -173,14 +173,19 @@ enum OpSnapshot<'a> {
         old_target: Option<Digest>,
         referrer: &'a Option<Digest>,
         media_type: &'a Option<MediaType>,
+        size: &'a Option<u64>,
+        annotations: &'a Option<BTreeMap<String, String>>,
         descriptor: &'a Option<Box<Descriptor>>,
     },
     /// A delete with the link's currently-stored metadata (`None` = already
-    /// absent). Boxed because `LinkMetadata` dwarfs the common `Create` variant.
+    /// absent). Boxed because `LinkMetadata` dwarfs the common `Create`
+    /// variant. A resolved tag also carries its winner entry's body, the
+    /// descriptor fields the tombstone copies.
     Delete {
         link: &'a LinkKind,
         metadata: Option<Box<LinkMetadata>>,
         referrer: &'a Option<Digest>,
+        tag_body: Option<TagEntryBody>,
     },
 }
 
@@ -531,11 +536,19 @@ impl MetadataStore {
                     Err(Error::NotFound) => None,
                     Err(e) => return Err(e),
                 };
-                return Ok((op, metadata));
+                // A tag about to be tombstoned needs its winner entry's body:
+                // the one targeted body read left off the serving path.
+                let tag_body = match (op, link, &metadata) {
+                    (LinkOperation::Delete { .. }, LinkKind::Tag(tag), Some(m)) => {
+                        Some(self.read_tag_winner_body(namespace, tag, m).await?)
+                    }
+                    _ => None,
+                };
+                return Ok((op, metadata, tag_body));
             }
             let link_path = path_builder::link_path(link, namespace);
             let metadata = self.read_link_raw(&link_path).await?;
-            Ok::<_, Error>((op, metadata))
+            Ok::<_, Error>((op, metadata, None))
         }))
         .await;
 
@@ -544,13 +557,15 @@ impl MetadataStore {
             link_cache: HashMap::new(),
         };
         for result in results {
-            let (op, metadata) = result?;
+            let (op, metadata, tag_body) = result?;
             snapshot.ops.push(match op {
                 LinkOperation::Create {
                     link,
                     target,
                     referrer,
                     media_type,
+                    size,
+                    annotations,
                     descriptor,
                 } => {
                     let old_target = metadata.as_ref().map(|m| m.target.clone());
@@ -563,6 +578,8 @@ impl MetadataStore {
                         old_target,
                         referrer,
                         media_type,
+                        size,
+                        annotations,
                         descriptor,
                     }
                 }
@@ -570,6 +587,7 @@ impl MetadataStore {
                     link,
                     metadata: metadata.map(Box::new),
                     referrer,
+                    tag_body,
                 },
             });
         }
@@ -695,6 +713,8 @@ fn build_create_mutations(
             old_target,
             referrer,
             media_type,
+            size,
+            annotations,
             descriptor,
         } = op
         else {
@@ -757,13 +777,17 @@ fn build_create_mutations(
                         created_at,
                         target,
                         (*media_type).clone(),
+                        **size,
+                        (*annotations).clone(),
                     )?;
                     acc.finals.push(mutation);
                     let created_at =
                         path_builder::tag_ord_ts(path_builder::tag_ord(Some(created_at)))
                             .unwrap_or(created_at);
-                    let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at)
-                        .with_media_type((*media_type).clone());
+                    // No media type: tag resolution carries none (the
+                    // revision record serves it), so the cached write-through
+                    // must match a fresh resolve.
+                    let metadata = LinkMetadata::from_digest_at((*target).clone(), created_at);
                     acc.written_links.push(((*link).clone(), metadata));
                 }
                 LinkKind::Digest(digest) => {
@@ -814,6 +838,7 @@ fn build_delete_mutations(
             link,
             metadata: Some(metadata),
             referrer,
+            tag_body,
         } = op
         else {
             continue;
@@ -821,15 +846,16 @@ fn build_delete_mutations(
 
         if let LinkKind::Tag(tag) = link {
             // A tombstone entry, never a delete: it names the digest the tag
-            // held (tag history requires it) and its timestamp orders it
-            // against any concurrent push by key name alone.
+            // held (tag history requires it), copies the superseded winner's
+            // descriptor body, and its timestamp orders it against any
+            // concurrent push by key name alone.
             let created_at = tx.delete_source_ts().unwrap_or_else(Utc::now);
             let mutation = tag_del_mutation(
                 namespace,
                 tag,
                 created_at,
                 &metadata.target,
-                metadata.media_type.clone(),
+                tag_body.as_ref().unwrap_or(&TagEntryBody::default()),
             )?;
             acc.records.push(mutation);
             acc.deleted_links.push((*link).clone());

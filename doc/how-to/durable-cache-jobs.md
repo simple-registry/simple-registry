@@ -63,11 +63,11 @@ pending_ready_horizon_secs = 600     # only jobs ready within this many seconds 
 ```
 
 > **Note:** Because storage is inherited from `[metadata_store]`, the durable
-> queue needs the backend's atomic create-if-absent to be honest (`link(2)`
+> queue prefers the backend's atomic create-if-absent to be honest (`link(2)`
 > on FS, `If-None-Match: *` on S3). A startup probe creates a scratch claim
-> key twice and **Angos refuses to start** when the second create succeeds;
-> use a compliant backend, or remove `[global.job_queue]` to use the
-> in-process queue.
+> key twice; when the second create succeeds the queue degrades to advisory
+> claims with a logged warning, where a claim race may run an idempotent job
+> more than once. Correctness is unaffected.
 
 ## Running the worker
 
@@ -146,15 +146,15 @@ unless you also edit the body).
 
 **Filesystem metadata store on shared storage:** worker coordination rides on
 an atomic `link(2)`-based create-if-absent for the claim keys. A shared volume
-must be writable by every replica and must enforce that atomic create; NFS
+must be writable by every replica and should enforce that atomic create; NFS
 implementations get this wrong often enough that the startup probe verifies
-it and refuses the backend otherwise.
+it, degrading to advisory claims with a logged warning otherwise.
 
 **S3 metadata store requirements:** the claim keys are created with
-`PutObject` + `If-None-Match: *`, so the provider must support that
-conditional write and surface it honestly. The startup probe verifies it and
-refuses the backend otherwise. Endpoints that ignore `If-None-Match` are not
-supported.
+`PutObject` + `If-None-Match: *`, so the provider should support that
+conditional write and surface it honestly. The startup probe verifies it;
+endpoints that ignore `If-None-Match` degrade to advisory claims with a
+logged warning, where a claim race may run an idempotent job more than once.
 
 **S3 LIST cost:** Each enqueue scans `_jobs/pending/cache/` for duplicate
 `lock_key`s. At the default `pending_refresh_interval_secs = 15` and with N

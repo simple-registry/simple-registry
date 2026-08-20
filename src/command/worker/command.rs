@@ -20,7 +20,7 @@ use crate::{
     configuration::{Configuration, listeners::ServerTlsConfig, watcher::ConfigNotifier},
     jobs::Queue,
     jobs::runner::execute_one,
-    jobs::store::{self as job_store, JobHandler, JobRetryPolicy, JobStore},
+    jobs::store::{self as job_store, ClaimMode, JobHandler, JobRetryPolicy, JobStore},
     registry::{
         Registry, blob_store::BlobStore, metadata_store::MetadataStore,
         repository_resolver::RepositoryResolver,
@@ -219,6 +219,7 @@ struct WorkerContext {
     repositories: Arc<RepositoryResolver>,
     registry: Arc<Registry>,
     retry_policy: JobRetryPolicy,
+    claim_mode: ClaimMode,
 }
 
 impl WorkerContext {
@@ -241,7 +242,7 @@ impl WorkerContext {
         // Share the metadata store's object store instead of wiring a
         // second backend over the same storage.
         let storage = metadata_store.object_store().clone();
-        job_store::ensure_claim_support(&storage).await?;
+        let claim_mode = job_store::ensure_claim_support(&storage).await?;
         let registry = bootstrap::registry(
             config,
             blob_store.clone(),
@@ -250,6 +251,7 @@ impl WorkerContext {
             Arc::new(JobStore::with_retry_policy(
                 storage.clone(),
                 "worker",
+                claim_mode,
                 retry_policy,
             )),
         )?;
@@ -261,6 +263,7 @@ impl WorkerContext {
             repositories,
             registry,
             retry_policy,
+            claim_mode,
         })
     }
 
@@ -270,6 +273,7 @@ impl WorkerContext {
         let consumer = Arc::new(JobStore::with_retry_policy(
             self.storage.clone(),
             Uuid::new_v4().to_string(),
+            self.claim_mode,
             self.retry_policy,
         ));
         let handler: Arc<dyn JobHandler> = match queue {
@@ -307,7 +311,7 @@ mod tests {
         cache_fill::CACHE_FETCH_BLOB_KIND,
         jobs::{
             Queue,
-            store::{JobEnvelope, JobRetryPolicy, JobStore},
+            store::{ClaimMode, JobEnvelope, JobRetryPolicy, JobStore},
         },
         metrics_provider,
         registry::{
@@ -371,12 +375,17 @@ mod tests {
             metadata_store.clone(),
             repositories.clone(),
             RegistryConfig {
-                job_queue: Some(Arc::new(JobStore::new(storage.clone(), "worker-test"))),
+                job_queue: Some(Arc::new(JobStore::new(
+                    storage.clone(),
+                    "worker-test",
+                    ClaimMode::Atomic,
+                ))),
                 ..RegistryConfig::default()
             },
         );
         let context = WorkerContext {
             retry_policy: JobRetryPolicy::default(),
+            claim_mode: ClaimMode::Atomic,
             storage,
             blob_store,
             metadata_store,

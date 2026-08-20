@@ -33,7 +33,7 @@ use crate::{
         event::{EventActor, EventKind},
     },
     jobs::Queue,
-    jobs::store::JobStore,
+    jobs::store::{ClaimMode, JobStore},
     registry::{
         Registry, RegistryConfig, Repository,
         blob_ownership::BlobOwnership,
@@ -746,7 +746,7 @@ impl ReplicationFixture {
         } = fs_test_stack();
         let resolver = single_repo_resolver(REPLICATION_REPO, repository);
 
-        let job_store: Arc<JobStore> = Arc::new(JobStore::new(store, "test"));
+        let job_store: Arc<JobStore> = Arc::new(JobStore::new(store, "test", ClaimMode::Atomic));
 
         let config = RegistryConfig {
             job_queue: Some(job_store.clone()),

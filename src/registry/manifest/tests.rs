@@ -1,4 +1,8 @@
-use std::{collections::HashSet, io::Cursor, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io::Cursor,
+    sync::Arc,
+};
 
 use futures_util::future::join_all;
 use hyper::{
@@ -26,7 +30,7 @@ use crate::{
     registry::{
         Error, Registry,
         blob_ownership::BlobOwnership,
-        metadata_store::{LinkKind, LinkMetadata, LinkOperation},
+        metadata_store::{LinkKind, LinkMetadata, LinkOperation, link::tag::TagEntryBody},
         path_builder::{self, blob_path},
         repository::Config as RepositoryConfig,
         test_utils::{
@@ -1356,6 +1360,8 @@ async fn a_tag_racing_a_digest_delete_reads_as_gone() {
                     LinkKind::Tag(fresh.clone()),
                     digest.clone(),
                     Some(media_type.clone()),
+                    None,
+                    None,
                 )],
             )
             .await
@@ -2178,17 +2184,16 @@ async fn test_put_manifest_stores_media_type() {
             "Digest link should have media_type stored"
         );
 
+        // Tag resolution carries no media type: the revision record above
+        // serves it, and the tag's entry body stores it for tag history.
         let tag_link = LinkKind::Tag(Tag::new(tag).unwrap());
         let tag_meta = registry
             .metadata_store
             .read_link(namespace, &tag_link)
             .await
             .unwrap();
-        assert_eq!(
-            tag_meta.media_type,
-            Some(media_type),
-            "Tag link should have media_type stored"
-        );
+        assert_eq!(tag_meta.target, response.digest);
+        assert_eq!(tag_meta.media_type, None);
     })
     .await;
 }
@@ -3695,7 +3700,10 @@ mod noop_suppression_tests {
 
     use crate::registry::manifest::tests::{create_test_manifest, manifest_with_references};
     use crate::{
-        jobs::{Queue, store::JobStore},
+        jobs::{
+            Queue,
+            store::{ClaimMode, JobStore},
+        },
         registry::{
             Registry, RegistryConfig,
             metadata_store::{LinkKind, LinkOperation},
@@ -3725,7 +3733,7 @@ mod noop_suppression_tests {
             repository_with_downstream(REPO, downstream_client("https://unused.test")),
         );
 
-        let job_store: Arc<JobStore> = Arc::new(JobStore::new(store, "test"));
+        let job_store: Arc<JobStore> = Arc::new(JobStore::new(store, "test", ClaimMode::Atomic));
 
         let config = RegistryConfig {
             job_queue: Some(job_store.clone()),
@@ -4341,7 +4349,10 @@ mod dispatch_replication_tests {
         DispatchTarget, MISSING_SUBJECT_DIGEST, create_test_manifest_with_subject,
     };
     use crate::{
-        jobs::{Queue, store::JobStore},
+        jobs::{
+            Queue,
+            store::{ClaimMode, JobStore},
+        },
         registry::{
             Registry, RegistryConfig, Repository,
             test_utils::{
@@ -4400,7 +4411,7 @@ mod dispatch_replication_tests {
         let resolver = single_repo_resolver(REPO, repository);
 
         // No drain spawned: the bare JobStore only persists envelopes; these tests assert enqueue only.
-        let job_store: Arc<JobStore> = Arc::new(JobStore::new(store, "test"));
+        let job_store: Arc<JobStore> = Arc::new(JobStore::new(store, "test", ClaimMode::Atomic));
 
         let config = RegistryConfig {
             job_queue: Some(job_store.clone()),
@@ -4857,5 +4868,62 @@ async fn an_excluded_tag_remains_writable() {
         *response_header(&response, &LOCATION),
         format!("/v2/{namespace}/manifests/latest"),
         "the write must be reported at the tag it created"
+    );
+}
+
+/// A tag push persists the manifest's size and annotations into its entry
+/// body for tag history, dropping annotation keys under the reserved
+/// `org.opencontainers.distribution` prefix at write time.
+#[tokio::test]
+async fn a_tag_push_persists_descriptor_fields_in_its_entry_body() {
+    let test_case = FSRegistryTestCase::new();
+    let registry = test_case.registry();
+    let namespace = &Namespace::new("tag-entry-descriptor").unwrap();
+    let manifest = json!({
+        "schemaVersion": 2,
+        "mediaType": IMAGE_MANIFEST_MEDIA_TYPE,
+        "layers": [],
+        "annotations": {
+            "org.opencontainers.distribution.internal": "reserved",
+            "com.example.team": "kept",
+        },
+    });
+    let content = serde_json::to_vec(&manifest).unwrap();
+    let media_type = MediaType::new(IMAGE_MANIFEST_MEDIA_TYPE).unwrap();
+    let tag = Tag::new("annotated").unwrap();
+
+    registry
+        .put_manifest(
+            namespace,
+            &Reference::Tag(tag.clone()),
+            Some(&media_type),
+            &content,
+        )
+        .await
+        .unwrap();
+
+    let store = test_case.metadata_store();
+    let dir = path_builder::tag_entry_dir(namespace, &tag);
+    let entries = store.object_store().list(&dir, 10, None).await.unwrap();
+    let entry = entries
+        .items
+        .iter()
+        .find(|name| name.contains(".set."))
+        .expect("the push must write one set entry");
+    let body = store
+        .object_store()
+        .get(&format!("{dir}/{entry}"))
+        .await
+        .unwrap();
+    let parsed: TagEntryBody = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed.media_type, Some(media_type));
+    assert_eq!(parsed.size, Some(content.len() as u64));
+    assert_eq!(
+        parsed.annotations,
+        Some(BTreeMap::from([(
+            "com.example.team".to_string(),
+            "kept".to_string()
+        )])),
+        "only the non-reserved annotation survives"
     );
 }

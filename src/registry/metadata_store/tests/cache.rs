@@ -24,6 +24,8 @@ async fn test_read_link_cache_hit_skips_storage() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -56,6 +58,8 @@ async fn test_read_link_cache_miss_fetches_from_storage() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -90,6 +94,8 @@ async fn test_read_link_cache_expired_refetches() {
         target: digest_a.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -128,6 +134,8 @@ async fn test_update_links_populates_cache_on_overwrite() {
         target: digest_a.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -140,6 +148,8 @@ async fn test_update_links_populates_cache_on_overwrite() {
         target: digest_b.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -167,6 +177,8 @@ async fn test_update_links_populates_cache_on_create() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -194,6 +206,8 @@ async fn test_update_links_invalidates_cache_on_delete() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -229,6 +243,8 @@ async fn test_read_link_with_access_time_update_populates_cache() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -267,6 +283,8 @@ async fn test_cache_disabled_when_ttl_zero() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
@@ -289,6 +307,76 @@ async fn test_cache_disabled_when_ttl_zero() {
 }
 
 #[tokio::test]
+async fn a_revision_record_stays_cached_past_the_tag_ttl() {
+    let mut config = test_config();
+    config.link_cache_ttl = 1;
+    let (backend, _cache) = test_backend_with_cache(&config);
+    let namespace = Namespace::new("cache-immutable-ns").unwrap();
+    let digest =
+        Digest::from_str("sha256:e1e2e3e4e5e6e7e8e1e2e3e4e5e6e7e8e1e2e3e4e5e6e7e8e1e2e3e4e5e6e7e8")
+            .unwrap();
+    let link = LinkKind::Digest(digest.clone());
+
+    backend
+        .update_links(
+            &namespace,
+            &[LinkOperation::create(link.clone(), digest.clone())],
+        )
+        .await
+        .unwrap();
+    let meta = backend.read_link(&namespace, &link).await.unwrap();
+    assert_eq!(meta.target, digest);
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    // Remove the record from storage: only the cache can answer now, and it
+    // must, because an immutable record is cached without the tag TTL bound.
+    backend
+        .object_store()
+        .delete(&path_builder::revision_record_path(&namespace, &digest))
+        .await
+        .unwrap();
+
+    let meta = backend.read_link(&namespace, &link).await.unwrap();
+    assert_eq!(
+        meta.target, digest,
+        "an immutable record must outlive the tag TTL in cache"
+    );
+}
+
+#[tokio::test]
+async fn a_manifest_delete_invalidates_the_cached_revision_record() {
+    let config = test_config();
+    let (backend, _cache) = test_backend_with_cache(&config);
+    let namespace = Namespace::new("cache-record-delete-ns").unwrap();
+    let digest =
+        Digest::from_str("sha256:f1f2f3f4f5f6f7f8f1f2f3f4f5f6f7f8f1f2f3f4f5f6f7f8f1f2f3f4f5f6f7f8")
+            .unwrap();
+    let link = LinkKind::Digest(digest.clone());
+
+    backend
+        .update_links(
+            &namespace,
+            &[LinkOperation::create(link.clone(), digest.clone())],
+        )
+        .await
+        .unwrap();
+    let meta = backend.read_link(&namespace, &link).await.unwrap();
+    assert_eq!(meta.target, digest);
+
+    backend
+        .delete_manifest(&namespace, &[LinkOperation::delete(link.clone())], None)
+        .await
+        .unwrap();
+
+    let result = backend.read_link(&namespace, &link).await;
+    assert!(
+        matches!(result, Err(Error::NotFound)),
+        "the delete must invalidate the no-expiry cache entry, got: {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_cache_keys_are_namespace_scoped() {
     let config = test_config();
     let (backend, _cache) = test_backend_with_cache(&config);
@@ -307,6 +395,8 @@ async fn test_cache_keys_are_namespace_scoped() {
         target: digest_a.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace_a, &ops_a).await.unwrap();
@@ -316,6 +406,8 @@ async fn test_cache_keys_are_namespace_scoped() {
         target: digest_b.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace_b, &ops_b).await.unwrap();

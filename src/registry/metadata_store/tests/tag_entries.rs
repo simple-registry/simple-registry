@@ -1,16 +1,20 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use tempfile::TempDir;
 
-use angos_oci::{Digest, Namespace, Tag};
+use angos_oci::{Digest, MediaType, Namespace, Tag};
 use angos_storage::{ObjectStore, fs::Backend as StorageFsBackend};
 
 use crate::registry::metadata_store::tests::test_config;
 use crate::registry::{
     Error,
-    metadata_store::{LinkKind, LinkMetadata, LinkOperation, MetadataStore, ReferencePolicy},
+    metadata_store::{
+        LinkKind, LinkMetadata, LinkOperation, MetadataStore, ReferencePolicy,
+        link::tag::TagEntryBody,
+    },
     path_builder,
     test_utils::metadata_store_over_cached,
 };
@@ -163,4 +167,125 @@ async fn a_young_legacy_tag_link_survives_conversion_under_grace() {
         .head(&legacy_path)
         .await
         .expect("a link younger than the grace period must survive the conversion's delete");
+}
+
+fn fs_store(dir: &TempDir) -> Arc<MetadataStore> {
+    let backend: Arc<dyn ObjectStore> = Arc::new(
+        StorageFsBackend::builder(dir.path())
+            .sync_to_disk(false)
+            .build(),
+    );
+    metadata_store_over_cached(backend, 0)
+}
+
+/// A tag delete's tombstone copies the superseded winner's descriptor fields
+/// (media type, size, filtered annotations), which tag history serves later.
+#[tokio::test]
+async fn a_tombstone_copies_the_prior_winners_descriptor_fields() {
+    let dir = TempDir::new().unwrap();
+    let store = fs_store(&dir);
+    let namespace = Namespace::new("tombstone-descriptor").unwrap();
+    let tag = Tag::new("v1").unwrap();
+    let link = LinkKind::Tag(tag.clone());
+    let target = Digest::sha256_of_bytes(b"descriptor-manifest");
+    let media_type = MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap();
+    let annotations = BTreeMap::from([
+        (
+            "org.opencontainers.distribution.internal".to_string(),
+            "reserved".to_string(),
+        ),
+        ("com.example.team".to_string(), "kept".to_string()),
+    ]);
+
+    store
+        .store_manifest(
+            &namespace,
+            &[LinkOperation::create_with_media_type(
+                link.clone(),
+                target.clone(),
+                Some(media_type.clone()),
+                Some(42),
+                Some(annotations),
+            )],
+            None,
+            ReferencePolicy::Trusted,
+        )
+        .await
+        .unwrap();
+    store
+        .delete_links(&namespace, &[LinkOperation::delete(link.clone())], None)
+        .await
+        .unwrap();
+
+    let entry_dir = path_builder::tag_entry_dir(&namespace, &tag);
+    let entries = store
+        .object_store()
+        .list(&entry_dir, 10, None)
+        .await
+        .unwrap();
+    let tombstone = entries
+        .items
+        .iter()
+        .find(|name| name.contains(".del."))
+        .expect("the delete must append a tombstone entry");
+    let body = store
+        .object_store()
+        .get(&format!("{entry_dir}/{tombstone}"))
+        .await
+        .unwrap();
+    let parsed: TagEntryBody = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed.media_type, Some(media_type));
+    assert_eq!(parsed.size, Some(42));
+    assert_eq!(
+        parsed.annotations,
+        Some(BTreeMap::from([(
+            "com.example.team".to_string(),
+            "kept".to_string()
+        )])),
+        "the tombstone carries the prior entry's filtered annotations"
+    );
+}
+
+/// An entry body written before the descriptor fields existed parses with
+/// them absent and the tag still resolves.
+#[tokio::test]
+async fn an_old_shape_entry_body_still_resolves() {
+    let dir = TempDir::new().unwrap();
+    let store = fs_store(&dir);
+    let namespace = Namespace::new("old-shape-entry").unwrap();
+    let tag = Tag::new("v1").unwrap();
+    let link = LinkKind::Tag(tag.clone());
+    let target = Digest::sha256_of_bytes(b"old-shape-manifest");
+    let ts = entry_ms(Utc::now());
+
+    let key = path_builder::tag_entry_path(
+        &namespace,
+        &tag,
+        path_builder::tag_ord(Some(ts)),
+        false,
+        &target,
+    );
+    store
+        .object_store()
+        .put(
+            &key,
+            Bytes::from_static(br#"{"media_type":"application/vnd.oci.image.manifest.v1+json"}"#),
+        )
+        .await
+        .unwrap();
+
+    let resolved = store.read_link_reference(&namespace, &link).await.unwrap();
+    assert_eq!(resolved.target, target);
+    assert_eq!(resolved.created_at, Some(ts));
+
+    let body = store
+        .read_tag_winner_body(&namespace, &tag, &resolved)
+        .await
+        .unwrap();
+    assert_eq!(
+        body.media_type,
+        Some(MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap())
+    );
+    assert_eq!(body.size, None);
+    assert_eq!(body.annotations, None);
 }

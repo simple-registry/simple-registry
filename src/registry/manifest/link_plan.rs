@@ -10,6 +10,8 @@
 //! ensures that both sides apply the same decisions about which links to create
 //! or delete for a given manifest, eliminating divergence between them.
 
+use std::collections::BTreeMap;
+
 use angos_oci::{Content, Digest, Manifest, MediaType, Reference, Tag};
 
 use crate::registry::metadata_store::{LinkKind, LinkOperation};
@@ -40,10 +42,23 @@ pub fn push(
 ) -> Vec<LinkOperation> {
     let mut ops = Vec::new();
 
+    // Tag entries persist the manifest's descriptor fields for tag history;
+    // cloned before `take_descriptor` can move the annotations out.
+    let annotations: Option<BTreeMap<String, String>> =
+        (!manifest.annotations.is_empty()).then(|| {
+            manifest
+                .annotations
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        });
+
     ops.push(LinkOperation::create_with_media_type(
         LinkKind::Digest(digest.clone()),
         digest.clone(),
         effective_media_type.cloned(),
+        None,
+        None,
     ));
 
     if let Some(tag) = reference.as_tag() {
@@ -51,6 +66,8 @@ pub fn push(
             LinkKind::Tag(tag.clone()),
             digest.clone(),
             effective_media_type.cloned(),
+            Some(body_len),
+            annotations.clone(),
         ));
     }
 
@@ -59,6 +76,8 @@ pub fn push(
             LinkKind::Tag(tag.clone()),
             digest.clone(),
             effective_media_type.cloned(),
+            Some(body_len),
+            annotations.clone(),
         ));
     }
 

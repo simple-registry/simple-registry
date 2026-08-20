@@ -37,6 +37,8 @@ async fn test_blob_index_updates_multiple_digests() {
             target: digest.clone(),
             referrer: None,
             media_type: None,
+            size: None,
+            annotations: None,
             descriptor: None,
         })
         .collect();
@@ -84,6 +86,8 @@ async fn test_tracked_link_creates_with_referrers() {
             target: d.clone(),
             referrer: Some(referrer_digest.clone()),
             media_type: None,
+            size: None,
+            annotations: None,
             descriptor: None,
         })
         .collect();
@@ -93,6 +97,8 @@ async fn test_tracked_link_creates_with_referrers() {
         target: config_digest.clone(),
         referrer: Some(referrer_digest.clone()),
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     });
 
@@ -139,6 +145,8 @@ async fn test_tracked_link_deletes_with_referrers() {
             target: d.clone(),
             referrer: Some(referrer_digest.clone()),
             media_type: None,
+            size: None,
+            annotations: None,
             descriptor: None,
         })
         .collect();
@@ -209,6 +217,8 @@ async fn test_mixed_creates_and_deletes_across_digests() {
             target: digest_keep.clone(),
             referrer: None,
             media_type: None,
+            size: None,
+            annotations: None,
             descriptor: None,
         },
         LinkOperation::Create {
@@ -216,6 +226,8 @@ async fn test_mixed_creates_and_deletes_across_digests() {
             target: digest_remove.clone(),
             referrer: None,
             media_type: None,
+            size: None,
+            annotations: None,
             descriptor: None,
         },
     ];
@@ -231,6 +243,8 @@ async fn test_mixed_creates_and_deletes_across_digests() {
             target: digest_add.clone(),
             referrer: None,
             media_type: None,
+            size: None,
+            annotations: None,
             descriptor: None,
         },
     ];
@@ -284,6 +298,8 @@ async fn writes_land_as_reference_keys_not_shards() {
         target: digest.clone(),
         referrer: None,
         media_type: None,
+        size: None,
+        annotations: None,
         descriptor: None,
     }];
     backend.update_links(&namespace, &ops).await.unwrap();

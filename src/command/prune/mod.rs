@@ -23,7 +23,7 @@ use crate::{
         scrub::default_concurrency,
     },
     configuration::Configuration,
-    jobs::store::JobStore,
+    jobs::store::{ClaimMode, JobStore},
     policy::{RetentionPolicy, RetentionPolicyConfig, SystemClock},
 };
 
@@ -179,6 +179,7 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
             &Arc::new(JobStore::new(
                 metadata_store.object_store().clone(),
                 "prune-orphans",
+                ClaimMode::Atomic,
             )),
             &repositories,
             sink.as_ref(),

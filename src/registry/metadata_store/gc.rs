@@ -118,7 +118,19 @@ impl MetadataStore {
             start: start.clone(),
             end: end.clone(),
         };
-        self.put_gc_run(&claim).await?;
+        // A fresh UUID cannot legitimately exist already; adopting one would
+        // fence against another collector's live marker.
+        let body = self.gc_run_body(&claim)?;
+        if !self
+            .object_store()
+            .create_if_absent(&claim.key, body)
+            .await?
+        {
+            return Err(Error::Internal(format!(
+                "gc run marker collision at {}",
+                claim.key
+            )));
+        }
         Ok(claim)
     }
 
@@ -151,6 +163,14 @@ impl MetadataStore {
     }
 
     async fn put_gc_run(&self, claim: &GcClaim) -> Result<(), Error> {
+        let body = self.gc_run_body(claim)?;
+        self.object_store()
+            .put(&claim.key, body)
+            .await
+            .map_err(Error::from)
+    }
+
+    fn gc_run_body(&self, claim: &GcClaim) -> Result<Bytes, Error> {
         // Twice the grace, floored so a marker outlives its own publish even
         // under a tiny grace setting.
         let ttl = i64::try_from(self.gc_grace_secs)
@@ -163,9 +183,6 @@ impl MetadataStore {
             expires_at: Utc::now() + Duration::seconds(ttl),
             instance: claim.instance.clone(),
         };
-        self.object_store()
-            .put(&claim.key, Bytes::from(serde_json::to_vec(&run)?))
-            .await
-            .map_err(Error::from)
+        Ok(Bytes::from(serde_json::to_vec(&run)?))
     }
 }

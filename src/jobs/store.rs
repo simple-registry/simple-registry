@@ -3,9 +3,10 @@
 //!
 //! The queue is lock-free and collector-free. Every mutation is an ordered
 //! sequence of idempotent object writes: enqueue dedup and claims rest on
-//! atomic `create_if_absent`, workers serialise on leased claim keys, and
-//! each crash window re-runs work instead of losing it (handlers are
-//! idempotent, so duplicates are safe).
+//! atomic `create_if_absent` (degrading to advisory put-settle-verify claims
+//! on backends that cannot enforce it), workers serialise on leased claim
+//! keys, and each crash window re-runs work instead of losing it (handlers
+//! are idempotent, so duplicates are safe).
 
 use std::{
     fmt,
@@ -29,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use angos_backoff::Backoff;
+use angos_backoff::{Backoff, jitter_below};
 use angos_storage::{Error as StorageError, ObjectStore, Page};
 
 use crate::{
@@ -180,12 +181,24 @@ impl From<StorageError> for Error {
     }
 }
 
-/// Precondition for `[global.job_queue]`: workers in separate processes
-/// serialise on claim keys, which requires an honest atomic `create_if_absent`
-/// from the backend. Probed once at startup with a scratch key: the second
-/// create of the same key must fail, or the provider would let two workers
-/// hold one claim.
-pub async fn ensure_claim_support(store: &Arc<dyn ObjectStore>) -> Result<(), Error> {
+/// How claim keys serialise workers on this backend, as determined by
+/// [`ensure_claim_support`]'s startup probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimMode {
+    /// The backend's `create_if_absent` is honest: one atomic create wins.
+    Atomic,
+    /// The backend cannot enforce the atomic create; claims fall back to a
+    /// put-settle-verify sequence that admits transient claim races.
+    Advisory,
+}
+
+/// Startup probe for `[global.job_queue]` claim serialisation: create a
+/// scratch key twice and read how the backend behaves. An honest backend
+/// (second create fails) gets [`ClaimMode::Atomic`]; a dishonest one degrades
+/// to [`ClaimMode::Advisory`] with a logged warning, since claims are an
+/// efficiency mechanism and correctness rests on handler idempotency. Probe
+/// IO errors still fail startup.
+pub async fn ensure_claim_support(store: &Arc<dyn ObjectStore>) -> Result<ClaimMode, Error> {
     let key = format!("{JOBS_ROOT}/claims/.probe-{}", Uuid::new_v4());
     let first = store
         .create_if_absent(&key, Bytes::from_static(b"probe"))
@@ -195,13 +208,16 @@ pub async fn ensure_claim_support(store: &Arc<dyn ObjectStore>) -> Result<(), Er
         .await;
     let _ = store.delete(&key).await;
     match (first, second) {
-        (Ok(true), Ok(false)) => Ok(()),
-        (Ok(_), Ok(_)) => Err(Error::Storage(
-            "[global.job_queue] needs atomic create-if-absent so workers serialize \
-             claims across processes, but the metadata store's backend did not \
-             enforce it; use a backend with conditional-write support"
-                .to_string(),
-        )),
+        (Ok(true), Ok(false)) => Ok(ClaimMode::Atomic),
+        (Ok(_), Ok(_)) => {
+            warn!(
+                "job queue: the metadata store's backend did not enforce atomic \
+                 create-if-absent; falling back to advisory claims: claim races admit \
+                 multiple workers, so idempotent jobs may execute more than once until \
+                 the losing claimants self-cancel within a refresh period"
+            );
+            Ok(ClaimMode::Advisory)
+        }
         (Err(e), _) | (_, Err(e)) => Err(Error::Storage(format!(
             "[global.job_queue] claim-support probe failed: {e}"
         ))),
@@ -552,6 +568,14 @@ pub const MAX_REPORTED_PENDING: u64 = 10_000;
 /// of the lease; a claimant finding a lapsed lease takes the key over.
 const CLAIM_TTL_SECS: u64 = 60;
 
+/// Advisory-claim settle floor: how long a racing claimant's PUT gets to land
+/// before the verify read decides the winner.
+const ADVISORY_SETTLE_BASE_MS: u64 = 100;
+
+/// Upper bound on the random extra settle, decorrelating claimants that PUT in
+/// the same instant so their verify reads do not tie.
+const ADVISORY_SETTLE_JITTER_MS: u64 = 200;
+
 /// The stored body of a claim key.
 #[derive(Serialize, Deserialize)]
 struct ClaimRecord {
@@ -688,6 +712,7 @@ impl ClaimOutcome {
 pub struct JobStore {
     store: Arc<dyn ObjectStore>,
     worker_id: String,
+    claim_mode: ClaimMode,
     retry_backoff: Backoff,
     claim_error_backoff: Backoff,
     consecutive_claim_errors: AtomicU32,
@@ -702,11 +727,17 @@ impl JobStore {
     ///
     /// `worker_id` is a structured-log tag that makes concurrent workers'
     /// `claim_one` actions distinguishable in aggregated logs. Pass an empty
-    /// string for producer-only instances. The retry policy defaults to
-    /// [`JobRetryPolicy::default`]; the durable queue overrides it with
-    /// [`Self::with_retry_policy`].
-    pub fn new(store: Arc<dyn ObjectStore>, worker_id: impl Into<String>) -> Self {
-        Self::with_retry_policy(store, worker_id, JobRetryPolicy::default())
+    /// string for producer-only instances. `claim_mode` is the probed claim
+    /// serialisation mode (see [`ensure_claim_support`]); pass
+    /// [`ClaimMode::Atomic`] when the backend is known honest. The retry
+    /// policy defaults to [`JobRetryPolicy::default`]; the durable queue
+    /// overrides it with [`Self::with_retry_policy`].
+    pub fn new(
+        store: Arc<dyn ObjectStore>,
+        worker_id: impl Into<String>,
+        claim_mode: ClaimMode,
+    ) -> Self {
+        Self::with_retry_policy(store, worker_id, claim_mode, JobRetryPolicy::default())
     }
 
     /// [`Self::new`] with an operator-configured retry policy (see
@@ -714,6 +745,7 @@ impl JobStore {
     pub fn with_retry_policy(
         store: Arc<dyn ObjectStore>,
         worker_id: impl Into<String>,
+        claim_mode: ClaimMode,
         retry: JobRetryPolicy,
     ) -> Self {
         let backoff = || {
@@ -725,6 +757,7 @@ impl JobStore {
         Self {
             store,
             worker_id: worker_id.into(),
+            claim_mode,
             retry_backoff: backoff(),
             claim_error_backoff: backoff(),
             consecutive_claim_errors: AtomicU32::new(0),
@@ -1012,13 +1045,13 @@ impl JobStore {
     async fn try_claim(&self, lock_key: &LockKey) -> Result<Option<JobClaim>, Error> {
         let key = job_claim_path(lock_key);
         let instance = Uuid::new_v4().to_string();
-        let mut stamped_until = self.put_claim_if_absent(&key, &instance).await?;
+        let mut stamped_until = self.acquire_claim(&key, &instance).await?;
         if stamped_until.is_none() {
             if !self.claim_is_stale(&key).await? {
                 return Ok(None);
             }
             self.store.delete(&key).await?;
-            stamped_until = self.put_claim_if_absent(&key, &instance).await?;
+            stamped_until = self.acquire_claim(&key, &instance).await?;
         }
         let Some(stamped_until) = stamped_until else {
             return Ok(None);
@@ -1038,6 +1071,65 @@ impl JobStore {
             lost,
             refresher: Some(refresher),
         }))
+    }
+
+    /// Acquire the claim record per the probed [`ClaimMode`]. Advisory
+    /// acquisition can let two claimants transiently coexist; that stays safe
+    /// because every downstream path (lease refresh, release, complete/fail)
+    /// detects a foreign instance in the record and stands down.
+    async fn acquire_claim(
+        &self,
+        key: &str,
+        instance: &str,
+    ) -> Result<Option<DateTime<Utc>>, Error> {
+        match self.claim_mode {
+            ClaimMode::Atomic => self.put_claim_if_absent(key, instance).await,
+            ClaimMode::Advisory => self.put_claim_advisory(key, instance).await,
+        }
+    }
+
+    /// Advisory acquisition for backends whose `create_if_absent` is not
+    /// honest: lose to a fresh foreign record, otherwise put our record,
+    /// settle, and win only if the record read back still carries this
+    /// instance.
+    async fn put_claim_advisory(
+        &self,
+        key: &str,
+        instance: &str,
+    ) -> Result<Option<DateTime<Utc>>, Error> {
+        match self.store.get(key).await {
+            Ok(raw) => {
+                if let Ok(record) = serde_json::from_slice::<ClaimRecord>(&raw)
+                    && record.instance != instance
+                    && record.expires_at >= Utc::now()
+                {
+                    return Ok(None);
+                }
+            }
+            Err(StorageError::NotFound) => {}
+            Err(e) => return Err(Error::from(e)),
+        }
+        let record = ClaimRecord {
+            instance: instance.to_string(),
+            expires_at: Utc::now() + ChronoDuration::seconds(self.claim_ttl_secs),
+        };
+        let body = Bytes::from(
+            serde_json::to_vec(&record)
+                .map_err(|e| Error::Storage(format!("claim serialization failed: {e}")))?,
+        );
+        self.store.put(key, body).await?;
+        sleep(Duration::from_millis(
+            ADVISORY_SETTLE_BASE_MS + jitter_below(ADVISORY_SETTLE_JITTER_MS + 1),
+        ))
+        .await;
+        match self.store.get(key).await {
+            Ok(raw) => Ok(serde_json::from_slice::<ClaimRecord>(&raw)
+                .ok()
+                .filter(|read_back| read_back.instance == instance)
+                .map(|read_back| read_back.expires_at)),
+            Err(StorageError::NotFound) => Ok(None),
+            Err(e) => Err(Error::from(e)),
+        }
     }
 
     /// Atomically create the claim record; returns its `expires_at` when the

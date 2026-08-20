@@ -519,7 +519,17 @@ pub async fn manifest_content_type(ctx: &GateContext) -> GateResult<()> {
         r#"{{"target":"sha256:{}","created_at":null,"accessed_at":null}}"#,
         pushed.manifest_digest
     );
-    ctx.store.put(&link_key, link).await?;
+    ctx.store.put(&link_key, link.clone()).await?;
+
+    // The served Content-Type comes from the revision side, so a true
+    // pre-media-type store has no revision record and a media-type-less
+    // revision link: seed that too.
+    let hash = &pushed.manifest_digest;
+    let record_key = format!("v2/ns/{namespace}!rev/sha256/{}/{hash}", &hash[..2]);
+    ctx.store.delete(&record_key).await?;
+    let revision_link_key =
+        format!("v2/repositories/{namespace}/_manifests/revisions/sha256/{hash}/link");
+    ctx.store.put(&revision_link_key, link).await?;
 
     // Before migrate the link has no media type, so HEAD serves no Content-Type.
     // The conformance configs disable the link cache, so this read cannot pin a

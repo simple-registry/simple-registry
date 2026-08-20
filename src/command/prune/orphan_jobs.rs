@@ -278,7 +278,7 @@ mod tests {
         },
         jobs::{
             JobState, Queue,
-            store::{FailOutcome, JobEnvelope, JobStore},
+            store::{ClaimMode, FailOutcome, JobEnvelope, JobStore},
         },
         policy::{RetentionPolicy, RetentionPolicyConfig, SystemClock},
         registry::{
@@ -309,6 +309,7 @@ mod tests {
         Arc::new(JobStore::new(
             metadata_store.object_store().clone(),
             "orphan-test",
+            ClaimMode::Atomic,
         ))
     }
 

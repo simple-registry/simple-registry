@@ -15,6 +15,11 @@ use crate::registry::{
     path_builder,
 };
 
+/// Cache TTL for revision and referrer records, immutable once written: a
+/// year stands in for "no expiry" (deletes invalidate explicitly) while
+/// staying safe for the memory backend's deadline arithmetic.
+const IMMUTABLE_LINK_CACHE_TTL_SECS: u64 = 365 * 24 * 3600;
+
 impl MetadataStore {
     /// Read the stored [`LinkMetadata`] for `link` within `namespace`. A tag
     /// resolves from its ordered entries, a revision or referrer from its
@@ -98,9 +103,15 @@ impl MetadataStore {
         if self.link_cache_ttl == 0 {
             return;
         }
+        // A tag re-resolves after the TTL; a revision or referrer record
+        // never mutates, so only an explicit delete invalidates it.
+        let ttl = match link {
+            LinkKind::Digest(_) | LinkKind::Referrer { .. } => IMMUTABLE_LINK_CACHE_TTL_SECS,
+            _ => self.link_cache_ttl,
+        };
         if let Some(cache) = &self.cache {
             let key = Self::cache_key(namespace, link);
-            if let Err(err) = cache.store(&key, metadata, self.link_cache_ttl).await {
+            if let Err(err) = cache.store(&key, metadata, ttl).await {
                 warn!("Failed to store link metadata in cache for {namespace}/{link}: {err}");
             }
         }

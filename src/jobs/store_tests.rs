@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone as _, Utc};
 use tempfile::TempDir;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use angos_storage::{
@@ -16,8 +17,8 @@ use angos_storage::{
 };
 
 use crate::jobs::store::{
-    ClaimCheck, ClaimedJob, CompleteOutcome, FailOutcome, JOBS_ROOT, JobEnvelope, JobQueueConfig,
-    JobRetryPolicy, JobState, JobStore, LockKey, MAX_REPORTED_PENDING, Queue,
+    ClaimCheck, ClaimMode, ClaimedJob, CompleteOutcome, FailOutcome, JOBS_ROOT, JobEnvelope,
+    JobQueueConfig, JobRetryPolicy, JobState, JobStore, LockKey, MAX_REPORTED_PENDING, Queue,
     STORAGE_KEY_PREFIX_LEN, ensure_claim_support, job_claim_path, job_lock_key_index_path,
     job_pending_path, make_storage_key, parse_lock_key_index, parse_not_before,
     serialize_dead_letter, serialize_lock_key_index, should_cancel_claim,
@@ -44,7 +45,7 @@ fn harness_memory() -> Harness {
 }
 
 fn build_harness(raw: Arc<dyn ObjectStore>) -> Harness {
-    let store = Arc::new(JobStore::new(raw.clone(), "test-worker"));
+    let store = Arc::new(JobStore::new(raw.clone(), "test-worker", ClaimMode::Atomic));
     Harness { store, raw }
 }
 
@@ -505,7 +506,7 @@ async fn orphan_index_transient_delete_failure_does_not_drop_enqueue() {
         index_path: index_path.clone(),
     };
     let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(inner.clone(), hook));
-    let store = Arc::new(JobStore::new(hooked, "test-worker"));
+    let store = Arc::new(JobStore::new(hooked, "test-worker", ClaimMode::Atomic));
 
     // Seed an orphan index (index present, pending file absent) through the
     // inner store so the fault hook does not intercept the fixture write.
@@ -568,7 +569,7 @@ async fn claim_rechecks_pending_under_lock_and_skips_a_vanished_job() {
             pending_reads: AtomicUsize::new(0),
         },
     ));
-    let store = Arc::new(JobStore::new(hooked, "test-worker"));
+    let store = Arc::new(JobStore::new(hooked, "test-worker", ClaimMode::Atomic));
 
     store
         .enqueue(dummy_envelope("cache.ns:sha256:vanish"))
@@ -601,7 +602,7 @@ async fn claim_is_skipped_when_the_dedup_index_cannot_be_retired() {
             index_path: index_path.clone(),
         },
     ));
-    let store = Arc::new(JobStore::new(hooked, "test-worker"));
+    let store = Arc::new(JobStore::new(hooked, "test-worker", ClaimMode::Atomic));
 
     store
         .enqueue(dummy_envelope(lock_key.as_str()))
@@ -1427,7 +1428,11 @@ async fn ensure_claim_support_probe_succeeds_and_cleans_up() {
         Arc::new(MemoryObjectStore::new()),
     ];
     for raw in backends {
-        ensure_claim_support(&raw).await.expect("probe");
+        assert_eq!(
+            ensure_claim_support(&raw).await.expect("probe"),
+            ClaimMode::Atomic,
+            "fs and memory backends are honest and must probe as atomic",
+        );
         let page = raw
             .list(&format!("{JOBS_ROOT}/claims/"), 10, None)
             .await
@@ -1438,6 +1443,173 @@ async fn ensure_claim_support_probe_succeeds_and_cleans_up() {
             page.items
         );
     }
+}
+
+/// Deletes the key ahead of every write, so `create_if_absent` never sees an
+/// existing object: a fake backend whose atomic create is dishonest.
+struct DishonestCreate {
+    inner: Arc<dyn ObjectStore>,
+}
+
+#[async_trait]
+impl StoreHook for DishonestCreate {
+    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+        if let StoreOp::Put { key, .. } = op {
+            let _ = self.inner.delete(key).await;
+        }
+        Ok(())
+    }
+}
+
+/// A backend whose second create of an existing key succeeds must no longer
+/// fail startup: the probe degrades it to advisory claims.
+#[tokio::test]
+async fn a_dishonest_backend_probes_as_advisory() {
+    metrics_provider::init_for_tests();
+    let inner: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+    let hooked: Arc<dyn ObjectStore> =
+        Arc::new(HookedStore::new(inner.clone(), DishonestCreate { inner }));
+    assert_eq!(
+        ensure_claim_support(&hooked)
+            .await
+            .expect("a dishonest backend must probe cleanly"),
+        ClaimMode::Advisory,
+    );
+}
+
+/// Gates one advisory claimant's claim-key ops on semaphores so its interleave
+/// with the other claimant is deterministic instead of timing-dependent.
+struct AdvisoryRaceGate {
+    claim_key: String,
+    gets: AtomicUsize,
+    signal_before_put: Option<Arc<Semaphore>>,
+    wait_before_put: Option<Arc<Semaphore>>,
+    signal_before_verify: Option<Arc<Semaphore>>,
+    wait_before_verify: Option<Arc<Semaphore>>,
+}
+
+#[async_trait]
+impl StoreHook for AdvisoryRaceGate {
+    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+        match op {
+            StoreOp::Put { key, .. } if key == self.claim_key => {
+                if let Some(gate) = &self.signal_before_put {
+                    gate.add_permits(1);
+                }
+                if let Some(gate) = &self.wait_before_put {
+                    gate.acquire().await.expect("gate").forget();
+                }
+            }
+            // The claim key's second read is the post-settle verify; the
+            // first is the pre-read.
+            StoreOp::Get { key }
+                if key == self.claim_key && self.gets.fetch_add(1, Ordering::SeqCst) == 1 =>
+            {
+                if let Some(gate) = &self.signal_before_verify {
+                    gate.add_permits(1);
+                }
+                if let Some(gate) = &self.wait_before_verify {
+                    gate.acquire().await.expect("gate").forget();
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// Advisory race, driven deterministically: both claimants pre-read the key
+/// as absent, A puts its record first, B overwrites it before A's verify.
+/// A's verify must lose, B's must win, and exactly one claimant proceeds.
+#[tokio::test]
+async fn advisory_claim_race_admits_exactly_one_winner() {
+    metrics_provider::init_for_tests();
+    let inner: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+    let claim_key = job_claim_path(&lock_key("cache.ns:sha256:advisory-race"));
+
+    // Gate order: B pre-reads, A puts, B puts, then both verify.
+    let b_preread_done = Arc::new(Semaphore::new(0));
+    let a_put_done = Arc::new(Semaphore::new(0));
+    let b_put_done = Arc::new(Semaphore::new(0));
+
+    let hooked_a: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+        inner.clone(),
+        AdvisoryRaceGate {
+            claim_key: claim_key.clone(),
+            gets: AtomicUsize::new(0),
+            signal_before_put: None,
+            wait_before_put: Some(b_preread_done.clone()),
+            signal_before_verify: Some(a_put_done.clone()),
+            wait_before_verify: Some(b_put_done.clone()),
+        },
+    ));
+    let hooked_b: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+        inner.clone(),
+        AdvisoryRaceGate {
+            claim_key: claim_key.clone(),
+            gets: AtomicUsize::new(0),
+            signal_before_put: Some(b_preread_done),
+            wait_before_put: Some(a_put_done),
+            signal_before_verify: Some(b_put_done),
+            wait_before_verify: None,
+        },
+    ));
+
+    let a = {
+        let store = JobStore::new(hooked_a, "worker-a", ClaimMode::Advisory);
+        let key = claim_key.clone();
+        tokio::spawn(async move { store.put_claim_advisory(&key, "instance-a").await })
+    };
+    let b = {
+        let store = JobStore::new(hooked_b, "worker-b", ClaimMode::Advisory);
+        let key = claim_key.clone();
+        tokio::spawn(async move { store.put_claim_advisory(&key, "instance-b").await })
+    };
+
+    let a_won = a.await.expect("join a").expect("a acquire").is_some();
+    let b_won = b.await.expect("join b").expect("b acquire").is_some();
+    assert!(!a_won, "A's verify must lose to B's overwrite");
+    assert!(b_won, "B's verify must find its own record and win");
+
+    let body = inner.get(&claim_key).await.expect("claim record");
+    let record: serde_json::Value = serde_json::from_slice(&body).expect("claim json");
+    assert_eq!(
+        record["instance"], "instance-b",
+        "the surviving record must carry the winner's instance"
+    );
+}
+
+/// Advisory mode end to end: a claim is acquired via put-settle-verify, its
+/// release on complete frees the key, and the next claim wins again.
+#[tokio::test]
+async fn advisory_mode_claims_completes_and_reclaims() {
+    metrics_provider::init_for_tests();
+    let raw: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+    let store = Arc::new(JobStore::new(raw, "advisory-worker", ClaimMode::Advisory));
+
+    store
+        .enqueue(dummy_envelope("cache.ns:sha256:advisory"))
+        .await
+        .expect("enqueue");
+    let claimed = store
+        .claim_one(Queue::Cache)
+        .await
+        .expect("claim")
+        .claimed
+        .expect("Some");
+    store.complete(claimed).await.expect("complete");
+
+    store
+        .enqueue(dummy_envelope("cache.ns:sha256:advisory"))
+        .await
+        .expect("re-enqueue");
+    let reclaimed = store
+        .claim_one(Queue::Cache)
+        .await
+        .expect("re-claim")
+        .claimed
+        .expect("the released key must be claimable again");
+    store.complete(reclaimed).await.expect("complete 2");
 }
 
 /// Fails the first delete under the pending prefix, modelling a transient
@@ -1473,7 +1645,7 @@ async fn complete_cleanup_failure_fails_over_to_retry() {
             remaining: AtomicUsize::new(1),
         },
     ));
-    let store = Arc::new(JobStore::new(hooked, "test-worker"));
+    let store = Arc::new(JobStore::new(hooked, "test-worker", ClaimMode::Atomic));
 
     store
         .enqueue(dummy_envelope("cache.ns:sha256:cleanup"))
@@ -1529,6 +1701,7 @@ async fn claim_ttl_knob_stamps_the_claim_lease() {
     let store = Arc::new(JobStore::with_retry_policy(
         raw.clone(),
         "test-worker",
+        ClaimMode::Atomic,
         JobRetryPolicy {
             claim_ttl_secs: 7,
             ..JobRetryPolicy::default()

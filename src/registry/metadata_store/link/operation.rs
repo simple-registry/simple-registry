@@ -1,5 +1,7 @@
 //! Public link-mutation operation type.
 
+use std::collections::BTreeMap;
+
 use angos_oci::{Descriptor, Digest, MediaType};
 
 use crate::registry::metadata_store::LinkKind;
@@ -23,9 +25,10 @@ pub enum ReferencePolicy {
 
 /// A single link mutation submitted to [`crate::registry::metadata_store::MetadataStore::update_links`].
 /// `Create` carries the target digest and optional referrer / media-type /
-/// descriptor metadata; `Delete` carries an optional referrer qualification so
-/// tracked links (layers, configs) decrement their reference count rather than
-/// being removed outright.
+/// descriptor metadata, plus the manifest's size and annotations for the tag
+/// entries that persist them; `Delete` carries an optional referrer
+/// qualification so tracked links (layers, configs) decrement their reference
+/// count rather than being removed outright.
 #[derive(Debug, Clone)]
 pub enum LinkOperation {
     Create {
@@ -33,6 +36,8 @@ pub enum LinkOperation {
         target: Digest,
         referrer: Option<Digest>,
         media_type: Option<MediaType>,
+        size: Option<u64>,
+        annotations: Option<BTreeMap<String, String>>,
         descriptor: Option<Box<Descriptor>>,
     },
     Delete {
@@ -49,6 +54,8 @@ impl LinkOperation {
             target,
             referrer: None,
             media_type: None,
+            size: None,
+            annotations: None,
             descriptor: None,
         }
     }
@@ -60,21 +67,28 @@ impl LinkOperation {
             target,
             referrer: Some(referrer),
             media_type: None,
+            size: None,
+            annotations: None,
             descriptor: None,
         }
     }
 
-    /// Creates a link carrying an optional `media_type`.
+    /// Creates a link carrying an optional `media_type`, plus the manifest's
+    /// size and annotations where a tag entry persists them for tag history.
     pub fn create_with_media_type(
         link: LinkKind,
         target: Digest,
         media_type: Option<MediaType>,
+        size: Option<u64>,
+        annotations: Option<BTreeMap<String, String>>,
     ) -> Self {
         Self::Create {
             link,
             target,
             referrer: None,
             media_type,
+            size,
+            annotations,
             descriptor: None,
         }
     }
@@ -90,6 +104,8 @@ impl LinkOperation {
             target,
             referrer: None,
             media_type: None,
+            size: None,
+            annotations: None,
             descriptor: Some(descriptor),
         }
     }

@@ -167,7 +167,7 @@ operation_attempt_timeout_secs = 300
 - Higher latency than local disk
 - Network dependency
 - Potential egress costs
-- Requires a provider with honest conditional writes (`If-None-Match: *`), which the job queue probes at startup
+- The job queue probes conditional writes (`If-None-Match: *`) at startup; a provider that does not enforce them degrades to advisory claims, where a claim race may run an idempotent job more than once
 
 ### Compatible Services
 
@@ -514,8 +514,9 @@ The durable job queue serialises workers with leased claim keys under
 `If-None-Match: *` on S3) takes the key, the holder's refresh task keeps the
 lease alive, and a lapsed lease is taken over by the next claimant. Enqueue,
 complete, and fail are ordered idempotent writes with no transaction; a
-startup probe verifies the backend's create-if-absent is honest before
-`[global.job_queue]` is served. A blob upload session persists as its assembled
+startup probe checks the backend's create-if-absent is honest before
+`[global.job_queue]` is served, degrading claims to an advisory
+put-settle-verify sequence (with a logged warning) when it is not. A blob upload session persists as its assembled
 `data` object plus one `session.json` record (last activity, committed offset,
 hasher checkpoint) under `v2/repositories/<namespace>/_uploads/<uuid>/`;
 `complete` moves the staged blob to its content-addressed key as an idempotent

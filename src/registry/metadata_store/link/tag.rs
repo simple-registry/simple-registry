@@ -7,7 +7,7 @@
 //! contend. A tag with no entries falls back to the legacy `current/link`,
 //! which scrub converts; a tombstone entry shadows any legacy link.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -24,12 +24,33 @@ use crate::registry::{
     path_builder,
 };
 
-/// The stored body of one tag entry. The hot path resolves from key names
-/// alone; the body carries what the key cannot.
+/// The stored body of one tag entry: the descriptor fields a future tag
+/// history needs (distribution-spec PR 606). The hot path resolves from key
+/// names alone; the body carries what the key cannot.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TagEntryBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<MediaType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<BTreeMap<String, String>>,
+}
+
+/// Annotation keys under the distribution spec's reserved prefix never
+/// persist into a tag entry.
+const RESERVED_ANNOTATION_PREFIX: &str = "org.opencontainers.distribution";
+
+/// The manifest annotations a `set` entry stores: the pushed set minus the
+/// reserved-prefix keys, `None` when nothing survives.
+fn persisted_annotations(
+    annotations: Option<BTreeMap<String, String>>,
+) -> Option<BTreeMap<String, String>> {
+    let filtered: BTreeMap<String, String> = annotations?
+        .into_iter()
+        .filter(|(key, _)| !key.starts_with(RESERVED_ANNOTATION_PREFIX))
+        .collect();
+    (!filtered.is_empty()).then_some(filtered)
 }
 
 /// The resolved winner of a tag's newest entry group. Its fields rebuild the
@@ -42,13 +63,16 @@ struct TagWinner {
 
 /// The mutation appending one `set` entry. The entry key carries the authored
 /// timestamp (truncated to the millisecond the ordinal encodes) and target;
-/// the body carries the media type.
+/// the body carries the manifest's descriptor fields, reserved-prefix
+/// annotations filtered out.
 pub fn tag_set_mutation(
     namespace: &Namespace,
     tag: &Tag,
     created_at: DateTime<Utc>,
     target: &Digest,
     media_type: Option<MediaType>,
+    size: Option<u64>,
+    annotations: Option<BTreeMap<String, String>>,
 ) -> Result<Mutation, serde_json::Error> {
     let key = path_builder::tag_entry_path(
         namespace,
@@ -57,7 +81,11 @@ pub fn tag_set_mutation(
         false,
         target,
     );
-    let body = serde_json::to_vec(&TagEntryBody { media_type })?;
+    let body = serde_json::to_vec(&TagEntryBody {
+        media_type,
+        size,
+        annotations: persisted_annotations(annotations),
+    })?;
     Ok(Mutation::Put {
         key,
         body: Bytes::from(body),
@@ -65,13 +93,14 @@ pub fn tag_set_mutation(
 }
 
 /// The mutation appending one `del` tombstone. It names the digest the tag
-/// held immediately before deletion, which tag history requires.
+/// held immediately before deletion and copies the superseded winner's
+/// descriptor `body`, which tag history requires.
 pub fn tag_del_mutation(
     namespace: &Namespace,
     tag: &Tag,
     created_at: DateTime<Utc>,
     prior_target: &Digest,
-    media_type: Option<MediaType>,
+    body: &TagEntryBody,
 ) -> Result<Mutation, serde_json::Error> {
     let key = path_builder::tag_entry_path(
         namespace,
@@ -80,7 +109,7 @@ pub fn tag_del_mutation(
         true,
         prior_target,
     );
-    let body = serde_json::to_vec(&TagEntryBody { media_type })?;
+    let body = serde_json::to_vec(body)?;
     Ok(Mutation::Put {
         key,
         body: Bytes::from(body),
@@ -92,7 +121,10 @@ impl MetadataStore {
     /// decides (highest digest wins the same-millisecond tie, and a deletion
     /// does not beat an equal-timestamped push of the same digest); a
     /// tombstone winner reads as `NotFound` and shadows any legacy link; a
-    /// tag with no entries falls back to the legacy `current/link`.
+    /// tag with no entries falls back to the legacy `current/link`. The
+    /// winner comes from key names alone, so `media_type` is `None`: serving
+    /// paths take it from the revision record they read anyway, and only
+    /// [`Self::read_tag_winner_body`] pays for the entry body.
     pub async fn resolve_tag(
         &self,
         namespace: &Namespace,
@@ -100,31 +132,42 @@ impl MetadataStore {
     ) -> Result<LinkMetadata, Error> {
         match self.resolve_tag_winner(namespace, tag).await? {
             Some(winner) if winner.deletion => Err(Error::NotFound),
-            Some(winner) => {
-                let entry_path = path_builder::tag_entry_path(
-                    namespace,
-                    tag,
-                    winner.ord,
-                    winner.deletion,
-                    &winner.digest,
-                );
-                let media_type = match self.object_store().get(&entry_path).await {
-                    Ok(body) => serde_json::from_slice::<TagEntryBody>(&body)
-                        .ok()
-                        .and_then(|body| body.media_type),
-                    Err(StorageError::NotFound) => None,
-                    Err(e) => return Err(e.into()),
-                };
-                Ok(LinkMetadata {
-                    target: winner.digest,
-                    created_at: path_builder::tag_ord_ts(winner.ord),
-                    accessed_at: None,
-                    referenced_by: HashSet::new(),
-                    media_type,
-                    descriptor: None,
-                })
-            }
+            Some(winner) => Ok(LinkMetadata {
+                target: winner.digest,
+                created_at: path_builder::tag_ord_ts(winner.ord),
+                accessed_at: None,
+                referenced_by: HashSet::new(),
+                media_type: None,
+                descriptor: None,
+            }),
             None => self.read_legacy_tag_link(namespace, tag).await,
+        }
+    }
+
+    /// Targeted read of the resolved winner's stored entry body, for the one
+    /// consumer that needs it (the tombstone copies its descriptor fields). A
+    /// tag answered by the legacy link has no entry; its recorded media type
+    /// stands in.
+    pub async fn read_tag_winner_body(
+        &self,
+        namespace: &Namespace,
+        tag: &Tag,
+        metadata: &LinkMetadata,
+    ) -> Result<TagEntryBody, Error> {
+        let entry_path = path_builder::tag_entry_path(
+            namespace,
+            tag,
+            path_builder::tag_ord(metadata.created_at),
+            false,
+            &metadata.target,
+        );
+        match self.object_store().get(&entry_path).await {
+            Ok(body) => Ok(serde_json::from_slice(&body).unwrap_or_default()),
+            Err(StorageError::NotFound) => Ok(TagEntryBody {
+                media_type: metadata.media_type.clone(),
+                ..TagEntryBody::default()
+            }),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -187,6 +230,7 @@ impl MetadataStore {
         );
         let body = serde_json::to_vec(&TagEntryBody {
             media_type: metadata.media_type.clone(),
+            ..TagEntryBody::default()
         })?;
         self.object_store()
             .put(&key, Bytes::from(body))
@@ -268,6 +312,7 @@ impl MetadataStore {
         );
         let body = serde_json::to_vec(&TagEntryBody {
             media_type: metadata.media_type,
+            ..TagEntryBody::default()
         })?;
         self.object_store()
             .put(&entry_key, Bytes::from(body))

@@ -42,7 +42,7 @@ use crate::{
     jobs::Queue,
     jobs::{
         runner::execute_one,
-        store::{JobHandler, JobStore},
+        store::{ClaimMode, JobHandler, JobStore},
     },
     registry::{
         blob_store::BlobStore, metadata_store::MetadataStore,
@@ -343,9 +343,12 @@ fn build_in_process_queue(
     replication_concurrency: NonZeroUsize,
     event_dispatcher: Option<Arc<EventDispatcher>>,
 ) -> (Arc<JobStore>, CancellationToken) {
+    // In-process draining is not preceded by the startup probe; atomic mode
+    // preserves the historical unconditional `create_if_absent` behaviour.
     let job_store: Arc<JobStore> = Arc::new(JobStore::new(
         metadata_store.object_store().clone(),
         "in-process",
+        ClaimMode::Atomic,
     ));
 
     let cache_handler: Arc<dyn JobHandler> = Arc::new(CacheFillJobHandler::new(
@@ -469,7 +472,7 @@ mod in_process_replication_tests {
     use crate::{
         jobs::{
             Queue,
-            store::{JobEnvelope, JobStore},
+            store::{ClaimMode, JobEnvelope, JobStore},
         },
         registry::{
             Registry, RegistryConfig, Repository,
@@ -603,7 +606,11 @@ mod in_process_replication_tests {
         .await
         .unwrap_or(false);
 
-        let inspector = JobStore::new(metadata_store.object_store().clone(), "inspector");
+        let inspector = JobStore::new(
+            metadata_store.object_store().clone(),
+            "inspector",
+            ClaimMode::Atomic,
+        );
 
         if !saw_put {
             let received = mock_server.received_requests().await.unwrap_or_default();

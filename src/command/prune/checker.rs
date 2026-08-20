@@ -632,7 +632,7 @@ mod tests {
             dispatcher::EventDispatcher,
             event::EventKind,
         },
-        jobs::store::JobStore,
+        jobs::store::{ClaimMode, JobStore},
         policy::{CelRule, RetentionPolicy, RetentionPolicyConfig, SystemClock},
         registry::{
             Registry, RegistryConfig,
@@ -1270,6 +1270,7 @@ mod tests {
         let job_store = Arc::new(JobStore::new(
             metadata_store.object_store().clone(),
             "retention-test",
+            ClaimMode::Atomic,
         ));
         let registry = Registry::new(
             test_case.blob_store(),

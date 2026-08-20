@@ -78,10 +78,11 @@ pub async fn build_registry(
     // so no second backend is wired.
     let pending = if let Some(jq_config) = &config.global.job_queue {
         let storage = metadata_store.object_store().clone();
-        job_store::ensure_claim_support(&storage).await?;
+        let claim_mode = job_store::ensure_claim_support(&storage).await?;
         let job_store: Arc<JobStore> = Arc::new(JobStore::with_retry_policy(
             storage,
             "server",
+            claim_mode,
             jq_config.retry_policy(),
         ));
         registry_config.job_queue = Some(job_store.clone());

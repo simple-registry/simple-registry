@@ -383,7 +383,11 @@ mod tests {
             check::NamespaceChecker,
             executor::{ActionSink, Executor},
         },
-        jobs::{Queue, runner::execute_one, store::JobStore},
+        jobs::{
+            Queue,
+            runner::execute_one,
+            store::{ClaimMode, JobStore},
+        },
         registry::{
             Repository,
             metadata_store::{LinkKind, LinkOperation},
@@ -610,6 +614,7 @@ mod tests {
         let job_store = Arc::new(JobStore::new(
             metadata_store.object_store().clone(),
             "scrub-test",
+            ClaimMode::Atomic,
         ));
 
         let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone());
@@ -1404,6 +1409,7 @@ mod tests {
         let job_store = Arc::new(JobStore::new(
             metadata_store.object_store().clone(),
             "scrub-test",
+            ClaimMode::Atomic,
         ));
 
         let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone());
@@ -1527,6 +1533,7 @@ mod tests {
         let job_store = Arc::new(JobStore::new(
             metadata_store.object_store().clone(),
             "scrub-test",
+            ClaimMode::Atomic,
         ));
 
         let checker = ReplicationChecker::new(metadata_store.clone(), resolver.clone());

@@ -189,7 +189,8 @@ impl Registry {
         let link = self
             .read_manifest_link(namespace, &blob_link, client)
             .await?;
-        self.probe_revision_for_tag(namespace, reference, &link.target)
+        let revision = self
+            .probe_revision_for_tag(namespace, reference, &link.target)
             .await?;
 
         // A missing body is a genuine 404; a backend fault is not, and must not
@@ -209,7 +210,7 @@ impl Registry {
             })?;
 
         Ok(ManifestMeta {
-            media_type: link.media_type,
+            media_type: revision.map_or(link.media_type, |r| r.media_type),
             digest: link.target,
             size,
         })
@@ -379,31 +380,32 @@ impl Registry {
             self.probe_revision_for_tag(namespace, reference, &link.target),
             self.blob_store.read(&link.target),
         );
-        revision?;
         Ok(ManifestBody {
-            media_type: link.media_type,
+            media_type: revision?.map_or(link.media_type, |r| r.media_type),
             digest: link.target,
             content: content?,
         })
     }
 
-    /// `Err(ManifestUnknown)` when a tag reference resolves to a revision
-    /// that no longer exists; a digest reference already read the revision.
+    /// The revision's metadata when `reference` is a tag, which also supplies
+    /// the served media type (tag resolution carries none); `None` for a
+    /// digest reference, whose link read was the revision record already.
+    /// `Err(ManifestUnknown)` when the tag's revision no longer exists.
     async fn probe_revision_for_tag(
         &self,
         namespace: &Namespace,
         reference: &Reference,
         target: &Digest,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<LinkMetadata>, Error> {
         if !matches!(reference, Reference::Tag(_)) {
-            return Ok(());
+            return Ok(None);
         }
         match self
             .metadata_store
             .read_link_reference(namespace, &LinkKind::Digest(target.clone()))
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(metadata) => Ok(Some(metadata)),
             Err(Error::NotFound) => Err(Error::ManifestUnknown),
             Err(e) => Err(e),
         }

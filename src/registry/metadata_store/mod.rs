@@ -12,7 +12,7 @@ mod access_time;
 mod blob_index;
 mod catalog;
 mod gc;
-mod link;
+pub mod link;
 mod mutation;
 
 #[cfg(test)]

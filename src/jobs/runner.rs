@@ -94,7 +94,7 @@ mod tests {
         jobs::Queue,
         jobs::{
             runner::{execute_one, run_once},
-            store::{ClaimedJob, Error, JobEnvelope, JobHandler, JobStore},
+            store::{ClaimMode, ClaimedJob, Error, JobEnvelope, JobHandler, JobStore},
         },
         metrics_provider,
     };
@@ -111,7 +111,7 @@ mod tests {
     fn make_store(dir: &TempDir) -> Arc<JobStore> {
         let object: Arc<dyn ObjectStore> =
             Arc::new(StorageFsBackend::builder(dir.path().to_str().expect("valid path")).build());
-        Arc::new(JobStore::new(object, "test-worker"))
+        Arc::new(JobStore::new(object, "test-worker", ClaimMode::Atomic))
     }
 
     #[tokio::test]

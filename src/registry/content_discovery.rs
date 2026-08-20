@@ -795,6 +795,8 @@ mod tests {
             target: manifest.clone(),
             referrer: None,
             media_type: None,
+            size: None,
+            annotations: None,
             descriptor: descriptor.map(Box::new),
         }];
         m.update_links(namespace, &ops).await.unwrap();

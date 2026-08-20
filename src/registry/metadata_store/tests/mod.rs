@@ -2000,6 +2000,8 @@ async fn create_link_with_media_type(
             link.clone(),
             digest.clone(),
             Some(MediaType::new(media_type).unwrap()),
+            None,
+            None,
         )],
     )
     .await

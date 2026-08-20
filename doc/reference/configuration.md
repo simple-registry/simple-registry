@@ -146,12 +146,13 @@ whichever metadata uses), under a hardcoded top-level `_jobs/` prefix. There is
 no job-queue-level backend, credential, or prefix setting: the section accepts
 only the tunables below.
 
-> **An honest atomic create is required.** The durable queue is drained by
-> separate processes that serialise on leased claim keys created atomically
-> (`link(2)` on FS, `If-None-Match: *` on S3). A startup probe creates a
-> scratch claim key twice and refuses the backend if the second create
-> succeeds, so a provider that cannot enforce it is rejected before jobs are
-> served.
+> **An honest atomic create is preferred and probed at startup.** The durable
+> queue is drained by separate processes that serialise on leased claim keys
+> created atomically (`link(2)` on FS, `If-None-Match: *` on S3). A startup
+> probe creates a scratch claim key twice; a backend where the second create
+> succeeds cannot enforce the atomic create and degrades to advisory claims
+> with a logged warning, where a claim race may run an idempotent job more
+> than once. Correctness is unaffected either way.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
