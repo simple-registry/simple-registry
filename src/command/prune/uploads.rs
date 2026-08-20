@@ -1,8 +1,6 @@
-//! The `-u` window sweeps: upload-lifecycle reclamation driven by `angos
-//! prune`. Upload sessions, orphan S3 multiparts, and byteless blob-index
-//! shard entries (a grant written by an upload whose bytes never landed).
-//! Grant-only blob ownership is a retention subject instead; see
-//! `checker::sweep_orphan_grants`.
+//! The `-u` window sweeps: upload sessions, orphan S3 multiparts, and byteless
+//! blob-index shard entries. Grant-only blob ownership is a retention subject
+//! instead; see `checker::sweep_orphan_grants`.
 
 use std::sync::Arc;
 
@@ -30,11 +28,10 @@ use crate::{
 };
 
 enum UploadVerdict {
-    /// Upload state is broken (missing summary or corrupted data): delete.
+    /// Missing summary or corrupted data.
     DeleteInconsistent,
-    /// Upload age exceeds the window: delete.
+    /// Age exceeds the window.
     DeleteObsolete,
-    /// Upload is healthy or the failure was transient: leave alone.
     Keep,
 }
 
@@ -48,15 +45,14 @@ fn classify_upload(
         Ok(s) if now.signed_duration_since(s.started_at) > window => UploadVerdict::DeleteObsolete,
         Ok(_) => UploadVerdict::Keep,
         // A corrupt record never decodes on a retry, so the session can never
-        // complete and is safe to reap.
+        // complete and is safe to reap at any age.
         Err(
             RegistryError::BlobUploadUnknown
             | RegistryError::NotFound
             | RegistryError::BlobUnknown
             | RegistryError::Corrupt(_),
         ) => UploadVerdict::DeleteInconsistent,
-        // A transient backend read is kept: deleting on one would destroy a
-        // live upload.
+        // Deleting on a transient read failure would destroy a live upload.
         Err(_) => UploadVerdict::Keep,
     }
 }
@@ -129,11 +125,10 @@ pub async fn sweep_orphan_multiparts(
     Ok(())
 }
 
-/// Remove blob-index entries that reference byteless blobs once the shard is
-/// older than the window: a grant written by an upload whose bytes never
-/// landed (or whose bytes were reclaimed out-of-band). A pull-through grant
-/// whose lazy fill never completed is purged too; the next pull re-fills the
-/// bytes and re-grants.
+/// Remove blob-index entries referencing byteless blobs once the shard is
+/// older than the window: a grant whose bytes never landed or were reclaimed
+/// out-of-band. A pull-through grant is purged too, since the next pull
+/// re-fills and re-grants.
 pub async fn sweep_byteless_shards(
     blob_store: &Arc<BlobStore>,
     metadata_store: &Arc<MetadataStore>,
@@ -169,7 +164,6 @@ pub async fn sweep_byteless_shards(
     Ok(())
 }
 
-/// The state a single byteless-shard check shares across the whole sweep.
 struct ShardSweep<'a> {
     blob_store: &'a Arc<BlobStore>,
     metadata_store: &'a Arc<MetadataStore>,
@@ -198,8 +192,8 @@ async fn sweep_one_shard(
         Err(e) => return Err(RegistryError::from(e).into()),
     };
     let Some(last_modified) = meta.last_modified else {
-        // No timestamp to gate on: keep, rather than risk racing an upload
-        // that granted before its bytes landed.
+        // No timestamp to gate on, so keep rather than race an upload that
+        // granted before its bytes landed.
         return Ok(());
     };
     if ctx.now.signed_duration_since(last_modified) < ctx.window {
@@ -213,8 +207,8 @@ async fn sweep_one_shard(
         .await?;
     for link in links {
         // The walked key's age gate does not cover its siblings: a fresh
-        // `_own` granted before its bytes land is a normal in-flight state,
-        // so each entry is gated on its own reference key.
+        // `_own` granted before its bytes land is normal, so each entry is
+        // gated on its own reference key.
         if entry_is_young(ctx, &path_builder::blob_ref_path(blob, &namespace, &link)).await? {
             continue;
         }
@@ -230,8 +224,8 @@ async fn sweep_one_shard(
 }
 
 /// Whether an entry's reference key is younger than the sweep window. A
-/// missing timestamp reads as young; a gone key reads as old, since its only
-/// record is the already-gated legacy shard.
+/// missing timestamp reads as young; an absent key reads as old, its only
+/// record being the already-gated legacy shard.
 async fn entry_is_young(ctx: &ShardSweep<'_>, ref_key: &str) -> Result<bool, Error> {
     let meta = match ctx.metadata_store.object_store().head(ref_key).await {
         Ok(meta) => meta,
@@ -375,9 +369,8 @@ mod tests {
     }
 
     /// The sweep ages both session shapes on their own record: a backdated
-    /// `session.json` and a backdated legacy `startedat` are reaped past the
-    /// window, while a fresh legacy session survives it (a fresh new-shape
-    /// session is covered above).
+    /// `session.json` and a backdated legacy `startedat` are reaped, a fresh
+    /// legacy session is not.
     #[tokio::test]
     async fn sweep_ages_both_session_shapes() {
         for_each_backend(async |test_case| {
@@ -559,10 +552,8 @@ mod tests {
         );
     }
 
-    /// The walked key's age gate does not vouch for its siblings: an `_own`
-    /// grant landed after the sweep's cutoff (a normal state for an upload
-    /// whose bytes are still in flight) must survive the purge its old
-    /// sibling entry triggers.
+    /// An `_own` grant landed after the sweep's cutoff must survive the purge
+    /// its old sibling entry triggers.
     #[tokio::test]
     async fn byteless_purge_keeps_young_sibling_own_key() {
         for_each_backend(async |test_case| {
@@ -580,9 +571,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            // A sweep cutoff between the two puts: the layer entry reads old
-            // and the later `_own` grant reads young. The sleeps keep both
-            // clear of the cutoff on second-granularity store timestamps.
+            // A cutoff between the two puts: the layer entry reads old, the
+            // later `_own` grant young. The sleeps keep both clear of the
+            // cutoff on second-granularity store timestamps.
             sleep(StdDuration::from_millis(1500)).await;
             let window = Duration::hours(1);
             let now = Utc::now() + window;

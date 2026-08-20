@@ -1,8 +1,7 @@
-//! Blob-index reference validation. Legacy `refs/{ns}.json` shards are
-//! converted into per-link reference keys; each reference key is then probed
-//! against the link that backs it. Runs after the link pass, so every grant a
-//! manifest implies has been re-issued before entries are pruned against the
-//! links.
+//! Blob-index reference validation: legacy `refs/{ns}.json` shards become
+//! per-link reference keys, each probed against the link backing it. Runs
+//! after the link pass, so every grant a manifest implies has been re-issued
+//! before entries are pruned against the links.
 
 use std::collections::HashSet;
 
@@ -23,11 +22,9 @@ use crate::{
 };
 
 impl Validator {
-    /// Convert one legacy `refs/{ns}.json` shard of `digest`'s blob index
-    /// into reference keys. Content defects keep their old handling (corrupt
-    /// and empty shards are deleted, an invalid name is left alone); a healthy
-    /// shard is rewritten as keys and deleted, keys first, and its entries are
-    /// validated by the reference-key walk that follows.
+    /// Convert one legacy `refs/{ns}.json` shard of `digest`'s blob index into
+    /// reference keys, keys first. Corrupt and empty shards are deleted, an
+    /// invalidly named one is left alone.
     pub async fn validate_shard(
         &self,
         key: &str,
@@ -40,10 +37,9 @@ impl Validator {
             Err(e) => return Err(RegistryError::from(e).into()),
         };
         let Ok(links) = serde_json::from_slice::<HashSet<LinkKind>>(&raw) else {
-            // Unreadable shard content: delete; the next run's link pass
-            // re-grants every entry a manifest implies (a grant cannot land
-            // on unreadable shard content this run). Hold the blob out of
-            // this run's GC so the vanished references do not read as orphan.
+            // No grant can land on unreadable shard content, so the next run's
+            // link pass re-grants instead. Hold the blob out of this run's GC
+            // so the vanished references do not read as orphan.
             warn!("scrub: blob-index shard '{key}' does not parse; deleting");
             self.hold_blob_gc(digest);
             return self.delete_corrupt(WalkedStore::Metadata, key).await;
@@ -57,14 +53,13 @@ impl Validator {
             return self.delete_corrupt(WalkedStore::Metadata, key).await;
         }
         // Witness for blob GC, which otherwise decides from a per-blob listing:
-        // the walk reached this shard through a whole-store scan, so the two
-        // enumerations can be compared.
+        // this shard was reached by a whole-store scan, so the two enumerations
+        // can be compared.
         self.record_shard_reference(digest);
 
         // Reference keys spell out only foreign digests, so an entry whose
-        // self-digest is not the shard's blob cannot be represented. No angos
-        // writer produces such an entry; converting it would alias a real one,
-        // so it is dropped with the shard instead.
+        // self-digest is not the shard's blob would alias a real key on
+        // conversion; it is dropped with the shard instead.
         let (links, nonsense): (Vec<LinkKind>, Vec<LinkKind>) = links
             .into_iter()
             .partition(|link| convertible(digest, link));
@@ -100,10 +95,8 @@ impl Validator {
         match self.blob_store.size(digest).await {
             Ok(_) => {}
             Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
-                // Bytes absent: an in-flight upload that granted before its
-                // bytes landed, or a pull-through cache entry whose bytes are
-                // fetched lazily. Normal state; the age-gated purge is
-                // prune's job, so no warning here.
+                // Normal for an in-flight upload or a lazily filled cache
+                // entry; the age-gated purge is prune's job.
                 debug!("scrub: reference key '{key}' references byteless blob '{digest}'");
                 return Ok(());
             }
@@ -114,16 +107,14 @@ impl Validator {
         if matches!(link, LinkKind::Blob(_)) {
             return Ok(());
         }
-        // A key younger than the grace period may belong to a push between
-        // its reference wave and its commit, whose backing does not exist
-        // yet. A gone key reads as not-young; the reverify below observes
-        // its absence and skips the removal.
+        // A key younger than the grace period may belong to a push between its
+        // reference wave and its commit, whose backing does not exist yet. A
+        // gone key reads as not-young, and the reverify below sees its absence.
         if self.younger_than_grace(key).await? {
             return Ok(());
         }
-        // Only a confirmed-dead backing justifies removing the key; a
-        // transient read error must not. The reads are raw so the metadata
-        // cache cannot mask this run's repairs.
+        // Only a confirmed-dead backing justifies removing the key; a transient
+        // read error must not.
         if self
             .metadata_store
             .reference_backed(&namespace, &link, digest)
@@ -174,9 +165,7 @@ fn convertible(digest: &Digest, link: &LinkKind) -> bool {
         LinkKind::Blob(d) | LinkKind::Digest(d) | LinkKind::Layer(d) | LinkKind::Config(d) => {
             d == digest
         }
-        // `ReferencedBy` postdates the shards, so it is never stored in one;
-        // representable as a key regardless (it spells out only the referrer
-        // digest).
+        // These spell out only a foreign digest, so any value is representable.
         LinkKind::Tag(_) | LinkKind::ReferencedBy(_) => true,
         LinkKind::Referrer { referrer, .. } => referrer == digest,
         LinkKind::Manifest { child, .. } => child == digest,

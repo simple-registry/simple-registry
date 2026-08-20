@@ -43,18 +43,15 @@ impl Registry {
             return Ok(false);
         }
 
-        // The blob already exists, so there is nothing to store: hash the
-        // body into a sink under the target algorithm alone, purely to
-        // confirm it matches. With a declared length, drain at most one byte
-        // past it so an over-long body is rejected as soon as the surplus
-        // appears rather than after the whole `bound_blob_stream`-capped
-        // body is read.
+        // Nothing to store, so the body is hashed into a sink purely to
+        // confirm it matches. A declared length drains at most one byte past
+        // it, rejecting an over-long body as soon as the surplus appears.
         let mut reader =
             HashingReader::new(&mut *stream, Hasher::for_algorithm(digest.algorithm()));
         match content_length {
             Some(expected) => {
-                // Draining faults are I/O (surface the source); only the
-                // read-vs-declared comparison is a length mismatch (416).
+                // Draining faults are I/O; only the read-vs-declared
+                // comparison is a length mismatch.
                 let read = copy(
                     &mut (&mut reader).take(expected.saturating_add(1)),
                     &mut sink(),
@@ -75,10 +72,9 @@ impl Registry {
             return Err(Error::DigestInvalid);
         }
 
-        // The bytes pre-exist and may be old: the guarded grant catches a
-        // mid-flight reclaim. The body is already drained, so neither miss
-        // may fall through to a fresh write; both surface as retryable
-        // conflicts (the digest matched, the client just repushes).
+        // The pre-existing bytes may be old, so the guarded grant catches a
+        // mid-flight reclaim. The body is already drained, so neither miss may
+        // fall through to a fresh write; both surface as retryable conflicts.
         match self
             .blob_ownership()
             .grant_existing(&self.blob_store, namespace, digest)
@@ -111,11 +107,10 @@ impl Registry {
         )?)
     }
 
-    /// Grants `namespace` a reference to `mount.digest`, re-checked against
-    /// the authorized `source`, returning `Ok(None)` when the source no
-    /// longer holds the blob or its bytes are gone (including a reclaim
-    /// caught mid-flight by the guarded grant), which falls back to a
-    /// regular upload session per the spec.
+    /// Grants `namespace` a reference to `mount.digest`, re-checked against the
+    /// authorized `source`. `Ok(None)` means the source no longer holds the
+    /// blob or its bytes are gone, which the spec lets fall back to a regular
+    /// upload session.
     async fn try_cross_repo_mount(
         &self,
         namespace: &Namespace,
@@ -172,9 +167,8 @@ impl Registry {
         Ok(candidates)
     }
 
-    /// Opens a fresh resumable upload session and returns its `202` headers.
-    /// `digest_algorithm` is the client's `?digest-algorithm=` hint, which fixes
-    /// what each chunk is hashed under.
+    /// Opens a fresh resumable upload session and returns its `202` headers;
+    /// `digest_algorithm` fixes what each chunk is hashed under.
     async fn open_upload_session(
         &self,
         namespace: &Namespace,
@@ -226,8 +220,8 @@ impl Registry {
         }
 
         // A `?digest=` POST carrying the blob is the single-request upload, a
-        // declared zero being the empty blob. Only an undeclared length falls
-        // back to a session, which hashes the target's algorithm alone.
+        // declared zero being the empty blob; only an undeclared length falls
+        // back to a session.
         let Some(content_length) = target.content_length else {
             return self
                 .open_upload_session(&request.namespace, Some(digest.algorithm()))
@@ -254,14 +248,12 @@ impl Registry {
     }
 
     /// Starts a cross-repository blob mount from `source`, the namespace the
-    /// caller was authorized to read the blob from, which is resolved by the
-    /// serving side rather than named on the wire. A mount that cannot be
-    /// satisfied falls back to an ordinary upload session.
+    /// caller was authorized to read from, resolved by the serving side rather
+    /// than named on the wire. An unsatisfiable mount falls back to an ordinary
+    /// upload session.
     ///
-    /// The `blob.push` intent event fires before the mount attempt, so a mounted
-    /// blob is as visible to webhook consumers as an uploaded one; the session
-    /// fallback leaves a false-positive event behind and its eventual upload
-    /// completion emits one of its own.
+    /// The `blob.push` intent event fires before the mount attempt, so a
+    /// mounted blob is as visible to webhook consumers as an uploaded one.
     #[instrument(skip(request))]
     pub async fn mount_blob(
         &self,
@@ -320,12 +312,10 @@ impl Registry {
         Ok(())
     }
 
-    /// Bound a chunked (`None` content-length) body to `remaining + 1` bytes so
-    /// it can never grow the session past `max_blob_size_bytes` without the
-    /// extra byte tripping the overflow check after the write. `remaining` is
-    /// the headroom left before the cap; a `Some(_)` content-length is passed
-    /// through unbounded because [`Self::reject_oversized_known_length`] already
-    /// vetted it.
+    /// Bound a chunked body to `remaining + 1` bytes so it can never grow the
+    /// session past `max_blob_size_bytes` without the extra byte tripping the
+    /// overflow check after the write. A known content-length passes through
+    /// unbounded because [`Self::reject_oversized_known_length`] vetted it.
     fn bound_blob_stream<S>(
         &self,
         committed: u64,
@@ -344,8 +334,8 @@ impl Registry {
         stream.take(remaining.saturating_add(1))
     }
 
-    /// After a write, reject (and abort) when the session's cumulative size has
-    /// exceeded `max_blob_size_bytes`, i.e. the chunked guard byte was consumed.
+    /// Reject and abort when the write pushed the session's cumulative size
+    /// past `max_blob_size_bytes`, consuming the chunked guard byte.
     async fn reject_if_oversized(
         &self,
         namespace: &Namespace,
@@ -362,10 +352,9 @@ impl Registry {
         Ok(())
     }
 
-    /// Best-effort abort of an upload session that can never complete (its body
-    /// breached the size cap, or hashed to the wrong digest); a cleanup failure
-    /// is logged, not surfaced, since the caller already has a terminal error to
-    /// return.
+    /// Best-effort abort of a session that can never complete. A cleanup
+    /// failure is logged rather than surfaced, since the caller already has a
+    /// terminal error to return.
     async fn abort_upload_quietly(&self, namespace: &Namespace, session_id: &UploadSessionId) {
         if let Err(error) = self.blob_store.delete_upload(namespace, session_id).await {
             warn!("Failed to abort upload session: {error}");
@@ -407,9 +396,9 @@ impl Registry {
         .await?;
 
         let bounded = self.bound_blob_stream(summary.size, request.content_length, stream);
-        // PATCH only needs the running size; the digest is finalized at the PUT.
-        // Concurrent PATCHes on one session are unserialized (the backends call
-        // them unsupported); the PUT's digest check catches any interleaving.
+        // PATCH only needs the running size, the digest being finalized at the
+        // PUT. Concurrent PATCHes on one session are unserialized, and the
+        // PUT's digest check catches any interleaving.
         let (_, size) = self
             .blob_store
             .append_upload(
@@ -424,8 +413,8 @@ impl Registry {
             .await?;
 
         // A chunked body's length is only known once read, so its window can
-        // only be checked here. The session now holds bytes the client will
-        // never account for and the 416 cannot say so, hence the abort.
+        // only be checked here; the session now holds bytes the client will
+        // never account for, hence the abort.
         if request.content_length.is_none()
             && let Some(range) = request.content_range
             && !range.covers(size.saturating_sub(summary.size))
@@ -473,9 +462,8 @@ impl Registry {
         } = request;
         let (namespace, session_id, digest) = (&namespace, &session_id, &digest);
 
-        // Intent-first emission: the event fires before the finalize, so a
-        // completed blob can never go unnotified; a completion that fails
-        // past this point leaves a false-positive notification instead.
+        // The event fires before the finalize, so a completed blob can never
+        // go unnotified; a later failure leaves a false positive instead.
         let repository = self.repository_name_for(namespace);
         let event = Event::push_blob(namespace, &repository, digest, actor.as_ref());
         self.dispatch_events(&[event]).await?;
@@ -491,9 +479,9 @@ impl Registry {
         let has_prior_writes = committed > 0;
 
         // A final-chunk PUT carrying a Content-Range must resume from the
-        // committed offset and, when it declares a length, carry the window it
-        // announced: both are out-of-order chunks (416), not digest mismatches,
-        // and both are refused before a byte is committed.
+        // committed offset and carry the window it announced. Both are
+        // out-of-order chunks rather than digest mismatches, and both are
+        // refused before a byte is committed.
         if let Some(range) = content_range
             && (!range.starts_at(committed)
                 || content_length.is_some_and(|length| !range.covers(length)))
@@ -521,9 +509,9 @@ impl Registry {
             return Err(Error::BlobUploadUnknown);
         }
 
-        // A monolithic PUT (no prior chunked writes) knows its algorithm up
-        // front, so hash only the target; a chunked finalize must resume the
-        // both-algorithm checkpoint left by its PATCHes.
+        // A monolithic PUT knows its algorithm up front, so it hashes only the
+        // target; a chunked finalize must resume the both-algorithm checkpoint
+        // its PATCHes left.
         let (upload_digest, new_total) = if has_prior_writes {
             self.blob_store
                 .write_upload(
@@ -550,8 +538,8 @@ impl Registry {
             .await?;
 
         // A chunked body's length is only known once read, so its window can
-        // only be checked here. The session now holds bytes the client will
-        // never account for and the 416 cannot say so, hence the abort.
+        // only be checked here; the session now holds bytes the client will
+        // never account for, hence the abort.
         if content_length.is_none()
             && let Some(range) = content_range
             && !range.covers(new_total.saturating_sub(committed))
@@ -656,8 +644,8 @@ mod tests {
         },
     };
 
-    /// Which storage operation the failing hook turns into a hard error.
-    /// Everything else delegates to the inner backend untouched.
+    /// Which storage operation the hook turns into a hard error; everything
+    /// else delegates to the inner backend untouched.
     #[derive(Clone, Copy)]
     enum FailOp {
         /// Fail the best-effort container sweep at the end of promotion.
@@ -686,8 +674,7 @@ mod tests {
         }
     }
 
-    /// Rebuild `inner` with its object store wrapped so `fail` errors out,
-    /// reusing the same upload backend.
+    /// Rebuild `inner` with its object store wrapped so `fail` errors out.
     fn failing_blob_store(inner: &Arc<BlobStore>, fail: FailOp) -> Arc<BlobStore> {
         let failing = Arc::new(HookedStore::new(inner.object_store().clone(), fail));
         Arc::new(BlobStore::new(failing, None))
@@ -712,7 +699,6 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            // A fresh session answers `202` with its location.
             assert_eq!(response.status(), StatusCode::ACCEPTED);
             assert_eq!(
                 *response_header(&response, &LOCATION),
@@ -825,10 +811,7 @@ mod tests {
         .await;
     }
 
-    // Mount event emission is covered by
-    // `event_emission_tests::mount_emits_blob_push_event` and
-    // `event_emission_tests::mount_fallback_still_emits_intent_event` (the
-    // intent-first event stays even when the mount falls back to a session).
+    // Mount event emission is covered in `event_emission_tests`.
 
     #[tokio::test]
     async fn test_mount_blob_falls_back_when_source_lacks_blob() {
@@ -1178,10 +1161,8 @@ mod tests {
         .await;
     }
 
-    // A chunked request (`Transfer-Encoding: chunked`, no `Content-Length`) is
-    // authorized with `content_length = None`: the body streams to EOF and the
-    // blob is stored with the digest derived from the bytes actually read. This
-    // is the `docker push` path.
+    /// The `docker push` path: with no `Content-Length` the body streams to
+    /// EOF and the digest comes from the bytes actually read.
     #[tokio::test]
     async fn patch_upload_without_content_length_streams_to_eof() {
         for_each_backend(async |test_case| {
@@ -1298,9 +1279,8 @@ mod tests {
     #[tokio::test]
     async fn test_monolithic_complete_upload_without_prior_patch() {
         for_each_backend(async |test_case| {
-            // The whole body arrives in the final PUT with no prior PATCH, so
-            // completion takes the monolithic path that hashes only the target
-            // algorithm; verify it produces the correct digest for both.
+            // No prior PATCH, so completion takes the monolithic path that
+            // hashes the target algorithm alone.
             for algorithm in [Algorithm::Sha256, Algorithm::Sha512] {
                 let registry = test_case.registry();
                 let namespace = &Namespace::new("test-repo").unwrap();
@@ -1467,9 +1447,8 @@ mod tests {
         .await;
     }
 
-    /// A chunk declaring its last byte must carry exactly that many: a body
-    /// shorter or longer than the window it announced is refused rather than
-    /// committed as whatever arrived.
+    /// A body shorter or longer than the window it announced is refused rather
+    /// than committed as whatever arrived.
     #[tokio::test]
     async fn a_chunk_shorter_than_its_content_range_is_refused() {
         for_each_backend(async |test_case| {
@@ -1578,8 +1557,7 @@ mod tests {
         .await;
     }
 
-    /// The declared window and the bytes agreeing is the ordinary case, and
-    /// still commits.
+    /// The ordinary case, where the window and the bytes agree, still commits.
     #[tokio::test]
     async fn a_chunk_matching_its_content_range_is_committed() {
         for_each_backend(async |test_case| {
@@ -1716,8 +1694,8 @@ mod tests {
         .await;
     }
 
-    /// The `?digest-algorithm=` hint makes a chunked session hash under that one
-    /// algorithm alone, which the closing PUT must still be able to finalize.
+    /// The `?digest-algorithm=` hint makes a session hash under that algorithm
+    /// alone, which the closing PUT must still be able to finalize.
     #[tokio::test]
     async fn hinted_algorithm_completes_a_chunked_upload() {
         for_each_backend(async |test_case| {
@@ -2253,11 +2231,11 @@ mod tests {
         .await;
     }
 
+    /// A re-PUT over an already-present blob is rejected on size as soon as
+    /// the surplus byte past its declared length is read.
     #[tokio::test]
     async fn test_complete_upload_existing_blob_rejects_oversized_body() {
         for_each_backend(async |test_case| {
-            // A re-PUT of an already-present blob whose body exceeds its declared
-            // length is rejected on size, as soon as the surplus byte is read.
             let registry = test_case.registry();
             let namespace = &Namespace::new("test-repo").unwrap();
             let content = vec![b'x'; 100];
@@ -2413,8 +2391,7 @@ mod tests {
 
         assert_eq!(summary.size, content.len() as u64);
 
-        // Corrupt the session record so that `complete_upload` cannot
-        // reconstruct the final digest from the persisted hasher state.
+        // Corrupt the record so no final digest can be reconstructed.
         let session_file = test_case
             .temp_dir()
             .path()
@@ -2455,8 +2432,8 @@ mod tests {
         );
     }
 
-    /// Build a registry over an `FSRegistryTestCase`'s stores but with a tiny
-    /// `max_blob_size_bytes`, so the blob-size cap can be exercised end-to-end.
+    /// A registry over the test case's stores with a tiny
+    /// `max_blob_size_bytes`, so the cap can be exercised end-to-end.
     fn tiny_blob_cap_registry(
         test_case: &FSRegistryTestCase,
         max_blob_size_bytes: u64,
@@ -2530,8 +2507,8 @@ mod tests {
             .await
             .unwrap();
 
-        // No Content-Length (chunked): the body must be bounded mid-stream and
-        // the overflow detected after the write.
+        // Chunked, so the body is bounded mid-stream and the overflow is only
+        // detected after the write.
         let content = b"way past the eight byte cap";
         let result = registry
             .patch_upload(
@@ -2603,10 +2580,9 @@ mod tests {
         );
     }
 
-    /// A monolithic PUT over already-present bytes whose guarded grant hits
-    /// a covering collector run must fail closed with a retryable conflict:
-    /// the body is already drained, so falling through to a fresh write
-    /// would misreport a digest mismatch.
+    /// A guarded grant that hits a covering collector run must fail closed
+    /// with a retryable conflict: the body is already drained, so falling
+    /// through to a fresh write would misreport a digest mismatch.
     #[tokio::test]
     async fn completing_over_an_existing_blob_fails_closed_while_gc_covers_it() {
         let test_case = FSRegistryTestCase::new();

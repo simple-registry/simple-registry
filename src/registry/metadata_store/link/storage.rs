@@ -1,6 +1,5 @@
-//! Link reference storage primitives: read/write a single link's
-//! [`LinkMetadata`], the cache-aware `read_link`, and the link-metadata
-//! cache helpers behind it (gated on `link_cache_ttl`).
+//! Single-link primitives: read a link's [`LinkMetadata`], the cache-aware
+//! `read_link`, and the cache helpers behind it (gated on `link_cache_ttl`).
 
 #[cfg(test)]
 use bytes::Bytes;
@@ -15,16 +14,16 @@ use crate::registry::{
     path_builder,
 };
 
-/// Cache TTL for revision and referrer records, immutable once written: a
-/// year stands in for "no expiry" (deletes invalidate explicitly) while
-/// staying safe for the memory backend's deadline arithmetic.
+/// Cache TTL for revision and referrer records, which never mutate: a year
+/// stands in for "no expiry" (deletes invalidate explicitly) while staying
+/// safe for the memory backend's deadline arithmetic.
 const IMMUTABLE_LINK_CACHE_TTL_SECS: u64 = 365 * 24 * 3600;
 
 impl MetadataStore {
     /// Read the stored [`LinkMetadata`] for `link` within `namespace`. A tag
-    /// resolves from its ordered entries, a revision or referrer from its
-    /// immutable record (each with the legacy-link fallback); every other
-    /// kind is one link-file read.
+    /// resolves from its ordered entries and a revision or referrer from its
+    /// record (each falling back to the legacy link); every other kind is one
+    /// link-file read.
     pub async fn read_link_reference(
         &self,
         namespace: &Namespace,
@@ -62,9 +61,9 @@ impl MetadataStore {
         Ok(data)
     }
 
-    /// Persist `metadata` for `link` within `namespace`. Used by tests to set up
-    /// initial state; production code goes through `update_links`. A tag lands
-    /// as an entry, the shape the write path produces.
+    /// Seed `link` state directly, for tests only; production writes go
+    /// through `update_links`. A tag lands as an entry, the shape the write
+    /// path produces.
     #[cfg(test)]
     pub async fn write_link_reference(
         &self,
@@ -103,8 +102,8 @@ impl MetadataStore {
         if self.link_cache_ttl == 0 {
             return;
         }
-        // A tag re-resolves after the TTL; a revision or referrer record
-        // never mutates, so only an explicit delete invalidates it.
+        // A revision or referrer record never mutates, so only an explicit
+        // delete invalidates it; a tag re-resolves after the TTL.
         let ttl = match link {
             LinkKind::Digest(_) | LinkKind::Referrer { .. } => IMMUTABLE_LINK_CACHE_TTL_SECS,
             _ => self.link_cache_ttl,

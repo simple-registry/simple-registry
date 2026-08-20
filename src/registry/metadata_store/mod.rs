@@ -25,29 +25,23 @@ pub use access_time::AccessEntry;
 pub use blob_index::{BlobIndex, BlobIndexOperation, shard::decode_blob_index_shard_namespace};
 pub use link::{LinkKind, LinkMetadata, LinkOperation, LinksCommit, LinksTx, ReferencePolicy};
 
-// MetadataStore (concrete implementation)
-
 #[derive(Clone)]
 pub struct MetadataStore {
-    /// The object store all reads and writes flow through.
     object: Arc<dyn ObjectStore>,
     cache: Option<Arc<Cache>>,
     link_cache_ttl: u64,
-    /// Concurrent directory scans a catalog namespace walk keeps in flight.
     namespace_walk_concurrency: usize,
-    /// The reclamation grace period: how long fresh blob data and fresh
-    /// reference keys are unconditionally live, and how long a collector's
-    /// range marker outlives its last refresh. Writers and collectors built
-    /// over the same store share the value.
+    /// How long fresh blob data and fresh reference keys are unconditionally
+    /// live, and how long a collector's range marker outlives its last
+    /// refresh. Writers and collectors over the same store share the value.
     gc_grace_secs: u64,
     /// Namespaces whose catalog index key this process already ensured; being
     /// wrong only costs one redundant put.
     catalog_indexed: Arc<Mutex<HashSet<Namespace>>>,
 }
 
-/// Default reclamation grace period. It only has to exceed the widest
-/// adjacent-request gap on a write path plus clock skew, so minutes are
-/// comfortable.
+/// Default reclamation grace period, which only has to exceed the widest
+/// adjacent-request gap on a write path plus clock skew.
 pub const DEFAULT_GC_GRACE_SECS: u64 = 300;
 
 pub struct Builder {
@@ -69,9 +63,8 @@ impl Builder {
         }
     }
 
-    /// The reclamation grace period, in seconds. Production deployments run
-    /// the default; tests and offline maintenance runs shrink it to exercise
-    /// reclamation immediately.
+    /// The reclamation grace period, in seconds; tests and offline
+    /// maintenance runs shrink it to exercise reclamation immediately.
     #[must_use]
     pub fn gc_grace_secs(mut self, secs: u64) -> Self {
         self.gc_grace_secs = secs;
@@ -110,18 +103,15 @@ impl Builder {
 
 impl MetadataStore {
     /// Return a builder over the object store all reads and writes flow
-    /// through. `cache` and `link_cache_ttl` are optional fluent setters.
+    /// through.
     pub fn builder(object: Arc<dyn ObjectStore>) -> Builder {
         Builder::new(object)
     }
 
-    /// The object store all reads and writes flow through.
     pub fn object_store(&self) -> &Arc<dyn ObjectStore> {
         &self.object
     }
 
-    /// The reclamation grace period, shared by writers and collectors built
-    /// over this store.
     pub fn gc_grace_secs(&self) -> u64 {
         self.gc_grace_secs
     }

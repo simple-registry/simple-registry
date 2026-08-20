@@ -1,11 +1,9 @@
 //! The `scrub` command: a single categorizing walk over both stores.
 //!
-//! Every object key is streamed, categorized by shape, and validated
-//! concurrently: derivable state is repaired, unreadable content is deleted,
-//! and keys matching no known angos layout are quarantined under the
-//! lost-and-found prefix (or deleted outright with `--delete-unknown`).
-//! Scrub is purely structural; age-gated reclamation (upload sessions,
-//! orphan grants) belongs to `angos prune`.
+//! Every key is streamed, categorized by shape, and validated concurrently:
+//! derivable state is repaired, unreadable content deleted, and unrecognized
+//! keys quarantined (or deleted under `--delete-unknown`). Scrub is purely
+//! structural; config-relative reclamation belongs to `angos prune`.
 
 use std::sync::Arc;
 
@@ -77,9 +75,8 @@ impl Command {
             Arc::new(DryRunSink)
         } else {
             let job_store = run_job_store(&metadata_store, "scrub");
-            // Tag and manifest deletions go through the registry's standard
-            // delete path (locking, blob reclaim, events, replication), so
-            // scrub always wires one.
+            // Tag and manifest deletions take the registry's standard delete
+            // path (locking, blob reclaim, events, replication).
             let scrub_registry = bootstrap::registry(
                 config,
                 blob_store.clone(),
@@ -116,14 +113,12 @@ impl Command {
 
     /// The passes, each internally concurrent. Ordering matters: links are
     /// healed and grants reconciled before index entries are pruned against
-    /// them, and the index is healed before blob GC reads it. A listing
-    /// failure aborts the run, since the later passes' deletions rely on the
-    /// earlier repairs.
+    /// them, so a listing failure aborts the run rather than letting a later
+    /// pass delete on top of skipped repairs.
     pub async fn run(&mut self) -> Result<(), Error> {
         self.walk_pass(Pass::MetadataLinks, "").await?;
-        // Legacy shards first (each converts into reference keys), then the
-        // reference keys, so a converted shard's keys are validated in the
-        // same run.
+        // Legacy shards before the reference keys, so a converted shard's keys
+        // are validated in the same run.
         self.walk_pass(Pass::MetadataShards, path_builder::BLOBS_ROOT)
             .await?;
         self.walk_pass(Pass::MetadataShards, path_builder::REF_ROOT)
@@ -255,9 +250,8 @@ mod tests {
         );
         assert!(objects.get(&bad_tag_key).await.is_err());
 
-        // Convergence: a repair can create new derivable state (the recreated
-        // revision link derives back-links on the next pass), so run to the
-        // fixpoint and assert it is reached quickly.
+        // A repair can create new derivable state, so run to the fixpoint and
+        // assert it is reached quickly.
         let mut runs = 0;
         loop {
             let mut again = Command::new(&options(false, 4), &config).await.unwrap();
@@ -319,7 +313,6 @@ mod tests {
                 .unwrap();
             command.run().await.unwrap();
 
-            // Collect the final key set (sorted by the walker).
             let keys = std::sync::Mutex::new(Vec::new());
             walk::for_each_key(command.metadata_store.object_store(), "", 1, |key| {
                 keys.lock().unwrap().push(key);

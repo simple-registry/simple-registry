@@ -1,13 +1,10 @@
-//! Access-time recording: every path that stamps a link's `accessed_at`
-//! lives here.
+//! Every path that stamps a link's `accessed_at`.
 //!
-//! A tag's or revision's access times are append-only entries under its atime
-//! entry directory, named like tag entries (inverted-millis ordinal plus a
-//! per-client suffix) so a listing yields newest first and same-millisecond
-//! stamps from distinct clients coexist. The entries double as a rolling
-//! audit log: each body records who pulled and when, every stamped pull is
-//! one plain put, and scrub collects superseded entries past the audit
-//! window.
+//! A tag's or revision's access times are append-only entries named like tag
+//! entries (inverted-millis ordinal plus a per-client suffix), so a listing
+//! yields newest first and same-millisecond stamps from distinct clients
+//! coexist. Each body records who pulled and when, making the directory a
+//! rolling audit log scrub trims past the audit window.
 
 use std::{str::from_utf8, sync::Arc};
 
@@ -32,13 +29,12 @@ pub struct AccessEntry {
     pub at: DateTime<Utc>,
 }
 
-/// Longest client identity an access entry records. Identities come from
-/// token claims, which have no length bound of their own; the cap keeps a
-/// pathological subject from bloating every stamped pull.
+/// Longest client identity an access entry records; identities come from
+/// token claims, which have no length bound of their own.
 const MAX_CLIENT_CHARS: usize = 256;
 
-/// Append one access entry to `dir`: a fresh ordinal plus the client's
-/// suffix, the body recording the client and the stamp time.
+/// Append one access entry to `dir`, its body recording the client and the
+/// stamp time.
 pub async fn put_access_entry(
     store: &Arc<dyn ObjectStore>,
     dir: &str,
@@ -64,9 +60,8 @@ pub async fn put_access_entry(
 }
 
 impl MetadataStore {
-    /// Like [`MetadataStore::read_link`] but records the link's access time
-    /// under `client`'s identity: one appended entry per stamped pull. The
-    /// manifest pull path uses this when pull-time tracking is enabled.
+    /// Like [`MetadataStore::read_link`] but appends one access entry under
+    /// `client`'s identity.
     #[instrument(skip(self))]
     pub async fn read_link_recording_access(
         &self,
@@ -79,10 +74,9 @@ impl MetadataStore {
         Ok(link_data)
     }
 
-    /// Stamp the access time. A tag or revision appends an entry to its own
-    /// atime directory; every other kind rewrites its link body with a fresh
-    /// `accessed_at`. Access times are advisory, so a concurrent writer's
-    /// lost update is acceptable.
+    /// A tag or revision appends an entry to its atime directory; every other
+    /// kind rewrites its link body. Access times are advisory, so the
+    /// rewrite's lost update under a concurrent writer is acceptable.
     async fn stamp_link_access_time(
         &self,
         namespace: &Namespace,
@@ -113,8 +107,8 @@ impl MetadataStore {
         Ok(link_data)
     }
 
-    /// The target's last access: the newest entry of `dir` (its ordinal
-    /// encodes the stamp time), falling back to the legacy single key.
+    /// The target's last access, from the newest entry of `dir` (its ordinal
+    /// encodes the stamp time) or the legacy single key.
     pub async fn newest_access_time(
         &self,
         dir: &str,

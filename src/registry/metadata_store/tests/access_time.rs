@@ -11,7 +11,6 @@ use crate::registry::{
     path_builder,
 };
 
-/// The tag's stored access time under the entry shape.
 async fn stored_atime(
     backend: &MetadataStore,
     namespace: &Namespace,
@@ -23,8 +22,8 @@ async fn stored_atime(
     backend.read_tag_access_time(namespace, tag).await.unwrap()
 }
 
-/// Craft one access entry at `at`, as a raw backend put with the real key
-/// shape (how a sibling replica's stamp would land).
+/// Plant one access entry at `at` as a raw put, the way a sibling replica's
+/// stamp would land.
 async fn put_entry_at(backend: &MetadataStore, dir: &str, client: &str, at: DateTime<Utc>) {
     let name = path_builder::atime_entry_name(
         path_builder::tag_ord(Some(at)),
@@ -55,8 +54,8 @@ async fn create_tag(backend: &MetadataStore, namespace: &Namespace, tag: &LinkKi
     backend.update_links(namespace, &ops).await.unwrap();
 }
 
-/// A recording pull appends an entry whose body carries the acting client,
-/// and the newest entry wins the read over a backdated one.
+/// The entry body carries the acting client, and the newest entry wins the
+/// read over a backdated one.
 #[tokio::test]
 async fn a_pull_stamps_an_entry_carrying_the_client_and_newest_wins() {
     let config = test_config();
@@ -104,8 +103,8 @@ async fn a_pull_stamps_an_entry_carrying_the_client_and_newest_wins() {
     );
 }
 
-/// Every stamped pull appends its own entry; distinct clients in the same
-/// millisecond coexist through the suffix.
+/// Distinct clients stamping the same millisecond coexist through the entry
+/// name's suffix.
 #[tokio::test]
 async fn each_pull_appends_one_entry_per_client() {
     let config = test_config();
@@ -133,8 +132,7 @@ async fn each_pull_appends_one_entry_per_client() {
     assert_eq!(page.items.len(), 2, "each client's pull is its own entry");
 }
 
-/// Concurrent stamps are write-once appends: they never contend, and every
-/// read still succeeds.
+/// Concurrent stamps are appends, so they never contend.
 #[tokio::test]
 async fn concurrent_stamps_never_contend() {
     let config = test_config();
@@ -172,8 +170,8 @@ async fn concurrent_stamps_never_contend() {
     assert!(raw.is_some(), "the racing stamps must have landed");
 }
 
-/// `last_pulled` resolves from the newest entry, and from the legacy single
-/// key when only it exists, for both tags and revisions.
+/// The read falls back to the legacy single key when no entry exists, for
+/// both tags and revisions.
 #[tokio::test]
 async fn last_pulled_reads_newest_entry_and_falls_back_to_legacy() {
     let config = test_config();

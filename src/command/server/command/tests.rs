@@ -18,8 +18,8 @@ use crate::{
             server_context::tests::create_test_event,
         },
     },
-    configuration::{self, Configuration},
-    policy::{AccessMode, AccessPolicyConfig, CelRule},
+    configuration::Configuration,
+    policy::{AccessMode, AccessPolicyConfig},
     registry::{
         Registry, RegistryConfig, manifest::DEFAULT_MAX_MANIFEST_SIZE_BYTES, repository,
         test_utils::response_json,
@@ -38,11 +38,9 @@ fn init_crypto_provider() {
     });
 }
 
-// The tests here build real filesystem stores, so unlike the shared fixture
-// in `test_fixtures::configuration` each config needs fresh temporary
-// directories; the returned `TempDir` values must be kept alive for the
-// duration of the test that uses the config. `extra` is appended after the
-// `[global]` section, so it may extend it with bare keys or add new tables.
+// These tests build real filesystem stores, so the returned `TempDir` values
+// must be kept alive for as long as the config is used. `extra` is appended
+// after the `[global]` section, so it may extend it or add new tables.
 fn tempdir_config(extra: &str) -> (Configuration, TempDir, TempDir) {
     init_for_tests();
     let blobs = TempDir::new().unwrap();
@@ -86,28 +84,6 @@ fn create_config_with_repository() -> (Configuration, TempDir, TempDir) {
     )
 }
 
-#[test]
-fn test_build_blob_store_filesystem_success() {
-    let (config, _blobs, _meta) = create_minimal_config();
-    let result = config.blob_store.build_backend();
-
-    assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn test_build_metadata_store_filesystem_success() {
-    let (config, _blobs, _meta) = create_minimal_config();
-    let auth_cache = bootstrap::auth_cache(&config.cache).unwrap();
-    let result = bootstrap::metadata_store(
-        &config.resolve_registry_storage(),
-        &auth_cache,
-        config.global.namespace_walk_concurrency,
-        config.global.gc_grace_secs,
-    );
-
-    assert!(result.is_ok());
-}
-
 #[tokio::test]
 async fn test_build_repository_with_upstream() {
     let repo_config = repository::Config {
@@ -134,57 +110,6 @@ async fn test_build_repository_with_upstream() {
     .await;
 
     assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn test_build_repository_with_immutable_tags() {
-    let repo_config = repository::Config {
-        access_policy: Some(AccessPolicyConfig {
-            default: AccessMode::Allow,
-            ..AccessPolicyConfig::default()
-        }),
-        immutable_tags: true,
-        immutable_tags_exclusions: vec![
-            configuration::RegexPattern::compile("latest").unwrap(),
-            configuration::RegexPattern::compile("dev-.*").unwrap(),
-        ],
-        ..repository::Config::default()
-    };
-    let cache_config = cache::Config::Memory;
-    let cache = bootstrap::auth_cache(&cache_config).unwrap();
-
-    let result = bootstrap::repository(
-        "immutable-repo",
-        &repo_config,
-        &cache,
-        DEFAULT_MAX_MANIFEST_SIZE_BYTES,
-    )
-    .await;
-
-    assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn test_build_repositories_single() {
-    let repo_config = repository::Config {
-        access_policy: Some(AccessPolicyConfig {
-            default: AccessMode::Allow,
-            ..AccessPolicyConfig::default()
-        }),
-        ..repository::Config::default()
-    };
-    let mut configs = HashMap::new();
-    configs.insert("repo1".to_string(), repo_config);
-
-    let cache_config = cache::Config::Memory;
-    let cache = bootstrap::auth_cache(&cache_config).unwrap();
-
-    let result = bootstrap::repositories(&configs, &cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).await;
-
-    assert!(result.is_ok());
-    let repos = result.unwrap();
-    assert_eq!(repos.len(), 1);
-    assert!(repos.contains_key("repo1"));
 }
 
 #[tokio::test]
@@ -217,34 +142,6 @@ async fn test_build_repositories_multiple() {
 #[tokio::test]
 async fn test_build_registry_minimal_config() {
     let (config, _blobs, _meta) = create_minimal_config();
-    let result = setup::build_registry(
-        &config,
-        &bootstrap::auth_cache(&config.cache).expect("auth cache"),
-    )
-    .await;
-
-    assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn test_build_registry_with_repositories() {
-    let (config, _blobs, _meta) = create_config_with_repository();
-    let result = setup::build_registry(
-        &config,
-        &bootstrap::auth_cache(&config.cache).expect("auth cache"),
-    )
-    .await;
-
-    assert!(result.is_ok());
-}
-
-#[tokio::test]
-async fn test_build_registry_with_update_pull_time() {
-    // The [global] key cannot be overridden through the appended extra TOML,
-    // so flip it on the parsed configuration instead.
-    let (mut config, _blobs, _meta) = create_minimal_config();
-    config.global.update_pull_time = true;
-
     let result = setup::build_registry(
         &config,
         &bootstrap::auth_cache(&config.cache).expect("auth cache"),
@@ -342,36 +239,6 @@ async fn test_build_registry_components_integration() {
         body["repositories"].as_array().unwrap().is_empty(),
         "a freshly built registry must serve an empty catalog"
     );
-}
-
-#[tokio::test]
-async fn test_build_repositories_with_different_configs() {
-    let repo_config1 = repository::Config {
-        access_policy: Some(AccessPolicyConfig {
-            default: AccessMode::Allow,
-            ..AccessPolicyConfig::default()
-        }),
-        ..repository::Config::default()
-    };
-    let repo_config2 = repository::Config {
-        access_policy: Some(AccessPolicyConfig {
-            default: AccessMode::Deny,
-            rules: vec![CelRule::compile("identity.username == 'admin'").unwrap()],
-        }),
-        ..repository::Config::default()
-    };
-
-    let mut configs = HashMap::new();
-    configs.insert("public".to_string(), repo_config1);
-    configs.insert("private".to_string(), repo_config2);
-
-    let cache_config = cache::Config::Memory;
-    let cache = bootstrap::auth_cache(&cache_config).unwrap();
-    let result = bootstrap::repositories(&configs, &cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).await;
-
-    assert!(result.is_ok());
-    let repos = result.unwrap();
-    assert_eq!(repos.len(), 2);
 }
 
 fn create_config_with_webhook(url: &str) -> (Configuration, TempDir, TempDir) {

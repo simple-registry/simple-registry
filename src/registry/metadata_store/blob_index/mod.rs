@@ -1,10 +1,9 @@
-//! The blob-index domain: cross-namespace blob reference tracking.
+//! Cross-namespace blob reference tracking.
 //!
 //! One write-once, empty reference key per (namespace, link) under
 //! [`path_builder::blob_ref_dir`] records that a namespace references a blob.
-//! Writers only touch these keys; the legacy per-namespace JSON shards under
-//! `v2/blobs/.../refs/` are still merged into every read as a fallback until
-//! scrub finishes converting them ([`shard`]).
+//! Legacy per-namespace JSON shards still merge into every read until scrub
+//! finishes converting them ([`shard`]).
 
 use std::collections::{HashMap, HashSet};
 use std::pin::pin;
@@ -35,8 +34,6 @@ use self::shard::{
 /// Keys fetched per page when listing a blob's reference directory.
 const REF_LIST_PAGE: u16 = 1000;
 
-// Domain types
-
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BlobIndex {
     pub namespace: HashMap<Namespace, HashSet<LinkKind>>,
@@ -49,8 +46,7 @@ pub enum BlobIndexOperation {
 }
 
 /// The mutation one blob-index operation compiles to. Reference keys are
-/// write-once and empty, so an insert is an unconditional put and a removal
-/// an unconditional delete; nothing is read first.
+/// write-once and empty, so nothing is read first.
 pub fn ref_mutation(
     namespace: &Namespace,
     digest: &Digest,
@@ -67,8 +63,8 @@ pub fn ref_mutation(
     }
 }
 
-/// `namespace`'s reference entries for `digest` under the new key shape: the
-/// `!own` leaf plus the `!r/` subtree.
+/// `namespace`'s reference entries for `digest`: the `!own` leaf plus the
+/// `!r/` subtree.
 async fn namespace_ref_entries(
     store: &Arc<dyn ObjectStore>,
     namespace: &Namespace,
@@ -100,9 +96,9 @@ async fn namespace_ref_entries(
     Ok(links)
 }
 
-/// `namespace`'s merged entries: the new reference keys plus its legacy
-/// shard. A corrupt shard fails the read rather than parsing as empty, since
-/// reclaim decisions built on this must fail closed.
+/// `namespace`'s reference keys merged with its legacy shard. A corrupt
+/// shard fails the read rather than parsing as empty, because reclaim
+/// decisions built on this must fail closed.
 pub async fn namespace_entries_merged(
     store: &Arc<dyn ObjectStore>,
     namespace: &Namespace,
@@ -116,11 +112,9 @@ pub async fn namespace_entries_merged(
     Ok(links)
 }
 
-// Store-backed methods
-
 impl MetadataStore {
-    /// Write the reference key for `digest` in `namespace` (insert), or
-    /// remove it. Idempotent: the key's existence is the whole record.
+    /// Write or remove the reference key for `digest` in `namespace`.
+    /// Idempotent: the key's existence is the whole record.
     #[instrument(skip(self))]
     pub async fn update_blob_index(
         &self,
@@ -135,9 +129,8 @@ impl MetadataStore {
         .map_err(Error::from)
     }
 
-    /// Whether `namespace` holds the `_own` grant for `digest`: one head of
-    /// the key `namespace_ref_entries` probes first, without the reference
-    /// listing behind it.
+    /// Whether `namespace` holds the `_own` grant for `digest`, without the
+    /// reference listing [`Self::read_blob_index_namespace`] does.
     pub async fn has_own_grant(
         &self,
         namespace: &Namespace,
@@ -151,9 +144,9 @@ impl MetadataStore {
         }
     }
 
-    /// Revoke `namespace`'s ownership of `digest`: one delete of the `_own`
-    /// key, the only reference removal a writer ever performs. The bytes are
-    /// the collector's to reclaim once every reference is stale.
+    /// Revoke `namespace`'s ownership of `digest`, the only reference removal
+    /// a writer ever performs. The bytes are the collector's to reclaim once
+    /// every reference is stale.
     pub async fn revoke_blob_ownership(
         &self,
         namespace: &Namespace,
@@ -166,11 +159,9 @@ impl MetadataStore {
         self.execute_links_tx(namespace, &[], tx).await.map(|_| ())
     }
 
-    /// Stream each present shard under `refs_dir` as its relative filename plus
-    /// raw body: shard names page off the listing while up to
-    /// [`SHARD_READ_CONCURRENCY`] bodies read concurrently. A shard deleted
-    /// between listing and read is dropped; parsing is left to the caller so
-    /// each derives its own decode and empty-shard policy.
+    /// Stream each present shard under `refs_dir` as its relative filename
+    /// plus raw body. A shard deleted between listing and read is dropped;
+    /// parsing is the caller's, so each picks its own empty-shard policy.
     fn stream_shards<'a>(
         &'a self,
         refs_dir: &'a str,
@@ -202,7 +193,6 @@ impl MetadataStore {
         loop {
             let page = self.object_store().list(&dir, REF_LIST_PAGE, token).await?;
             for key in &page.items {
-                // Foreign key shapes and invalid namespaces are skipped.
                 let Some((raw, link)) = path_builder::parse_blob_ref(digest, key) else {
                     continue;
                 };
@@ -251,8 +241,7 @@ impl MetadataStore {
     /// revision, or referrer while it resolves to `blob`, a per-referrer
     /// entry while the referring manifest's revision resolves, every other
     /// (legacy tracked) kind while a manifest in its recorded referrer set
-    /// still resolves. Reads are raw, so a cache cannot mask a live
-    /// reference.
+    /// resolves. Reads bypass the cache so it cannot mask a live reference.
     pub async fn reference_backed(
         &self,
         namespace: &Namespace,
@@ -277,9 +266,7 @@ impl MetadataStore {
             }
             _ => {
                 // Legacy tracked entries: the link file alone is not
-                // liveness, since a manifest delete leaves it in place. An
-                // unparseable body fails the read, so reclaim decisions
-                // stay closed.
+                // liveness, because a manifest delete leaves it in place.
                 let metadata = match self.read_link_reference(namespace, link).await {
                     Ok(metadata) => metadata,
                     Err(Error::NotFound) => return Ok(false),
@@ -303,8 +290,8 @@ impl MetadataStore {
     /// Collector-side liveness over the reference index: `_own` pins
     /// unconditionally, an unconverted legacy shard pins, and any other key
     /// pins while it is younger than the grace period or its backing link
-    /// still resolves. The blob-data age gate is the caller's, since the
-    /// bytes live in the blob store.
+    /// resolves. The blob-data age gate is the caller's, since the bytes live
+    /// in the blob store.
     pub async fn blob_references_live(&self, digest: &Digest) -> Result<bool, Error> {
         let dir = path_builder::blob_ref_dir(digest);
         let mut token = None;
@@ -320,8 +307,8 @@ impl MetadataStore {
                 let full_key = format!("{dir}/{key}");
                 match self.object_store().head(&full_key).await {
                     Ok(meta) => {
-                        // No timestamp to gate on: live, never guess in
-                        // favour of deletion.
+                        // No timestamp to gate on, so never guess in favour
+                        // of deletion.
                         let Some(modified) = meta.last_modified else {
                             return Ok(true);
                         };
@@ -362,8 +349,8 @@ impl MetadataStore {
     }
 
     /// Delete every reference key and legacy shard of a reclaimed blob. Only
-    /// the collector calls this, after the marker protocol has fenced the
-    /// blob-data delete.
+    /// the collector calls this, and only after the marker protocol has
+    /// fenced the blob-data delete.
     pub async fn delete_blob_references(&self, digest: &Digest) -> Result<(), Error> {
         for prefix in [
             path_builder::blob_ref_dir(digest),

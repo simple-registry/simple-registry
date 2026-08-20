@@ -95,22 +95,25 @@ mod tests {
     use std::sync::Mutex;
 
     use bytes::Bytes;
+    use tempfile::TempDir;
 
-    use angos_storage::MemoryObjectStore;
+    use angos_storage::fs::Backend as StorageFsBackend;
 
     use super::*;
 
-    async fn seeded_store(keys: &[&str]) -> Arc<dyn ObjectStore> {
-        let store = MemoryObjectStore::new();
+    /// A store holding one object per key, plus the temp directory backing it.
+    async fn seeded_store(keys: &[&str]) -> (Arc<dyn ObjectStore>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let store = StorageFsBackend::builder(dir.path()).build();
         for key in keys {
             store.put(key, Bytes::from_static(b"x")).await.unwrap();
         }
-        Arc::new(store)
+        (Arc::new(store), dir)
     }
 
     #[tokio::test]
     async fn walks_every_key_under_the_root() {
-        let store = seeded_store(&[
+        let (store, _dir) = seeded_store(&[
             "v2/blobs/sha256/aa/aaaa/data",
             "_jobs/pending/cache/x.json",
             "top-level-file",
@@ -137,7 +140,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefixed_walk_rejoins_absolute_keys_and_excludes_siblings() {
-        let store = seeded_store(&[
+        let (store, _dir) = seeded_store(&[
             "v2/blobs/sha256/aa/aaaa/data",
             "v2/blobsx/decoy",
             "v2/repositories/ns/_manifests/tags/t/current/link",

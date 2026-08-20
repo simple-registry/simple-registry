@@ -1,11 +1,10 @@
 //! Tag state as ordered write-once entries.
 //!
-//! A tag is the set of entries under its [`path_builder::tag_entry_dir`],
-//! each named `<ord>.<kind>.<algo>.<hash>` with an inverted-timestamp `<ord>`
-//! so a listing yields newest first. Writers only append; last-writer-wins is
-//! a property of the key names, so concurrent writers and replicas never
-//! contend. A tag with no entries falls back to the legacy `current/link`,
-//! which scrub converts; a tombstone entry shadows any legacy link.
+//! A tag is the set of entries under its [`path_builder::tag_entry_dir`], each
+//! named `<ord>.<kind>.<algo>.<hash>` with an inverted-timestamp `<ord>` so a
+//! listing yields newest first. Writers only append, so last-writer-wins is a
+//! property of the key names and concurrent writers never contend; a tag with
+//! no entries falls back to the legacy `current/link`.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -24,9 +23,8 @@ use crate::registry::{
     path_builder,
 };
 
-/// The stored body of one tag entry: the descriptor fields a future tag
-/// history needs (distribution-spec PR 606). The hot path resolves from key
-/// names alone; the body carries what the key cannot.
+/// The stored body of one tag entry, carrying the descriptor fields the key
+/// name cannot. Resolution reads key names alone and never fetches it.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TagEntryBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,8 +39,8 @@ pub struct TagEntryBody {
 /// persist into a tag entry.
 const RESERVED_ANNOTATION_PREFIX: &str = "org.opencontainers.distribution";
 
-/// The manifest annotations a `set` entry stores: the pushed set minus the
-/// reserved-prefix keys, `None` when nothing survives.
+/// The pushed annotations minus the reserved-prefix keys, `None` when nothing
+/// survives.
 fn persisted_annotations(
     annotations: Option<BTreeMap<String, String>>,
 ) -> Option<BTreeMap<String, String>> {
@@ -53,7 +51,7 @@ fn persisted_annotations(
     (!filtered.is_empty()).then_some(filtered)
 }
 
-/// The resolved winner of a tag's newest entry group. Its fields rebuild the
+/// The resolved winner of a tag's newest entry group; its fields rebuild the
 /// entry key via [`path_builder::tag_entry_path`].
 struct TagWinner {
     ord: u64,
@@ -61,10 +59,8 @@ struct TagWinner {
     digest: Digest,
 }
 
-/// The mutation appending one `set` entry. The entry key carries the authored
-/// timestamp (truncated to the millisecond the ordinal encodes) and target;
-/// the body carries the manifest's descriptor fields, reserved-prefix
-/// annotations filtered out.
+/// The key carries the authored timestamp (truncated to the millisecond the
+/// ordinal encodes) and the target; the body carries the descriptor fields.
 pub fn tag_set_mutation(
     namespace: &Namespace,
     tag: &Tag,
@@ -92,9 +88,8 @@ pub fn tag_set_mutation(
     })
 }
 
-/// The mutation appending one `del` tombstone. It names the digest the tag
-/// held immediately before deletion and copies the superseded winner's
-/// descriptor `body`, which tag history requires.
+/// The tombstone names the digest the tag held immediately before deletion and
+/// copies the superseded winner's descriptor `body`, which tag history needs.
 pub fn tag_del_mutation(
     namespace: &Namespace,
     tag: &Tag,
@@ -117,14 +112,11 @@ pub fn tag_del_mutation(
 }
 
 impl MetadataStore {
-    /// Resolve `tag` to link-shaped metadata. The complete newest entry group
-    /// decides (highest digest wins the same-millisecond tie, and a deletion
-    /// does not beat an equal-timestamped push of the same digest); a
-    /// tombstone winner reads as `NotFound` and shadows any legacy link; a
-    /// tag with no entries falls back to the legacy `current/link`. The
-    /// winner comes from key names alone, so `media_type` is `None`: serving
-    /// paths take it from the revision record they read anyway, and only
-    /// [`Self::read_tag_winner_body`] pays for the entry body.
+    /// Resolve `tag` to link-shaped metadata: the complete newest entry group
+    /// decides, the highest digest winning a same-millisecond tie and a
+    /// deletion never beating an equal-timestamped push of the same digest. A
+    /// tombstone winner reads as `NotFound`, and `media_type` is always `None`
+    /// because the winner comes from key names alone.
     pub async fn resolve_tag(
         &self,
         namespace: &Namespace,
@@ -144,10 +136,9 @@ impl MetadataStore {
         }
     }
 
-    /// Targeted read of the resolved winner's stored entry body, for the one
-    /// consumer that needs it (the tombstone copies its descriptor fields). A
-    /// tag answered by the legacy link has no entry; its recorded media type
-    /// stands in.
+    /// Targeted read of the resolved winner's stored entry body, which only
+    /// the tombstone needs. A tag answered by the legacy link has no entry, so
+    /// its recorded media type stands in.
     pub async fn read_tag_winner_body(
         &self,
         namespace: &Namespace,
@@ -211,9 +202,8 @@ impl MetadataStore {
         Ok(group.into_iter().next())
     }
 
-    /// Test-only backend write of tag state: one `set` entry carrying
-    /// `metadata`'s target, timestamp, and media type, as a sibling replica's
-    /// write would land it.
+    /// Test-only write of one `set` entry, as a sibling replica's write would
+    /// land it.
     #[cfg(test)]
     pub async fn write_tag_state(
         &self,
@@ -238,8 +228,7 @@ impl MetadataStore {
             .map_err(Error::from)
     }
 
-    /// Raw read of the legacy `current/link`, the fallback for a tag with no
-    /// entries.
+    /// Raw read of the legacy `current/link`.
     async fn read_legacy_tag_link(
         &self,
         namespace: &Namespace,
@@ -270,9 +259,8 @@ impl MetadataStore {
         .await
     }
 
-    /// Append one access entry to the tag's atime directory, recording
-    /// `client` and the current time. A plain put with no transaction and no
-    /// read.
+    /// Append one access entry naming `client` to the tag's atime directory,
+    /// a plain put with no read.
     pub async fn write_tag_access_time(
         &self,
         namespace: &Namespace,
@@ -289,10 +277,9 @@ impl MetadataStore {
 
     /// Convert one legacy `current/link` into a `set` entry stamped with the
     /// link's recorded `created_at`, then delete the link once it is older
-    /// than the grace period (an old-binary writer may still rewrite a young
-    /// one in place; a skipped delete waits for the next run). Entry first
-    /// and both halves idempotent, so an interruption or an absent link
-    /// loses nothing.
+    /// than the grace period, since an old-binary writer may still rewrite a
+    /// young one in place. Entry first and both halves idempotent, so an
+    /// interruption loses nothing and a skipped delete waits for the next run.
     pub async fn convert_legacy_tag_link(
         &self,
         namespace: &Namespace,
@@ -323,8 +310,8 @@ impl MetadataStore {
         );
         match self.object_store().head(&link_path).await {
             Ok(meta) => {
-                // A missing timestamp reads as young: never delete a file an
-                // old-shape writer may just have rewritten.
+                // A missing timestamp reads as young, so a file an old-shape
+                // writer may just have rewritten is never deleted.
                 let age = meta
                     .last_modified
                     .map_or(0, |m| Utc::now().signed_duration_since(m).num_seconds());

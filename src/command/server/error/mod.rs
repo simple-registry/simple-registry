@@ -61,13 +61,11 @@ impl Error {
         }
     }
 
-    /// The error answer's body. A 4XX `code` must come from the spec's fixed set, so
-    /// each case picks the closest of those and carries what angos knows in
-    /// `message`; a 5XX code is unconstrained.
+    /// The error answer's body. A 4XX `code` must come from the spec's fixed
+    /// set, so each case picks the closest of those; a 5XX code is unconstrained.
     pub fn error_body(&self, request_id: Option<&String>) -> ErrorResponse {
         // A 5xx body carries no message: an internal error string must never
-        // leak to the client. The full detail is logged server-side (see
-        // `error_for_log`); the client gets the code plus a request id.
+        // leak to the client, which gets the code plus a request id instead.
         let (code, message) = match self {
             Error::Unauthorized(msg) => (ErrorCode::Unauthorized.as_str(), Some(msg.as_str())),
             Error::BadRequest(msg) => (ErrorCode::Unsupported.as_str(), Some(msg.as_str())),

@@ -58,9 +58,8 @@ pub async fn test_datastore_stream_uploads(store: &BlobStore) {
     assert!(!uploads_after_complete.contains(upload_to_complete));
 }
 
-/// Seed the backend with `content` at the canonical blob path for `algorithm`
-/// by driving the upload workflow (`create_upload` → `write_upload` →
-/// `complete_upload`). Mirrors how production creates blobs.
+/// Seed `content` at its canonical blob path by driving the whole upload
+/// workflow, as production does.
 async fn seed_blob_with(store: &BlobStore, content: &[u8], algorithm: Algorithm) -> Digest {
     let namespace = Namespace::new("test/setup").unwrap();
     let session_id = UploadSessionId::generate();
@@ -90,28 +89,9 @@ async fn seed_blob(store: &BlobStore, content: &[u8]) -> Digest {
     seed_blob_with(store, content, Algorithm::Sha256).await
 }
 
-pub async fn test_datastore_stream_blobs(store: &BlobStore) {
-    let blob_contents = [
-        b"aaa_content_1".to_vec(),
-        b"bbb_content_2".to_vec(),
-        b"ccc_content_3".to_vec(),
-    ];
-
-    let mut digests = Vec::new();
-    for content in &blob_contents {
-        digests.push(seed_blob(store, content).await);
-    }
-
-    let blobs: Vec<Digest> = store.stream_blobs().try_collect().await.unwrap();
-    assert!(blobs.len() >= digests.len());
-    for digest in &digests {
-        assert!(blobs.contains(digest));
-    }
-}
-
+/// Blobs of the two algorithms live under separate prefixes; the walk must
+/// cross the boundary and surface each exactly once.
 pub async fn test_datastore_stream_blobs_across_algorithms(store: &BlobStore) {
-    // Blobs of both algorithms live under separate prefixes; the stream must
-    // walk across the boundary and surface each exactly once.
     let mut expected = Vec::new();
     for algorithm in [Algorithm::Sha256, Algorithm::Sha512] {
         for content in [b"alpha".as_slice(), b"beta".as_slice()] {
@@ -214,12 +194,8 @@ pub async fn test_datastore_upload_operations(store: &BlobStore) {
     assert!(upload_result.is_err());
 }
 
-/// Repeated promotion of identical content converges on one blob. Two
-/// independent uploads of the same bytes both complete: the second moves onto
-/// the already-present content-addressed path (overwriting identical bytes),
-/// yields the same digest with intact content, and both sessions are swept.
-/// Covers promotion onto an existing destination plus best-effort session
-/// cleanup; single-session crash re-drive is the caller's `size(digest)` gate.
+/// Two independent uploads of the same bytes both complete, the second
+/// promoting onto the already-present path, and both sessions are swept.
 pub async fn test_repeated_promotion_converges(store: &BlobStore) {
     let content = b"idempotent promotion content";
     let first = seed_blob(store, content).await;
@@ -240,10 +216,8 @@ pub async fn test_repeated_promotion_converges(store: &BlobStore) {
     );
 }
 
-/// `complete_upload` consumes the session's liveness marker, so a second call on
-/// the same session returns `UploadNotFound` and leaves the promoted blob
-/// intact. A naive S3 re-finalize would overwrite the blob with an empty object,
-/// so this guards that the marker is consumed before the multipart-complete.
+/// The session marker must be consumed before the multipart-complete: a naive
+/// S3 re-finalize would overwrite the promoted blob with an empty object.
 pub async fn test_complete_upload_fails_on_rerun(store: &BlobStore) {
     let namespace = Namespace::new("test/rerun").unwrap();
     let session_id = UploadSessionId::generate();
@@ -308,8 +282,6 @@ pub async fn test_datastore_stream_uploads_skips_a_non_session_name(store: &Blob
     );
 }
 
-// Test entry points: run each helper against every backend fixture
-
 use crate::registry::test_utils::{FSRegistryTestCase, RegistryTestCase, for_each_backend};
 
 #[tokio::test]
@@ -324,14 +296,6 @@ async fn stream_uploads() {
 async fn stream_uploads_skips_a_non_session_name() {
     for_each_backend(async |tc| {
         test_datastore_stream_uploads_skips_a_non_session_name(tc.blob_store().as_ref()).await;
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn stream_blobs() {
-    for_each_backend(async |tc| {
-        test_datastore_stream_blobs(tc.blob_store().as_ref()).await;
     })
     .await;
 }
@@ -392,9 +356,8 @@ async fn complete_upload_fails_on_rerun() {
     .await;
 }
 
-/// FS-only: the assertions are about the exact keys under one prefix, which
-/// the shared backends agree on, and this keeps the check independent of a
-/// live S3.
+/// FS-only: the assertions are about exact keys under one prefix, which both
+/// backends agree on, so this stays independent of a live S3.
 #[tokio::test]
 async fn session_state_is_one_json_record() {
     let tc = FSRegistryTestCase::new();
@@ -420,9 +383,7 @@ async fn complete_upload_rejects_size_divergence() {
 
 /// An append that fails after durably writing bytes leaves the staging object
 /// longer than the checkpoint records, and the resume that follows hashes only
-/// its own bytes, so the digest matches while the stored bytes do not. The
-/// orphaned tail is written directly here because no backend error is needed to
-/// reach the state, only the size divergence it leaves behind.
+/// its own bytes, so the digest matches while the stored bytes do not.
 pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
     let tail = b"orphaned tail".to_vec();
     let namespace = Namespace::new("test/divergence").unwrap();
@@ -443,7 +404,7 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
         .await
         .unwrap();
 
-    // Bytes the session hashed, then a tail it never did.
+    // A tail the session never hashed.
     let upload_key = path_builder::upload_path(&namespace, &session_id);
     store
         .object
@@ -466,9 +427,9 @@ pub async fn test_complete_upload_rejects_size_divergence(store: &BlobStore) {
     );
 }
 
-/// A chunked upload keeps its whole state in one `session.json`, rewritten
-/// per chunk: no `hashstates/` or `startedat` keys appear, the checkpoint
-/// resumes across chunks, and completion leaves no session keys behind.
+/// A chunked upload keeps its whole state in one `session.json`: no legacy
+/// keys appear, the checkpoint resumes across chunks, and completion leaves
+/// nothing behind.
 pub async fn test_session_state_is_one_json_record(store: &BlobStore) {
     let namespace = &Namespace::new("session-single-record").unwrap();
     let session_id = &UploadSessionId::generate();
@@ -512,8 +473,8 @@ pub async fn test_session_state_is_one_json_record(store: &BlobStore) {
         "no legacy artifacts may be written: {keys:?}"
     );
 
-    // The checkpoint resumed across chunks iff the digest of the whole body
-    // verifies at completion.
+    // The whole body's digest verifying at completion is what proves the
+    // checkpoint resumed across chunks.
     let content = b"onetwothreefour";
     let digest = Digest::sha256_of_bytes(content);
     store
@@ -533,9 +494,9 @@ pub async fn test_session_state_is_one_json_record(store: &BlobStore) {
     );
 }
 
-/// A session persisted by a previous binary (raw `startedat` marker, a
-/// `hashstates/<offset>` checkpoint, and partial data) resumes under the new
-/// code, which writes `session.json` on the first activity, and completes.
+/// A session in the legacy shape (raw `startedat` marker, a `hashstates`
+/// checkpoint, partial data) resumes, gains a `session.json` on its first
+/// activity, and completes.
 pub async fn test_legacy_session_resumes_and_completes(store: &BlobStore) {
     let namespace = &Namespace::new("legacy-session").unwrap();
     let session_id = &UploadSessionId::generate();

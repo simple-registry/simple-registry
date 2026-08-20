@@ -1,4 +1,4 @@
-//! Public link-mutation operation type.
+//! The link mutations callers submit to the write planner.
 
 use std::collections::BTreeMap;
 
@@ -7,28 +7,22 @@ use angos_oci::{Descriptor, Digest, MediaType};
 use crate::registry::metadata_store::LinkKind;
 
 /// How a manifest push treats newly-referenced digests the target namespace
-/// does not already own. Enforced by the link planner's ownership pre-read;
-/// the `v2/gc` marker check keeps it from racing a concurrent reclaim.
+/// does not already own, enforced by the link planner's ownership pre-read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReferencePolicy {
     /// Reject the push with `MANIFEST_BLOB_UNKNOWN`.
     Strict,
     /// Store the manifest but skip the ownership-granting links for unowned
-    /// references, so they stay dangling and resolve as unknown on a later pull
-    /// instead of handing the namespace read access to content it never pushed.
+    /// references, so they stay dangling rather than handing the namespace
+    /// read access to content it never pushed.
     Permissive,
-    /// Trust every reference as owned. Used only by pull-through cache-fill,
-    /// where the referenced content is fetched from the upstream the namespace
-    /// mirrors.
+    /// Trust every reference as owned; only pull-through cache-fill, which
+    /// fetches the content from the upstream the namespace mirrors, may use it.
     Trusted,
 }
 
-/// A single link mutation submitted to [`crate::registry::metadata_store::MetadataStore::update_links`].
-/// `Create` carries the target digest and optional referrer / media-type /
-/// descriptor metadata, plus the manifest's size and annotations for the tag
-/// entries that persist them; `Delete` carries an optional referrer
-/// qualification so tracked links (layers, configs) decrement their reference
-/// count rather than being removed outright.
+/// A single link mutation. A `Delete` carrying a `referrer` decrements a
+/// tracked link's (layer, config) reference count instead of removing it.
 #[derive(Debug, Clone)]
 pub enum LinkOperation {
     Create {
@@ -47,7 +41,6 @@ pub enum LinkOperation {
 }
 
 impl LinkOperation {
-    /// Creates a link with no referrer, media type, or descriptor.
     pub fn create(link: LinkKind, target: Digest) -> Self {
         Self::Create {
             link,
@@ -60,7 +53,6 @@ impl LinkOperation {
         }
     }
 
-    /// Creates a link carrying a parent `referrer` digest.
     pub fn create_with_referrer(link: LinkKind, target: Digest, referrer: Digest) -> Self {
         Self::Create {
             link,
@@ -73,8 +65,8 @@ impl LinkOperation {
         }
     }
 
-    /// Creates a link carrying an optional `media_type`, plus the manifest's
-    /// size and annotations where a tag entry persists them for tag history.
+    /// `size` and `annotations` are persisted only by a tag entry, for tag
+    /// history.
     pub fn create_with_media_type(
         link: LinkKind,
         target: Digest,
@@ -110,7 +102,6 @@ impl LinkOperation {
         }
     }
 
-    /// Deletes a link with no referrer qualification.
     pub fn delete(link: LinkKind) -> Self {
         Self::Delete {
             link,
@@ -118,7 +109,6 @@ impl LinkOperation {
         }
     }
 
-    /// Deletes a link qualified by a parent `referrer` digest.
     pub fn delete_with_referrer(link: LinkKind, referrer: Digest) -> Self {
         Self::Delete {
             link,

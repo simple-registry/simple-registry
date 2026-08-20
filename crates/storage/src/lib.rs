@@ -19,8 +19,6 @@
 //!   [`angos_s3_client::Backend`].
 
 mod error;
-#[cfg(any(test, feature = "test-util"))]
-mod memory;
 mod object;
 mod pagination;
 mod presigned;
@@ -38,8 +36,6 @@ mod tests;
 use tokio::io::AsyncRead;
 
 pub use crate::error::Error;
-#[cfg(any(test, feature = "test-util"))]
-pub use crate::memory::MemoryObjectStore;
 pub use crate::object::{KeyStream, ObjectStore};
 pub use crate::pagination::paginated;
 pub use crate::presigned::PresignedStore;

@@ -39,11 +39,9 @@ pub struct Options {
     pub dry_run: bool,
 }
 
-/// Consumer queue and handler for draining reconcile-enqueued replication jobs
-/// in-process, since no running worker is assumed; a transiently failing push
-/// is rescheduled with backoff onto the durable queue for a worker or a later
-/// run. `concurrency` bounds the parallel claim loops so a cold-mirror
-/// reconcile does not push one tag at a time.
+/// Drains reconcile-enqueued replication jobs in-process, since no running
+/// worker is assumed; a transiently failing push is rescheduled with backoff
+/// onto the durable queue for a worker or a later run.
 pub struct ReplicationDrain {
     consumer: Arc<JobStore>,
     handler: Box<dyn JobHandler>,
@@ -51,9 +49,9 @@ pub struct ReplicationDrain {
 }
 
 impl ReplicationDrain {
-    /// Builds the consumer queue and handler for the in-process drain.
-    /// Reconcile-enqueued pushes carry `source_ts = None`; the handler re-derives
-    /// it from the tag's `created_at`, so the receiver still runs last-writer-wins.
+    /// Reconcile-enqueued pushes carry `source_ts = None`; the handler
+    /// re-derives it from the tag's `created_at`, so the receiver still runs
+    /// last-writer-wins.
     pub fn new(
         consumer: Arc<JobStore>,
         blob_store: &Arc<BlobStore>,
@@ -73,9 +71,8 @@ impl ReplicationDrain {
         }
     }
 
-    /// Drains reconcile-enqueued replication jobs with up to `concurrency`
-    /// concurrent claim loops. A loop ends when no claimable job remains, so
-    /// jobs already backed off to a future time are intentionally not awaited.
+    /// Runs up to `concurrency` claim loops. A loop ends when no claimable job
+    /// remains, so jobs backed off to a future time are not awaited.
     pub async fn drain(&self) {
         info!(
             "Draining enqueued replication jobs to convergence ({} concurrent)",
@@ -117,8 +114,7 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
         info!("Dry-run mode: no changes will be made to the storage");
         Box::new(DryRunSink)
     } else {
-        // One `Arc<JobStore>` serves as both producer (Executor enqueue) and
-        // consumer (end-of-run drain).
+        // One store serves as producer (Executor enqueue) and consumer (drain).
         let job_store = run_job_store(&metadata_store, "replicate");
         drain = Some(ReplicationDrain::new(
             job_store.clone(),
@@ -134,8 +130,7 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
         ))
     };
 
-    // Sequential on purpose: reconciliation enqueues downstream work in
-    // listing order and has no per-namespace concurrency knob.
+    // Sequential on purpose: there is no per-namespace concurrency knob here.
     check::check_namespaces(&metadata_store, &checker, sink.as_ref(), 1).await?;
     if let Some(drain) = &drain {
         drain.drain().await;

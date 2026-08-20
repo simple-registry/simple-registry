@@ -4,10 +4,8 @@ use serde::Deserialize;
 
 use crate::registry::{blob_store, s3_connection::S3ConnectionConfig};
 
-// Unknown keys in any sub-table are ignored (serde's default), so configs
-// carrying knobs of removed subsystems keep loading.
-
-// FS backend config
+// Unknown keys in any sub-table are ignored (serde's default), so a config
+// carrying knobs angos does not read still loads.
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct MetadataFsConfig {
@@ -24,8 +22,6 @@ impl Default for MetadataFsConfig {
         }
     }
 }
-
-// S3 backend config
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct MetadataS3Config {
@@ -48,25 +44,17 @@ fn default_link_cache_ttl() -> u64 {
     30
 }
 
-// RegistryStorageConfig
-
-/// Unified storage configuration for both the metadata store and the job store.
+/// Storage configuration shared by the metadata store and the job store, both
+/// of which run over the one `ObjectStore` the CLI bootstrap builds from it.
 ///
-/// Both subsystems share the same `ObjectStore` built once at startup by the
-/// CLI bootstrap (`crate::command::bootstrap::build_object_store`); this module
-/// carries only the parsed configuration.
-///
-/// The operator-facing TOML key remains `[metadata_store]` (with `.fs` or
-/// `.s3` sub-tables). The `Inherit` variant is the default and resolves to
-/// the blob-store configuration at startup.
+/// The operator-facing TOML key is `[metadata_store]`, with `.fs` or `.s3`
+/// sub-tables; the default `Inherit` resolves to the blob-store configuration.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum RegistryStorageConfig {
-    /// Inherit blob-store credentials and root path.
-    ///
-    /// Resolved via [`crate::configuration::Configuration::resolve_registry_storage`]
-    /// before any backend is built. Reaching the bootstrap's
-    /// `build_object_store` with this variant is a programming error.
+    /// Inherit blob-store credentials and root path, resolved via
+    /// [`crate::configuration::Configuration::resolve_registry_storage`] before
+    /// any backend is built.
     #[default]
     Inherit,
     #[serde(rename = "fs")]
@@ -75,11 +63,8 @@ pub enum RegistryStorageConfig {
     S3(MetadataS3Config),
 }
 
-/// A [`RegistryStorageConfig`] after its `Inherit` default has been resolved to
-/// a concrete backend by
-/// [`Configuration::resolve_registry_storage`](crate::configuration::Configuration::resolve_registry_storage).
-/// Having only two variants lets every consumer match without a dead `Inherit`
-/// arm.
+/// A [`RegistryStorageConfig`] whose `Inherit` default has been resolved to a
+/// concrete backend, so consumers match without a dead `Inherit` arm.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum ResolvedStorageConfig {
@@ -88,8 +73,7 @@ pub enum ResolvedStorageConfig {
 }
 
 impl ResolvedStorageConfig {
-    /// Build a `ResolvedStorageConfig` that mirrors the given blob-store config,
-    /// the resolution of the `Inherit` default.
+    /// Mirror the given blob-store config, which is how `Inherit` resolves.
     pub fn from_blob_store(blob: &blob_store::BlobStoreConfig) -> Self {
         match blob {
             blob_store::BlobStoreConfig::FS(config) => {
@@ -161,10 +145,8 @@ mod tests {
         }
     }
 
-    /// `[metadata_store.s3]` round-trip: flat TOML deserialises into a
-    /// `MetadataS3Config` whose `connection` carries the right values, whose
-    /// metadata-specific keys override their defaults, and whose removed
-    /// `access_time_debounce_secs` knob is accepted and ignored.
+    /// Flat TOML deserialises into a `MetadataS3Config` whose `connection`
+    /// carries the right values and whose own keys override their defaults.
     #[test]
     fn s3_backend_config_toml_round_trip() {
         let toml = r#"
@@ -188,8 +170,7 @@ mod tests {
         assert_eq!(cfg.link_cache_ttl, 60);
     }
 
-    /// Regression: `region` must be required, matching the documented schema
-    /// and the behaviour before consolidation.
+    /// Regression: `region` must be required, matching the documented schema.
     #[test]
     fn s3_backend_config_requires_region() {
         let toml = r#"
@@ -218,8 +199,8 @@ mod tests {
         )
     }
 
-    /// The deprecated coordination keys still parse, in every shape they were
-    /// ever accepted in, and are silently ignored.
+    /// The retired coordination keys still parse, in every shape they are
+    /// written in, and are ignored.
     #[test]
     fn deprecated_lock_keys_parse_and_are_ignored() {
         for extra in [

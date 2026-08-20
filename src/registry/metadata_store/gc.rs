@@ -1,16 +1,17 @@
 //! The blob-reclamation marker protocol: the one place a writer and the
 //! collector must agree, with no lock.
 //!
-//! A collector about to delete blob data publishes a [`GcRun`] naming the
-//! digest range it is working on, re-reads its own marker before the
-//! irreversible delete, and removes it afterwards. A writer that has just
-//! written reference keys lists `v2/gc/` once: an unexpired run covering one
-//! of its digests means back off. Either the writer's reference completed
-//! before the collector's liveness listing (the key is younger than the grace
-//! period, so the blob reads live), or it completed after, in which case the
-//! marker was already visible to the writer's check. The marker's expiry only
-//! stops a crashed collector from wedging writers; a live collector fences
-//! itself by refreshing before each delete.
+//! A collector about to delete blob data publishes a [`GcRun`] naming its
+//! digest range, re-reads that marker before the irreversible delete, and
+//! removes it afterwards; a writer that has just written reference keys lists
+//! `v2/gc/` once and backs off on an unexpired run covering one of its
+//! digests. Either the writer's reference completed before the collector's
+//! liveness listing (the key is younger than the grace period, so the blob
+//! reads live), or it completed after, in which case the marker was already
+//! visible to the writer's check.
+//!
+//! The marker's expiry only stops a crashed collector from wedging writers; a
+//! live collector fences itself by refreshing before each delete.
 
 use std::time::Duration as StdDuration;
 
@@ -27,16 +28,15 @@ use angos_storage::Error as StorageError;
 
 use crate::registry::{Error, metadata_store::MetadataStore, path_builder};
 
-/// Attempts and jittered backoff for a writer waiting out a collector run
-/// covering one of its blobs; a run only covers a batch, so the wait is
-/// short.
+/// Attempts and jittered backoff for a writer waiting out a collector run; a
+/// run only covers one batch, so the wait is short.
 const WRITER_BACKOFF_ATTEMPTS: u32 = 5;
 const WRITER_BACKOFF: Backoff =
     Backoff::exponential(StdDuration::from_millis(50), StdDuration::from_millis(800)).with_jitter();
 
 /// One collector run's published claim over an inclusive digest range.
 /// `Digest` ordering matches the lexical order of its `algo:hash` string, so
-/// the range semantics are those of the stored keys.
+/// the range covers exactly the stored keys between its bounds.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GcRun {
     pub start: Digest,
@@ -45,8 +45,8 @@ pub struct GcRun {
     pub instance: String,
 }
 
-/// A held claim: the marker key plus the instance token that proves
-/// ownership on refresh.
+/// A held claim: the marker key plus the token that proves ownership on
+/// refresh.
 pub struct GcClaim {
     key: String,
     instance: String,
@@ -56,9 +56,8 @@ pub struct GcClaim {
 
 impl MetadataStore {
     /// Writer-side wait: brief backoff while an unexpired collector run
-    /// covers any of `digests`. `false` means still covered after the
-    /// budget, and the caller should treat the blobs as being reclaimed.
-    /// Both sides aborting is safe.
+    /// covers any of `digests`. `false` means still covered after the budget,
+    /// so the caller must treat the blobs as being reclaimed.
     pub async fn gc_clear(&self, digests: &[&Digest]) -> Result<bool, Error> {
         for attempt in 0..WRITER_BACKOFF_ATTEMPTS {
             if !self.gc_blocked(digests).await? {
@@ -69,8 +68,8 @@ impl MetadataStore {
         Ok(false)
     }
 
-    /// Writer side: whether an unexpired collector run covers any of
-    /// `digests`. One listing, nothing per blob.
+    /// Whether an unexpired collector run covers any of `digests`; one
+    /// listing, nothing per blob.
     pub async fn gc_blocked(&self, digests: &[&Digest]) -> Result<bool, Error> {
         let mut token = None;
         loop {
@@ -108,9 +107,9 @@ impl MetadataStore {
         }
     }
 
-    /// Collector side: publish a run marker covering `start..=end` (digest
-    /// strings). The expiry is generous; safety rests on [`Self::gc_refresh`],
-    /// not on the timer.
+    /// Collector side: publish a run marker covering `start..=end`. The
+    /// expiry is generous because safety rests on [`Self::gc_refresh`], not
+    /// on the timer.
     pub async fn gc_claim(&self, start: &Digest, end: &Digest) -> Result<GcClaim, Error> {
         let claim = GcClaim {
             key: path_builder::gc_run_path(&Uuid::new_v4().to_string()),
@@ -118,8 +117,8 @@ impl MetadataStore {
             start: start.clone(),
             end: end.clone(),
         };
-        // A fresh UUID cannot legitimately exist already; adopting one would
-        // fence against another collector's live marker.
+        // A fresh UUID cannot legitimately exist; adopting one would fence
+        // against another collector's live marker.
         let body = self.gc_run_body(&claim)?;
         if !self
             .object_store()
@@ -135,8 +134,8 @@ impl MetadataStore {
     }
 
     /// Re-read and re-stamp the claim before an irreversible delete. `false`
-    /// means the marker was lost or overwritten: stop collecting, because a
-    /// writer may already have read it as expired and skipped its check.
+    /// means the marker was lost or overwritten, so stop collecting: a writer
+    /// may already have read it as expired and skipped its check.
     pub async fn gc_refresh(&self, claim: &GcClaim) -> Result<bool, Error> {
         match self.object_store().get(&claim.key).await {
             Ok(raw) => {

@@ -1,5 +1,5 @@
-//! Legacy blob-index shard support, read-side only: readers merge shards in
-//! as a fallback and scrub converts each one into reference keys.
+//! Legacy blob-index shards, read-side only: readers merge them in as a
+//! fallback and scrub converts each into reference keys.
 
 use std::{collections::HashSet, sync::Arc};
 
@@ -26,8 +26,8 @@ pub fn non_empty_links_or_not_found(links: HashSet<LinkKind>) -> Result<HashSet<
 }
 
 /// Read one per-namespace shard's parsed links, or `None` when absent. A
-/// present shard that fails to parse is an error, never an empty set: the
-/// reclaim decisions built on this read must fail closed.
+/// present shard that fails to parse is an error, never an empty set,
+/// because the reclaim decisions built on this must fail closed.
 pub async fn read_shard(
     store: &Arc<dyn ObjectStore>,
     shard_path: &str,

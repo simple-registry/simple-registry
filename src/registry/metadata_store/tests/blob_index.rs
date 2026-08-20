@@ -104,8 +104,6 @@ async fn test_tracked_link_creates_with_referrers() {
 
     backend.update_links(&namespace, &ops).await.unwrap();
 
-    // Pushes write no tracked link files; the pin is the per-referrer
-    // reference entry on each referenced blob.
     let entry = LinkKind::ReferencedBy(referrer_digest.clone());
     for target in layer_digests.iter().chain([&config_digest]) {
         let index = backend.read_blob_index(target).await.unwrap();
@@ -181,8 +179,6 @@ async fn test_tracked_link_deletes_with_referrers() {
             "Tracked link {link} should be deleted"
         );
 
-        // The reference entry outlives the link as a stale over-approximation;
-        // pruning it is the collector's.
         let entry = LinkKind::ReferencedBy(referrer_digest.clone());
         let index = backend.read_blob_index(d).await.unwrap();
         assert!(
@@ -254,8 +250,6 @@ async fn test_mixed_creates_and_deletes_across_digests() {
     let keep_links = keep_index.namespace.get(&namespace).unwrap();
     assert!(keep_links.contains(&LinkKind::Tag(Tag::new("keep-tag").unwrap())));
 
-    // Writers never remove reference entries: the removed tag's entry stays
-    // as a stale over-approximation until the collector prunes it.
     let remove_index = backend.read_blob_index(&digest_remove).await.unwrap();
     assert!(
         remove_index
@@ -281,8 +275,8 @@ async fn test_mixed_creates_and_deletes_across_digests() {
     assert_eq!(new_meta.target, digest_add);
 }
 
-/// Writers only produce the reference-key shape: a link write lands as one
-/// key under `v2/ref/` and leaves the legacy shard directory empty.
+/// A link write lands as one key under `v2/ref/` and leaves the legacy shard
+/// directory empty.
 #[tokio::test]
 async fn writes_land_as_reference_keys_not_shards() {
     let config = test_config();
@@ -317,9 +311,8 @@ async fn writes_land_as_reference_keys_not_shards() {
     assert!(shards.items.is_empty(), "a push must write no legacy shard");
 }
 
-/// Until scrub converts them, legacy shards must keep answering every read
-/// alongside the new keys: the whole-index read, the per-namespace read, the
-/// liveness check, and the cross-namespace check.
+/// Until scrub converts them, legacy shards answer alongside the new keys in
+/// the whole-index read, the per-namespace read, and the liveness check.
 #[tokio::test]
 async fn legacy_shards_merge_into_every_read() {
     let config = test_config();
@@ -364,9 +357,8 @@ async fn legacy_shards_merge_into_every_read() {
     );
 }
 
-/// Legacy shards gate collector liveness: an empty shard is a legacy
-/// artifact and must not pin the blob forever, while any populated one pins
-/// it until scrub converts it.
+/// An empty legacy shard must not pin the blob forever, while any populated
+/// one pins it until scrub converts it.
 #[tokio::test]
 async fn legacy_shards_gate_collector_liveness() {
     let config = test_config();
@@ -416,8 +408,8 @@ async fn legacy_shards_gate_collector_liveness() {
     );
 }
 
-// A corrupt shard must fail the reclaim read instead of parsing as an empty
-// link set that green-lights blob-data deletion.
+/// A corrupt shard must fail the reclaim read instead of parsing as an empty
+/// link set that green-lights blob-data deletion.
 #[tokio::test]
 async fn corrupt_shard_fails_reclaim_read_instead_of_parsing_empty() {
     let stack = fs_test_stack();
@@ -437,10 +429,10 @@ async fn corrupt_shard_fails_reclaim_read_instead_of_parsing_empty() {
     assert!(result.is_err(), "corrupt shard must error, got: {result:?}");
 }
 
-/// A legacy shard's tracked entry is backed only while a manifest in the
-/// link body's referrer set still resolves: the surviving link file alone
-/// must not pin the blob once the referring manifest is deleted, or blob
-/// DELETE on a pre-migration store answers `BlobReferenced` forever.
+/// A legacy shard's tracked entry is backed only while a manifest in the link
+/// body's referrer set resolves; the surviving link file alone must not pin
+/// the blob, or blob DELETE on a pre-migration store answers
+/// `BlobReferenced` forever.
 #[tokio::test]
 async fn legacy_tracked_entry_reads_unbacked_once_its_referrer_is_gone() {
     let stack = fs_test_stack();

@@ -30,15 +30,16 @@ async fn test_read_link_cache_hit_skips_storage() {
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
 
-    // First read populates cache
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
     assert_eq!(meta.target, digest);
 
-    // Delete the storage object directly
-    let link_path = path_builder::link_path(&tag, &namespace);
-    backend.object_store().delete(&link_path).await.unwrap();
+    let entry_dir = path_builder::tag_entry_dir(&namespace, &Tag::new("latest").unwrap());
+    backend
+        .object_store()
+        .delete_prefix(&entry_dir)
+        .await
+        .unwrap();
 
-    // Second read should succeed from cache
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
     assert_eq!(meta.target, digest);
 }
@@ -64,11 +65,9 @@ async fn test_read_link_cache_miss_fetches_from_storage() {
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
 
-    // First read should return correct data from storage
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
     assert_eq!(meta.target, digest);
 
-    // Verify cache was populated
     let cache_key = format!("link:{namespace}:{tag}");
     let cached: Option<LinkMetadata> = cache.retrieve(&cache_key).await.unwrap();
     assert!(cached.is_some(), "Cache should be populated after read");
@@ -105,7 +104,7 @@ async fn test_read_link_cache_expired_refetches() {
 
     tokio::time::sleep(Duration::from_millis(1100)).await;
 
-    // Write new data directly to storage (bypassing cache invalidation)
+    // Write straight to storage so nothing invalidates the cache entry.
     let new_metadata = LinkMetadata::from_digest(digest_b.clone());
     backend
         .write_link_reference(&namespace, &tag, &new_metadata)
@@ -154,9 +153,12 @@ async fn test_update_links_populates_cache_on_overwrite() {
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
 
-    // Delete the storage object to prove the read comes from cache
-    let link_path = path_builder::link_path(&tag, &namespace);
-    backend.object_store().delete(&link_path).await.unwrap();
+    let entry_dir = path_builder::tag_entry_dir(&namespace, &Tag::new("latest").unwrap());
+    backend
+        .object_store()
+        .delete_prefix(&entry_dir)
+        .await
+        .unwrap();
 
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
     assert_eq!(meta.target, digest_b);
@@ -183,9 +185,12 @@ async fn test_update_links_populates_cache_on_create() {
     }];
     backend.update_links(&namespace, &ops).await.unwrap();
 
-    // Delete the storage object to prove the read comes from cache
-    let link_path = path_builder::link_path(&tag, &namespace);
-    backend.object_store().delete(&link_path).await.unwrap();
+    let entry_dir = path_builder::tag_entry_dir(&namespace, &Tag::new("v1").unwrap());
+    backend
+        .object_store()
+        .delete_prefix(&entry_dir)
+        .await
+        .unwrap();
 
     let meta = backend.read_link(&namespace, &tag).await.unwrap();
     assert_eq!(meta.target, digest);
@@ -329,8 +334,8 @@ async fn a_revision_record_stays_cached_past_the_tag_ttl() {
 
     tokio::time::sleep(Duration::from_millis(1100)).await;
 
-    // Remove the record from storage: only the cache can answer now, and it
-    // must, because an immutable record is cached without the tag TTL bound.
+    // With the record gone only the cache can answer, and it must: an
+    // immutable record is cached without the tag TTL bound.
     backend
         .object_store()
         .delete(&path_builder::revision_record_path(&namespace, &digest))

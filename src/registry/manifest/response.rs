@@ -37,8 +37,8 @@ impl GetManifestResponse {
     }
 }
 
-/// What a manifest PUT committed. The registry serves `headers` and decides
-/// replication off the rest, so both outlive the write.
+/// What a manifest PUT committed: the headers to serve plus what the
+/// replication decision needs.
 pub struct PutManifestResponse {
     pub digest: Digest,
     /// Whether the write changed local state, per the commit's recorded

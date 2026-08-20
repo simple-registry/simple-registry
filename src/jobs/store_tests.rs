@@ -11,7 +11,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use angos_storage::{
-    Error as StorageError, MemoryObjectStore, ObjectStore,
+    Error as StorageError, ObjectStore,
     fs::Backend as StorageFsBackend,
     test_util::{HookedStore, StoreHook, StoreOp},
 };
@@ -30,23 +30,28 @@ struct Harness {
     // Raw handle lets tests stage deliberate fixture state (count-cap
     // stress, orphan indexes) that the engine would never produce naturally.
     raw: Arc<dyn ObjectStore>,
+    // Keeps the backing directory alive for as long as the harness.
+    _dir: TempDir,
 }
 
-fn harness(dir: &TempDir) -> Harness {
+/// A job store over a private fs backend rooted in its own temp directory.
+fn harness() -> Harness {
     metrics_provider::init_for_tests();
-    let raw: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(dir.path()).build());
-    build_harness(raw)
-}
-
-fn harness_memory() -> Harness {
-    metrics_provider::init_for_tests();
-    let raw: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
-    build_harness(raw)
-}
-
-fn build_harness(raw: Arc<dyn ObjectStore>) -> Harness {
+    let (raw, dir) = fs_store();
     let store = Arc::new(JobStore::new(raw.clone(), "test-worker", ClaimMode::Atomic));
-    Harness { store, raw }
+    Harness {
+        store,
+        raw,
+        _dir: dir,
+    }
+}
+
+/// A bare fs object store and the temp directory that must outlive it. Tests
+/// that wrap the store in a [`HookedStore`] build their `JobStore` by hand.
+fn fs_store() -> (Arc<dyn ObjectStore>, TempDir) {
+    let dir = TempDir::new().expect("temp dir");
+    let store: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(dir.path()).build());
+    (store, dir)
 }
 
 fn lock_key(value: &str) -> LockKey {
@@ -57,27 +62,13 @@ fn dummy_envelope(key: &str) -> JobEnvelope {
     JobEnvelope::new(Queue::Cache, "test.noop", key, &()).expect("envelope")
 }
 
-/// Runs `test` once per job-store backend (FS over a fresh temp directory,
-/// then in-memory), printing the active backend first so captured output names
-/// it on failure. Mirrors `test_utils::for_each_backend`; the [`Harness`] type
-/// is local, so the runner lives here. The temp directory guard stays alive
-/// until both runs finish.
-async fn for_each_job_backend<F>(test: F)
-where
-    F: AsyncFn(Harness),
-{
-    let dir = TempDir::new().expect("temp dir");
-    eprintln!("running against the fs job backend");
-    test(harness(&dir)).await;
-    eprintln!("running against the memory job backend");
-    test(harness_memory()).await;
-}
-
 // =========================================================================
-// Shared test bodies
+// End-to-end claim cycle
 // =========================================================================
 
-async fn run_enqueue_then_claim_succeeds(h: Harness) {
+#[tokio::test]
+async fn enqueue_then_claim_succeeds() {
+    let h = harness();
     h.store
         .enqueue(dummy_envelope("cache.ns:sha256:aaa"))
         .await
@@ -103,7 +94,13 @@ async fn run_enqueue_then_claim_succeeds(h: Harness) {
     );
 }
 
-async fn run_retry_writes_pending_with_backoff(h: Harness) {
+// =========================================================================
+// Retry + dead-letter (consumer-driven storage behaviour)
+// =========================================================================
+
+#[tokio::test]
+async fn retry_writes_pending_with_backoff() {
+    let h = harness();
     let mut env = dummy_envelope("cache.ns:sha256:retry");
     env.max_attempts = Some(3);
     h.store.enqueue(env).await.expect("enqueue");
@@ -135,7 +132,9 @@ async fn run_retry_writes_pending_with_backoff(h: Harness) {
     assert_eq!(updated.attempts, 1);
 }
 
-async fn run_dead_letter_after_max_attempts(h: Harness) {
+#[tokio::test]
+async fn dead_letter_after_max_attempts() {
+    let h = harness();
     let mut env = dummy_envelope("cache.ns:sha256:dl");
     env.max_attempts = Some(1);
     h.store.enqueue(env).await.expect("enqueue");
@@ -159,7 +158,73 @@ async fn run_dead_letter_after_max_attempts(h: Harness) {
     ));
 }
 
-async fn run_count_failed_reflects_dead_letters(h: Harness) {
+// =========================================================================
+// count_pending
+// =========================================================================
+
+#[tokio::test]
+async fn count_pending_saturates_at_cap() {
+    let h = harness();
+    let now = Utc::now();
+    for i in 0..(MAX_REPORTED_PENDING + 5) {
+        let key = make_storage_key(now, &format!("stub-{i}"));
+        h.raw
+            .put(
+                &crate::jobs::store::job_pending_path("cache", &key),
+                Bytes::from_static(b"{}"),
+            )
+            .await
+            .expect("stub");
+    }
+    let count = h
+        .store
+        .count_pending(Queue::Cache, 600)
+        .await
+        .expect("count");
+    assert_eq!(count, MAX_REPORTED_PENDING);
+}
+
+#[tokio::test]
+async fn count_pending_excludes_envelopes_past_readiness_horizon() {
+    let h = harness();
+    let now = Utc::now();
+    for i in 0..2 {
+        let key = make_storage_key(now, &format!("ready-{i}"));
+        h.raw
+            .put(
+                &crate::jobs::store::job_pending_path("cache", &key),
+                Bytes::from_static(b"{}"),
+            )
+            .await
+            .expect("ready");
+    }
+    let far_future = now + chrono::Duration::hours(1);
+    for i in 0..2 {
+        let key = make_storage_key(far_future, &format!("future-{i}"));
+        h.raw
+            .put(
+                &crate::jobs::store::job_pending_path("cache", &key),
+                Bytes::from_static(b"{}"),
+            )
+            .await
+            .expect("future");
+    }
+
+    let count = h
+        .store
+        .count_pending(Queue::Cache, 60)
+        .await
+        .expect("count");
+    assert_eq!(count, 2, "only ready envelopes must count");
+}
+
+// =========================================================================
+// count_failed
+// =========================================================================
+
+#[tokio::test]
+async fn count_failed_reflects_dead_letters() {
+    let h = harness();
     assert_eq!(h.store.count_failed(Queue::Cache).await.expect("count"), 0);
 
     let mut env = dummy_envelope("cache.ns:sha256:dl-count");
@@ -192,59 +257,9 @@ async fn run_count_failed_reflects_dead_letters(h: Harness) {
     );
 }
 
-async fn run_count_pending_saturates_at_cap(h: Harness) {
-    let now = Utc::now();
-    for i in 0..(MAX_REPORTED_PENDING + 5) {
-        let key = make_storage_key(now, &format!("stub-{i}"));
-        h.raw
-            .put(
-                &crate::jobs::store::job_pending_path("cache", &key),
-                Bytes::from_static(b"{}"),
-            )
-            .await
-            .expect("stub");
-    }
-    let count = h
-        .store
-        .count_pending(Queue::Cache, 600)
-        .await
-        .expect("count");
-    assert_eq!(count, MAX_REPORTED_PENDING);
-}
-
-async fn run_count_pending_excludes_envelopes_past_readiness_horizon(h: Harness) {
-    let now = Utc::now();
-    for i in 0..2 {
-        let key = make_storage_key(now, &format!("ready-{i}"));
-        h.raw
-            .put(
-                &crate::jobs::store::job_pending_path("cache", &key),
-                Bytes::from_static(b"{}"),
-            )
-            .await
-            .expect("ready");
-    }
-    let far_future = now + chrono::Duration::hours(1);
-    for i in 0..2 {
-        let key = make_storage_key(far_future, &format!("future-{i}"));
-        h.raw
-            .put(
-                &crate::jobs::store::job_pending_path("cache", &key),
-                Bytes::from_static(b"{}"),
-            )
-            .await
-            .expect("future");
-    }
-
-    let count = h
-        .store
-        .count_pending(Queue::Cache, 60)
-        .await
-        .expect("count");
-    assert_eq!(count, 2, "only ready envelopes must count");
-}
-
-async fn run_future_storage_key_yields_next_ready_without_claiming(h: Harness) {
+#[tokio::test]
+async fn future_storage_key_yields_next_ready_without_claiming() {
+    let h = harness();
     let mut env = dummy_envelope("cache.ns:sha256:future");
     env.max_attempts = Some(5);
     h.store.enqueue(env).await.expect("enqueue");
@@ -274,7 +289,13 @@ async fn run_future_storage_key_yields_next_ready_without_claiming(h: Harness) {
     );
 }
 
-async fn run_orphan_index_is_self_healed_on_next_lookup(h: Harness) {
+// =========================================================================
+// Dedup index (lock-key index)
+// =========================================================================
+
+#[tokio::test]
+async fn orphan_index_is_self_healed_on_next_lookup() {
+    let h = harness();
     let lock_key = lock_key("cache.ns:sha256:orphan");
 
     let storage_key = make_storage_key(Utc::now(), "phantom-id");
@@ -298,7 +319,198 @@ async fn run_orphan_index_is_self_healed_on_next_lookup(h: Harness) {
     );
 }
 
-async fn run_retry_updates_lock_key_index_to_new_storage_key(h: Harness) {
+/// Fails the plain `Delete` of one key, modelling a transient backend error on
+/// the orphan-index self-heal while leaving every other op untouched.
+struct FailIndexDelete {
+    index_path: String,
+}
+
+#[async_trait]
+impl StoreHook for FailIndexDelete {
+    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+        match op {
+            StoreOp::Delete { key } if key == self.index_path => Err(StorageError::Backend(
+                "injected orphan-delete failure".to_string(),
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[tokio::test]
+async fn orphan_index_transient_delete_failure_does_not_drop_enqueue() {
+    metrics_provider::init_for_tests();
+    let lock_key = lock_key("cache.ns:sha256:orphan-transient");
+    let index_path = crate::jobs::store::job_lock_key_index_path("cache", &lock_key);
+
+    let (inner, _dir) = fs_store();
+    let hook = FailIndexDelete {
+        index_path: index_path.clone(),
+    };
+    let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(inner.clone(), hook));
+    let store = Arc::new(JobStore::new(hooked, "test-worker", ClaimMode::Atomic));
+
+    // Seed an orphan index (index present, pending file absent) through the
+    // inner store so the fault hook does not intercept the fixture write.
+    let storage_key = make_storage_key(Utc::now(), "phantom-id");
+    let index_data = serialize_lock_key_index(&storage_key).expect("serialize");
+    inner
+        .put(&index_path, Bytes::from(index_data))
+        .await
+        .expect("seed index");
+
+    // The self-heal delete fails transiently, so the lookup surfaces the error
+    // rather than reporting a false miss.
+    assert!(
+        store
+            .find_pending_with_lock_key(Queue::Cache, &lock_key)
+            .await
+            .is_err(),
+        "a transient orphan-cleanup failure must surface as an error",
+    );
+
+    // And the enqueue must not silently drop the distinct job: it propagates the
+    // failure instead of colliding with the lingering index on `PutIfAbsent` and
+    // returning a false dedup hit.
+    assert!(
+        store
+            .enqueue(dummy_envelope(lock_key.as_str()))
+            .await
+            .is_err(),
+        "enqueue must not silently drop a job behind an un-retired orphan index",
+    );
+}
+
+/// Fails the second `get` of a pending-job file with `NotFound`, modelling
+/// another worker completing the job (deleting its pending file) between the
+/// claim's first read and its post-acquire re-read.
+struct VanishOnSecondPendingRead {
+    pending_reads: AtomicUsize,
+}
+
+#[async_trait]
+impl StoreHook for VanishOnSecondPendingRead {
+    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
+        if let StoreOp::Get { key } = op
+            && key.contains("/pending/")
+            && self.pending_reads.fetch_add(1, Ordering::SeqCst) >= 1
+        {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn claim_rechecks_pending_under_lock_and_skips_a_vanished_job() {
+    metrics_provider::init_for_tests();
+    let (inner, _dir) = fs_store();
+    let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+        inner,
+        VanishOnSecondPendingRead {
+            pending_reads: AtomicUsize::new(0),
+        },
+    ));
+    let store = Arc::new(JobStore::new(hooked, "test-worker", ClaimMode::Atomic));
+
+    store
+        .enqueue(dummy_envelope("cache.ns:sha256:vanish"))
+        .await
+        .expect("enqueue");
+
+    // The claim reads the pending file, acquires the lock, then re-reads: the
+    // re-read finds it gone, so the job is skipped rather than claimed as stale.
+    let outcome = store.claim_one(Queue::Cache).await.expect("claim");
+    assert!(
+        outcome.claimed.is_none(),
+        "a job whose pending file vanished after lock acquisition must not be claimed"
+    );
+}
+
+/// Regression: the retire is what stops a same-`lock_key` enqueue coalescing
+/// into a job that is already running. When it fails, claiming anyway leaves
+/// that stale index in place for the whole execution, so the claim must be
+/// abandoned and retried by the next scan instead.
+#[tokio::test]
+async fn claim_is_skipped_when_the_dedup_index_cannot_be_retired() {
+    metrics_provider::init_for_tests();
+    let lock_key = lock_key("cache.ns:sha256:retire-fails");
+    let index_path = crate::jobs::store::job_lock_key_index_path("cache", &lock_key);
+
+    let (inner, _dir) = fs_store();
+    let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
+        inner.clone(),
+        FailIndexDelete {
+            index_path: index_path.clone(),
+        },
+    ));
+    let store = Arc::new(JobStore::new(hooked, "test-worker", ClaimMode::Atomic));
+
+    store
+        .enqueue(dummy_envelope(lock_key.as_str()))
+        .await
+        .expect("enqueue");
+
+    let outcome = store.claim_one(Queue::Cache).await.expect("claim");
+    assert!(
+        outcome.claimed.is_none(),
+        "a job whose dedup index could not be retired must not be claimed"
+    );
+    assert!(
+        inner.head(&index_path).await.is_ok(),
+        "the index the retire failed to remove is still there for the next scan"
+    );
+}
+
+/// Regression: the execution lock keeps other workers out but not producers,
+/// so a reschedule must not overwrite an index a concurrent enqueue just
+/// pointed at its own fresh job.
+#[tokio::test]
+async fn retry_leaves_a_concurrent_producers_index_alone() {
+    let h = harness();
+    let lock_key = lock_key("cache.ns:sha256:retry-vs-producer");
+
+    let mut env = dummy_envelope(lock_key.as_str());
+    env.max_attempts = Some(3);
+    h.store.enqueue(env).await.expect("enqueue");
+
+    let claimed = h
+        .store
+        .claim_one(Queue::Cache)
+        .await
+        .expect("claim")
+        .claimed
+        .expect("Some");
+
+    // The claim retired the index, so a producer enqueueing the same lock_key
+    // mid-execution indexes its own fresh pending file.
+    h.store
+        .enqueue(dummy_envelope(lock_key.as_str()))
+        .await
+        .expect("producer enqueue");
+    let index_path = crate::jobs::store::job_lock_key_index_path("cache", &lock_key);
+    let produced = parse_lock_key_index(&h.raw.get(&index_path).await.expect("read index"))
+        .expect("parse")
+        .storage_key;
+
+    assert!(matches!(
+        h.store.fail(claimed, "boom").await.expect("fail"),
+        FailOutcome::Retried { .. }
+    ));
+
+    let after = parse_lock_key_index(&h.raw.get(&index_path).await.expect("read index"))
+        .expect("parse")
+        .storage_key;
+    assert_eq!(
+        after, produced,
+        "the reschedule clobbered the index of a job enqueued while it ran, \
+         stranding that job's pending file unindexed"
+    );
+}
+
+#[tokio::test]
+async fn retry_updates_lock_key_index_to_new_storage_key() {
+    let h = harness();
     let lock_key = lock_key("cache.ns:sha256:retry-index");
 
     let mut env = dummy_envelope(lock_key.as_str());
@@ -329,7 +541,9 @@ async fn run_retry_updates_lock_key_index_to_new_storage_key(h: Harness) {
     assert_eq!(&index.storage_key, new_storage_key);
 }
 
-async fn run_enqueue_dedup_skips_existing_lock_key(h: Harness) {
+#[tokio::test]
+async fn enqueue_dedup_skips_existing_lock_key() {
+    let h = harness();
     h.store
         .enqueue(dummy_envelope("cache.ns:sha256:dup"))
         .await
@@ -352,7 +566,9 @@ async fn run_enqueue_dedup_skips_existing_lock_key(h: Harness) {
     );
 }
 
-async fn run_enqueue_after_claim_creates_second_pending(h: Harness) {
+#[tokio::test]
+async fn enqueue_after_claim_creates_second_pending() {
+    let h = harness();
     let lock_key = lock_key("cache.ns:sha256:inflight");
     h.store
         .enqueue(dummy_envelope(lock_key.as_str()))
@@ -417,272 +633,9 @@ async fn run_enqueue_after_claim_creates_second_pending(h: Harness) {
     );
 }
 
-// =========================================================================
-// End-to-end claim cycle
-// =========================================================================
-
 #[tokio::test]
-async fn enqueue_then_claim_succeeds() {
-    for_each_job_backend(run_enqueue_then_claim_succeeds).await;
-}
-
-// =========================================================================
-// Retry + dead-letter (consumer-driven storage behaviour)
-// =========================================================================
-
-#[tokio::test]
-async fn retry_writes_pending_with_backoff() {
-    for_each_job_backend(run_retry_writes_pending_with_backoff).await;
-}
-
-#[tokio::test]
-async fn dead_letter_after_max_attempts() {
-    for_each_job_backend(run_dead_letter_after_max_attempts).await;
-}
-
-// =========================================================================
-// count_pending
-// =========================================================================
-
-#[tokio::test]
-async fn count_pending_saturates_at_cap() {
-    for_each_job_backend(run_count_pending_saturates_at_cap).await;
-}
-
-#[tokio::test]
-async fn count_pending_excludes_envelopes_past_readiness_horizon() {
-    for_each_job_backend(run_count_pending_excludes_envelopes_past_readiness_horizon).await;
-}
-
-// =========================================================================
-// count_failed
-// =========================================================================
-
-#[tokio::test]
-async fn count_failed_reflects_dead_letters() {
-    for_each_job_backend(run_count_failed_reflects_dead_letters).await;
-}
-
-#[tokio::test]
-async fn future_storage_key_yields_next_ready_without_claiming() {
-    for_each_job_backend(run_future_storage_key_yields_next_ready_without_claiming).await;
-}
-
-// =========================================================================
-// Dedup index (lock-key index)
-// =========================================================================
-
-#[tokio::test]
-async fn orphan_index_is_self_healed_on_next_lookup() {
-    for_each_job_backend(run_orphan_index_is_self_healed_on_next_lookup).await;
-}
-
-/// Fails the plain `Delete` of one key, modelling a transient backend error on
-/// the orphan-index self-heal while leaving every other op untouched.
-struct FailIndexDelete {
-    index_path: String,
-}
-
-#[async_trait]
-impl StoreHook for FailIndexDelete {
-    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
-        match op {
-            StoreOp::Delete { key } if key == self.index_path => Err(StorageError::Backend(
-                "injected orphan-delete failure".to_string(),
-            )),
-            _ => Ok(()),
-        }
-    }
-}
-
-#[tokio::test]
-async fn orphan_index_transient_delete_failure_does_not_drop_enqueue() {
-    metrics_provider::init_for_tests();
-    let lock_key = lock_key("cache.ns:sha256:orphan-transient");
-    let index_path = crate::jobs::store::job_lock_key_index_path("cache", &lock_key);
-
-    let inner: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
-    let hook = FailIndexDelete {
-        index_path: index_path.clone(),
-    };
-    let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(inner.clone(), hook));
-    let store = Arc::new(JobStore::new(hooked, "test-worker", ClaimMode::Atomic));
-
-    // Seed an orphan index (index present, pending file absent) through the
-    // inner store so the fault hook does not intercept the fixture write.
-    let storage_key = make_storage_key(Utc::now(), "phantom-id");
-    let index_data = serialize_lock_key_index(&storage_key).expect("serialize");
-    inner
-        .put(&index_path, Bytes::from(index_data))
-        .await
-        .expect("seed index");
-
-    // The self-heal delete fails transiently, so the lookup surfaces the error
-    // rather than reporting a false miss.
-    assert!(
-        store
-            .find_pending_with_lock_key(Queue::Cache, &lock_key)
-            .await
-            .is_err(),
-        "a transient orphan-cleanup failure must surface as an error",
-    );
-
-    // And the enqueue must not silently drop the distinct job: it propagates the
-    // failure instead of colliding with the lingering index on `PutIfAbsent` and
-    // returning a false dedup hit.
-    assert!(
-        store
-            .enqueue(dummy_envelope(lock_key.as_str()))
-            .await
-            .is_err(),
-        "enqueue must not silently drop a job behind an un-retired orphan index",
-    );
-}
-
-/// Fails the second `get` of a pending-job file with `NotFound`, modelling
-/// another worker completing the job (deleting its pending file) between the
-/// claim's first read and its post-acquire re-read.
-struct VanishOnSecondPendingRead {
-    pending_reads: AtomicUsize,
-}
-
-#[async_trait]
-impl StoreHook for VanishOnSecondPendingRead {
-    async fn before(&self, op: StoreOp<'_>) -> Result<(), StorageError> {
-        if let StoreOp::Get { key } = op
-            && key.contains("/pending/")
-            && self.pending_reads.fetch_add(1, Ordering::SeqCst) >= 1
-        {
-            return Err(StorageError::NotFound);
-        }
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn claim_rechecks_pending_under_lock_and_skips_a_vanished_job() {
-    metrics_provider::init_for_tests();
-    let inner: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
-    let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
-        inner,
-        VanishOnSecondPendingRead {
-            pending_reads: AtomicUsize::new(0),
-        },
-    ));
-    let store = Arc::new(JobStore::new(hooked, "test-worker", ClaimMode::Atomic));
-
-    store
-        .enqueue(dummy_envelope("cache.ns:sha256:vanish"))
-        .await
-        .expect("enqueue");
-
-    // The claim reads the pending file, acquires the lock, then re-reads: the
-    // re-read finds it gone, so the job is skipped rather than claimed as stale.
-    let outcome = store.claim_one(Queue::Cache).await.expect("claim");
-    assert!(
-        outcome.claimed.is_none(),
-        "a job whose pending file vanished after lock acquisition must not be claimed"
-    );
-}
-
-/// Regression: the retire is what stops a same-`lock_key` enqueue coalescing
-/// into a job that is already running. When it fails, claiming anyway leaves
-/// that stale index in place for the whole execution, so the claim must be
-/// abandoned and retried by the next scan instead.
-#[tokio::test]
-async fn claim_is_skipped_when_the_dedup_index_cannot_be_retired() {
-    metrics_provider::init_for_tests();
-    let lock_key = lock_key("cache.ns:sha256:retire-fails");
-    let index_path = crate::jobs::store::job_lock_key_index_path("cache", &lock_key);
-
-    let inner: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
-    let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
-        inner.clone(),
-        FailIndexDelete {
-            index_path: index_path.clone(),
-        },
-    ));
-    let store = Arc::new(JobStore::new(hooked, "test-worker", ClaimMode::Atomic));
-
-    store
-        .enqueue(dummy_envelope(lock_key.as_str()))
-        .await
-        .expect("enqueue");
-
-    let outcome = store.claim_one(Queue::Cache).await.expect("claim");
-    assert!(
-        outcome.claimed.is_none(),
-        "a job whose dedup index could not be retired must not be claimed"
-    );
-    assert!(
-        inner.head(&index_path).await.is_ok(),
-        "the index the retire failed to remove is still there for the next scan"
-    );
-}
-
-/// Regression: the execution lock keeps other workers out but not producers,
-/// so a reschedule must not overwrite an index a concurrent enqueue just
-/// pointed at its own fresh job.
-#[tokio::test]
-async fn retry_leaves_a_concurrent_producers_index_alone() {
-    metrics_provider::init_for_tests();
-    let h = harness_memory();
-    let lock_key = lock_key("cache.ns:sha256:retry-vs-producer");
-
-    let mut env = dummy_envelope(lock_key.as_str());
-    env.max_attempts = Some(3);
-    h.store.enqueue(env).await.expect("enqueue");
-
-    let claimed = h
-        .store
-        .claim_one(Queue::Cache)
-        .await
-        .expect("claim")
-        .claimed
-        .expect("Some");
-
-    // The claim retired the index, so a producer enqueueing the same lock_key
-    // mid-execution indexes its own fresh pending file.
-    h.store
-        .enqueue(dummy_envelope(lock_key.as_str()))
-        .await
-        .expect("producer enqueue");
-    let index_path = crate::jobs::store::job_lock_key_index_path("cache", &lock_key);
-    let produced = parse_lock_key_index(&h.raw.get(&index_path).await.expect("read index"))
-        .expect("parse")
-        .storage_key;
-
-    assert!(matches!(
-        h.store.fail(claimed, "boom").await.expect("fail"),
-        FailOutcome::Retried { .. }
-    ));
-
-    let after = parse_lock_key_index(&h.raw.get(&index_path).await.expect("read index"))
-        .expect("parse")
-        .storage_key;
-    assert_eq!(
-        after, produced,
-        "the reschedule clobbered the index of a job enqueued while it ran, \
-         stranding that job's pending file unindexed"
-    );
-}
-
-#[tokio::test]
-async fn retry_updates_lock_key_index_to_new_storage_key() {
-    for_each_job_backend(run_retry_updates_lock_key_index_to_new_storage_key).await;
-}
-
-#[tokio::test]
-async fn enqueue_dedup_skips_existing_lock_key() {
-    for_each_job_backend(run_enqueue_dedup_skips_existing_lock_key).await;
-}
-
-#[tokio::test]
-async fn enqueue_after_claim_creates_second_pending() {
-    for_each_job_backend(run_enqueue_after_claim_creates_second_pending).await;
-}
-
-async fn run_concurrent_enqueue_dedup(h: Harness) {
+async fn concurrent_enqueue_dedup() {
+    let h = harness();
     let lock_key = lock_key("cache.ns:sha256:concurrent");
     let mut handles = Vec::with_capacity(8);
     for _ in 0..8 {
@@ -704,11 +657,6 @@ async fn run_concurrent_enqueue_dedup(h: Harness) {
     );
 }
 
-#[tokio::test]
-async fn concurrent_enqueue_dedup() {
-    for_each_job_backend(run_concurrent_enqueue_dedup).await;
-}
-
 // =========================================================================
 // complete() commit-failure fail-over (no hot loop)
 // =========================================================================
@@ -716,7 +664,9 @@ async fn concurrent_enqueue_dedup() {
 /// The claim key serialises a `lock_key` across workers: while one holds it,
 /// a second scan finds the pending job but cannot claim it, and a release
 /// (here via `complete`) frees the key for the next claimant.
-async fn run_a_held_claim_blocks_a_second_claimant(h: Harness) {
+#[tokio::test]
+async fn a_held_claim_blocks_a_second_claimant() {
+    let h = harness();
     h.store
         .enqueue(dummy_envelope("cache.ns:sha256:claimed-once"))
         .await
@@ -743,16 +693,13 @@ async fn run_a_held_claim_blocks_a_second_claimant(h: Harness) {
     );
 }
 
-#[tokio::test]
-async fn a_held_claim_blocks_a_second_claimant() {
-    for_each_job_backend(run_a_held_claim_blocks_a_second_claimant).await;
-}
-
 // =========================================================================
 // Keyset pagination + administrative mutations
 // =========================================================================
 
-async fn run_list_pending_page_is_keyset_ordered(h: Harness) {
+#[tokio::test]
+async fn list_pending_page_is_keyset_ordered() {
+    let h = harness();
     for i in 0..5 {
         h.store
             .enqueue(dummy_envelope(&format!("cache.ns:sha256:page-{i}")))
@@ -794,7 +741,9 @@ async fn run_list_pending_page_is_keyset_ordered(h: Harness) {
     );
 }
 
-async fn run_retry_failed_resets_attempts(h: Harness) {
+#[tokio::test]
+async fn retry_failed_resets_attempts() {
+    let h = harness();
     // Seed a dead-letter record carrying a non-zero attempt count so the reset
     // is observable.
     let mut env = dummy_envelope("cache.ns:sha256:retry-failed");
@@ -854,7 +803,9 @@ async fn run_retry_failed_resets_attempts(h: Harness) {
     );
 }
 
-async fn run_delete_failed_record(h: Harness) {
+#[tokio::test]
+async fn delete_failed_record() {
+    let h = harness();
     let env = dummy_envelope("cache.ns:sha256:del-failed");
     let key = make_storage_key(Utc::now(), &env.id);
     let body = serialize_dead_letter(&env, "boom").expect("serialize");
@@ -885,7 +836,9 @@ async fn run_delete_failed_record(h: Harness) {
     );
 }
 
-async fn run_delete_pending_removes_record_and_index(h: Harness) {
+#[tokio::test]
+async fn delete_pending_removes_record_and_index() {
+    let h = harness();
     let lock_key = lock_key("cache.ns:sha256:del-pending");
     h.store
         .enqueue(dummy_envelope(lock_key.as_str()))
@@ -937,26 +890,6 @@ async fn run_delete_pending_removes_record_and_index(h: Harness) {
         ),
         "deleting a consumed key is a stale 404",
     );
-}
-
-#[tokio::test]
-async fn list_pending_page_is_keyset_ordered() {
-    for_each_job_backend(run_list_pending_page_is_keyset_ordered).await;
-}
-
-#[tokio::test]
-async fn retry_failed_resets_attempts() {
-    for_each_job_backend(run_retry_failed_resets_attempts).await;
-}
-
-#[tokio::test]
-async fn delete_failed_record() {
-    for_each_job_backend(run_delete_failed_record).await;
-}
-
-#[tokio::test]
-async fn delete_pending_removes_record_and_index() {
-    for_each_job_backend(run_delete_pending_removes_record_and_index).await;
 }
 
 // =========================================================================
@@ -1077,8 +1010,7 @@ fn a_lock_key_containing_the_escape_character_is_rejected() {
 /// on its first failure rather than retrying five times.
 #[tokio::test]
 async fn a_pinned_zero_budget_is_not_overwritten_by_the_queue_default() {
-    metrics_provider::init_for_tests();
-    let h = harness_memory();
+    let h = harness();
 
     let mut env = dummy_envelope("cache.ns:sha256:no-retries");
     env.max_attempts = Some(0);
@@ -1108,8 +1040,7 @@ async fn a_pinned_zero_budget_is_not_overwritten_by_the_queue_default() {
 /// enqueue, which is what every production caller relies on.
 #[tokio::test]
 async fn an_unpinned_budget_takes_the_queue_default() {
-    metrics_provider::init_for_tests();
-    let h = harness_memory();
+    let h = harness();
 
     let env = dummy_envelope("cache.ns:sha256:default-budget");
     assert_eq!(env.max_attempts, None, "a fresh envelope pins nothing");
@@ -1155,58 +1086,56 @@ fn a_stored_envelope_keeps_its_budget() {
 /// both queues re-enqueue what was lost.
 #[tokio::test]
 async fn a_poison_pending_record_is_discarded_and_does_not_wedge_the_queue() {
-    for_each_job_backend(async |h| {
-        h.store
-            .enqueue(dummy_envelope("cache.ns:sha256:poison"))
-            .await
-            .expect("enqueue poison");
-        let poisoned = h
-            .store
-            .list_pending_page(Queue::Cache, 10, None)
-            .await
-            .expect("list")
-            .items
-            .first()
-            .cloned()
-            .expect("the first job must be listed");
-        let path = crate::jobs::store::job_pending_path("cache", &poisoned);
-        h.raw
-            .put(&path, Bytes::from_static(b"{ truncated"))
-            .await
-            .expect("corrupt the body");
+    let h = harness();
+    h.store
+        .enqueue(dummy_envelope("cache.ns:sha256:poison"))
+        .await
+        .expect("enqueue poison");
+    let poisoned = h
+        .store
+        .list_pending_page(Queue::Cache, 10, None)
+        .await
+        .expect("list")
+        .items
+        .first()
+        .cloned()
+        .expect("the first job must be listed");
+    let path = crate::jobs::store::job_pending_path("cache", &poisoned);
+    h.raw
+        .put(&path, Bytes::from_static(b"{ truncated"))
+        .await
+        .expect("corrupt the body");
 
-        // Phase one: the scan meets the poison record and drops it. Ordering
-        // against a second job is not assumed: two enqueues can share a
-        // millisecond, so their storage keys may tie.
-        let outcome = h.store.claim_one(Queue::Cache).await.expect("claim");
-        assert!(
-            outcome.claimed.is_none(),
-            "an unreadable record must not claim as a job"
-        );
-        assert!(
-            h.raw.head(&path).await.is_err(),
-            "the unreadable record must be gone, not re-warned on every scan"
-        );
+    // Phase one: the scan meets the poison record and drops it. Ordering
+    // against a second job is not assumed: two enqueues can share a
+    // millisecond, so their storage keys may tie.
+    let outcome = h.store.claim_one(Queue::Cache).await.expect("claim");
+    assert!(
+        outcome.claimed.is_none(),
+        "an unreadable record must not claim as a job"
+    );
+    assert!(
+        h.raw.head(&path).await.is_err(),
+        "the unreadable record must be gone, not re-warned on every scan"
+    );
 
-        // Phase two: the queue still drains, which the old abort prevented for
-        // every job queued after the poison record.
-        h.store
-            .enqueue(dummy_envelope("cache.ns:sha256:healthy"))
-            .await
-            .expect("enqueue healthy");
-        let claimed = h
-            .store
-            .claim_one(Queue::Cache)
-            .await
-            .expect("claim")
-            .claimed
-            .expect("the queue must keep draining");
-        assert_eq!(
-            claimed.envelope.lock_key.to_string(),
-            "cache.ns:sha256:healthy"
-        );
-    })
-    .await;
+    // Phase two: the queue still drains, which the old abort prevented for
+    // every job queued after the poison record.
+    h.store
+        .enqueue(dummy_envelope("cache.ns:sha256:healthy"))
+        .await
+        .expect("enqueue healthy");
+    let claimed = h
+        .store
+        .claim_one(Queue::Cache)
+        .await
+        .expect("claim")
+        .claimed
+        .expect("the queue must keep draining");
+    assert_eq!(
+        claimed.envelope.lock_key.to_string(),
+        "cache.ns:sha256:healthy"
+    );
 }
 
 /// Retiring the record through the admin API is the only recovery path, and it
@@ -1214,37 +1143,35 @@ async fn a_poison_pending_record_is_discarded_and_does_not_wedge_the_queue() {
 /// delete proceeds without the index fold.
 #[tokio::test]
 async fn a_poison_pending_record_can_be_deleted() {
-    for_each_job_backend(async |h| {
-        h.store
-            .enqueue(dummy_envelope("cache.ns:sha256:poison"))
-            .await
-            .expect("enqueue");
-        let poisoned = h
-            .store
-            .list_pending_page(Queue::Cache, 10, None)
-            .await
-            .expect("list")
-            .items
-            .first()
-            .cloned()
-            .expect("the job must be listed");
-        let path = crate::jobs::store::job_pending_path("cache", &poisoned);
-        h.raw
-            .put(&path, Bytes::from_static(b"{ truncated"))
-            .await
-            .expect("corrupt the body");
+    let h = harness();
+    h.store
+        .enqueue(dummy_envelope("cache.ns:sha256:poison"))
+        .await
+        .expect("enqueue");
+    let poisoned = h
+        .store
+        .list_pending_page(Queue::Cache, 10, None)
+        .await
+        .expect("list")
+        .items
+        .first()
+        .cloned()
+        .expect("the job must be listed");
+    let path = crate::jobs::store::job_pending_path("cache", &poisoned);
+    h.raw
+        .put(&path, Bytes::from_static(b"{ truncated"))
+        .await
+        .expect("corrupt the body");
 
-        h.store
-            .delete_job(Queue::Cache, JobState::Pending, &poisoned)
-            .await
-            .expect("an unreadable pending record must still be deletable");
+    h.store
+        .delete_job(Queue::Cache, JobState::Pending, &poisoned)
+        .await
+        .expect("an unreadable pending record must still be deletable");
 
-        assert!(
-            h.raw.head(&path).await.is_err(),
-            "the pending object must be gone"
-        );
-    })
-    .await;
+    assert!(
+        h.raw.head(&path).await.is_err(),
+        "the pending object must be gone"
+    );
 }
 
 /// A worker whose claim lapsed mid-execution must not reschedule or bury the
@@ -1252,66 +1179,64 @@ async fn a_poison_pending_record_can_be_deleted() {
 /// key's new holder, exactly as on the `complete` path.
 #[tokio::test]
 async fn fail_with_lost_claim_leaves_pending_and_index_untouched() {
-    for_each_job_backend(async |h| {
-        let mut env = dummy_envelope("cache.ns:sha256:lostfail");
-        env.max_attempts = Some(5);
-        h.store.enqueue(env).await.expect("enqueue");
-        let storage_key = h
-            .store
-            .list_pending(Queue::Cache, 10)
+    let h = harness();
+    let mut env = dummy_envelope("cache.ns:sha256:lostfail");
+    env.max_attempts = Some(5);
+    h.store.enqueue(env).await.expect("enqueue");
+    let storage_key = h
+        .store
+        .list_pending(Queue::Cache, 10)
+        .await
+        .expect("list")
+        .pop()
+        .expect("one pending job");
+    let envelope = h
+        .store
+        .read_pending(Queue::Cache, &storage_key)
+        .await
+        .expect("read pending");
+
+    let lost = CancellationToken::new();
+    lost.cancel();
+    let claimed = ClaimedJob::for_test(envelope.clone(), storage_key.clone(), lost);
+    assert!(matches!(
+        h.store.fail(claimed, "boom").await.expect("fail"),
+        FailOutcome::Retried { .. }
+    ));
+
+    // Same guarantee on the dead-letter path.
+    let lost = CancellationToken::new();
+    lost.cancel();
+    let claimed = ClaimedJob::for_test(envelope, storage_key.clone(), lost);
+    assert!(matches!(
+        h.store
+            .fail_terminal(claimed, "boom")
             .await
-            .expect("list")
-            .pop()
-            .expect("one pending job");
-        let envelope = h
-            .store
-            .read_pending(Queue::Cache, &storage_key)
-            .await
-            .expect("read pending");
+            .expect("fail_terminal"),
+        FailOutcome::MovedToDeadLetter
+    ));
 
-        let lost = CancellationToken::new();
-        lost.cancel();
-        let claimed = ClaimedJob::for_test(envelope.clone(), storage_key.clone(), lost);
-        assert!(matches!(
-            h.store.fail(claimed, "boom").await.expect("fail"),
-            FailOutcome::Retried { .. }
-        ));
-
-        // Same guarantee on the dead-letter path.
-        let lost = CancellationToken::new();
-        lost.cancel();
-        let claimed = ClaimedJob::for_test(envelope, storage_key.clone(), lost);
-        assert!(matches!(
-            h.store
-                .fail_terminal(claimed, "boom")
-                .await
-                .expect("fail_terminal"),
-            FailOutcome::MovedToDeadLetter
-        ));
-
-        let pending = h.store.list_pending(Queue::Cache, 10).await.expect("list");
-        assert_eq!(
-            pending,
-            vec![storage_key.clone()],
-            "the original pending file must be the only one"
-        );
-        let pending_path = job_pending_path("cache", &storage_key);
-        assert!(
-            h.raw.head(&pending_path).await.is_ok(),
-            "the pending file must be untouched"
-        );
-        let index_path = job_lock_key_index_path("cache", &lock_key("cache.ns:sha256:lostfail"));
-        assert!(
-            h.raw.head(&index_path).await.is_ok(),
-            "the dedup index must be untouched"
-        );
-        assert_eq!(
-            h.store.count_failed(Queue::Cache).await.expect("count"),
-            0,
-            "nothing may be dead-lettered by a lost claim"
-        );
-    })
-    .await;
+    let pending = h.store.list_pending(Queue::Cache, 10).await.expect("list");
+    assert_eq!(
+        pending,
+        vec![storage_key.clone()],
+        "the original pending file must be the only one"
+    );
+    let pending_path = job_pending_path("cache", &storage_key);
+    assert!(
+        h.raw.head(&pending_path).await.is_ok(),
+        "the pending file must be untouched"
+    );
+    let index_path = job_lock_key_index_path("cache", &lock_key("cache.ns:sha256:lostfail"));
+    assert!(
+        h.raw.head(&index_path).await.is_ok(),
+        "the dedup index must be untouched"
+    );
+    assert_eq!(
+        h.store.count_failed(Queue::Cache).await.expect("count"),
+        0,
+        "nothing may be dead-lettered by a lost claim"
+    );
 }
 
 /// The refresher's loss predicate: a positive loss cancels immediately, and
@@ -1343,106 +1268,96 @@ fn should_cancel_claim_tolerates_transient_errors_inside_the_lease() {
 /// stale record, takes the key over, and claims the job.
 #[tokio::test]
 async fn claim_one_takes_over_a_stale_claim() {
-    for_each_job_backend(async |h| {
-        h.store
-            .enqueue(dummy_envelope("cache.ns:sha256:stale"))
-            .await
-            .expect("enqueue");
-        let claim_path = job_claim_path(&lock_key("cache.ns:sha256:stale"));
-        h.raw
-            .put(
-                &claim_path,
-                Bytes::from_static(
-                    br#"{"instance":"departed-worker","expires_at":"2020-01-01T00:00:00Z"}"#,
-                ),
-            )
-            .await
-            .expect("write stale claim");
+    let h = harness();
+    h.store
+        .enqueue(dummy_envelope("cache.ns:sha256:stale"))
+        .await
+        .expect("enqueue");
+    let claim_path = job_claim_path(&lock_key("cache.ns:sha256:stale"));
+    h.raw
+        .put(
+            &claim_path,
+            Bytes::from_static(
+                br#"{"instance":"departed-worker","expires_at":"2020-01-01T00:00:00Z"}"#,
+            ),
+        )
+        .await
+        .expect("write stale claim");
 
-        let claimed = h
-            .store
-            .claim_one(Queue::Cache)
-            .await
-            .expect("claim")
-            .claimed
-            .expect("a stale claim must be taken over");
-        assert_eq!(claimed.envelope.lock_key, lock_key("cache.ns:sha256:stale"));
-        h.store.complete(claimed).await.expect("complete");
-    })
-    .await;
+    let claimed = h
+        .store
+        .claim_one(Queue::Cache)
+        .await
+        .expect("claim")
+        .claimed
+        .expect("a stale claim must be taken over");
+    assert_eq!(claimed.envelope.lock_key, lock_key("cache.ns:sha256:stale"));
+    h.store.complete(claimed).await.expect("complete");
 }
 
 /// A release by an instance that no longer owns the claim key must leave the
 /// new owner's record in place.
 #[tokio::test]
 async fn release_leaves_a_foreign_claim_intact() {
-    for_each_job_backend(async |h| {
-        h.store
-            .enqueue(dummy_envelope("cache.ns:sha256:foreign"))
-            .await
-            .expect("enqueue");
-        let claimed = h
-            .store
-            .claim_one(Queue::Cache)
-            .await
-            .expect("claim")
-            .claimed
-            .expect("Some");
+    let h = harness();
+    h.store
+        .enqueue(dummy_envelope("cache.ns:sha256:foreign"))
+        .await
+        .expect("enqueue");
+    let claimed = h
+        .store
+        .claim_one(Queue::Cache)
+        .await
+        .expect("claim")
+        .claimed
+        .expect("Some");
 
-        // Another worker took the key over: overwrite the claim record with a
-        // foreign instance before this holder releases it.
-        let claim_path = job_claim_path(&lock_key("cache.ns:sha256:foreign"));
-        let foreign = format!(
-            r#"{{"instance":"foreign-instance","expires_at":"{}"}}"#,
-            (Utc::now() + ChronoDuration::seconds(300)).to_rfc3339(),
-        );
-        h.raw
-            .put(&claim_path, Bytes::from(foreign))
-            .await
-            .expect("overwrite claim");
+    // Another worker took the key over: overwrite the claim record with a
+    // foreign instance before this holder releases it.
+    let claim_path = job_claim_path(&lock_key("cache.ns:sha256:foreign"));
+    let foreign = format!(
+        r#"{{"instance":"foreign-instance","expires_at":"{}"}}"#,
+        (Utc::now() + ChronoDuration::seconds(300)).to_rfc3339(),
+    );
+    h.raw
+        .put(&claim_path, Bytes::from(foreign))
+        .await
+        .expect("overwrite claim");
 
-        assert!(matches!(
-            h.store.complete(claimed).await.expect("complete"),
-            CompleteOutcome::Completed
-        ));
+    assert!(matches!(
+        h.store.complete(claimed).await.expect("complete"),
+        CompleteOutcome::Completed
+    ));
 
-        let body = h
-            .raw
-            .get(&claim_path)
-            .await
-            .expect("the foreign claim must survive the release");
-        let record: serde_json::Value = serde_json::from_slice(&body).expect("claim json");
-        assert_eq!(record["instance"], "foreign-instance");
-    })
-    .await;
+    let body = h
+        .raw
+        .get(&claim_path)
+        .await
+        .expect("the foreign claim must survive the release");
+    let record: serde_json::Value = serde_json::from_slice(&body).expect("claim json");
+    assert_eq!(record["instance"], "foreign-instance");
 }
 
-/// The startup probe must pass on every job backend and leave no scratch key
+/// The startup probe must pass on the fs backend and leave no scratch key
 /// behind.
 #[tokio::test]
 async fn ensure_claim_support_probe_succeeds_and_cleans_up() {
     metrics_provider::init_for_tests();
-    let dir = TempDir::new().expect("temp dir");
-    let backends: [Arc<dyn ObjectStore>; 2] = [
-        Arc::new(StorageFsBackend::builder(dir.path()).build()),
-        Arc::new(MemoryObjectStore::new()),
-    ];
-    for raw in backends {
-        assert_eq!(
-            ensure_claim_support(&raw).await.expect("probe"),
-            ClaimMode::Atomic,
-            "fs and memory backends are honest and must probe as atomic",
-        );
-        let page = raw
-            .list(&format!("{JOBS_ROOT}/claims/"), 10, None)
-            .await
-            .expect("list claims");
-        assert!(
-            page.items.is_empty(),
-            "the probe must clean up its scratch key, found {:?}",
-            page.items
-        );
-    }
+    let (raw, _dir) = fs_store();
+    assert_eq!(
+        ensure_claim_support(&raw).await.expect("probe"),
+        ClaimMode::Atomic,
+        "the fs backend is honest and must probe as atomic",
+    );
+    let page = raw
+        .list(&format!("{JOBS_ROOT}/claims/"), 10, None)
+        .await
+        .expect("list claims");
+    assert!(
+        page.items.is_empty(),
+        "the probe must clean up its scratch key, found {:?}",
+        page.items
+    );
 }
 
 /// Deletes the key ahead of every write, so `create_if_absent` never sees an
@@ -1466,7 +1381,7 @@ impl StoreHook for DishonestCreate {
 #[tokio::test]
 async fn a_dishonest_backend_probes_as_advisory() {
     metrics_provider::init_for_tests();
-    let inner: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+    let (inner, _dir) = fs_store();
     let hooked: Arc<dyn ObjectStore> =
         Arc::new(HookedStore::new(inner.clone(), DishonestCreate { inner }));
     assert_eq!(
@@ -1524,7 +1439,7 @@ impl StoreHook for AdvisoryRaceGate {
 #[tokio::test]
 async fn advisory_claim_race_admits_exactly_one_winner() {
     metrics_provider::init_for_tests();
-    let inner: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+    let (inner, _dir) = fs_store();
     let claim_key = job_claim_path(&lock_key("cache.ns:sha256:advisory-race"));
 
     // Gate order: B pre-reads, A puts, B puts, then both verify.
@@ -1584,7 +1499,7 @@ async fn advisory_claim_race_admits_exactly_one_winner() {
 #[tokio::test]
 async fn advisory_mode_claims_completes_and_reclaims() {
     metrics_provider::init_for_tests();
-    let raw: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+    let (raw, _dir) = fs_store();
     let store = Arc::new(JobStore::new(raw, "advisory-worker", ClaimMode::Advisory));
 
     store
@@ -1638,7 +1553,7 @@ impl StoreHook for FailPendingDeleteOnce {
 #[tokio::test]
 async fn complete_cleanup_failure_fails_over_to_retry() {
     metrics_provider::init_for_tests();
-    let inner: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+    let (inner, _dir) = fs_store();
     let hooked: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
         inner.clone(),
         FailPendingDeleteOnce {
@@ -1697,7 +1612,7 @@ fn claim_ttl_defaults_and_floor() {
 #[tokio::test]
 async fn claim_ttl_knob_stamps_the_claim_lease() {
     metrics_provider::init_for_tests();
-    let raw: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+    let (raw, _dir) = fs_store();
     let store = Arc::new(JobStore::with_retry_policy(
         raw.clone(),
         "test-worker",

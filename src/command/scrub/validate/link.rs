@@ -1,7 +1,6 @@
-//! Link-key validation: one visit per link file replaces the old per-concern
-//! walks (manifest link repair, `referenced_by` back-links, blob-index grant
-//! reconcile, tag digest links, referrer liveness, the invalid-tag gate, and
-//! the orphan-namespace clearing).
+//! Link-key validation: one visit per link file covers manifest link repair,
+//! `referenced_by` back-links, blob-index grant reconciliation, tag targets,
+//! referrer liveness, and the invalid-name gates.
 
 use chrono::{DateTime, Utc};
 use tracing::{debug, warn};
@@ -82,9 +81,8 @@ impl Validator {
         .await
     }
 
-    /// A tag link: an invalid directory name is deleted; a valid one must
-    /// parse, target existing blob bytes, and have its digest revision link.
-    /// A healthy link is converted into a tag entry and reclaimed.
+    /// A tag link: an invalid directory name is deleted, a valid one must parse
+    /// and target existing bytes, and the link is converted into a tag entry.
     async fn validate_tag_link(
         &self,
         key: &str,
@@ -104,13 +102,10 @@ impl Validator {
         };
         self.validate_tag_target(namespace, &tag, metadata.target, metadata.created_at)
             .await?;
-        // Convert whether or not the target was healthy: the entry is tag
-        // history either way, an unhealthy target's orphan repair tombstones
-        // the tag, and a surviving legacy link would re-propose that repair
-        // on every walk. A concurrent new-shape write appends a fresher
-        // entry that wins resolution regardless, and the conversion's
-        // legacy-link delete is grace-gated so an old-shape writer
-        // rewriting the link in place is never raced.
+        // Convert whether or not the target was healthy: a surviving legacy
+        // link would re-propose the orphan repair on every walk. A concurrent
+        // new-shape write appends a fresher entry that wins resolution anyway,
+        // and the conversion's link delete is grace-gated.
         self.emit(Action::ConvertTagLink {
             namespace: namespace.clone(),
             tag,
@@ -121,7 +116,6 @@ impl Validator {
 
     /// One tag's entry directory, validated once per (namespace, tag): the
     /// resolved winner must satisfy the same checks as a legacy tag link.
-    /// Both names already passed their grammars at categorization.
     pub async fn validate_tag_entries(
         &self,
         namespace_raw: &str,
@@ -140,7 +134,7 @@ impl Validator {
             .await
         {
             Ok(metadata) => metadata,
-            // Tombstoned: entries are history, nothing to check.
+            // Tombstoned: the entries are history now.
             Err(RegistryError::NotFound) => return Ok(()),
             Err(e) => return Err(e.into()),
         };
@@ -149,10 +143,9 @@ impl Validator {
     }
 
     /// Demote entries superseded by the tag's winner group to the `!hist/`
-    /// prefix. The complete lowest-ordinal group is the winner and always
-    /// stays, so a same-millisecond tie is never split; only strictly older
-    /// entries are candidates, each age-gated so a racing push's fresh entry
-    /// is never in scope.
+    /// prefix. The whole lowest-ordinal group stays, so a same-millisecond tie
+    /// is never split, and each strictly older candidate is age-gated so a
+    /// racing push's entry is out of scope.
     async fn demote_superseded_entries(
         &self,
         namespace: &Namespace,
@@ -229,10 +222,9 @@ impl Validator {
     }
 
     /// Collect one atime entry directory: the newest decodable entry always
-    /// stays (retention needs the last access durably), an undecodable body
-    /// is deleted, a superseded entry is deleted once its own ordinal
-    /// timestamp is past the audit window, and the legacy single key is
-    /// retired (grace-gated) once an entry exists.
+    /// stays, since retention needs the last access durably. An undecodable
+    /// body goes, a superseded entry goes once past the audit window, and the
+    /// legacy single key retires once an entry exists.
     async fn collect_atime_entries(&self, dir: &str, legacy_key: &str) -> Result<(), Error> {
         if !self.claim(format!("atime-entries:{dir}")) {
             return Ok(());
@@ -264,8 +256,8 @@ impl Validator {
                     Err(e) => return Err(RegistryError::from(e).into()),
                 }
                 if !kept_newest {
-                    // The listing sorts newest first: the first decodable
-                    // entry is the last access and always stays.
+                    // The listing sorts newest first, so the first decodable
+                    // entry is the last access.
                     kept_newest = true;
                     continue;
                 }
@@ -297,13 +289,10 @@ impl Validator {
         .await
     }
 
-    /// The shared tail of both tag shapes: the current target must have blob
-    /// bytes (else the orphan manifest is removed) and its digest revision
-    /// link (re-issued when missing).
-    /// A tag whose winning entry is younger than the grace period is left
-    /// alone: the walk can resolve it before a concurrent delete's tombstone
-    /// lands and then read the revision after that delete removed it, and
-    /// repairing on that interleaving would resurrect a deleted manifest.
+    /// The shared tail of both tag shapes: the target must have blob bytes,
+    /// else its orphan manifest is removed, and its revision link is re-issued
+    /// when missing. A winning entry inside the grace period is left alone,
+    /// since repairing mid-delete would resurrect a deleted manifest.
     async fn validate_tag_target(
         &self,
         namespace: &Namespace,
@@ -336,7 +325,7 @@ impl Validator {
     }
 
     /// A manifest revision link: validated through the shared anchor routine,
-    /// then converted into a revision record and reclaimed when healthy.
+    /// then converted into a revision record when healthy.
     async fn validate_revision_link(
         &self,
         key: &str,
@@ -347,8 +336,7 @@ impl Validator {
             return Ok(());
         };
         if metadata.target != *revision {
-            // The body targets a different digest than the path addresses;
-            // rewrite it to the canonical self-target.
+            // The body disagrees with the path; rewrite it to the self-target.
             self.emit(Action::RecreateLink {
                 namespace: namespace.clone(),
                 link: LinkKind::Digest(revision.clone()),
@@ -367,8 +355,7 @@ impl Validator {
     }
 
     /// A revision record: the same anchor routine as a legacy link, deduped
-    /// against it per (namespace, digest). Grammars were checked at
-    /// categorization.
+    /// against it per (namespace, digest).
     pub async fn validate_revision_record(
         &self,
         namespace_raw: &str,
@@ -383,10 +370,9 @@ impl Validator {
     }
 
     /// The anchor of the derivable state, shared by both revision shapes: one
-    /// manifest read drives child-link repair, `referenced_by` back-links,
-    /// and blob-index grant reconciliation. Returns whether the revision was
-    /// healthy (its manifest blob present). Runs once per (namespace,
-    /// revision) per scrub; a repeat visit only re-answers the health probe.
+    /// manifest read drives child-link repair, back-links, and grant
+    /// reconciliation, returning whether the manifest blob is present. Runs
+    /// once per (namespace, revision); a repeat visit only re-probes health.
     async fn validate_revision_content(
         &self,
         namespace: &Namespace,
@@ -397,9 +383,9 @@ impl Validator {
             return Ok(self.blob_store.size(revision).await.is_ok());
         }
 
-        // A revision younger than the grace period may belong to a push
-        // whose later waves are still in flight; deriving repairs from it
-        // would race them, so it waits for the next run.
+        // A revision younger than the grace period may belong to a push whose
+        // later waves are still in flight, so repairs derived from it would
+        // race them.
         if self
             .younger_than_grace(&path_builder::revision_record_path(namespace, revision))
             .await?
@@ -435,12 +421,10 @@ impl Validator {
         self.ensure_grant(namespace, revision, &LinkKind::Digest(revision.clone()))
             .await?;
 
-        // Only repair references the namespace already holds. A permissive push
-        // withholds the link and the grant for a digest the namespace does not
-        // own, so re-deriving them from the manifest body would hand it exactly
-        // the cross-namespace read access the write path refused.
-        // A tracked reference is pinned by its per-referrer entry alone; the
-        // legacy link file is advisory and never repaired from a manifest.
+        // Only repair references the namespace already holds: a permissive push
+        // withholds the link and grant for a digest it does not own, and
+        // re-deriving them from the manifest body would hand back exactly the
+        // cross-namespace read access the write path refused.
         for (link, target) in link_plan::revision_links(&manifest, revision) {
             if !self.holds_reference(namespace, &target, &link).await? {
                 debug!(
@@ -449,6 +433,8 @@ impl Validator {
                 );
                 continue;
             }
+            // A tracked reference is pinned by its per-referrer entry alone;
+            // the legacy link file is advisory and never repaired.
             if link.is_tracked() {
                 self.ensure_grant(
                     namespace,
@@ -496,15 +482,10 @@ impl Validator {
         }
     }
 
-    /// Whether `namespace` already holds `target`. Writers never remove
-    /// reference keys or tracked link files, so raw existence is not
-    /// ownership: the namespace's own blob-index key counts directly, any
-    /// other entry (and the link itself) only while the metadata store's
-    /// `reference_backed` vouches for it, else a manifest
-    /// delete's stale leftovers would mint back the access the write path
-    /// refused. Losing every backed reference for one the namespace did own
-    /// leaves the manifest unrepaired (and unpullable) rather than guessing
-    /// in favour of access.
+    /// Whether `namespace` already holds `target`. Raw key existence is not
+    /// ownership: the namespace's own blob-index key counts directly, every
+    /// other entry only while `reference_backed` vouches for it, else a
+    /// manifest delete's leftovers would mint back the refused access.
     async fn holds_reference(
         &self,
         namespace: &Namespace,
@@ -564,8 +545,8 @@ impl Validator {
             .await
     }
 
-    /// A referrer record is live only while its referrer manifest is a
-    /// current revision. Grammars were checked at categorization.
+    /// A referrer record is live only while its referrer manifest is a current
+    /// revision.
     pub async fn validate_referrer_record(
         &self,
         namespace_raw: &str,
@@ -581,9 +562,8 @@ impl Validator {
             Err(StorageError::NotFound) => return Ok(()),
             Err(e) => return Err(RegistryError::from(e).into()),
         }
-        // A young record may precede its referrer's revision inside a push,
-        // or follow a delete whose tombstoning the walk raced; either way
-        // pruning waits out the grace period.
+        // A young record may precede its referrer's revision inside a push, or
+        // follow a delete the walk raced; either way pruning waits.
         if self.younger_than_grace(&key).await? {
             return Ok(());
         }
@@ -616,11 +596,10 @@ impl Validator {
         .await
     }
 
-    /// A blob/layer/config/index-child link file: prune `referenced_by`
-    /// entries whose revision is gone, re-home each live referrer's pin to
-    /// its per-referrer reference entry, and once every live pin is covered
-    /// and every dead one pruned, retire the file (the executor re-checks
-    /// its age before deleting).
+    /// A blob/layer/config/index-child link file: prune `referenced_by` entries
+    /// whose revision is gone and re-home each live pin to its per-referrer
+    /// entry. The file is retired only once every live pin is covered and every
+    /// dead one pruned.
     async fn validate_tracked_link(
         &self,
         key: &str,
@@ -631,8 +610,7 @@ impl Validator {
             return Ok(());
         };
         // A young link file may carry the back-link of a push whose revision
-        // record is still in flight; pruning and retirement both wait out
-        // the grace period.
+        // record is still in flight, so pruning and retirement both wait.
         if self.younger_than_grace(key).await? {
             return Ok(());
         }
@@ -647,8 +625,8 @@ impl Validator {
         let mut retire = true;
         for referrer in &metadata.referenced_by {
             if self.revision_exists(namespace, referrer).await? {
-                // A live pin must exist as a per-referrer entry before the
-                // file may go.
+                // A live pin must exist as a per-referrer entry before the file
+                // may go.
                 if !self
                     .ensure_grant(namespace, &blob, &LinkKind::ReferencedBy(referrer.clone()))
                     .await?
@@ -705,11 +683,9 @@ impl Validator {
         }
     }
 
-    /// Recreate `link -> expected` when it is confirmed missing or
-    /// mistargeted (absorbed from the old `link_repair::ensure_link`). Any
-    /// other read error propagates: a repair write must not be based on a
-    /// read that never succeeded, and an unreadable link is deleted when its
-    /// own key is visited.
+    /// Recreate `link -> expected` when it is confirmed missing or mistargeted.
+    /// Any other read error propagates: a repair write must not be based on a
+    /// read that never succeeded.
     async fn ensure_link(
         &self,
         namespace: &Namespace,
@@ -746,9 +722,8 @@ impl Validator {
     }
 
     /// Emit a grant for `link` on `blob` unless the index already records it,
-    /// and only for bytes that still exist (absorbed from the old
-    /// `BlobIndexChecker`). Returns whether the entry is accounted for:
-    /// already recorded, or its grant emitted this run.
+    /// and only for bytes that still exist. Returns whether the entry is
+    /// accounted for: already recorded, or its grant emitted this run.
     async fn ensure_grant(
         &self,
         namespace: &Namespace,
@@ -767,8 +742,8 @@ impl Validator {
         match self.blob_store.size(blob).await {
             Ok(_) => {}
             Err(RegistryError::BlobUnknown | RegistryError::NotFound) => {
-                // A manifest referencing missing bytes is a broken-manifest
-                // problem; granting it would churn against the blob GC.
+                // A manifest referencing missing bytes is broken; granting it
+                // would only churn against the blob GC.
                 return Ok(false);
             }
             Err(e) => return Err(e.into()),

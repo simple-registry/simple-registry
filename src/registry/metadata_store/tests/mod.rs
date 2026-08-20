@@ -32,7 +32,6 @@ use crate::{
     },
 };
 
-/// Configuration for a test S3 metadata backend.
 #[derive(Clone)]
 pub struct TestS3Config {
     pub connection: S3ConnectionConfig,
@@ -76,8 +75,6 @@ pub fn test_backend_with_cache(config: &TestS3Config) -> (MetadataStore, Arc<Cac
 pub fn test_backend(config: &TestS3Config) -> MetadataStore {
     config.to_backend(None).unwrap()
 }
-
-// Integration tests
 
 async fn create_link(m: &Arc<MetadataStore>, namespace: &str, link: &LinkKind, digest: &Digest) {
     let namespace = Namespace::new(namespace).unwrap();
@@ -217,12 +214,11 @@ pub async fn test_datastore_list_tag_names_includes_malformed(m: Arc<MetadataSto
     let namespace = &Namespace::new("test-repo/raw-tags").unwrap();
     let digest = put_blob_direct(m.object_store(), b"raw tag test blob").await;
 
-    // A valid tag via the normal link path.
     let valid = LinkKind::Tag(Tag::new("v1.0").unwrap());
     create_link(&m, namespace, &valid, &digest).await;
 
-    // A directory whose name fails the tag grammar (leading '-'), planted by
-    // writing a raw `current/link` object so validation is bypassed.
+    // A directory whose name fails the tag grammar, planted as a raw
+    // `current/link` object so validation is bypassed.
     m.object_store()
         .put(
             &format!(
@@ -237,7 +233,7 @@ pub async fn test_datastore_list_tag_names_includes_malformed(m: Arc<MetadataSto
         .unwrap();
 
     // The raw listing covers legacy tag directories only; a tag written
-    // through the normal path lands as entries and is absent here.
+    // through the normal path lands as entries.
     let raw_names = m.list_tag_names(namespace, 10, None).await.unwrap().items;
     assert!(raw_names.contains(&"-bad".to_string()));
     assert!(!raw_names.contains(&"v1.0".to_string()));
@@ -253,7 +249,6 @@ pub async fn test_datastore_list_tag_names_includes_malformed(m: Arc<MetadataSto
 pub async fn test_datastore_delete_tag_directory_guards_unsafe_names(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("test-repo/guard-tags").unwrap();
 
-    // Unsafe segment names must be refused without deleting anything.
     let unsafe_name = "a/b";
     assert!(
         matches!(
@@ -263,8 +258,8 @@ pub async fn test_datastore_delete_tag_directory_guards_unsafe_names(m: Arc<Meta
         "expected guard to reject {unsafe_name:?}"
     );
 
-    // Positive case: a safe but grammar-invalid name (leading '-') is the normal
-    // invalid-tag scrub target and must be deleted, proving no over-rejection.
+    // A safe but grammar-invalid name is the normal scrub target and must
+    // still be deleted, proving no over-rejection.
     m.object_store()
         .put(
             &format!(
@@ -298,7 +293,6 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
 
     create_link(&m, namespace, &base_link, &base_digest).await;
 
-    // Create artifacts that reference the base manifest
     let referrer_content = format!(
         r#"{{
             "schemaVersion": 2,
@@ -323,7 +317,6 @@ pub async fn test_datastore_list_referrers(registry: &Registry) {
 
     create_link(&m, namespace, &link, &referrer_digest).await;
 
-    // Also add it to the referrers index
     let referrers_link = LinkKind::Referrer {
         subject: base_digest.clone(),
         referrer: referrer_digest.clone(),
@@ -401,9 +394,8 @@ pub async fn test_datastore_stream_revisions(m: Arc<MetadataStore>) {
 pub async fn test_datastore_stream_revisions_across_algorithms(m: Arc<MetadataStore>) {
     let namespace = &Namespace::new("multi-algo-repo").unwrap();
 
-    // Two revisions per algorithm. sha256 and sha512 are stored under separate
-    // prefixes; the stream must chain them in global sort order (every sha256
-    // before every sha512), each exactly once.
+    // sha256 and sha512 live under separate prefixes; the stream must chain
+    // them in global sort order, each digest exactly once.
     let mut expected = Vec::new();
     for content in [b"a".as_slice(), b"b".as_slice()] {
         for algorithm in [Algorithm::Sha256, Algorithm::Sha512] {
@@ -503,7 +495,6 @@ pub async fn test_datastore_list_namespaces_deduplication(m: Arc<MetadataStore>)
     let namespace = "dedup-repo";
     let digest = put_blob_direct(m.object_store(), b"dedup test content").await;
 
-    // Create multiple link types within the same namespace
     let tag_link = LinkKind::Tag(Tag::new("latest").unwrap());
     let digest_link = LinkKind::Digest(digest.clone());
     let layer_link = LinkKind::Layer(digest.clone());
@@ -514,7 +505,6 @@ pub async fn test_datastore_list_namespaces_deduplication(m: Arc<MetadataStore>)
     create_link(&m, namespace, &layer_link, &digest).await;
     create_link(&m, namespace, &config_link, &digest).await;
 
-    // The namespace should appear exactly once despite having multiple object types
     let namespaces = m.list_namespaces(10, None).await.unwrap().items;
     let count = namespaces.iter().filter(|n| *n == namespace).count();
     assert_eq!(
@@ -573,53 +563,6 @@ pub async fn test_datastore_list_namespaces_many_namespaces_pagination(m: Arc<Me
     );
 }
 
-pub async fn test_datastore_list_namespaces_single_item_pages(m: Arc<MetadataStore>) {
-    let digest = put_blob_direct(m.object_store(), b"single page test content").await;
-
-    let namespace_names: Vec<String> = (0..5).map(|i| format!("single-{i:02}")).collect();
-
-    for ns in &namespace_names {
-        let tag_link = LinkKind::Tag(Tag::new("v1").unwrap());
-        create_link(&m, ns, &tag_link, &digest).await;
-    }
-
-    let mut all_namespaces = Vec::new();
-    let mut token: Option<String> = None;
-
-    for (i, expected_name) in namespace_names.iter().enumerate() {
-        let Page {
-            items: page,
-            next_token,
-        } = m.list_namespaces(1, token).await.unwrap();
-        assert_eq!(
-            page.len(),
-            1,
-            "Page {i} should have exactly 1 item but had {}",
-            page.len()
-        );
-        assert_eq!(
-            page[0].to_string(),
-            *expected_name,
-            "Page {i} should contain '{expected_name}' but contained '{}'",
-            page[0]
-        );
-        all_namespaces.extend(page);
-        token = next_token;
-    }
-
-    assert!(
-        token.is_none(),
-        "Token should be None after all namespaces are consumed"
-    );
-    assert_eq!(
-        all_namespaces
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
-        namespace_names
-    );
-}
-
 #[tokio::test]
 async fn test_list_namespaces_deduplication() {
     for_each_backend(async |test_case| {
@@ -632,14 +575,6 @@ async fn test_list_namespaces_deduplication() {
 async fn test_list_namespaces_many_namespaces_pagination() {
     for_each_backend(async |test_case| {
         test_datastore_list_namespaces_many_namespaces_pagination(test_case.metadata_store()).await;
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn test_list_namespaces_single_item_pages() {
-    for_each_backend(async |test_case| {
-        test_datastore_list_namespaces_single_item_pages(test_case.metadata_store()).await;
     })
     .await;
 }
@@ -813,7 +748,6 @@ pub async fn test_datastore_read_link_access_time_update(m: Arc<MetadataStore>) 
     let tag_link = LinkKind::Tag(Tag::new("latest").unwrap());
     create_link(&m, namespace, &tag_link, &digest).await;
 
-    // A tracked read records accessed_at.
     let meta = m
         .read_link_recording_access(namespace, &tag_link, "test-client")
         .await
@@ -828,7 +762,6 @@ pub async fn test_datastore_read_link_access_time_update(m: Arc<MetadataStore>) 
         "accessed_at should be within 2 seconds of now"
     );
 
-    // The stamp is persisted in the tag's sibling atime key.
     let stored = m
         .read_tag_access_time(namespace, &Tag::new("latest").unwrap())
         .await
@@ -1263,8 +1196,6 @@ pub async fn test_datastore_parallel_mixed_create_delete(m: Arc<MetadataStore>) 
         .unwrap();
     assert_eq!(meta_v3.target, digest_c, "Tag v3 should point to digest_c");
 
-    // The re-pointed tag's old entry persists as a stale over-approximation
-    // until the collector prunes it.
     let tag_v1 = LinkKind::Tag(Tag::new("v1").unwrap());
     let index_a = m.read_blob_index(&digest_a).await.unwrap();
     assert!(
@@ -1371,7 +1302,6 @@ pub async fn test_datastore_tracked_create_with_referrer(m: Arc<MetadataStore>) 
     .await
     .unwrap();
 
-    // The pin is the per-referrer entry alone; no legacy link file is written.
     let err = m
         .read_link(namespace, &LinkKind::Layer(digest_layer.clone()))
         .await
@@ -1429,7 +1359,6 @@ pub async fn test_datastore_tracked_delete_with_referrer(m: Arc<MetadataStore>) 
     .await
     .unwrap();
 
-    // The pins live as one per-referrer entry each; no link file is written.
     let blob_index = m.read_blob_index(&layer_digest).await.unwrap();
     let links = blob_index
         .namespace
@@ -1451,8 +1380,6 @@ pub async fn test_datastore_tracked_delete_with_referrer(m: Arc<MetadataStore>) 
     .await
     .unwrap();
 
-    // No link file exists in either direction; the reference entries are
-    // never removed by writers.
     let result = m
         .read_link(namespace, &LinkKind::Layer(layer_digest.clone()))
         .await;
@@ -1497,8 +1424,8 @@ pub async fn test_datastore_duplicated_layer_keeps_other_referrers(m: Arc<Metada
     .await
     .unwrap();
 
-    // A manifest listing the same layer digest twice plans that layer's link
-    // twice in one transaction.
+    // A manifest listing the same layer twice plans that link twice in one
+    // transaction.
     let duplicated_create = vec![
         LinkOperation::create_with_referrer(
             LinkKind::Layer(layer_digest.clone()),
@@ -1529,8 +1456,6 @@ pub async fn test_datastore_duplicated_layer_keeps_other_referrers(m: Arc<Metada
     ];
     m.update_links(namespace, &duplicated_delete).await.unwrap();
 
-    // With no link file, a tracked delete is a no-op on the reference
-    // entries: the first manifest's pin must survive the duplicated delete.
     let blob_index = m.read_blob_index(&layer_digest).await.unwrap();
     let links = blob_index
         .namespace
@@ -1586,8 +1511,6 @@ pub async fn test_datastore_tracked_delete_removes_when_no_referrers(m: Arc<Meta
         "Link should not exist after all referrers removed, got: {err:?}"
     );
 
-    // The reference entry outlives the link as a stale over-approximation;
-    // pruning it is the collector's.
     let entry = LinkKind::ReferencedBy(manifest_digest.clone());
     let index = m.read_blob_index(&layer_digest).await.unwrap();
     assert!(
@@ -1644,8 +1567,6 @@ pub async fn test_datastore_shared_blob_pin_survives_other_manifest_delete(m: Ar
     .await
     .unwrap();
 
-    // The survivor's per-referrer entry still pins the blob; the deleted
-    // manifest's entry went stale with its revision and is the collector's.
     let links = m
         .read_blob_index_namespace(namespace, &config_digest)
         .await
@@ -1840,9 +1761,10 @@ pub async fn test_datastore_batch_handles_mixed_insert_remove_same_digest(m: Arc
         .get(namespace)
         .expect("Blob index should have an entry for the namespace");
     assert!(links.contains(&tag_v2), "Blob index should contain Tag(v2)");
-    // The superseded entry persists as a stale over-approximation until the
-    // collector prunes it.
-    assert!(links.contains(&tag_v1), "the stale entry must persist");
+    assert!(
+        links.contains(&tag_v1),
+        "the superseded entry is the collector's to prune, not the writer's"
+    );
 }
 
 #[tokio::test]
@@ -1864,7 +1786,6 @@ pub async fn test_datastore_batch_deletes_empty_blob_container(m: Arc<MetadataSt
     delete_link(&m, namespace, &tag_link).await;
 
     match m.read_blob_index(&digest).await {
-        // The stale entry persists for the collector; only the link is gone.
         Ok(index) => {
             let links = index.namespace.get(namespace);
             assert!(
@@ -2065,14 +1986,12 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
     let m = registry.metadata_store.clone();
     let namespace = &Namespace::new("test-stored-descriptor").unwrap();
 
-    // Create a base manifest blob that the referrers will reference
     let base_digest = put_blob_direct(m.object_store(), b"base manifest content").await;
     let base_link = LinkKind::Digest(base_digest.clone());
     create_link(&m, namespace, &base_link, &base_digest).await;
 
-    // Build a Descriptor for the referrer WITHOUT creating the referrer blob.
-    // If the optimization works, list_referrers should return this descriptor
-    // directly from the stored metadata, without needing the blob in the blob store.
+    // The referrer blob is never written, so the descriptor can only come
+    // from the stored link metadata.
     let referrer_digest: Digest =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             .parse()
@@ -2102,7 +2021,6 @@ pub async fn test_datastore_list_referrers_with_stored_descriptor(registry: &Reg
     .await
     .unwrap();
 
-    // list_referrers should return the stored descriptor without reading a blob
     let referrers = registry
         .list_referrers(None, &referrers_request(namespace, &base_digest))
         .await

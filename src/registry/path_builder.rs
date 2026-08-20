@@ -19,10 +19,9 @@ pub fn gc_run_path(run: &str) -> String {
     format!("{GC_ROOT}/{run}")
 }
 
-/// Root directory and namespace-name prefix for a namespace tree walk. `None`
-/// walks the whole repositories tree; `Some(repository)` restricts the walk to
-/// that repository's subtree while keeping the repository segment in the
-/// returned namespace names.
+/// Root directory and namespace-name prefix for a namespace tree walk;
+/// `Some(repository)` restricts the walk to that repository's subtree while
+/// keeping the repository segment in the returned namespace names.
 pub fn namespace_walk_root(scope: Option<&str>) -> (String, String) {
     match scope {
         Some(repository) => (
@@ -33,10 +32,9 @@ pub fn namespace_walk_root(scope: Option<&str>) -> (String, String) {
     }
 }
 
-/// Storage prefix for a namespace's repository subtree addressed by its raw
-/// on-disk name, so scrub can reclaim a directory whose name fails `Namespace`
-/// validation (out-of-band corruption). Returns `None` when a path segment is
-/// empty, `.`, or `..`, which could escape the repositories root.
+/// Storage prefix for a namespace subtree addressed by its raw on-disk name, so
+/// scrub can reclaim a directory whose name fails `Namespace` validation.
+/// `None` when a segment is empty, `.`, or `..`, which could escape the root.
 pub fn namespace_dir(name: &str) -> Option<String> {
     if name.is_empty()
         || name
@@ -66,8 +64,7 @@ pub fn blob_index_refs_dir(digest: &Digest) -> String {
 }
 
 /// Directory holding every reference key for `digest`, one key per
-/// (namespace, link). Lives under its own `v2/ref/` root so metadata keys no
-/// longer interleave with the blob store's `v2/blobs/` tree.
+/// (namespace, link), rooted outside the blob store's `v2/blobs/` tree.
 pub fn blob_ref_dir(digest: &Digest) -> String {
     format!(
         "{REF_ROOT}/{}/{}/{}",
@@ -78,10 +75,9 @@ pub fn blob_ref_dir(digest: &Digest) -> String {
 }
 
 /// One namespace's reference key for `digest`: ownership is the `<ns>!own`
-/// leaf, every other link kind is a leaf under the `<ns>!r/` subtree. `!`
-/// terminates the namespace: it is outside the namespace grammar so the name
-/// always parses back out, and it keeps namespace `a`'s leaves from colliding
-/// with namespace `a/b`'s directories on FS.
+/// leaf, every other link kind a leaf under `<ns>!r/`. `!` terminates the
+/// namespace because it is outside the namespace grammar, so the name always
+/// parses back out and `a`'s leaves never collide with `a/b`'s directories.
 pub fn blob_ref_path(digest: &Digest, namespace: &Namespace, link: &LinkKind) -> String {
     format!("{}/{namespace}!{}", blob_ref_dir(digest), ref_entry(link))
 }
@@ -90,17 +86,16 @@ pub fn blob_ref_own_path(digest: &Digest, namespace: &Namespace) -> String {
     format!("{}/{namespace}!own", blob_ref_dir(digest))
 }
 
-/// Directory holding `namespace`'s non-ownership reference keys for `digest`.
-/// A directory boundary on both backends, so it lists without partial-name
+/// Directory holding `namespace`'s non-ownership reference keys for `digest`,
+/// a directory boundary on both backends so it lists without partial-name
 /// prefix support.
 pub fn blob_ref_namespace_dir(digest: &Digest, namespace: &Namespace) -> String {
     format!("{}/{namespace}!r", blob_ref_dir(digest))
 }
 
-/// The key tail after `<ns>!`. The digest-bearing kinds omit digests equal to
-/// the blob's own (which is what their insertion always targets) and spell
-/// out only the foreign one: a referrer entry names its subject, an index
-/// child entry names its index.
+/// The key tail after `<ns>!`. Digest-bearing kinds omit the blob's own digest
+/// and spell out only the foreign one: a referrer entry names its subject, an
+/// index child entry names its index.
 fn ref_entry(link: &LinkKind) -> String {
     match link {
         LinkKind::Blob(_) => "own".to_string(),
@@ -120,9 +115,8 @@ fn ref_entry(link: &LinkKind) -> String {
     }
 }
 
-/// Decode one key of [`blob_ref_dir`] (relative to that directory) back into
-/// its raw namespace (validity is the caller's concern) and the link it
-/// records. `None` means the key is not a shape this version writes.
+/// Decode one key of [`blob_ref_dir`], relative to that directory, into its raw
+/// namespace (validity is the caller's concern) and the link it records.
 pub fn parse_blob_ref(digest: &Digest, key: &str) -> Option<(String, LinkKind)> {
     let (namespace, entry) = key.split_once('!')?;
     let link = match entry.strip_prefix("r/") {
@@ -152,24 +146,24 @@ pub fn parse_blob_ref_entry(digest: &Digest, entry: &str) -> Option<LinkKind> {
                     child: digest.clone(),
                 })
             } else {
-                // A bare `<algo>.<hash>` names the referring manifest.
-                // Unambiguous against the prefixed shapes: no algorithm is
-                // named `rev`, `layer`, `config`, `tag`, `sub`, or `idx`.
+                // A bare `<algo>.<hash>` names the referring manifest,
+                // unambiguous against the prefixed shapes because no algorithm
+                // is named `rev`, `layer`, `config`, `tag`, `sub`, or `idx`.
                 Some(LinkKind::ReferencedBy(parse_ref_digest(entry)?))
             }
         }
     }
 }
 
-/// `<algo>.<hash>` inside a reference-key entry. `.` separates unambiguously:
-/// algorithm names never contain it.
+/// `<algo>.<hash>` inside a reference-key entry; `.` separates unambiguously
+/// because algorithm names never contain it.
 fn parse_ref_digest(s: &str) -> Option<Digest> {
     let (algorithm, hash) = s.split_once('.')?;
     Digest::with_algorithm(Algorithm::from_str(algorithm).ok()?, hash).ok()
 }
 
-/// Directory holding every tag-entry directory of `namespace`. `!` terminates
-/// the namespace for the same reasons as the reference keys.
+/// Directory holding every tag-entry directory of `namespace`, `!`-terminated
+/// for the same reasons as the reference keys.
 pub fn tag_entries_root(namespace: &Namespace) -> String {
     format!("{NS_ROOT}/{namespace}!tag")
 }
@@ -201,10 +195,9 @@ pub fn tag_entry_path(
     )
 }
 
-/// Directory holding one tag's demoted entries under `<namespace>!hist`,
-/// `!`-terminated like [`tag_entry_dir`]. Nothing reads `!hist/` yet: it
-/// retains superseded entries for the future tag-history endpoint while
-/// `!tag/` keeps only each tag's current group.
+/// Directory holding one tag's demoted entries, `!`-terminated like
+/// [`tag_entry_dir`]. Nothing reads `!hist/` yet: it retains superseded entries
+/// for the tag-history endpoint while `!tag/` keeps only the current group.
 pub fn tag_hist_dir(namespace: &Namespace, tag: &Tag) -> String {
     format!("{NS_ROOT}/{namespace}!hist/{tag}!")
 }
@@ -354,14 +347,13 @@ pub fn parse_tag_entry(name: &str) -> Option<(u64, bool, Digest)> {
 }
 
 pub fn blob_index_shard_path(digest: &Digest, namespace: &Namespace) -> String {
-    // Encode namespace as a safe filename: percent-encode '/' and '%' to avoid
-    // ambiguity (namespaces can contain underscores, so '/' -> '_' is lossy).
+    // Percent-encoded rather than mapped to '_': namespaces can contain
+    // underscores, so that substitution would not round-trip.
     let safe_ns = namespace.replace('%', "%25").replace('/', "%2F");
     format!("{}/refs/{safe_ns}.json", blob_dir(digest))
 }
 
-/// Root directory holding every upload container for a namespace. Used to
-/// enumerate the namespace's active sessions (one child directory per session).
+/// Root directory holding a namespace's upload containers, one per session.
 pub fn uploads_root_dir(namespace: &Namespace) -> String {
     format!("{REPOS_ROOT}/{namespace}/_uploads")
 }
@@ -380,8 +372,8 @@ pub fn upload_session_path(namespace: &Namespace, session_id: &UploadSessionId) 
     format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/session.json")
 }
 
-/// Legacy directory of per-offset hasher-state checkpoints, written by
-/// previous versions; read only as a fallback when `session.json` is absent.
+/// Legacy directory of per-offset hasher-state checkpoints, read only as a
+/// fallback when `session.json` is absent.
 pub fn upload_hash_context_dir(namespace: &Namespace, session_id: &UploadSessionId) -> String {
     format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/hashstates")
 }
@@ -396,8 +388,8 @@ pub fn upload_hash_context_path(
     format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/hashstates/{offset}")
 }
 
-/// Legacy RFC3339 last-activity marker, written by previous versions; read
-/// only as a fallback when `session.json` is absent.
+/// Legacy RFC3339 last-activity marker, read only as a fallback when
+/// `session.json` is absent.
 pub fn upload_start_date_path(namespace: &Namespace, session_id: &UploadSessionId) -> String {
     format!("{REPOS_ROOT}/{namespace}/_uploads/{session_id}/startedat")
 }
@@ -479,9 +471,8 @@ pub fn link_container_path(link: &LinkKind, namespace: &Namespace) -> String {
                 child.hash()
             )
         }
-        // No writer ever creates this path; it exists only so the match is
-        // total. Reads of it yield NotFound and every caller treats that as
-        // absent/unbacked.
+        // No writer creates this path; it exists only so the match is total,
+        // and a read of it yields the NotFound every caller treats as absent.
         LinkKind::ReferencedBy(referrer) => {
             format!(
                 "{REPOS_ROOT}/{namespace}/_refs/referenced-by/{}/{}",
@@ -498,10 +489,8 @@ mod tests {
 
     use crate::registry::path_builder::*;
 
-    // Valid 64-char lowercase-hex sha256 hashes (the only shape `Digest` accepts).
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    // Valid 128-char lowercase-hex sha512 hash.
     const HASH_512: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     #[test]
@@ -554,9 +543,8 @@ mod tests {
     fn test_namespace_dir() {
         assert_eq!(namespace_dir("ns").unwrap(), "v2/repositories/ns");
         assert_eq!(namespace_dir("org/app").unwrap(), "v2/repositories/org/app");
-        // Uppercase fails `Namespace` validation but is safe as a directory name.
+        // Uppercase fails `Namespace` validation but is safe as a directory.
         assert_eq!(namespace_dir("BadNS").unwrap(), "v2/repositories/BadNS");
-        // Empty, traversal, and empty-segment names are rejected.
         for unsafe_name in ["", "..", ".", "a/../b", "a//b", "/a", "a/", "a/."] {
             assert!(
                 namespace_dir(unsafe_name).is_none(),
@@ -674,8 +662,6 @@ mod tests {
         assert_eq!(parse_tag_entry(file), Some((7, true, digest)));
     }
 
-    /// Every link kind's reference key must decode back to the namespace and
-    /// link it was built from, digest-bearing kinds included.
     #[test]
     fn blob_ref_paths_round_trip() {
         let ns = Namespace::new("org/app").unwrap();

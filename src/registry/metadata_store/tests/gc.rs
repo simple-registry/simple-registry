@@ -25,9 +25,8 @@ async fn seed_blob(case: &FSRegistryTestCase, content: &[u8]) -> Digest {
     digest
 }
 
-/// The collector never reclaims a referenced blob: an ownership key pins it
-/// unconditionally, and only once every reference is gone does the marker
-/// protocol delete the bytes and the stale keys.
+/// An ownership key pins a blob unconditionally; only once it is revoked
+/// does the collector delete the bytes and the stale reference keys.
 #[tokio::test]
 async fn collector_never_reclaims_a_referenced_blob() {
     let case = FSRegistryTestCase::new();
@@ -71,9 +70,8 @@ async fn collector_never_reclaims_a_referenced_blob() {
     );
 }
 
-/// A writer that has just written its reference keys backs off while an
-/// unexpired collector run covers one of its blobs: the push errors instead
-/// of committing over a possible reclaim, and both sides aborting is safe.
+/// An unexpired run covering a digest blocks writers, and releasing it
+/// unblocks them.
 #[tokio::test]
 async fn a_push_backs_off_while_a_collector_run_covers_its_blob() {
     let case = FSRegistryTestCase::new();
@@ -93,10 +91,8 @@ async fn a_push_backs_off_while_a_collector_run_covers_its_blob() {
     );
 }
 
-/// A guarded grant against still-present bytes fails closed while an
-/// unexpired collector run covers the digest: the grant reports the reclaim
-/// and the promotion path surfaces a retryable conflict instead of handing
-/// out bytes the collector may be deleting.
+/// A guarded grant against still-present bytes fails closed under a covering
+/// run rather than handing out bytes the collector may be deleting.
 #[tokio::test]
 async fn a_guarded_grant_fails_closed_while_a_run_covers_present_bytes() {
     let case = FSRegistryTestCase::new();
@@ -133,9 +129,8 @@ async fn a_guarded_grant_fails_closed_while_a_run_covers_present_bytes() {
     store.gc_release(claim).await.unwrap();
 }
 
-/// A mount (or any grant against pre-existing bytes) racing a sweep never
-/// hands out a reference to reclaimed bytes: the guarded grant re-probes the
-/// blob after the collector check and reports the blob gone.
+/// A grant racing a sweep re-probes the blob after the collector check, so
+/// it never hands out a reference to reclaimed bytes.
 #[tokio::test]
 async fn a_guarded_grant_never_returns_a_reclaimed_blob() {
     let case = FSRegistryTestCase::new();
@@ -143,8 +138,7 @@ async fn a_guarded_grant_never_returns_a_reclaimed_blob() {
     let namespace = Namespace::new("gc-mount").unwrap();
     let digest = seed_blob(&case, b"gc-mount-bytes").await;
 
-    // The sweep wins the race: the bytes are gone by the time the grant
-    // re-probes them.
+    // The sweep wins the race.
     case.blob_store().delete_blob(&digest).await.unwrap();
     let outcome = registry
         .blob_ownership()
@@ -158,9 +152,8 @@ async fn a_guarded_grant_never_returns_a_reclaimed_blob() {
     );
 }
 
-/// A crash between waves leaves only legal states: after wave C a revision
-/// with no tag (the push-by-digest state), after wave A nothing resolvable.
-/// Emulated by rewinding a completed push one wave at a time.
+/// A crash between waves leaves only legal states, emulated by rewinding a
+/// completed push one wave at a time.
 #[tokio::test]
 async fn a_push_interrupted_between_waves_reads_consistently() {
     let case = FSRegistryTestCase::new();
@@ -192,7 +185,7 @@ async fn a_push_interrupted_between_waves_reads_consistently() {
         .unwrap()
         .digest;
 
-    // Rewind wave D: the tag entry is gone, the revision stays resolvable.
+    // Rewind wave D.
     store
         .object_store()
         .delete_prefix(&path_builder::tag_entry_dir(
@@ -216,8 +209,7 @@ async fn a_push_interrupted_between_waves_reads_consistently() {
         "the wave-C revision must stay resolvable: the legal push-by-digest state"
     );
 
-    // Rewind wave C: nothing resolves, only over-approximated references
-    // remain for the collector.
+    // Rewind wave C.
     store
         .object_store()
         .delete(&path_builder::revision_record_path(&namespace, &digest))
@@ -233,9 +225,8 @@ async fn a_push_interrupted_between_waves_reads_consistently() {
 }
 
 /// The writer half of the marker protocol through the public push path: a
-/// manifest push referencing a blob covered by an unexpired collector run
-/// fails with the reclamation-in-progress conflict, and a retry after the
-/// run's release succeeds.
+/// push referencing a covered blob fails with the reclamation conflict, and a
+/// retry after the run's release succeeds.
 #[tokio::test]
 async fn a_manifest_push_fails_closed_while_a_run_covers_its_blob() {
     let case = FSRegistryTestCase::new();

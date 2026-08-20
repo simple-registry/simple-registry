@@ -23,9 +23,9 @@ fn entry_ms(ts: DateTime<Utc>) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ts.timestamp_millis()).unwrap()
 }
 
-/// Two processes pushing the same tag concurrently write disjoint entry keys:
-/// neither write is lost, and both resolve to the same deterministic winner
-/// (equal timestamps tie-break on the higher digest).
+/// Two processes pushing the same tag write disjoint entry keys, so neither
+/// write is lost and both resolve the same winner (equal timestamps
+/// tie-break on the higher digest).
 #[tokio::test]
 async fn concurrent_same_tag_pushes_from_two_processes_lose_nothing() {
     let dir = TempDir::new().unwrap();
@@ -124,9 +124,9 @@ async fn legacy_link_answers_until_a_tombstone_shadows_it() {
     assert!(!tags.contains(&tag), "a tombstoned tag must not list");
 }
 
-/// Under a nonzero grace the conversion still writes the entry but leaves a
-/// young legacy link in place for a later run, so an old-binary writer
-/// rewriting the link mid-upgrade loses nothing.
+/// Under a nonzero grace the conversion writes the entry but leaves a young
+/// legacy link for a later run, so an old-binary writer rewriting that link
+/// mid-upgrade loses nothing.
 #[tokio::test]
 async fn a_young_legacy_tag_link_survives_conversion_under_grace() {
     let dir = TempDir::new().unwrap();
@@ -246,8 +246,8 @@ async fn a_tombstone_copies_the_prior_winners_descriptor_fields() {
     );
 }
 
-/// An entry body written before the descriptor fields existed parses with
-/// them absent and the tag still resolves.
+/// An entry body carrying only `media_type` parses with the other descriptor
+/// fields absent, and the tag still resolves.
 #[tokio::test]
 async fn an_old_shape_entry_body_still_resolves() {
     let dir = TempDir::new().unwrap();

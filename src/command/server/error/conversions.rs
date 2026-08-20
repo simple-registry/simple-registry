@@ -18,8 +18,7 @@ fn oci_error(status_code: StatusCode, code: ErrorCode, msg: Option<String>) -> E
     angos_error(status_code, code.as_str(), msg)
 }
 
-/// The same body under a code the spec does not define: angos's own extensions,
-/// which a 5xx may carry and a replication peer reads to settle convergence.
+/// The same body under a code the spec does not define, angos's own extensions.
 fn angos_error(status_code: StatusCode, code: &str, msg: Option<String>) -> Error {
     Error::Custom {
         status_code,
@@ -37,7 +36,7 @@ impl From<registry::Error> for Error {
             }
             // `405` is what end-10 lists for a refused blob delete, so the
             // reason travels in the message rather than in a status outside
-            // that set: the client has only to delete the manifest first.
+            // that set.
             registry::Error::BlobReferenced => oci_error(
                 StatusCode::METHOD_NOT_ALLOWED,
                 ErrorCode::Denied,
@@ -91,22 +90,19 @@ impl From<registry::Error> for Error {
                 None,
             ),
             // A refused write (an immutable tag, a concurrent-writer CAS
-            // conflict): HTTP 409 so the client retries, under the spec code
-            // closest to a rejected write.
+            // conflict) answers 409 under the spec code closest to it.
             registry::Error::Conflict(msg) => {
                 oci_error(StatusCode::CONFLICT, ErrorCode::Denied, Some(msg))
             }
-            // Transient by construction: the collector's batch moves on, so
-            // the client backs off and retries rather than treating it as a
-            // refusal.
+            // Transient by construction, since the collector's batch moves on:
+            // the client backs off and retries instead of reading a refusal.
             registry::Error::ReclamationInProgress(msg) => angos_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 RECLAMATION_IN_PROGRESS_CODE,
                 Some(msg),
             ),
-            // The one code outside the spec's set, and the only one a client
-            // never sees: it answers a replication write, which angos marks with
-            // its own header and whose sender reads this code to converge.
+            // The one code outside the spec's set: it answers a replication
+            // write only, and its sender reads it to settle convergence.
             registry::Error::ReplicationSuperseded(msg) => {
                 angos_error(StatusCode::CONFLICT, REPLICATION_SUPERSEDED_CODE, Some(msg))
             }
@@ -118,9 +114,8 @@ impl From<registry::Error> for Error {
                 INTERNAL_ERROR_CODE,
                 Some(msg),
             ),
-            // Every remaining variant is an opaque server-side failure with no
-            // client-actionable OCI code. Matched exhaustively (no catch-all) so
-            // a newly added variant must be mapped deliberately here.
+            // Opaque server-side failures with no client-actionable OCI code,
+            // matched exhaustively so a new variant must be mapped here.
             registry::Error::Configuration(_)
             | registry::Error::Cache(_)
             | registry::Error::Io(_)

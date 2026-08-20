@@ -37,12 +37,11 @@ use crate::{
 /// Internal-process name stamped on the events retention deletions emit.
 pub const RETENTION_ACTOR: &str = "prune";
 
-/// A fresh uniquely-named job store for one maintenance run: the executor's
-/// replication-enqueue target and, when a drain is wired, its consumer.
+/// A fresh uniquely-named job store for one maintenance run.
 #[must_use]
 pub fn run_job_store(metadata_store: &MetadataStore, prefix: &str) -> Arc<JobStore> {
-    // Maintenance runs do not probe the backend; atomic mode preserves the
-    // historical unconditional `create_if_absent` behaviour.
+    // Maintenance runs never probe the backend, so claims go through the
+    // unconditional `create_if_absent` mode.
     Arc::new(JobStore::new(
         metadata_store.object_store().clone(),
         format!("{prefix}-{}", Uuid::new_v4()),
@@ -50,8 +49,8 @@ pub fn run_job_store(metadata_store: &MetadataStore, prefix: &str) -> Arc<JobSto
     ))
 }
 
-/// A sink that receives `Action` values produced by maintenance checks.
-/// `apply` takes `&self` so one sink can serve many concurrent producers.
+/// A sink that receives `Action` values produced by maintenance checks;
+/// `apply` takes `&self` so one sink serves many concurrent producers.
 #[async_trait]
 pub trait ActionSink: Send + Sync {
     async fn apply(&self, action: Action) -> Result<(), Error>;
@@ -76,14 +75,12 @@ pub struct Executor {
     job_store: Arc<JobStore>,
     /// The registry the retention deletions run through, so they take the
     /// standard delete path (locking, blob reclaim, events, replication).
-    /// Only the retention actions need it; integrity repairs never use it.
     registry: Option<Arc<Registry>>,
 }
 
 impl Executor {
-    /// Construct an executor from its resolved fields: the `blob_store` it
-    /// reads/deletes blobs through, the `metadata_store` it mutates links
-    /// through, and the `job_store` replication enqueue actions are landed on.
+    /// Construct an executor over the stores it mutates and the queue
+    /// replication enqueues land on.
     #[must_use]
     pub fn new(
         blob_store: Arc<BlobStore>,
@@ -98,9 +95,8 @@ impl Executor {
         }
     }
 
-    /// Wire the registry that tag and manifest deletions run through, so they
-    /// take the standard delete path (locking, blob reclaim, events,
-    /// replication). Both scrub and prune construct their executors with one.
+    /// Wire the registry tag and manifest deletions run through; both scrub
+    /// and prune construct their executors with one.
     #[must_use]
     pub fn with_registry(mut self, registry: Arc<Registry>) -> Self {
         self.registry = Some(registry);
@@ -115,8 +111,8 @@ impl Executor {
         })
     }
 
-    /// Test-only constructor that synthesizes a `JobStore` and a registry
-    /// over the same stores, so the retention arms work out of the box.
+    /// Test-only constructor synthesizing a `JobStore` and a registry over the
+    /// same stores, so the retention arms work out of the box.
     #[cfg(test)]
     #[must_use]
     pub fn new_for_test(blob_store: Arc<BlobStore>, metadata_store: Arc<MetadataStore>) -> Self {
@@ -141,10 +137,8 @@ impl Executor {
         Self::new(blob_store, metadata_store, job_store).with_registry(registry)
     }
 
-    /// Lands the envelope on the durable replication queue. A reconcile push
-    /// shares the event path's `lock_key` (so it coalesces with a pending
-    /// event-path push); a prune delete keys on the bare reference, so repeated
-    /// runs coalesce and never merge with a timestamped event-path delete.
+    /// Lands the envelope on the durable replication queue, coalescing on the
+    /// `lock_key` its builder chose.
     async fn enqueue_replication(
         &self,
         envelope: Result<JobEnvelope, JobStoreError>,
@@ -194,13 +188,11 @@ impl Executor {
             .map_err(|e| Error::from(RegistryError::from(e)))
     }
 
-    /// The collector's only irreversible action, fenced by the marker
-    /// protocol instead of a lock: age-gate the bytes, check reference
-    /// liveness, publish a run covering the digest, re-verify under a
-    /// refreshed marker, then delete the bytes and every stale reference key.
-    /// A writer either wrote its reference before the re-verification (a
-    /// young key reads live) or after the marker was visible to its own
-    /// check, so it backed off.
+    /// The collector's only irreversible action, fenced by the marker protocol
+    /// rather than a lock: age-gate, check liveness, publish a run covering the
+    /// digest, re-verify under a refreshed marker, then delete. A writer either
+    /// landed its reference before the re-verification or saw the marker in its
+    /// own check and backed off.
     async fn delete_orphan_blob(&self, digest: Digest) -> Result<(), Error> {
         // Fresh bytes are unconditionally live: an upload's `_own` key or a
         // push's reference may still be in flight.
@@ -248,10 +240,8 @@ impl Executor {
     }
 
     /// Remove a blob-index entry, re-checking at apply time that the removal
-    /// is still justified: a byteless grant (prune's sweep) or a dangling
-    /// entry whose link file is gone (scrub's reference pass). An entry
-    /// re-legitimized since classification, by an upload or cache fill
-    /// landing the bytes or a push recreating the link, is kept.
+    /// is still justified. An entry re-legitimized since classification, by an
+    /// upload landing the bytes or a push recreating the link, is kept.
     async fn remove_blob_index_link(
         &self,
         namespace: Namespace,
@@ -290,8 +280,8 @@ impl Executor {
     }
 
     /// Whether the reference entry for `link` is still backed: a blob
-    /// self-grant is its own record; every other kind defers to the
-    /// content-based [`MetadataStore::reference_backed`].
+    /// self-grant is its own record, every other kind defers to
+    /// [`MetadataStore::reference_backed`].
     async fn entry_still_backed(
         &self,
         namespace: &Namespace,
@@ -307,14 +297,9 @@ impl Executor {
             .map_err(Error::from)
     }
 
-    /// Re-add a blob-index grant the index is missing for a still-referenced
-    /// blob.
-    ///
-    /// Re-checks the bytes first: the checker's existence gate ran before
-    /// this apply, so a concurrent reclaim may have deleted the bytes in
-    /// between. Granting then would resurrect a reference to a deleted blob,
-    /// so a vanished blob is skipped. The insert itself is idempotent, so a
-    /// concurrent push that re-granted the same link is harmless.
+    /// Re-add a blob-index grant missing for a still-referenced blob. The
+    /// bytes are re-checked first, since granting after a concurrent reclaim
+    /// would resurrect a reference to a deleted blob.
     async fn grant_blob_index_link(
         &self,
         namespace: Namespace,
@@ -335,8 +320,8 @@ impl Executor {
         Ok(())
     }
 
-    /// The migration actions: each converts one legacy shape into its new
-    /// one, or backfills the catalog index. Every conversion is idempotent.
+    /// The migration actions, each an idempotent conversion of one legacy
+    /// shape or a catalog-index backfill.
     async fn apply_migration(&self, action: Action) -> Result<(), Error> {
         match action {
             Action::ConvertTagLink { namespace, tag } => self
@@ -376,9 +361,8 @@ impl Executor {
         }
     }
 
-    /// Convert one legacy shard into reference keys: every entry is written
-    /// as its key, then the shard is deleted. Both halves are idempotent, so
-    /// an interruption anywhere just re-runs on the next scrub.
+    /// Convert one legacy shard into reference keys, then delete it. Both
+    /// halves are idempotent, so an interruption re-runs on the next scrub.
     async fn convert_blob_index_shard(
         &self,
         key: String,
@@ -404,16 +388,15 @@ impl Executor {
         namespace: Namespace,
         blob: Digest,
     ) -> Result<(), Error> {
-        // Re-check at apply time: a manifest reference may have appeared
-        // since the checker classified the grant as orphaned.
+        // A manifest reference may have appeared since the checker classified
+        // the grant as orphaned.
         let links = match self
             .metadata_store
             .read_blob_index_namespace(&namespace, &blob)
             .await
         {
             Ok(links) => links,
-            // The grant vanished since classification (a concurrent revoke
-            // or delete): nothing left to do.
+            // A concurrent revoke or delete already took the grant.
             Err(RegistryError::NotFound) => return Ok(()),
             Err(e) => return Err(Error::from(e)),
         };
@@ -439,8 +422,8 @@ impl Executor {
             }
             Some(false) => {}
         }
-        // Revoke the grant; the bytes are the collector's to reclaim
-        // once every reference is stale.
+        // The bytes stay: they are the collector's to reclaim once every
+        // reference is stale.
         self.metadata_store
             .revoke_blob_ownership(&namespace, &blob)
             .await?;
@@ -459,9 +442,9 @@ impl Executor {
         Ok(())
     }
 
-    /// Retention tag deletion through the registry's standard delete path,
-    /// so it emits `tag.delete`/`manifest.delete` events and, per its
-    /// internal actor, mirrors only to `prune = true` downstreams.
+    /// Retention tag deletion through the registry's standard delete path, so
+    /// it emits the delete events and, per its internal actor, mirrors only to
+    /// `prune = true` downstreams.
     async fn delete_tag(&self, namespace: Namespace, tag: Tag) -> Result<(), Error> {
         self.retention_registry()?
             .delete_manifest(
@@ -475,9 +458,8 @@ impl Executor {
     }
 
     /// Move one superseded tag entry to the `!hist/` prefix, re-reading the
-    /// body at apply time (a vanished entry was demoted concurrently). Hist
-    /// key first, then the delete, so an interruption duplicates rather than
-    /// loses; both halves are idempotent.
+    /// body at apply time. Hist key first, then the delete, so an interruption
+    /// duplicates rather than loses.
     async fn demote_tag_entry(
         &self,
         namespace: Namespace,
@@ -494,8 +476,8 @@ impl Executor {
             Err(StorageError::NotFound) => return Ok(()),
             Err(e) => return Err(Error::from(RegistryError::from(e))),
         };
-        // `false` means an interrupted earlier demotion already wrote the
-        // copy; the delete below finishes the move either way.
+        // An interrupted earlier demotion may already have written the copy;
+        // the delete below finishes the move either way.
         store
             .create_if_absent(
                 &path_builder::tag_hist_path(&namespace, &tag, &entry_name),
@@ -511,7 +493,7 @@ impl Executor {
 
     async fn delete_invalid_tag(&self, namespace: Namespace, tag: String) -> Result<(), Error> {
         // An invalid tag name cannot form a typed `LinkKind::Tag`, so the
-        // directory is removed by prefix rather than via a link delete.
+        // directory goes by prefix rather than via a link delete.
         self.metadata_store
             .delete_tag_directory(&namespace, &tag)
             .await?;
@@ -535,8 +517,7 @@ impl Executor {
     }
 
     /// Retention orphan-manifest deletion through the registry's standard
-    /// delete path, which also reclaims the manifest's blob bytes once
-    /// unreferenced (a missing blob body deletes metadata-only).
+    /// delete path, which also reclaims the manifest's bytes once unreferenced.
     async fn delete_orphan_manifest(
         &self,
         namespace: Namespace,
@@ -597,10 +578,9 @@ impl Executor {
         Ok(())
     }
 
-    /// Delete a retired legacy tracked link file, re-checking its age at
-    /// apply time: a file rewritten since classification (a concurrent
-    /// old-binary writer) reads young and waits for the next run, and a
-    /// vanished file needs nothing.
+    /// Delete a retired legacy tracked link file, re-checking its age: a file
+    /// an old-binary writer rewrote since classification reads young and waits
+    /// for the next run.
     async fn retire_tracked_link(&self, namespace: Namespace, link: LinkKind) -> Result<(), Error> {
         let store = self.metadata_store.object_store();
         let key = path_builder::link_path(&link, &namespace);
@@ -631,7 +611,7 @@ impl Executor {
         tag: Tag,
         digest: Digest,
     ) -> Result<(), Error> {
-        // The handler stamps source_ts from the tag's created_at at execute
+        // The handler stamps `source_ts` from the tag's `created_at` at execute
         // time, so the push carries the same last-writer-wins version as the
         // event path.
         let job = ReplicationJob::Push {
@@ -652,11 +632,9 @@ impl Executor {
         namespace: Namespace,
         tag: Tag,
     ) -> Result<(), Error> {
-        // Stamp `source_ts` with the prune decision time so the receiver runs
-        // last-writer-wins and preserves a downstream tag dated after this
-        // decision (clock skew, or a push racing the listing). That does NOT
-        // make prune active-active safe: a peer's newer tag created before this
-        // run is still deleted, so `prune = true` is one-way-mirror-only.
+        // The decision-time `source_ts` lets the receiver preserve a downstream
+        // tag dated after it. It does NOT make prune active-active safe: a
+        // peer's newer tag created before this run is still deleted.
         let job = ReplicationJob::Delete {
             target: ReplicationTarget {
                 downstream,
@@ -667,8 +645,8 @@ impl Executor {
             },
             subject: None,
         };
-        // The prune envelope keys on the bare reference so repeated runs
-        // coalesce instead of stacking one fresh-ts job per run.
+        // Keyed on the bare reference so repeated runs coalesce instead of
+        // stacking one fresh-ts job each.
         self.enqueue_replication(build_prune_delete_envelope(&job))
             .await
     }
@@ -681,8 +659,7 @@ impl Executor {
     ) -> Result<(), Error> {
         match self.job_store.delete_job(queue, state, &storage_key).await {
             Ok(()) => Ok(()),
-            // A stale key means the job was claimed-and-completed or deleted
-            // concurrently; either way the orphan is gone.
+            // A stale key means the job completed or was deleted concurrently.
             Err(JobStoreError::NotFound) => {
                 debug!("{queue} job '{storage_key}' already gone; nothing to delete");
                 Ok(())
@@ -702,10 +679,9 @@ impl Executor {
         }
     }
 
-    /// Move an unrecognized key under the lost-and-found prefix, preserving
-    /// its original path so an operator can inspect or restore it. A missing
-    /// source counts as success: on a shared physical root both store walks
-    /// see the same alien key, and the second quarantine finds it moved.
+    /// Move an unrecognized key under the lost-and-found prefix, preserving its
+    /// original path. A missing source counts as success: on a shared physical
+    /// root both walks see the alien key, and the second finds it moved.
     async fn quarantine_key(&self, store: WalkedStore, key: String) -> Result<(), Error> {
         let destination = format!("{LOST_AND_FOUND_PREFIX}/{key}");
         if let Err(e) = self
@@ -837,9 +813,10 @@ mod tests {
     use std::str::FromStr;
 
     use chrono::DateTime;
+    use tempfile::TempDir;
 
     use angos_oci::Digest;
-    use angos_storage::MemoryObjectStore;
+    use angos_storage::fs::Backend as StorageFsBackend;
 
     use crate::command::maintenance::executor::*;
     use crate::{
@@ -852,12 +829,17 @@ mod tests {
         replication::REPLICATION_DELETE_MANIFEST_KIND,
     };
 
-    /// A producer `JobStore` over a private store no worker drains. Tests that
-    /// assert queue depth must not share the registry store, whose in-process
-    /// claim loops would otherwise claim the job and race the assertion.
-    fn standalone_job_store(worker_id: &str) -> Arc<JobStore> {
-        let raw = Arc::new(MemoryObjectStore::new());
-        Arc::new(JobStore::new(raw, worker_id, ClaimMode::Atomic))
+    /// A producer `JobStore` over a private store no worker drains, plus the
+    /// temp directory backing it. Tests that assert queue depth must not share
+    /// the registry store, whose in-process claim loops would otherwise claim
+    /// the job and race the assertion.
+    fn standalone_job_store(worker_id: &str) -> (Arc<JobStore>, TempDir) {
+        let dir = TempDir::new().expect("temp dir");
+        let raw = Arc::new(StorageFsBackend::builder(dir.path()).build());
+        (
+            Arc::new(JobStore::new(raw, worker_id, ClaimMode::Atomic)),
+            dir,
+        )
     }
 
     #[tokio::test]
@@ -1504,7 +1486,7 @@ mod tests {
             let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
 
-            let job_store = standalone_job_store("scrub-source-ts");
+            let (job_store, _job_dir) = standalone_job_store("scrub-source-ts");
 
             let executor = Executor::new(blob_store, metadata_store, job_store.clone());
 
@@ -1547,7 +1529,7 @@ mod tests {
             let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
 
-            let job_store = standalone_job_store("scrub-prune-coalesce");
+            let (job_store, _job_dir) = standalone_job_store("scrub-prune-coalesce");
 
             let executor = Executor::new(blob_store, metadata_store, job_store.clone());
 
@@ -1619,7 +1601,7 @@ mod tests {
         for_each_backend(async |test_case| {
             let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
-            let job_store = standalone_job_store("scrub-orphan");
+            let (job_store, _job_dir) = standalone_job_store("scrub-orphan");
 
             let executor = Executor::new(blob_store, metadata_store, job_store.clone());
 
@@ -1655,7 +1637,7 @@ mod tests {
         for_each_backend(async |test_case| {
             let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
-            let job_store = standalone_job_store("scrub-orphan");
+            let (job_store, _job_dir) = standalone_job_store("scrub-orphan");
 
             let executor = Executor::new(blob_store, metadata_store, job_store.clone());
 
@@ -1711,7 +1693,7 @@ mod tests {
         for_each_backend(async |test_case| {
             let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
-            let job_store = standalone_job_store("scrub-orphan");
+            let (job_store, _job_dir) = standalone_job_store("scrub-orphan");
 
             let executor = Executor::new(blob_store, metadata_store, job_store);
 

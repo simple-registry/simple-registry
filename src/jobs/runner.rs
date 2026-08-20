@@ -6,11 +6,8 @@ use crate::{
     jobs::store::{ClaimedJob, CompleteOutcome, Error, FailOutcome, JobHandler, JobStore},
 };
 
-/// Execute one claimed job: observe the claim's cancellation token
-/// alongside the handler future, then complete, fail (with retry or
-/// dead-letter), or abort on claim loss. The refresher is internal to the
-/// claim; it stops when the claim is consumed by `complete`/`fail` or
-/// dropped on the lost branch.
+/// Execute one claimed job, racing the handler against the claim's cancellation
+/// token, then complete, fail, or abort on claim loss.
 pub async fn execute_one(consumer: &JobStore, handler: &dyn JobHandler, claimed: ClaimedJob) {
     let lock_key = claimed.envelope.lock_key.to_string();
     let lock_lost = claimed.lock_lost();
@@ -35,8 +32,8 @@ pub async fn execute_one(consumer: &JobStore, handler: &dyn JobHandler, claimed:
         Some(Err(err)) => {
             warn!(lock_key, error = %err, "Job handler returned error");
             let err_msg = err.to_string();
-            // A terminal failure is non-retryable: dead-letter it now rather
-            // than burn the retry budget against an outcome that cannot change.
+            // Dead-letter a terminal failure now rather than burn the retry
+            // budget against an outcome that cannot change.
             let outcome = if matches!(err, Error::Terminal(_)) {
                 consumer.fail_terminal(claimed, &err_msg).await
             } else {
@@ -55,8 +52,8 @@ pub async fn execute_one(consumer: &JobStore, handler: &dyn JobHandler, claimed:
     }
 }
 
-/// Drive one full claim → execute → complete/fail cycle. Returns `true` when
-/// a job was processed and `false` when no claimable job remains.
+/// Drive one claim, execute, and complete/fail cycle. Returns `true` when a job
+/// was processed and `false` when no claimable job remains.
 pub async fn run_once(
     consumer: &JobStore,
     handler: &dyn JobHandler,
@@ -182,8 +179,6 @@ mod tests {
             "the terminal job must be processed"
         );
 
-        // The job is dead-lettered on the first attempt rather than re-queued
-        // to burn its retry budget.
         assert_eq!(
             store
                 .count_failed(Queue::Cache)
@@ -202,9 +197,7 @@ mod tests {
         );
     }
 
-    /// Handler that sleeps for `duration` and records whether it ran to
-    /// completion. Used to assert that a lost lock cancels the handler
-    /// future before its own work finishes.
+    /// Sleeps for `duration` and records whether it ran to completion.
     struct SleepyHandler {
         duration: Duration,
         completed: Arc<AtomicBool>,
@@ -219,11 +212,7 @@ mod tests {
         }
     }
 
-    /// If the session's heartbeat fires its cancellation mid-execution,
-    /// `execute_one` drops the handler future before it completes its
-    /// own work: the in-flight operation is cancelled. The test
-    /// substitutes a hand-built `LockSession` whose cancellation token
-    /// we fire ourselves, so it pins the runner's `select!` behaviour
+    /// A hand-fired cancellation token pins the runner's `select!` behaviour
     /// without depending on backend timing.
     #[tokio::test]
     async fn execute_one_cancels_handler_when_lock_lost() {
@@ -242,14 +231,12 @@ mod tests {
 
         let completed = Arc::new(AtomicBool::new(false));
         let handler = SleepyHandler {
-            // Longer than the test timeout below: cancellation is the
-            // only way `execute_one` returns in time.
+            // Longer than the timeout below, so cancellation is the only way
+            // `execute_one` returns in time.
             duration: Duration::from_secs(30),
             completed: completed.clone(),
         };
 
-        // Fire the lost token shortly after `execute_one` starts so
-        // the runner's `select!` picks the cancellation arm.
         tokio::spawn(async move {
             sleep(Duration::from_millis(100)).await;
             lost_clone.cancel();

@@ -1,11 +1,8 @@
-//! Job-queue vocabulary shared across altitudes: the durable job store, the
-//! CLI commands, the admin API actions, and the request router all speak these
-//! serialized value types without depending on the queue machinery itself.
+//! The job-queue subsystem: [`store`] persists and claims durable jobs over the
+//! shared object store, [`runner`] drives one claimed job through its handler,
+//! and this module holds the value types the CLI, admin API, and router share.
 //!
-//! The machinery itself lives beneath: [`store`] persists and claims durable
-//! jobs over the shared object store, and [`runner`] drives one claimed job
-//! through its handler. Domain handlers (cache fill, replication push) stay
-//! with their domains; only the queue subsystem lives here.
+//! Domain handlers (cache fill, replication push) stay with their domains.
 
 pub mod runner;
 pub mod store;
@@ -17,9 +14,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-/// The set of durable job queues. Selects the storage prefix, the worker's
-/// `--queue` filter, and the dispatch handler. Serializes as its lowercase name
-/// so stored envelopes, storage paths, and metric labels keep their string form.
+/// The durable job queues, selecting the storage prefix, the worker's `--queue`
+/// filter, and the dispatch handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Queue {
@@ -58,8 +54,8 @@ impl FromStr for Queue {
     }
 }
 
-/// Which durable partition a job lives in, used to address admin mutations
-/// (`retry`/`delete`) at the correct storage prefix.
+/// Which durable partition a job lives in, addressing admin mutations at the
+/// correct storage prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
     Pending,

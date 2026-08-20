@@ -1,20 +1,12 @@
-//! The `angos migrate` maintenance command: converts pre-JSON link metadata
-//! into the current JSON [`LinkMetadata`] format and backfills a served
-//! manifest link's `media_type`.
+//! The `angos migrate` maintenance command: rewrites pre-JSON bare-digest link
+//! files as [`LinkMetadata`] JSON and backfills a served manifest link's
+//! `media_type` from the manifest body.
 //!
-//! Registries seeded from a raw upstream `distribution` on-disk layout hold
-//! link files that are a bare digest string rather than JSON. The serving
-//! paths parse link files as JSON only, so such a link no longer resolves,
-//! cannot be rewritten (a read-modify-write reads it first), and cannot be
-//! deleted through the API until it is migrated. This command walks every link
-//! object once and rewrites each bare-digest file as JSON, leaving already-JSON
-//! links and unrecognisable files untouched.
-//!
-//! It also recovers the `media_type` of every tag and revision link that lacks
-//! one (a bare-digest link, or one an earlier migrate rewrote without it) from
-//! the manifest body, so a manifest HEAD/GET always carries the `Content-Type`
-//! the OCI spec requires. It is idempotent, so a partially completed run can
-//! simply be re-run.
+//! A registry seeded from a raw `distribution` layout holds link files that are
+//! a bare digest string, which the serving paths cannot parse, so such a link
+//! only resolves, rewrites and deletes once migrated. The sweep leaves
+//! already-JSON and unrecognisable files untouched and is idempotent, so a
+//! partial run can simply be re-run.
 
 use std::{str, sync::Arc};
 
@@ -58,8 +50,7 @@ struct Report {
     failed: u64,
 }
 
-/// What a scan decided for one link, which is both the counter it belongs to
-/// and what the log line says.
+/// What a scan decided for one link: its counter and its log line.
 enum Plan {
     /// Already current, or a served manifest whose body could not be read.
     Current,
@@ -85,9 +76,9 @@ pub struct Options {
     pub dry_run: bool,
 }
 
-/// Classify a link file's raw bytes. JSON that deserialises to `LinkMetadata`
-/// is current; otherwise a bare digest string is a legacy `distribution` link,
-/// and anything else is unrecognised and must not be rewritten.
+/// Classify a link file's raw bytes: `LinkMetadata` JSON is current, a bare
+/// digest string is a legacy `distribution` link, and anything else must not be
+/// rewritten.
 fn classify(raw: &[u8]) -> LinkForm {
     if let Ok(metadata) = serde_json::from_slice::<LinkMetadata>(raw) {
         return LinkForm::Current(Box::new(metadata));
@@ -101,18 +92,16 @@ fn classify(raw: &[u8]) -> LinkForm {
     }
 }
 
-/// Whether a link key is a tag or revision manifest link, the links served with
-/// a `Content-Type`. Referrer and index back-links also live under `_manifests/`
+/// Whether a link key is a tag or revision manifest link, the ones served with
+/// a `Content-Type`. Referrer and index back-links live under `_manifests/` too
 /// but are never served as manifests, so they carry no `media_type`.
 fn serves_manifest(key: &str) -> bool {
     key.contains("/_manifests/tags/") || key.contains("/_manifests/revisions/")
 }
 
-/// The media type for a served-manifest link's target, recovered from its stored
-/// body: its own `mediaType`, else the one its shape implies, so a manifest GET
-/// never lacks the `Content-Type` the OCI spec requires. `None` for a
-/// non-manifest link (layer, config, referrer, index) or an unreadable body, in
-/// which case the serving path recovers it on each read.
+/// The media type for a served-manifest link's target, read from its stored
+/// body. `None` for a non-manifest link or an unreadable body, in which case the
+/// serving path recovers it on each read.
 async fn link_media_type(blob_store: &BlobStore, key: &str, target: &Digest) -> Option<MediaType> {
     if !serves_manifest(key) {
         return None;
@@ -131,16 +120,14 @@ async fn link_media_type(blob_store: &BlobStore, key: &str, target: &Digest) -> 
     }
 }
 
-/// Whether a current JSON link is a served manifest still missing its media
-/// type, the one case a rewrite has to recover.
+/// Whether a current JSON link is a served manifest still missing its media type.
 fn needs_backfill(key: &str, metadata: &LinkMetadata) -> bool {
     metadata.media_type.is_none() && serves_manifest(key)
 }
 
-/// Rewrite one link as a plain read-classify-write. Legacy links are the
-/// migration's subject and nothing rewrites them concurrently: pushes write
-/// tag entries and revision records, not these keys, so the unguarded
-/// overwrite cannot revert a live write.
+/// Rewrite one link as a plain read-classify-write. Nothing rewrites legacy
+/// links concurrently (a push writes tag entries and revision records, not these
+/// keys), so the unguarded overwrite cannot revert a live write.
 async fn rewrite_link(
     store: &Arc<dyn ObjectStore>,
     blob_store: &BlobStore,
@@ -176,8 +163,7 @@ async fn rewrite_link(
     Ok(plan)
 }
 
-/// Walk every link object and rewrite each bare-digest file as JSON. Supersedes
-/// the removed runtime fallback that parsed bare-digest links on every read.
+/// Walk every link object and rewrite each bare-digest file as JSON.
 pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error> {
     let bootstrap::MaintenanceContext {
         blob_store,
@@ -195,9 +181,8 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
     Ok(())
 }
 
-/// Walk every link object under the repositories root, rewriting each
-/// bare-digest file as JSON and backfilling a missing manifest media type.
-/// Streams the keys so it never holds more than one listing page in memory.
+/// Walk every link object under the repositories root, streaming the keys so no
+/// more than one listing page is held in memory.
 async fn migrate_links(
     store: &Arc<dyn ObjectStore>,
     blob_store: &BlobStore,
@@ -211,8 +196,8 @@ async fn migrate_links(
         // touching the object.
         if key.ends_with("/link") {
             let full_key = format!("{root}/{key}");
-            // Mirrors scrub: one defective object is warned and counted rather
-            // than stranding a sweep that is re-runnable and idempotent.
+            // One defective object is counted rather than stranding a sweep
+            // that is re-runnable and idempotent.
             if let Err(error) =
                 migrate_one(store, blob_store, &full_key, dry_run, &mut report).await
             {
@@ -224,8 +209,7 @@ async fn migrate_links(
     Ok(report)
 }
 
-/// Read one link file, rewriting a bare-digest legacy link as JSON and
-/// backfilling a served-manifest link's missing media type from the body.
+/// Migrate one link file and record its outcome in `report`.
 async fn migrate_one(
     store: &Arc<dyn ObjectStore>,
     blob_store: &BlobStore,
@@ -235,9 +219,8 @@ async fn migrate_one(
 ) -> Result<(), Error> {
     report.scanned += 1;
     let plan = if dry_run {
-        // A dry run writes nothing, so it needs neither a transaction nor the
-        // manifest body: classifying the link is enough to say what a real run
-        // would do.
+        // A dry run writes nothing, so classifying the link is enough to say
+        // what a real run would do.
         let raw = store.get(key).await.map_err(registry::Error::from)?;
         match classify(&raw) {
             LinkForm::Unrecognized => Plan::Unrecognized,
@@ -406,8 +389,7 @@ mod tests {
         let link = LinkKind::Tag(Tag::new("latest").unwrap());
         let target = seed_manifest_blob(&blob_store).await;
 
-        // Seed a pre-JSON bare-digest link, the format the serving path no
-        // longer reads.
+        // Seed a pre-JSON bare-digest link, which the serving path cannot read.
         put_link_raw(
             metadata_store.object_store(),
             &namespace,
@@ -439,8 +421,8 @@ mod tests {
         );
     }
 
-    /// A body that will not parse still gets a `Content-Type`: the OCI image
-    /// manifest type, rather than a link left typeless.
+    /// A body that will not parse still gets a `Content-Type`, the OCI image
+    /// manifest type, rather than being left typeless.
     #[tokio::test]
     async fn migrate_types_an_unparseable_manifest_body_as_an_image_manifest() {
         let test_case = FSRegistryTestCase::new();
@@ -478,7 +460,7 @@ mod tests {
         let link = LinkKind::Tag(Tag::new("latest").unwrap());
         let target = seed_manifest_blob(&blob_store).await;
 
-        // A JSON tag link that an earlier migrate rewrote without a media type.
+        // A JSON tag link carrying no media type.
         let metadata = LinkMetadata::without_timestamp(target.clone());
         put_link_raw(
             metadata_store.object_store(),
@@ -559,8 +541,7 @@ mod tests {
         assert_eq!(report.current, 1);
     }
 
-    /// Fails every read of `key`, standing in for a permanently unreadable
-    /// link object.
+    /// Fails every read of `key`, standing in for an unreadable link object.
     struct FailReadsOf {
         key: String,
     }

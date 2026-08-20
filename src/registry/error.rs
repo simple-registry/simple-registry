@@ -46,10 +46,9 @@ pub enum Error {
     RangeNotSatisfiable,
     #[error("resource not found")]
     NotFound,
-    /// A transactional write could not be applied because a concurrent writer
-    /// won the compare-and-set: the retry budget was exhausted or a precondition
-    /// failed. Distinct from [`Self::ReplicationSuperseded`] (a last-writer-wins
-    /// convergence, not a retry-conflict). Mapped to HTTP 409.
+    /// A concurrent writer won the compare-and-set and the retry budget ran
+    /// out. Distinct from [`Self::ReplicationSuperseded`], which is a
+    /// last-writer-wins convergence rather than a retry-conflict.
     #[error("{0}")]
     Conflict(String),
     /// A collector run covers a blob the write references; transient, the
@@ -57,23 +56,23 @@ pub enum Error {
     #[error("reclamation in progress: {0}")]
     ReclamationInProgress(String),
     /// A replication write lost last-writer-wins: the local tag is strictly
-    /// newer than the incoming `source_ts`. Mapped to a distinct OCI code so
-    /// the sender can treat it as convergence rather than a conflict to retry.
+    /// newer than the incoming `source_ts`. Carries a distinct OCI code so the
+    /// sender treats it as convergence rather than a conflict to retry.
     #[error("{0}")]
     ReplicationSuperseded(String),
-    /// A `required`-policy webhook rejected or failed the event delivery.
-    /// The operation itself has already committed when this surfaces.
+    /// A `required`-policy webhook rejected or failed the event delivery; the
+    /// operation itself has already committed when this surfaces.
     #[error("event delivery failed: {0}")]
     EventDelivery(String),
     #[error("internal server error: {0}")]
     Internal(String),
     /// Stored content that does not decode. Distinct from [`Self::Internal`]
-    /// because re-reading returns the same bytes: a caller reclaiming broken
-    /// state can act on it instead of treating it as a transient failure.
+    /// because re-reading returns the same bytes, so a caller reclaiming broken
+    /// state can act on it instead of retrying.
     #[error("corrupt stored data: {0}")]
     Corrupt(String),
 
-    // Typed variants that preserve the source error chain.
+    // Typed variants preserving the source error chain.
     #[error("configuration error during operations: {0}")]
     Configuration(#[from] configuration::Error),
     #[error("cache error during operations: {0}")]
@@ -88,10 +87,9 @@ pub enum Error {
     InvalidHeader(#[from] InvalidHeaderValue),
 }
 
-// A raw storage outcome carries no domain context. `NotFound` becomes the
-// generic `NotFound`; call sites that know a miss means a specific
-// blob/upload/manifest 404 intercept `StorageError::NotFound` explicitly before
-// `?` reaches this impl. A backend failure is an opaque 500.
+// A raw storage outcome carries no domain context: a call site that knows a
+// miss means a specific blob/upload/manifest 404 must intercept
+// `StorageError::NotFound` before `?` reaches this impl.
 impl From<StorageError> for Error {
     fn from(error: StorageError) -> Self {
         match error {
@@ -101,8 +99,7 @@ impl From<StorageError> for Error {
     }
 }
 
-// Decoding stored bytes: a failure is the content, not the read, so it is
-// permanent and reported as `Corrupt` (still HTTP 500).
+// A decode failure is the content, not the read, so it is permanent.
 impl From<DeserializeStateError> for Error {
     fn from(error: DeserializeStateError) -> Self {
         Error::Corrupt(format!("hash state deserialization error: {error}"))
@@ -127,17 +124,15 @@ impl From<chrono::format::ParseError> for Error {
     }
 }
 
-// `policy::Error` routes to `Initialization` to preserve the prior behaviour.
-// A `#[from]` variant is not used here because the mapping is semantic, not
-// structural: all policy errors collapse into the string-carrying `Initialization`.
+// Every policy error collapses into the string-carrying `Initialization`, a
+// semantic mapping `#[from]` could not express.
 impl From<policy::Error> for Error {
     fn from(error: policy::Error) -> Self {
         Error::Initialization(error.to_string())
     }
 }
 
-// `job_store::Error` routes by variant: a missing record is a `404`, every
-// other failure (storage, initialisation) is an opaque `500`.
+// A missing job record is a `404`; every other failure is an opaque `500`.
 impl From<job_store::Error> for Error {
     fn from(error: job_store::Error) -> Self {
         match error {
@@ -147,8 +142,8 @@ impl From<job_store::Error> for Error {
     }
 }
 
-// The outbound client's remote outcomes map variant for variant, so the
-// pull-through path surfaces a remote miss as the matching local OCI code.
+// Variant for variant, so the pull-through path surfaces a remote miss as the
+// matching local OCI code.
 impl From<registry_client::Error> for Error {
     fn from(error: registry_client::Error) -> Self {
         match error {
@@ -174,7 +169,6 @@ impl From<http_range::Error> for Error {
     }
 }
 
-// `OciError` routes to `NameInvalid`: preserve that semantic.
 impl From<OciError> for Error {
     fn from(_: OciError) -> Self {
         Error::NameInvalid
@@ -182,18 +176,15 @@ impl From<OciError> for Error {
 }
 
 impl Error {
-    /// Maps a manifest parse or ingress-validation failure to the code the OCI
-    /// spec gives a malformed manifest. The blanket `From<OciError>` above
-    /// answers `NameInvalid` instead, so every manifest body goes through here
-    /// to keep one error shape.
+    /// The code the OCI spec gives a malformed manifest. The blanket
+    /// `From<OciError>` answers `NameInvalid` instead, so every manifest body
+    /// must go through here.
     pub fn manifest_invalid(error: &OciError) -> Self {
         warn!("Rejecting manifest: {error}");
         Error::ManifestInvalid(error.to_string())
     }
 }
 
-// `x509_parser::error::X509Error` routes to `Unauthorized`: preserve that
-// semantic.
 impl From<x509_parser::error::X509Error> for Error {
     fn from(_: x509_parser::error::X509Error) -> Self {
         Error::Unauthorized("Invalid client certificate".to_string())
@@ -278,7 +269,7 @@ mod tests {
     }
 
     /// The reclaim paths key off `Corrupt` to tell undecodable stored bytes
-    /// from a transient read, so each decode failure must land there.
+    /// from a transient read.
     #[test]
     fn decoding_stored_bytes_fails_as_corrupt() {
         let not_utf8 = String::from_utf8(vec![0xff, 0xfe]).unwrap_err();

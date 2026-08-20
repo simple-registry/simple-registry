@@ -95,23 +95,20 @@ pub fn metadata_store(
         .namespace_walk_concurrency(namespace_walk_concurrency)
         .gc_grace_secs(gc_grace_secs);
 
-    // Wire in the auth cache for link-metadata caching (only meaningful on S3,
-    // where link_cache_ttl > 0 by default).
     builder = builder.cache(auth_cache.clone());
 
     Ok(Arc::new(builder.build()))
 }
 
-/// The storage and repository handles every maintenance command (`prune`,
-/// `replicate`, `scrub`, `worker`) boots with.
+/// The storage and repository handles every maintenance command boots with.
 pub struct MaintenanceContext {
     pub blob_store: Arc<BlobStore>,
     pub metadata_store: Arc<MetadataStore>,
     pub repositories: Arc<RepositoryResolver>,
 }
 
-/// Build the shared maintenance-command context: auth cache, blob backend,
-/// metadata store, and the resolved repositories, in the one canonical order.
+/// Build the auth cache, blob backend, metadata store and repositories a
+/// maintenance command shares.
 pub async fn maintenance_context(config: &Configuration) -> Result<MaintenanceContext, Error> {
     let auth_cache = auth_cache(&config.cache)?;
     let blob_store = Arc::new(
@@ -143,10 +140,8 @@ pub fn auth_cache(config: &cache::Config) -> Result<Arc<Cache>, Error> {
     config.to_backend().map_err(Error::from)
 }
 
-/// Registry over the shared stores, with webhooks wired from configuration
-/// and a caller-held job queue so no in-process drain loops are spawned.
-/// Used by the maintenance and worker commands; the server wires its own
-/// queue choice in `server setup`.
+/// Registry over the shared stores, with webhooks from configuration and a
+/// caller-held job queue so no in-process drain loop is spawned.
 pub fn registry(
     config: &Configuration,
     blob_store: Arc<BlobStore>,
@@ -275,19 +270,6 @@ mod tests {
         let result = repositories(&configs, &cache, DEFAULT_MAX_MANIFEST_SIZE_BYTES).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::Overlap(_)));
-    }
-
-    #[test]
-    fn error_registry_converts_from_registry_error() {
-        let err: Error = registry::Error::BlobUnknown.into();
-        assert!(matches!(err, Error::Registry(_)));
-    }
-
-    #[test]
-    fn error_cache_converts_from_cache_error() {
-        let inner = cache::Error::Execution("backend down".to_string());
-        let err: Error = inner.into();
-        assert!(matches!(err, Error::Cache(_)));
     }
 
     #[test]

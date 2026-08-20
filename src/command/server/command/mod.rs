@@ -51,9 +51,8 @@ impl ServiceListener {
 )]
 pub struct Options {}
 
-/// Background tickers (one per drained queue: `cache` and `replication`) that
-/// publish the `angos_job_queue_pending` and `angos_job_queue_failed` gauges
-/// on `/metrics`.
+/// Background tickers, one per queue, publishing the job-queue depth gauges on
+/// `/metrics`.
 struct PendingRefreshTask {
     shutdown: CancellationToken,
     tracker: TaskTracker,
@@ -83,9 +82,8 @@ impl Command {
         let pending_refresh = pending.map(|refresh| {
             let shutdown = CancellationToken::new();
             let tracker = TaskTracker::new();
-            // The server reads queue depth off the shared store, so the
-            // replication gauges are published here even though `angos worker`
-            // drains that queue.
+            // Queue depth is read off the shared store, so the replication
+            // gauges are published here even though `angos worker` drains it.
             for queue in [Queue::Cache, Queue::Replication] {
                 tracker.spawn(queue_depth_refresh_loop(
                     refresh.store.clone(),

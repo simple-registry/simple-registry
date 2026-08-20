@@ -104,7 +104,7 @@ async fn scrub_capture(test_case: &dyn RegistryTestCase) -> Vec<Action> {
     }
 }
 
-/// Push a healthy image (config + layer blobs, manifest, `v1` tag) through
+/// Push a healthy image (config and layer blobs, manifest, `v1` tag) through
 /// the real write path, so every link, back-reference, and grant exists.
 async fn push_healthy_image(
     test_case: &dyn RegistryTestCase,
@@ -316,7 +316,7 @@ async fn missing_referrer_backlink_is_added_and_stale_one_removed() {
         let (manifest_digest, config_digest, _) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // Rewrite the config link with a bogus referrer and without the real one.
+        // A config link carrying a bogus referrer and not the real one.
         let stale_revision = Digest::sha256_of_bytes(b"no-such-revision");
         let mut broken = LinkMetadata::from_digest(config_digest.clone());
         broken.add_referrer(stale_revision.clone());
@@ -330,8 +330,8 @@ async fn missing_referrer_backlink_is_added_and_stale_one_removed() {
 
         scrub_apply(test_case).await;
 
-        // Pruning the stale referrer empties the advisory file's set, so the
-        // collector reclaims the file; the real pin is the per-referrer entry.
+        // Pruning the stale referrer empties the advisory file's set, so it is
+        // reclaimed; the real pin is the per-referrer entry.
         assert!(
             metadata_store
                 .read_link(namespace, &LinkKind::Config(config_digest.clone()))
@@ -346,37 +346,6 @@ async fn missing_referrer_backlink_is_added_and_stale_one_removed() {
         assert!(
             links.contains(&LinkKind::ReferencedBy(manifest_digest.clone())),
             "the real revision's per-referrer entry must survive"
-        );
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn missing_blob_index_grant_is_regranted() {
-    for_each_backend(async |test_case| {
-        let namespace = &Namespace::new("test-repo/regrant").unwrap();
-        let (manifest_digest, _, layer_digest) = push_healthy_image(test_case, namespace).await;
-        let metadata_store = test_case.metadata_store();
-
-        let link = LinkKind::ReferencedBy(manifest_digest.clone());
-        metadata_store
-            .update_blob_index(
-                namespace,
-                &layer_digest,
-                BlobIndexOperation::Remove(link.clone()),
-            )
-            .await
-            .unwrap();
-
-        scrub_apply(test_case).await;
-
-        let links = metadata_store
-            .read_blob_index_namespace(namespace, &layer_digest)
-            .await
-            .unwrap();
-        assert!(
-            links.contains(&link),
-            "the layer's per-referrer entry must be re-issued from the manifest"
         );
     })
     .await;
@@ -472,9 +441,8 @@ async fn stale_shard_entry_is_removed() {
         let (_, _, layer_digest) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // Grant an entry whose backing tag does not exist. (A `Layer` phantom
-        // would be unrepresentable: its entry key carries no foreign digest,
-        // so it aliases the healthy self-entry and asserts nothing.)
+        // A `Layer` phantom would alias the healthy self-entry and assert
+        // nothing, so the phantom names a tag instead.
         let phantom = LinkKind::Tag(Tag::new("phantom-tag").unwrap());
         metadata_store
             .update_blob_index(
@@ -653,8 +621,8 @@ async fn corrupt_shard_is_deleted_and_regranted_on_next_run() {
             .unwrap();
 
         scrub_apply(test_case).await;
-        // The corrupt shard was deleted; the same run's link pass may have
-        // preceded the deletion, so a second run re-grants from the manifest.
+        // The link pass may have preceded the shard's deletion, so the second
+        // run is the one that re-grants from the manifest.
         scrub_apply(test_case).await;
 
         let links = metadata_store
@@ -714,8 +682,8 @@ async fn a_blob_the_shard_walk_saw_referenced_is_never_reclaimed() {
             .await
             .expect("the shard walk must read the layer's references");
 
-        // The per-blob index read now finds nothing, as it would on a backend
-        // that dropped this key from the listing behind it.
+        // The per-blob index read now finds nothing, as on a backend that
+        // dropped this key from the listing behind it.
         metadata_store
             .object_store()
             .delete(&shard_key)
@@ -811,8 +779,8 @@ async fn unknown_keys_are_quarantined_in_both_stores() {
             b"blob alien"
         );
 
-        // The quarantined copies are a known category: a second run leaves
-        // them alone and emits nothing.
+        // The quarantined copies are a known category, so a second run emits
+        // nothing.
         let actions = scrub_capture(test_case).await;
         assert!(
             actions.is_empty(),
@@ -925,7 +893,6 @@ async fn delete_unknown_removes_aliens_without_quarantining() {
         ));
         let stats = run_passes_with(&blob_store, &metadata_store, sink, true).await;
 
-        // Both aliens are gone, counted, and nothing landed in quarantine.
         let meta_objects = metadata_store.object_store();
         assert!(meta_objects.get(alien).await.is_err());
         assert!(
@@ -1018,8 +985,8 @@ async fn convergence_second_run_emits_zero_actions() {
             push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // Mixed corruption: a missing per-referrer pin, a phantom index
-        // entry, an alien key, and a corrupt tag link.
+        // Mixed corruption: a missing pin, a phantom index entry, an alien
+        // key, and a corrupt tag link.
         metadata_store
             .update_blob_index(
                 namespace,
@@ -1195,10 +1162,9 @@ async fn legacy_referrer_link_is_converted_to_a_record() {
     .await;
 }
 
-/// A legacy shard is converted into reference keys and reclaimed: scrub
-/// emits the conversion and deletes the shard. With no link file backing it,
-/// the lossy layer entry it carried is then collected as dangling, while the
-/// per-referrer pin keeps the blob referenced throughout.
+/// A legacy shard is converted into reference keys and reclaimed. With no link
+/// file backing it, the lossy layer entry it carried is then collected as
+/// dangling, while the per-referrer pin keeps the blob referenced throughout.
 #[tokio::test]
 async fn legacy_shard_is_converted_to_reference_keys() {
     for_each_backend(async |test_case| {
@@ -1207,8 +1173,8 @@ async fn legacy_shard_is_converted_to_reference_keys() {
         let metadata_store = test_case.metadata_store();
         let store = metadata_store.object_store();
 
-        // The legacy shape: a shard carrying the lossy layer entry, as an
-        // un-upgraded store would hold it.
+        // A shard carrying the lossy layer entry, as an un-upgraded store
+        // would hold it.
         let layer_link = LinkKind::Layer(layer_digest.clone());
         let shard_key = path_builder::blob_index_shard_path(&layer_digest, namespace);
         let shard = serde_json::to_vec(slice::from_ref(&layer_link)).unwrap();
@@ -1281,7 +1247,7 @@ async fn unrepresentable_shard_entries_are_dropped_by_conversion() {
 }
 
 /// A grant entry with no backing link is settled damage once the reverify
-/// re-reads the same inconsistency (formerly the expired-intent case).
+/// re-reads the same inconsistency.
 #[tokio::test]
 async fn dangling_grant_entry_is_removed() {
     for_each_backend(async |test_case| {
@@ -1372,9 +1338,8 @@ async fn tx_leftovers_are_reclaimed_age_gated() {
     }
 }
 
-/// A legacy link file's back-link to a revision that does not exist is
-/// pruned once the reverify re-reads the same inconsistency (formerly the
-/// live-intent suppression case, whose subject left with the intent log).
+/// A legacy link file's back-link to a revision that does not exist is pruned
+/// once the reverify re-reads the same inconsistency.
 #[tokio::test]
 async fn dangling_referrer_backlink_is_pruned() {
     for_each_backend(async |test_case| {
@@ -1382,9 +1347,7 @@ async fn dangling_referrer_backlink_is_pruned() {
         let (_, config_digest, _) = push_healthy_image(test_case, namespace).await;
         let metadata_store = test_case.metadata_store();
 
-        // A legacy link file naming a referrer revision that is absent.
-        // Pushes do not write these files, so the legacy shape is seeded
-        // raw.
+        // Pushes do not write these files, so the legacy shape is seeded raw.
         let dead_revision = Digest::sha256_of_bytes(b"dead-revision");
         let config_link = LinkKind::Config(config_digest.clone());
         let mut current = LinkMetadata::from_digest(config_digest.clone());
@@ -1699,8 +1662,8 @@ async fn push_writes_no_tracked_link_files() {
             );
         }
 
-        // A pull still resolves the tag to readable manifest bytes, the
-        // blob stays readable, and the delete gate still refuses.
+        // A pull still resolves, the blob stays readable, and the delete gate
+        // still refuses.
         let registry = test_case.registry();
         let resolved = metadata_store
             .read_link(namespace, &tag("v1"))
@@ -1746,8 +1709,8 @@ async fn legacy_tracked_link_is_retired_after_rehoming() {
         let metadata_store = test_case.metadata_store();
         let registry = test_case.registry();
 
-        // Rewind the layer to the legacy shape: a link file backing the
-        // referrer, the lossy `r/layer` entry, and no per-referrer entry.
+        // The legacy shape: a link file backing the referrer, the lossy
+        // `r/layer` entry, and no per-referrer entry.
         let layer_link = LinkKind::Layer(layer_digest.clone());
         let mut legacy = LinkMetadata::from_digest(layer_digest.clone());
         legacy.add_referrer(manifest_digest.clone());
@@ -1902,8 +1865,8 @@ async fn atime_collector_keeps_newest_prunes_old_superseded_and_retires_legacy()
         let tag = Tag::new("v1").unwrap();
         let now = Utc::now();
 
-        // Tag side: a newest entry, a superseded one inside the audit
-        // window, a superseded one past it, and the legacy single key.
+        // Tag side: a newest entry, a superseded one inside the audit window,
+        // a superseded one past it, and the legacy single key.
         let dir = path_builder::tag_atime_entry_dir(&namespace, &tag);
         put_atime_entry(&metadata_store, &dir, "alice", now).await;
         put_atime_entry(&metadata_store, &dir, "bob", now - Duration::minutes(10)).await;

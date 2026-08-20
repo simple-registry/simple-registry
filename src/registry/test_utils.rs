@@ -45,9 +45,8 @@ use crate::{
     secret::Secret,
 };
 
-/// Canonical connection to the live S3 test backend (rustfs, in CI and
-/// locally), single-sourced from the s3-client test fixtures so credentials,
-/// bucket, and the `ANGOS_TEST_S3_ENDPOINT` override are declared once.
+/// Connection to the live S3 test backend, single-sourced from the s3-client
+/// fixtures so credentials, bucket, and the endpoint override live in one place.
 pub fn s3_test_connection(key_prefix: String) -> S3ConnectionConfig {
     S3ConnectionConfig {
         access_key_id: Secret::new(TEST_ACCESS_KEY.to_string()),
@@ -59,10 +58,9 @@ pub fn s3_test_connection(key_prefix: String) -> S3ConnectionConfig {
     }
 }
 
-/// FS-backed test stack over a fresh temp directory: one object store
-/// shared by a cache-less [`MetadataStore`] and a presign-less [`BlobStore`].
-/// Keep the stack alive for the test's duration; dropping it deletes the
-/// directory.
+/// One object store over a fresh temp directory, shared by a cache-less
+/// [`MetadataStore`] and a presign-less [`BlobStore`]. Keep the stack alive for
+/// the test's duration: dropping it deletes the directory.
 pub struct FsTestStack {
     pub dir: TempDir,
     pub store: Arc<dyn ObjectStore>,
@@ -95,10 +93,9 @@ pub fn single_repo_resolver(name: &str, repository: Repository) -> Arc<Repositor
     Arc::new(RepositoryResolver::new(Arc::new(repositories)).expect("test resolver"))
 }
 
-/// Run `test` once per registry backend, printing the active backend first
-/// (captured test output names it on failure) and running the case's
-/// best-effort cleanup after the body. The single home of the backend matrix;
-/// tests never iterate [`backends`] themselves.
+/// Run `test` once per registry backend, naming the active one in the captured
+/// output and running the case's cleanup afterwards. The single home of the
+/// backend matrix: tests never iterate [`backends`] themselves.
 pub async fn for_each_backend<F>(test: F)
 where
     F: AsyncFn(&dyn RegistryTestCase),
@@ -110,14 +107,13 @@ where
     }
 }
 
-/// Wrap an object store into a cache-less [`MetadataStore`] for tests (link
-/// cache disabled).
+/// A [`MetadataStore`] over `object` with the link cache disabled.
 pub fn metadata_store_over(object: Arc<dyn ObjectStore>) -> Arc<MetadataStore> {
     metadata_store_over_cached(object, 0)
 }
 
 /// Like [`metadata_store_over`] but with a memory-backed link cache at
-/// `link_cache_ttl_secs` (`0` keeps it disabled).
+/// `link_cache_ttl_secs`, where `0` keeps it disabled.
 pub fn metadata_store_over_cached(
     object: Arc<dyn ObjectStore>,
     link_cache_ttl_secs: u64,
@@ -126,8 +122,8 @@ pub fn metadata_store_over_cached(
         MetadataStore::builder(object)
             .cache(cache::Config::Memory.to_backend().expect("memory cache"))
             .link_cache_ttl(link_cache_ttl_secs)
-            // Tests exercise reclamation immediately; the race tests that
-            // need the grace protection set their own.
+            // Tests exercise reclamation immediately; the race tests needing
+            // the grace protection set their own.
             .gc_grace_secs(0)
             .build(),
     )
@@ -152,10 +148,8 @@ pub fn create_test_registry(
     create_test_registry_with(blob_store, metadata_store, true)
 }
 
-/// Like [`create_test_registry`] but lets a test pin whether the live
-/// `accept_put_manifest` path enforces manifest-reference validation, so both
-/// the strict and the permissive (`allow_missing_manifest_references`) modes
-/// can be exercised end-to-end.
+/// Like [`create_test_registry`] but pins whether `accept_put_manifest`
+/// enforces manifest-reference validation.
 pub fn create_test_registry_with(
     blob_store: Arc<BlobStore>,
     metadata_store: Arc<MetadataStore>,
@@ -182,9 +176,8 @@ pub fn create_test_registry_with(
     Registry::new(blob_store, metadata_store, resolver, config)
 }
 
-/// Write raw bytes at the canonical link path for `link` in `namespace`,
-/// bypassing the transactional `update_links` path so tests can seed
-/// hand-crafted or deliberately corrupt link files.
+/// Write raw bytes at the canonical link path, bypassing `update_links` so
+/// tests can seed hand-crafted or deliberately corrupt link files.
 pub async fn put_link_raw(
     store: &Arc<dyn ObjectStore>,
     namespace: &Namespace,
@@ -205,8 +198,7 @@ pub fn media_type(value: &str) -> MediaType {
     MediaType::new(value).unwrap()
 }
 
-/// An unfiltered referrers listing of `subject`, at the default page size.
-/// Tests needing a filter or a cursor spread their own fields over it.
+/// An unfiltered referrers listing of `subject` at the default page size.
 pub fn referrers_request(namespace: &Namespace, subject: &Digest) -> GetReferrersRequest {
     GetReferrersRequest {
         namespace: namespace.clone(),
@@ -216,8 +208,8 @@ pub fn referrers_request(namespace: &Namespace, subject: &Digest) -> GetReferrer
     }
 }
 
-/// Upload `content` through the full registry upload state machine (session
-/// create plus monolithic complete), returning its SHA-256 digest.
+/// Upload `content` through the full registry upload state machine, returning
+/// its SHA-256 digest.
 pub async fn upload_blob(registry: &Registry, namespace: &Namespace, content: &[u8]) -> Digest {
     let session_id = UploadSessionId::generate();
     registry
@@ -245,10 +237,9 @@ pub async fn upload_blob(registry: &Registry, namespace: &Namespace, content: &[
     digest
 }
 
-/// Seed `content` at the canonical blob path through the **blob** store, the
-/// one production reads bodies from. Seeding through the metadata store's
-/// object store instead only resolves when both share a root, which hides a
-/// split-backend bug.
+/// Seed `content` through the blob store, the one production reads bodies from.
+/// Seeding through the metadata store's object store instead only resolves when
+/// both share a root, which hides a split-backend bug.
 pub async fn put_blob_body(blob_store: &BlobStore, content: &[u8]) -> Digest {
     let digest = Digest::sha256_of_bytes(content);
     blob_store
@@ -258,9 +249,8 @@ pub async fn put_blob_body(blob_store: &BlobStore, content: &[u8]) -> Digest {
     digest
 }
 
-/// Test-only helper that writes `content` directly at the canonical blob path
-/// via the underlying `ObjectStore` (no upload state machine, no namespace),
-/// returning its SHA-256 digest.
+/// Write `content` at the canonical blob path through the raw `ObjectStore`,
+/// with no upload state machine and no namespace.
 pub async fn put_blob_direct(store: &Arc<dyn ObjectStore>, content: &[u8]) -> Digest {
     let digest = Digest::sha256_of_bytes(content);
     store
@@ -273,9 +263,8 @@ pub async fn put_blob_direct(store: &Arc<dyn ObjectStore>, content: &[u8]) -> Di
     digest
 }
 
-/// Fetch a blob the way `resolve_get_blob` does minus the redirect and event
-/// paths: resolve the namespace's ownership verdict, then serve locally or
-/// through the pull-through upstream.
+/// Fetch a blob the way `resolve_get_blob` does, minus the redirect and event
+/// paths.
 pub async fn get_blob(
     registry: &Registry,
     repository: &Repository,
@@ -408,12 +397,10 @@ impl FSRegistryTestCase {
         }
     }
 
-    /// Build the blob and metadata stores over **separate** roots, the
-    /// split-backend topology a deployment can configure (distinct S3
-    /// bucket/`key_prefix`). `blob_path(digest)` then resolves to different
+    /// Blob and metadata stores over separate roots, the split-backend topology
+    /// a deployment can configure. `blob_path(digest)` then addresses different
     /// physical objects per store, so a manifest written through the metadata
-    /// transaction would be invisible to the blob-store read path, the
-    /// cross-store-isolation regression this fixture exercises.
+    /// store would be invisible to the blob-store read path.
     pub fn with_split_backends() -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir for split backends");
         let blob_path = temp_dir.path().join("blob");
@@ -544,9 +531,8 @@ impl RegistryTestCase for S3RegistryTestCase {
     }
 }
 
-/// Build an `Arc<RegistryClient>` pointed at `uri` with a fresh in-memory
-/// cache. Callers pass a real mock-server URI, or a placeholder like
-/// `"https://unused.test"` when the client is never dialed.
+/// A `RegistryClient` pointed at `uri` with a fresh in-memory cache; callers
+/// pass a placeholder URI when the client is never dialed.
 pub fn downstream_client(uri: &str) -> Arc<RegistryClient> {
     let backend = cache::Config::Memory.to_backend().unwrap();
     Arc::new(
@@ -556,9 +542,9 @@ pub fn downstream_client(uri: &str) -> Arc<RegistryClient> {
     )
 }
 
-/// Build a test `Repository` named `name` carrying `replication` downstreams.
-/// The sole `Repository` test literal lives here, so a new struct field is
-/// edited in one place; callers vary only the downstream set.
+/// A test `Repository` named `name` carrying `replication` downstreams. The
+/// sole `Repository` test literal lives here, so a new struct field is edited
+/// in one place.
 pub fn repository_with_replication(
     name: &str,
     replication: Vec<ReplicationDownstream>,
@@ -577,9 +563,8 @@ pub fn repository_with_replication(
     }
 }
 
-/// Build a `Repository` named `name` carrying exactly one event+reconcile
-/// downstream "eu-region" (match-all filter, `max_concurrent_pushes` 4) backed
-/// by `client`.
+/// A `Repository` carrying exactly one match-all event+reconcile downstream
+/// named "eu-region", backed by `client`.
 pub fn repository_with_downstream(name: &str, client: Arc<RegistryClient>) -> Repository {
     repository_with_replication(
         name,
@@ -665,8 +650,6 @@ pub async fn seed_manifest(
 
 /// The value of `name` on a served response, panicking when absent: a test
 /// asserting on a header has already decided the response must carry it.
-/// `HeaderValue` compares against `str` and `String`, so callers assert on it
-/// directly.
 pub fn response_header<'a>(
     response: &'a Response<ResponseBody>,
     name: &HeaderName,

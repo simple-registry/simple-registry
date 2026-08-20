@@ -1,7 +1,6 @@
-//! [`OrphanJobChecker`]: emits a delete action for every job (pending or
-//! dead-lettered) on one durable queue whose payload no longer resolves to
-//! configured state, so stale config stops churning the queue through retries.
-//! Runs on every `angos prune`: prune is the config-trusting command.
+//! [`OrphanJobChecker`]: emits a delete action for every job, pending or
+//! dead-lettered, whose payload no longer resolves to configured state, so
+//! stale config stops churning the queue through retries.
 
 use std::sync::Arc;
 
@@ -25,7 +24,7 @@ const PAGE_SIZE: u16 = 256;
 /// Fan-out for the per-key payload reads within one page.
 const PAYLOAD_READ_CONCURRENCY: usize = 16;
 
-/// Which durable queue an [`OrphanJobChecker`] scans, carrying the per-queue
+/// Which durable queue an [`OrphanJobChecker`] scans, with its per-queue
 /// orphan classification.
 #[derive(Clone, Copy)]
 pub enum OrphanQueue {
@@ -38,7 +37,6 @@ pub enum OrphanQueue {
 }
 
 impl OrphanQueue {
-    /// The durable [`Queue`] this orphan scan addresses.
     #[must_use]
     pub fn as_queue(self) -> Queue {
         match self {
@@ -75,9 +73,9 @@ impl OrphanQueue {
                     )
                 }))
             }
-            // A blob already stored locally would let such a job complete on
-            // drain, but granting a reference to a namespace removed from
-            // pull-through config serves nothing, so it still counts as an orphan.
+            // Such a job could still complete on drain if the blob is already
+            // local, but granting a reference to a namespace removed from
+            // pull-through config serves nothing.
             OrphanQueue::Cache => {
                 let payload: CacheFetchBlobPayload = serde_json::from_value(payload)?;
                 let configured = resolver
@@ -105,10 +103,6 @@ pub struct OrphanJobChecker {
 }
 
 impl OrphanJobChecker {
-    /// Construct a checker from its resolved fields: the `job_store` the queue
-    /// partitions are read through, the namespace -> repository `resolver`
-    /// yielding the configured downstreams and pull-through upstreams, and the
-    /// durable `queue` to scan with its orphan classification.
     #[must_use]
     pub fn new(
         job_store: Arc<JobStore>,
@@ -131,9 +125,8 @@ impl OrphanJobChecker {
         self
     }
 
-    /// Reads the raw payload for one storage key. Returns `Ok(None)` for a key
-    /// that vanished mid-scan (someone else already handled it); decoding is
-    /// deferred to [`OrphanQueue::classify`].
+    /// Reads the raw payload for one storage key, `Ok(None)` for a key that
+    /// vanished mid-scan; decoding is left to [`OrphanQueue::classify`].
     async fn read_payload(
         &self,
         state: JobState,
@@ -243,7 +236,7 @@ impl OrphanJobChecker {
 }
 
 /// Delete queued jobs on both durable queues whose downstream or repository
-/// is no longer configured. Always runs with `angos prune`.
+/// is no longer configured.
 pub async fn sweep_orphan_jobs(
     job_store: &Arc<JobStore>,
     resolver: &Arc<RepositoryResolver>,
@@ -313,7 +306,7 @@ mod tests {
         ))
     }
 
-    /// Bare registry client for [`Upstream`]; never dialed by these checkers.
+    /// Never dialed by these checkers.
     fn upstream_client() -> RegistryClient {
         Arc::into_inner(downstream_client("http://127.0.0.1:1")).expect("unshared test client")
     }
@@ -323,7 +316,6 @@ mod tests {
         upstreams: Vec<RegistryClient>,
         replication: Vec<ReplicationDownstream>,
     ) -> Repository {
-        // Tests build clients directly; wrap each in a verbatim-mapping Upstream.
         let upstreams = upstreams
             .into_iter()
             .map(|client| Upstream {
@@ -423,8 +415,8 @@ mod tests {
         assert!(matches!(outcome, FailOutcome::MovedToDeadLetter));
     }
 
-    /// The conformance gate seeds this payload by hand; decoding it here keeps
-    /// the fixture honest about what the queue actually stores.
+    /// The conformance gate seeds this payload by hand, so decoding it here
+    /// keeps the fixture honest about what the queue stores.
     #[test]
     fn the_gate_orphan_fixture_decodes_and_classifies() {
         let payload = json!({
@@ -512,8 +504,7 @@ mod tests {
         } = fs_test_stack();
         let job_store = orphan_job_store(&metadata_store);
 
-        // The downstream name is configured, but only for `nginx`; the payload
-        // namespace resolves to no repository at all.
+        // The downstream name is configured, but only for `nginx`.
         enqueue_push(&job_store, DOWNSTREAM, GHOST_NAMESPACE).await;
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
@@ -605,8 +596,6 @@ mod tests {
         );
     }
 
-    /// End-to-end shape: checker into executor deletes only the orphan and the
-    /// configured job survives.
     #[tokio::test]
     async fn end_to_end_deletes_only_the_orphan_replication_job() {
         let FsTestStack {
@@ -651,8 +640,8 @@ mod tests {
         );
     }
 
-    /// Dry-run shape: the checker reads regardless of dry-run, but the
-    /// `DryRunSink` applies nothing, so both jobs remain.
+    /// The checker reads regardless of dry-run, but `DryRunSink` applies
+    /// nothing.
     #[tokio::test]
     async fn dry_run_leaves_both_replication_jobs_in_place() {
         let FsTestStack {
@@ -748,8 +737,7 @@ mod tests {
         } = fs_test_stack();
         let job_store = orphan_job_store(&metadata_store);
 
-        // The namespace resolves to a configured repository, but one with no
-        // upstreams: a fill job for it can never fetch anything.
+        // Configured, but with no upstreams: a fill job can never fetch.
         enqueue_cache_fill(&job_store, LOCAL_REPO).await;
 
         let sink: std::sync::Mutex<Vec<Action>> = std::sync::Mutex::new(Vec::new());
@@ -839,8 +827,6 @@ mod tests {
         );
     }
 
-    /// End-to-end shape: checker into executor deletes only the orphan cache
-    /// job and the configured pull-through job survives.
     #[tokio::test]
     async fn end_to_end_deletes_only_the_orphan_cache_job() {
         let FsTestStack {
@@ -875,8 +861,8 @@ mod tests {
         );
     }
 
-    /// Dry-run shape: the checker reads regardless of dry-run, but the
-    /// `DryRunSink` applies nothing, so both jobs remain.
+    /// The checker reads regardless of dry-run, but `DryRunSink` applies
+    /// nothing.
     #[tokio::test]
     async fn dry_run_leaves_both_cache_jobs_in_place() {
         let FsTestStack {

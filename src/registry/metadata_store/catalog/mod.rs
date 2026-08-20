@@ -1,6 +1,6 @@
-//! The namespace / tag / revision / referrer catalog: the content-derived
-//! enumeration endpoints, served from the `v2/cat` index (unscoped) or the
-//! scoped legacy walk plus `v2/ns` listings.
+//! The namespace / tag / revision / referrer enumeration endpoints, served
+//! from the `v2/cat` index (unscoped) or a scoped legacy walk merged with
+//! `v2/ns` listings.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -25,8 +25,8 @@ const TAG_LINK_READ_CONCURRENCY: usize = 20;
 /// winner: `Some(digest)` live, `None` tombstoned. A sorted listing delivers
 /// each group's entries contiguously with the newest ordinal first, so every
 /// group resolves from its complete lowest-ordinal set by the same rule as a
-/// point read: highest digest wins the same-millisecond tie, and a `set`
-/// beats a `del` of the same digest.
+/// point read: highest digest wins a same-millisecond tie, and a `set` beats
+/// a `del` of the same digest.
 #[derive(Default)]
 struct WinnerFold {
     states: HashMap<String, Option<Digest>>,
@@ -66,8 +66,7 @@ impl WinnerFold {
 impl MetadataStore {
     /// Lists the namespaces holding manifest content (at least one revision
     /// or live tag); an `_uploads`-only namespace is not a catalog entry and
-    /// is discovered through the blob store instead, where upload sessions
-    /// live.
+    /// is discovered through the blob store instead.
     #[instrument(skip(self))]
     pub async fn list_namespaces(
         &self,
@@ -82,9 +81,9 @@ impl MetadataStore {
         Ok(pagination::paginate_sorted(&namespaces, n, last.as_deref()))
     }
 
-    /// Ensure the namespace's catalog index key exists: an empty write-once
-    /// put, deduped by a process-local set, so it costs one put per namespace
-    /// per process. A failed put is forgotten so a later write retries it.
+    /// Ensure the namespace's catalog index key exists, deduped by a
+    /// process-local set. A failed put is forgotten so a later write retries
+    /// it.
     pub async fn ensure_catalog_index(&self, namespace: &Namespace) {
         let inserted = match self.catalog_indexed.lock() {
             Ok(mut set) => set.insert(namespace.clone()),
@@ -113,8 +112,7 @@ impl MetadataStore {
     /// order.
     #[instrument(skip(self))]
     pub async fn collect_namespaces(&self, scope: Option<&str>) -> Result<Vec<Namespace>, Error> {
-        // Unscoped, the index is the catalog: every write lands one key per
-        // namespace (`ensure_catalog_index`), so no legacy tree walk runs
+        // Unscoped, the index is the catalog, so no legacy tree walk runs
         // here. A namespace holding only pre-index legacy content lists again
         // once scrub's backfill writes its key, the documented migration
         // contract.
@@ -141,12 +139,10 @@ impl MetadataStore {
         .await?;
 
         // A scoped namespace whose tags or revisions live under `v2/ns/` may
-        // hold no `_manifests` marker of its own; merge those in from the
-        // scope's own tag and rev roots plus its `/` subtree, so the
-        // whole-segment rule is the listed prefix rather than a client-side
-        // filter over the full root. A revision record's existence is
-        // liveness; a tag counts only when its resolved winner is live, so a
-        // namespace holding only tombstones does not resurface.
+        // hold no `_manifests` marker, so merge those in from the scope's own
+        // tag and rev roots plus its `/` subtree. A revision record's
+        // existence is liveness; a tag counts only when its resolved winner
+        // is live, so a namespace holding only tombstones does not resurface.
         let listings: [(String, String); 3] = [
             (
                 format!("{}/{scope}!tag", path_builder::NS_ROOT),
@@ -207,10 +203,10 @@ impl MetadataStore {
         Ok(namespaces)
     }
 
-    /// Enumerate the `v2/cat` index: one key per namespace, in lexical key
-    /// order, which is `Namespace` order since the trailing `!` sorts below
-    /// every namespace character. Each name is content-checked so a stale
-    /// key of an emptied namespace does not list.
+    /// Enumerate the `v2/cat` index in lexical key order, which is
+    /// `Namespace` order because the trailing `!` sorts below every namespace
+    /// character. Each name is content-checked so a stale key of an emptied
+    /// namespace does not list.
     async fn collect_indexed_namespaces(&self) -> Result<Vec<Namespace>, Error> {
         let mut namespaces = Vec::new();
         let mut token = None;
@@ -225,9 +221,8 @@ impl MetadataStore {
                 .filter_map(|key| key.strip_suffix('!'))
                 .filter_map(|name| Namespace::new(name).ok())
                 .collect();
-            // One content probe per name; fanned out so a page of namespaces
-            // costs one round-trip group, not one per name, and ordered so
-            // the listing's lexical order survives.
+            // One content probe per name, fanned out but ordered so the
+            // listing's lexical order survives.
             let probes = candidates.into_iter().map(|namespace| async move {
                 match self.has_manifest_content(&namespace).await {
                     Ok(true) => Ok(Some(namespace)),
@@ -264,11 +259,10 @@ impl MetadataStore {
         Ok(pagination::paginate_sorted(&tags, n, last.as_deref()))
     }
 
-    /// Streams every live tag in `namespace`: the tag-entry states merged
-    /// with the legacy tag directories, entries shadowing legacy per name (a
-    /// tombstone winner drops the tag even when its legacy link remains).
-    /// Malformed names are dropped rather than surfaced as tags (scrub
-    /// reports and removes them, so the drop is silent).
+    /// Streams every live tag in `namespace`: tag-entry states merged with
+    /// the legacy tag directories, entries shadowing legacy per name, so a
+    /// tombstone winner drops the tag even when its legacy link remains.
+    /// Malformed names are dropped silently; scrub reports and removes them.
     pub fn stream_tags(
         &self,
         namespace: &Namespace,
@@ -300,9 +294,8 @@ impl MetadataStore {
         .try_flatten()
     }
 
-    /// Every new-shape tag with its resolved liveness: `Some(target)` for a
-    /// live tag, `None` for a tombstoned one. One flat listing over the
-    /// namespace's tag entries; bodies are never read.
+    /// Every new-shape tag with its resolved liveness: `Some(target)` live,
+    /// `None` tombstoned. One flat listing; bodies are never read.
     async fn collect_entry_tag_states(
         &self,
         namespace: &Namespace,
@@ -333,10 +326,9 @@ impl MetadataStore {
             .collect())
     }
 
-    /// Lists the RAW tag directory names in `namespace` with NO `Tag`
-    /// validation, so tests can observe directories whose names do not
-    /// satisfy the `oci::Tag` grammar, which [`Self::list_tags`] silently
-    /// drops (production code walks raw keys through scrub's categorizer).
+    /// Lists raw tag directory names with no `Tag` validation, so tests can
+    /// observe the names [`Self::list_tags`] silently drops. Production walks
+    /// raw keys through scrub's categorizer instead.
     #[cfg(test)]
     pub async fn list_tag_names(
         &self,
@@ -352,8 +344,6 @@ impl MetadataStore {
         Ok(pagination::paginate_sorted(&names, n, last.as_deref()))
     }
 
-    /// Enumerates every raw tag directory name under `namespace`'s tags dir,
-    /// for [`Self::list_tag_names`]'s no-validation contract.
     #[cfg(test)]
     async fn collect_tag_dir_names(&self, namespace: &Namespace) -> Result<Vec<String>, Error> {
         let tags_dir = path_builder::manifest_tags_dir(namespace);
@@ -361,8 +351,8 @@ impl MetadataStore {
         Ok(children.sub_prefixes)
     }
 
-    /// Returns the `LinkKind::Tag` entries in `namespace` that currently point at
-    /// `digest`. Reads bypass the link cache, since this set gates the
+    /// The `LinkKind::Tag` entries in `namespace` currently pointing at
+    /// `digest`. Reads bypass the link cache because this set gates the
     /// digest-delete LWW guard and must not omit a tag re-pointed on another
     /// replica within the cache TTL.
     #[instrument(skip(self))]
@@ -371,9 +361,8 @@ impl MetadataStore {
         namespace: &Namespace,
         digest: &Digest,
     ) -> Result<Vec<LinkKind>, Error> {
-        // New-shape tags answer from one flat listing; only tags that exist
-        // solely as unconverted legacy links still need a link read each. A
-        // legacy tag whose read fails is skipped rather than matched.
+        // Only tags existing solely as unconverted legacy links need a link
+        // read each; one whose read fails is skipped rather than matched.
         let states = self.collect_entry_tag_states(namespace).await?;
         let mut tags: Vec<LinkKind> = states
             .iter()
@@ -411,13 +400,10 @@ impl MetadataStore {
         Ok(tags)
     }
 
-    /// Streams the candidate referrer manifest digests recorded under
-    /// `digest`'s referrer records, merged with its legacy referrers
-    /// directory, unresolved and unordered. Record pages stream lazily; only
-    /// the legacy directory is buffered, and it is not read until the records
-    /// are exhausted. Callers resolve each candidate to a descriptor at
-    /// registry altitude, where the blob store holding manifest bodies is in
-    /// reach.
+    /// Streams `digest`'s candidate referrer manifest digests, records merged
+    /// with the legacy referrers directory, unresolved and unordered. Callers
+    /// resolve each candidate to a descriptor at registry altitude, where the
+    /// blob store holding manifest bodies is in reach.
     pub fn stream_referrer_digests(
         &self,
         namespace: &Namespace,
@@ -473,13 +459,10 @@ impl MetadataStore {
         })
     }
 
-    /// Whether `namespace` holds any manifest content, by the rule the catalog
-    /// listing names a repository with: at least one revision or tag. Probes one
-    /// entry of each, so a namespace that was never written costs the listings
-    /// that find nothing.
+    /// Whether `namespace` holds any manifest content, by the rule the
+    /// catalog listing names a repository with: at least one revision or tag.
     pub async fn has_manifest_content(&self, namespace: &Namespace) -> Result<bool, Error> {
-        // A one-key page answers the existence probe; the full page size is
-        // for enumeration callers.
+        // A one-key page answers the existence probe.
         let revisions = self.stream_revisions_paged(namespace, 1);
         tokio::pin!(revisions);
         if revisions.next().await.transpose()?.is_some() {
@@ -495,8 +478,8 @@ impl MetadataStore {
             return Ok(true);
         }
 
-        // New-shape tags: only a tag whose resolved winner is live counts, so
-        // a namespace holding nothing but tombstones reads as empty.
+        // Only a tag whose resolved winner is live counts, so a namespace
+        // holding nothing but tombstones reads as empty.
         let states = self.collect_entry_tag_states(namespace).await?;
         Ok(states.values().any(Option::is_some))
     }
@@ -518,11 +501,9 @@ impl MetadataStore {
         Ok(false)
     }
 
-    /// Streams every manifest revision digest in `namespace`: the new-shape
-    /// records merged with the legacy per-algorithm link directories, deduped
-    /// (a digest appears in both mid-conversion). Record pages stream lazily;
-    /// only the legacy directories are buffered, and they are not listed
-    /// until the records are exhausted.
+    /// Streams every manifest revision digest in `namespace`: records merged
+    /// with the legacy per-algorithm link directories, deduped because a
+    /// digest appears in both mid-conversion.
     pub fn stream_revisions<'a>(
         &'a self,
         namespace: &'a Namespace,
@@ -530,8 +511,8 @@ impl MetadataStore {
         self.stream_revisions_paged(namespace, 1000)
     }
 
-    /// [`Self::stream_revisions`] with a caller-chosen record page size, so an
-    /// existence probe can ask for one key instead of a full page.
+    /// [`Self::stream_revisions`] with a caller-chosen record page size, so
+    /// an existence probe can ask for one key instead of a full page.
     pub fn stream_revisions_paged<'a>(
         &'a self,
         namespace: &'a Namespace,
@@ -622,11 +603,10 @@ impl MetadataStore {
             .map_err(Error::from)
     }
 
-    /// Delete a namespace's entire repository subtree by raw on-disk name,
-    /// along with its tag entries, demoted tag history, and atime keys under
-    /// `v2/ns/`. Used by
-    /// scrub to reclaim a directory whose name fails `Namespace` validation
-    /// and so cannot form typed links for a per-link delete.
+    /// Delete a namespace's repository subtree by raw on-disk name, along
+    /// with its tag entries, tag history, and atime keys under `v2/ns/`. Used
+    /// by scrub for a directory whose name fails `Namespace` validation and
+    /// so cannot form typed links for a per-link delete.
     pub async fn delete_namespace_directory(&self, name: &str) -> Result<(), Error> {
         let prefix = path_builder::namespace_dir(name)
             .ok_or_else(|| Error::Internal(format!("unsafe namespace directory name: '{name}'")))?;

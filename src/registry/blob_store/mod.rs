@@ -1,13 +1,9 @@
-//! Blob storage subsystem.
+//! Blob storage: a single [`BlobStore`] over an [`ObjectStore`] plus an
+//! optional [`PresignedStore`], shared by the FS and S3 backends.
 //!
-//! Exposes a single [`BlobStore`] over a plain [`ObjectStore`] plus an
-//! optional [`PresignedStore`]. The blob store is pure storage with no
-//! coordination: writers rely on the collector's grace period and the `v2/gc`
-//! marker protocol in the metadata store. FS and S3 share one code path (the
-//! [`BlobStoreConfig`] enum only picks the storage handles); all public
-//! methods are inherent on `BlobStore`, except
-//! [`multipart_cleanup::MultipartCleanup`], kept as a trait so prune can
-//! inject a test double.
+//! It is pure storage with no coordination of its own: writers rely on the
+//! collector's grace period and the `v2/gc` marker protocol in the metadata
+//! store.
 
 mod config;
 pub mod hashing_reader;
@@ -32,8 +28,8 @@ use angos_storage::{ObjectStore, PresignedStore, paginated};
 
 use crate::registry::{Error, pagination, path_builder};
 pub use config::BlobStoreConfig;
-// Inner config structs are only constructed by tests; production code builds
-// backends through `BlobStoreConfig`. Re-export them for test builds only.
+// Production code builds backends through `BlobStoreConfig`; only tests
+// construct the inner structs.
 #[cfg(test)]
 pub use config::{FsBackendConfig, S3BackendConfig, TransportFields};
 pub use multipart_cleanup::{MultipartCleanup, OrphanMultipartUpload};
@@ -58,9 +54,8 @@ pub struct BlobStore {
     /// Object reads/writes and the upload lifecycle. On FS the backend prunes
     /// its own empty ancestor directories on delete, so callers don't.
     object: Arc<dyn ObjectStore>,
-    /// Presign backend paired with the lifetime of the URLs it signs, when the
-    /// storage supports presigning (S3 only). Absent for FS, where reads
-    /// stream instead.
+    /// Presign backend and the lifetime of the URLs it signs; absent on FS,
+    /// which streams instead.
     presign: Option<(Arc<dyn PresignedStore>, Duration)>,
     /// Concurrent directory scans an upload-namespace walk keeps in flight.
     namespace_walk_concurrency: usize,
@@ -74,8 +69,7 @@ impl Debug for BlobStore {
 
 impl BlobStore {
     /// Construct a blob store over `object`, optionally with a `presign`
-    /// backend for signed download URLs and the lifetime those URLs carry
-    /// (S3; `None` on FS, which has no presign concept and so no TTL).
+    /// backend for signed download URLs and the lifetime those URLs carry.
     #[must_use]
     pub fn new(
         object: Arc<dyn ObjectStore>,
@@ -95,31 +89,24 @@ impl BlobStore {
         self
     }
 
-    /// The underlying object store, for raw key access outside the blob API:
-    /// the scrub walk (quarantine/corrupt-object deletion on exact listed
-    /// keys) and test fixtures.
+    /// The underlying object store, for raw key access outside the blob API
+    /// (the scrub walk and test fixtures).
     #[must_use]
     pub fn object_store(&self) -> &Arc<dyn ObjectStore> {
         &self.object
     }
 
-    /// Whether a presign backend is wired (S3 has one; FS does not).
+    /// Whether a presign backend is wired.
     #[cfg(test)]
     #[must_use]
     pub fn supports_presign(&self) -> bool {
         self.presign.is_some()
     }
-}
 
-// blob CRUD (formerly `impl BlobStore`)
-
-impl BlobStore {
-    /// Streams every stored blob digest, unordered. Blobs live at
-    /// `blobs/<algo>/<shard>/<hash>/data` with the shard the hash's first two
-    /// hex digits, so hashes distribute uniformly over the shard directories:
-    /// each algorithm's existing shards are discovered with one children
-    /// listing, then walked as up to [`BLOB_LIST_CONCURRENCY`] concurrent
-    /// page chains instead of one serial continuation-token chain.
+    /// Streams every stored blob digest, unordered. Blobs are sharded by the
+    /// hash's first two hex digits, so the shards are discovered with one
+    /// children listing per algorithm and then walked as up to
+    /// [`BLOB_LIST_CONCURRENCY`] concurrent page chains.
     pub fn stream_blobs(&self) -> impl Stream<Item = Result<Digest, Error>> + Send + '_ {
         stream::once(async move {
             let shards = self.collect_blob_shards().await?;
@@ -132,11 +119,9 @@ impl BlobStore {
         .try_flatten()
     }
 
-    /// The existing `(algorithm, shard)` directories across every supported
-    /// algorithm, each algorithm discovered with one children listing. Shard
-    /// names are a small bounded set (two-hex-digit prefixes), so collecting
-    /// them up front lets [`Self::stream_blobs`] walk every shard as one
-    /// concurrent fan-out rather than a stream of streams of streams.
+    /// The existing `(algorithm, shard)` directories, one children listing per
+    /// algorithm. Shard names are a small bounded set, so collecting them up
+    /// front lets [`Self::stream_blobs`] be one flat concurrent fan-out.
     async fn collect_blob_shards(&self) -> Result<Vec<(Algorithm, String)>, Error> {
         let mut shards = Vec::new();
         for algorithm in Algorithm::supported_algorithms() {
@@ -155,9 +140,9 @@ impl BlobStore {
         Ok(shards)
     }
 
-    /// One shard directory's blobs (each the `<hash>/data` key under the
-    /// shard prefix), one listing page at a time. The returned stream borrows
-    /// only `self`: `shard` is consumed into the owned prefix up front.
+    /// One shard directory's blobs, a listing page at a time. The returned
+    /// stream borrows only `self`, `shard` being consumed into the owned
+    /// prefix up front.
     fn shard_blobs<'a>(
         &'a self,
         algorithm: Algorithm,
@@ -202,8 +187,8 @@ impl BlobStore {
     }
 
     /// The blob bytes' last-modified time, or `None` when the backend records
-    /// none. Used to age-gate orphan-grant cleanup so an in-flight push (which
-    /// grants ownership before linking the manifest) is never reaped.
+    /// none. Age-gates orphan-grant cleanup so an in-flight push, which grants
+    /// ownership before linking the manifest, is never reaped.
     #[instrument(skip(self))]
     pub async fn last_modified(&self, digest: &Digest) -> Result<Option<DateTime<Utc>>, Error> {
         let path = path_builder::blob_path(digest);
@@ -247,9 +232,9 @@ impl BlobStore {
     }
 
     /// Write `body` directly at the content-addressed blob path, for small
-    /// in-memory content (manifest bodies); layer blobs use the streaming upload
-    /// lifecycle instead. Idempotent (the digest fixes path and bytes); fresh
-    /// bytes sit inside the collector's grace period, so no reclaim can race.
+    /// in-memory content such as manifest bodies. The digest fixes both path
+    /// and bytes, and fresh bytes sit inside the collector's grace period, so
+    /// no reclaim can race this.
     #[instrument(skip(self, body))]
     pub async fn put_blob(&self, digest: &Digest, body: Bytes) -> Result<(), Error> {
         self.object
@@ -257,14 +242,9 @@ impl BlobStore {
             .await?;
         Ok(())
     }
-}
 
-// presigning (formerly `impl PresignedBlobStore`)
-
-impl BlobStore {
-    /// Generate a presigned download URL for `digest` when the underlying
-    /// storage supports presigning. Returns `Ok(None)` when no presigning
-    /// backend was wired (FS).
+    /// Generate a presigned download URL for `digest`, or `Ok(None)` when no
+    /// presign backend was wired.
     #[instrument(skip(self))]
     pub async fn presigned_url(
         &self,

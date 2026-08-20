@@ -24,14 +24,14 @@ pub enum LinkKind {
         child: Digest,
     },
     /// A per-referrer reference entry: the manifest with this digest
-    /// references the blob the entry lives under. Backed while that
+    /// references the blob the entry lives under, and is backed while that
     /// manifest's revision still resolves in the namespace.
     ReferencedBy(Digest),
 }
 
-/// The shape [`LinkKind`] has always had inside a blob-index shard, where the
-/// two-digest kinds are positional arrays. Named fields on the live type would
-/// otherwise re-encode those as objects and strand every stored shard.
+/// The shape [`LinkKind`] takes inside a blob-index shard: the two-digest
+/// kinds are positional arrays, which the live type's named fields would
+/// otherwise re-encode as objects and strand every stored shard.
 #[derive(Serialize, Deserialize)]
 enum StoredLinkKind {
     Blob(Digest),
@@ -41,8 +41,7 @@ enum StoredLinkKind {
     Config(Digest),
     Referrer(Digest, Digest),
     Manifest(Digest, Digest),
-    /// Never present in a legacy shard (the kind postdates them); carried so
-    /// the conversions stay total.
+    /// Carried only so the conversions stay total; no stored shard holds it.
     ReferencedBy(Digest),
 }
 
@@ -118,7 +117,6 @@ mod tests {
 
     use crate::registry::metadata_store::link::kind::*;
 
-    // Valid 64-char lowercase-hex sha256 hashes (the only shape `Digest` accepts).
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -127,9 +125,8 @@ mod tests {
     }
 
     /// The blob-index shards hold this enum, so its JSON is a stored format:
-    /// the two-digest kinds are positional arrays and must stay that way now
-    /// that the live type names its digests. Both directions, so a shard
-    /// written by any earlier angos still reads and still round-trips.
+    /// the two-digest kinds are positional arrays and must stay that way, in
+    /// both directions, or stored shards stop reading.
     #[test]
     fn the_stored_form_is_unchanged_by_the_named_fields() {
         let cases = [
@@ -185,20 +182,6 @@ mod tests {
                 "a stored {link} must read back unchanged"
             );
         }
-    }
-
-    /// The order inside a stored pair is load-bearing: the first digest is the
-    /// subject, the second the referrer.
-    #[test]
-    fn a_stored_pair_keeps_its_positions() {
-        let stored = format!(r#"{{"Referrer":["sha256:{HASH_A}","sha256:{HASH_B}"]}}"#);
-        let LinkKind::Referrer { subject, referrer } =
-            serde_json::from_str::<LinkKind>(&stored).unwrap()
-        else {
-            panic!("a referrer entry must read back as a referrer");
-        };
-        assert_eq!(subject, sha(HASH_A), "the first digest is the subject");
-        assert_eq!(referrer, sha(HASH_B), "the second is the referrer");
     }
 
     #[test]

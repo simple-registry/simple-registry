@@ -12,9 +12,8 @@ use crate::{
     registry::pagination::NAMESPACE_WALK_CONCURRENCY,
 };
 
-/// Default cap on concurrent in-process cache-fill jobs. Evaluated at
-/// compile time: any failure would be a const-eval error at build time, never
-/// a runtime panic.
+/// Default cap on concurrent in-process cache-fill jobs; the `unwrap` is
+/// const-evaluated.
 pub const DEFAULT_MAX_CONCURRENT_CACHE_JOBS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 /// Default replication-worker concurrency; the `unwrap` is const-evaluated.
@@ -31,8 +30,7 @@ pub struct GlobalConfig {
         deserialize_with = "deserialize_max_concurrent_cache_jobs"
     )]
     pub max_concurrent_cache_jobs: NonZeroUsize,
-    /// Worker concurrency for the replication queue, used by the server,
-    /// `angos worker`, and `angos replicate` drains.
+    /// Worker concurrency for the replication queue.
     #[serde(
         default = "default_max_concurrent_replication_jobs",
         deserialize_with = "deserialize_max_concurrent_replication_jobs"
@@ -56,19 +54,12 @@ pub struct GlobalConfig {
     pub immutable_tags: bool,
     #[serde(default)]
     pub immutable_tags_exclusions: Vec<RegexPattern>,
-    /// When `true` (the default), a manifest push is accepted even if some of
-    /// the blobs or child manifests it references are not yet present in or
-    /// owned by the target namespace. The unowned references are not granted to
-    /// the namespace, so they resolve as unknown on a later pull until their
-    /// content is pushed. This restores pre-1.2.0 compatibility with `docker
-    /// buildx`/`bake` index and attestation pushes whose children are not
-    /// namespace-local at validation time.
-    ///
-    /// When `false`, the registry instead rejects such pushes outright with
-    /// `MANIFEST_BLOB_UNKNOWN`.
-    ///
-    /// Either way a namespace never gains read access to content it did not push,
-    /// and `subject` references are always exempt.
+    /// When `true` (the default), a manifest push is accepted even if blobs or
+    /// child manifests it references are not owned by the target namespace, and
+    /// those references resolve as unknown on a later pull until their content
+    /// is pushed. When `false` such a push is rejected with
+    /// `MANIFEST_BLOB_UNKNOWN`; either way the namespace gains no read access to
+    /// content it did not push.
     #[serde(default = "default_allow_missing_manifest_references")]
     pub allow_missing_manifest_references: bool,
     pub authorization_webhook: Option<String>,
@@ -85,16 +76,15 @@ pub struct GlobalConfig {
     #[serde(default = "default_namespace_walk_concurrency")]
     pub namespace_walk_concurrency: usize,
     /// Reclamation grace period in seconds: scrub leaves unreferenced blobs,
-    /// dangling reference keys, and stale index entries alone while they are
-    /// younger than this, so it can never race an in-flight push or upload.
-    /// Lower it only for offline maintenance runs against a store with no
-    /// live traffic.
+    /// dangling reference keys and stale index entries younger than this alone,
+    /// so it cannot race an in-flight push or upload. Lower it only for offline
+    /// maintenance against a store with no live traffic.
     #[serde(default = "default_gc_grace_secs")]
     pub gc_grace_secs: u64,
     /// Proxy IPs or CIDR networks whose `X-Forwarded-For`/`X-Real-IP` headers
-    /// are honored as the client IP. From any other peer (the default, since
-    /// the list is empty) those headers are ignored and the socket address is
-    /// used, so clients cannot spoof IP-gated policies.
+    /// are honored as the client IP. From any other peer those headers are
+    /// ignored and the socket address is used, so clients cannot spoof IP-gated
+    /// policies.
     #[serde(default)]
     pub trusted_proxies: Vec<TrustedProxy>,
 }
@@ -218,7 +208,7 @@ mod tests {
         assert!(config.immutable_tags_exclusions.is_empty());
         assert!(
             config.allow_missing_manifest_references,
-            "manifest-reference validation is permissive by default (pre-1.2.0 behavior)"
+            "manifest-reference validation is permissive by default"
         );
         assert!(config.authorization_webhook.is_none());
         assert!(

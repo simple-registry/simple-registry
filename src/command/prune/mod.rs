@@ -93,10 +93,9 @@ pub fn global_retention_policy(config: &RetentionPolicyConfig) -> Option<Arc<Ret
     )))
 }
 
-/// Applies the global and per-repository retention policies to every
-/// namespace, deleting the tags the policies no longer retain; then reclaims
-/// aged upload-lifecycle leftovers within the `-u` window and queued jobs
-/// whose configuration is gone.
+/// Applies the retention policies to every namespace, then reclaims aged
+/// upload-lifecycle leftovers within the `-u` window and queued jobs whose
+/// configuration is gone.
 pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error> {
     ensure_pull_time_rules_are_recorded(config)?;
     let window = Duration::from_std(options.uploads.into())
@@ -142,10 +141,9 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
     )
     .await?;
 
-    // Config-relative and window-gated reclamation. Ordering matters for the
-    // first two: orphan-namespace clearing cascades the manifest links whose
-    // absence then lets the grant sweep revoke and reclaim. Each is
-    // best-effort: a failed sweep warns and the run continues.
+    // Orphan-namespace clearing must run first: it cascades the manifest links
+    // whose absence then lets the grant sweep revoke. Each sweep is
+    // best-effort, so a failure warns and the run continues.
     let sweeps = [
         orphan_namespaces::sweep_orphan_namespaces(
             &blob_backend,
@@ -191,8 +189,7 @@ pub async fn run(options: &Options, config: &Configuration) -> Result<(), Error>
         warn!("prune: sweep failed: {failed}");
     }
 
-    // The registry shutdown drains in-flight async webhook deliveries to
-    // completion before the process exits.
+    // Drains in-flight async webhook deliveries before the process exits.
     if let Some(registry) = registry {
         registry.shutdown().await;
     }

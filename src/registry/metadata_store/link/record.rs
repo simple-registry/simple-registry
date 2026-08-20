@@ -1,11 +1,10 @@
 //! Immutable revision and referrer records.
 //!
-//! A stored manifest is one record at [`path_builder::revision_record_path`]:
-//! its existence makes the digest resolvable, its body carries what a HEAD
-//! needs, and it never mutates (access times live in a sibling append-only
-//! atime directory). A referrer is one record per (subject, referrer) whose
-//! body is the referring manifest's descriptor. Records with no new-shape key
-//! fall back to the legacy `link` files, which scrub converts.
+//! A stored manifest is one never-mutated record at
+//! [`path_builder::revision_record_path`] whose existence makes the digest
+//! resolvable; a referrer is one record per (subject, referrer) whose body is
+//! the referring manifest's descriptor. A missing record falls back to the
+//! legacy `link` file, which scrub converts.
 
 use std::collections::HashSet;
 
@@ -46,7 +45,6 @@ impl RevisionRecord {
     }
 }
 
-/// The mutation writing one revision record.
 pub fn revision_set_mutation(
     namespace: &Namespace,
     digest: &Digest,
@@ -63,9 +61,8 @@ pub fn revision_set_mutation(
     })
 }
 
-/// The mutation writing one referrer record: the referring manifest's
-/// descriptor when the push carried one, an empty object otherwise (the
-/// listing needs only the key).
+/// The body is the referring manifest's descriptor, or an empty object when
+/// the push carried none (the listing needs only the key).
 pub fn referrer_set_mutation(
     namespace: &Namespace,
     subject: &Digest,
@@ -83,8 +80,8 @@ pub fn referrer_set_mutation(
 }
 
 impl MetadataStore {
-    /// Resolve a manifest revision to link-shaped metadata: the record first,
-    /// the legacy revision link as the fallback.
+    /// Resolve a manifest revision to link-shaped metadata, falling back to
+    /// the legacy revision link.
     pub async fn resolve_revision(
         &self,
         namespace: &Namespace,
@@ -105,8 +102,7 @@ impl MetadataStore {
         }
     }
 
-    /// Resolve a referrer back-link: the record first (its body is the
-    /// referring manifest's descriptor), the legacy link as the fallback.
+    /// Resolve a referrer back-link, falling back to the legacy link.
     pub async fn resolve_referrer(
         &self,
         namespace: &Namespace,
@@ -137,8 +133,7 @@ impl MetadataStore {
         }
     }
 
-    /// Raw read of a legacy link file, the fallback for a kind whose record
-    /// is absent.
+    /// Raw read of a legacy link file.
     async fn read_legacy_link(
         &self,
         link: &LinkKind,
@@ -166,9 +161,8 @@ impl MetadataStore {
         .await
     }
 
-    /// Append one access entry to the revision's atime directory, recording
-    /// `client` and the current time: a plain put with no transaction and no
-    /// read.
+    /// Append one access entry naming `client` to the revision's atime
+    /// directory, a plain put with no read.
     pub async fn write_revision_access_time(
         &self,
         namespace: &Namespace,
@@ -184,8 +178,8 @@ impl MetadataStore {
     }
 
     /// Convert one legacy revision link into a record, then delete the link.
-    /// Record first, so an interruption loses nothing; both halves are
-    /// idempotent, and an absent link is a no-op.
+    /// Record first and both halves idempotent, so an interruption loses
+    /// nothing.
     pub async fn convert_legacy_revision_link(
         &self,
         namespace: &Namespace,

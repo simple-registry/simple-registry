@@ -1,14 +1,8 @@
 //! Link-operation planners for manifest push and delete.
 //!
-//! These functions map a parsed `Manifest` plus its reference and media-type
-//! context to a `Vec<LinkOperation>` ready to be passed directly to
-//! `MetadataStore::update_links`. They perform no I/O. `push` consumes the
-//! manifest's `annotations` via `Manifest::take_descriptor` when emitting a
-//! referrer back-link.
-//!
-//! Using these planners in both the runtime write path and the scrub executor
-//! ensures that both sides apply the same decisions about which links to create
-//! or delete for a given manifest, eliminating divergence between them.
+//! Pure functions mapping a parsed `Manifest` and its reference to the
+//! `LinkOperation` set the metadata store commits. Both the runtime write path
+//! and the scrub executor plan through here, so neither can diverge.
 
 use std::collections::BTreeMap;
 
@@ -16,22 +10,11 @@ use angos_oci::{Content, Digest, Manifest, MediaType, Reference, Tag};
 
 use crate::registry::metadata_store::{LinkKind, LinkOperation};
 
-/// Produces the `LinkOperation::Create` set needed to store a manifest
-/// identified by `digest` under `reference`.
-///
-/// Emits in order: digest self-link, tag link (only for `Reference::Tag`),
-/// subject referrer back-link (only when the manifest has a `subject`; carries
-/// the full `Descriptor` when `media_type` is set), config link, layer links
-/// in manifest order, child-manifest links in manifest order. Every config /
-/// layer / child link records the parent `digest` as referrer.
-///
-/// `effective_media_type` is the caller-resolved
-/// `content_type.or(manifest.media_type)`. `manifest.annotations` is moved
-/// out when a referrer back-link is emitted.
-///
-/// `created_tags` carries the tags requested via `?tag=` query parameters on a
-/// by-digest push; one extra tag link is emitted per entry. The caller must
-/// have validated each value as a well-formed tag.
+/// The `LinkOperation::Create` set that stores `manifest` at `digest` under
+/// `reference`: the digest self-link, one tag link per path tag and validated
+/// `created_tags` entry, the subject referrer back-link, then one link per
+/// config, layer, or child manifest recording `digest` as referrer.
+/// `manifest.annotations` is moved out when the referrer back-link is emitted.
 pub fn push(
     manifest: &mut Manifest,
     digest: &Digest,
@@ -104,18 +87,10 @@ pub fn push(
     ops
 }
 
-/// Produces the set of `LinkOperation::Delete` operations needed to remove a
-/// manifest identified by `reference` from the metadata store.
-///
-/// - `Reference::Tag` → one tag delete.
-/// - `Reference::Digest` → digest self-link delete + one delete per tag in
-///   `tags_pointing_at_digest` + (when `manifest` is `Some`) the subject
-///   referrer back-link + `delete_with_referrer` for each config / layer /
-///   child manifest using the parent's digest as referrer.
-///
-/// `tags_pointing_at_digest` should contain the `LinkKind::Tag(...)` entries
-/// already pointing at the digest. Passing an empty slice is safe and correct
-/// when the caller has confirmed no tags point at the digest.
+/// The `LinkOperation::Delete` set that removes `reference`: a tag reference
+/// yields one tag delete, a digest reference yields the digest self-link, each
+/// entry of `tags_pointing_at_digest`, and (given `manifest`) the subject
+/// back-link plus every config, layer and child link under the parent digest.
 pub fn delete(
     reference: &Reference,
     manifest: Option<&Manifest>,
@@ -186,9 +161,8 @@ pub fn unpinned_by_delete(manifest: &Manifest) -> Vec<Digest> {
     unpinned
 }
 
-/// The config / layer / child-manifest links `manifest` implies under
-/// `revision`, each paired with the digest it targets. Config and layers come
-/// in manifest order, and an index yields its children instead.
+/// The config, layer or child-manifest links `manifest` implies under
+/// `revision`, in manifest order, each paired with the digest it targets.
 pub fn referenced_links(manifest: &Manifest, revision: &Digest) -> Vec<(LinkKind, Digest)> {
     match &manifest.content {
         Content::Image { config, layers } => {
@@ -262,8 +236,6 @@ mod tests {
     fn manifest_with_child(child: Digest) -> Manifest {
         Manifest::index(vec![descriptor(child)])
     }
-
-    // push
 
     #[test]
     fn push_digest_self_link_always_present() {
@@ -367,33 +339,6 @@ mod tests {
     }
 
     #[test]
-    fn push_empty_created_tags_emit_no_tag_links() {
-        let digest = d(0x03);
-        let mut m = minimal_manifest();
-        let ops = push(
-            &mut m,
-            &digest,
-            &Reference::Digest(digest.clone()),
-            None,
-            0,
-            &[],
-        );
-        let tag_count = ops
-            .iter()
-            .filter(|op| {
-                matches!(
-                    op,
-                    LinkOperation::Create {
-                        link: LinkKind::Tag(_),
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!(tag_count, 0, "empty additional tags emit no tag links");
-    }
-
-    #[test]
     fn push_config_and_layer_ops_carry_parent_referrer() {
         let parent = d(0x10);
         let config = d(0x11);
@@ -459,7 +404,6 @@ mod tests {
 
     #[test]
     fn push_total_op_count_for_simple_manifest_with_media_type() {
-        // manifest with media_type + config + layer → no subject, no children
         let digest = d(0x30);
         let config = d(0x31);
         let layer = d(0x32);
@@ -477,7 +421,7 @@ mod tests {
             42,
             &[],
         );
-        // Expected: digest-link + tag-link + config + layer = 4
+        // digest-link + tag-link + config + layer
         assert_eq!(ops.len(), 4);
     }
 
@@ -506,8 +450,6 @@ mod tests {
             "descriptor must be set when media_type is present"
         );
     }
-
-    // delete
 
     #[test]
     fn delete_tag_reference_emits_single_tag_delete() {
@@ -620,8 +562,6 @@ mod tests {
         };
         assert_eq!(referrer.as_ref(), Some(&parent));
     }
-
-    // unpinned_by_delete
 
     #[test]
     fn unpinned_by_delete_yields_index_children() {

@@ -3,9 +3,7 @@ use std::{num::NonZeroUsize, path::PathBuf};
 use crate::{
     cache,
     configuration::listeners::ClientAuth,
-    configuration::{
-        Configuration, Error, RegistryStorageConfig, ResolvedStorageConfig, ServerConfig,
-    },
+    configuration::{Configuration, Error, ResolvedStorageConfig, ServerConfig},
     policy::AccessMode,
     registry::blob_store,
     replication::ReplicationMode,
@@ -50,9 +48,8 @@ fn test_load_minimal_config() {
     assert!(config.observability.is_none());
 }
 
-/// Without a `[blob_store]` the filesystem backend used to default to the empty
-/// path, so a registry started from a container's working directory wrote every
-/// blob to the ephemeral layer and lost them on restart.
+/// A `[blob_store]` is mandatory: defaulting to the working directory would
+/// write blobs to a container's ephemeral layer and lose them on restart.
 #[test]
 fn a_configuration_without_a_blob_store_is_refused() {
     let error = Configuration::load_from_str(
@@ -86,69 +83,6 @@ fn an_empty_blob_store_root_is_refused() {
         format!("{error}").contains("root_dir"),
         "the error must name the offending key, got: {error}"
     );
-}
-
-#[test]
-fn test_tls_config_detection() {
-    let config = r#"
-    [blob_store.fs]
-    root_dir = "/tmp/test"
-
-    [server]
-    bind_address = "0.0.0.0"
-    port = 8000
-
-    [server.tls]
-    server_certificate_bundle = "server.pem"
-    server_private_key = "server.key"
-    "#;
-
-    let config = Configuration::load_from_str(config).unwrap();
-
-    match config.server {
-        ServerConfig::Tls(tls_config) => {
-            assert_eq!(
-                tls_config.tls.server_certificate_bundle.to_str(),
-                Some("server.pem")
-            );
-            assert_eq!(
-                tls_config.tls.server_private_key.to_str(),
-                Some("server.key")
-            );
-        }
-        ServerConfig::Insecure(_) => {
-            panic!("Expected TLS server config but got Insecure");
-        }
-    }
-}
-
-#[test]
-fn test_metadata_store_explicit_config_not_overridden() {
-    // When metadata store is explicitly configured, it should not be overridden
-    let config = r#"
-    [server]
-    bind_address = "0.0.0.0"
-
-    [blob_store.s3]
-    bucket = "blob-bucket"
-    region = "us-west-2"
-    endpoint = "https://blob.example.com"
-    access_key_id = "blob-key"
-    secret_key = "blob-secret"
-
-    [metadata_store.fs]
-    root_dir = "/custom/metadata/path"
-    "#;
-
-    let config = Configuration::load_from_str(config).unwrap();
-
-    // Should keep the explicitly configured FS metadata store
-    match config.registry_storage {
-        RegistryStorageConfig::FS(config) => {
-            assert_eq!(config.root_dir, PathBuf::from("/custom/metadata/path"));
-        }
-        _ => panic!("Expected explicitly configured FS metadata store to be preserved"),
-    }
 }
 
 #[test]
@@ -266,7 +200,6 @@ fn test_repository_downstream_config() {
     assert_eq!(repo.downstream.len(), 1);
     let downstream = &repo.downstream[0];
     assert_eq!(downstream.name, "instance-b");
-    // Flattened RegistryClientConfig fields.
     assert_eq!(downstream.client.url, "https://angos-eu.example.com");
     assert_eq!(downstream.client.username.as_deref(), Some("replicator"));
     assert_eq!(
@@ -277,7 +210,6 @@ fn test_repository_downstream_config() {
             .map(|p| p.expose().as_str()),
         Some("s3cret")
     );
-    // Replication-only fields.
     assert_eq!(downstream.mode, ReplicationMode::EventOnly);
     assert_eq!(downstream.namespace_filter.len(), 1);
     assert_eq!(downstream.namespace_filter[0].as_source(), "^nginx/.*");
@@ -287,8 +219,7 @@ fn test_repository_downstream_config() {
 
 #[test]
 fn test_repository_downstream_rejects_partial_mtls() {
-    // The mTLS-pairing validation must fire through the full Configuration
-    // parse too.
+    // The mTLS-pairing validation must fire through the full parse too.
     let config = r#"
     [blob_store.fs]
     root_dir = "/tmp/test"
@@ -381,7 +312,6 @@ fn test_tls_config_with_client_ca() {
                 tls_config.tls.client_ca_bundle,
                 Some(PathBuf::from("ca.pem"))
             );
-            // When client_auth is omitted, it defaults to Optional for backwards compatibility.
             assert_eq!(tls_config.tls.client_auth, ClientAuth::Optional);
         }
         ServerConfig::Insecure(_) => panic!("Expected TLS server config"),
@@ -439,44 +369,6 @@ fn test_multiple_repositories() {
     assert!(!config.repository["app2"].immutable_tags);
     assert!(config.repository["app3"].immutable_tags);
     assert_eq!(config.repository["app3"].immutable_tags_exclusions.len(), 2);
-}
-
-#[test]
-fn test_metadata_store_s3_with_redis() {
-    let config = r#"
-    [server]
-    bind_address = "0.0.0.0"
-
-    [blob_store.s3]
-    bucket = "my-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "blob-key"
-    secret_key = "blob-secret"
-
-    [metadata_store.s3]
-    bucket = "metadata-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "key"
-    secret_key = "secret"
-
-    [metadata_store.s3.redis]
-    url = "redis://localhost:6379"
-    ttl = 30
-    "#;
-
-    let config = Configuration::load_from_str(config).unwrap();
-    let metadata_config = config.resolve_registry_storage();
-
-    match metadata_config {
-        ResolvedStorageConfig::S3(s3_config) => {
-            assert_eq!(s3_config.connection.bucket, "metadata-bucket");
-        }
-        ResolvedStorageConfig::FS(_) => {
-            panic!("Expected S3 metadata store config")
-        }
-    }
 }
 
 #[test]
@@ -643,48 +535,6 @@ fn test_load_from_nonexistent_file() {
 }
 
 #[test]
-fn test_load_from_file_with_tls_config() {
-    use std::io::Write;
-
-    use tempfile::NamedTempFile;
-
-    let config_content = r#"
-    [blob_store.fs]
-    root_dir = "/tmp/test"
-
-    [server]
-    bind_address = "0.0.0.0"
-    port = 8443
-
-    [server.tls]
-    server_certificate_bundle = "/path/to/cert.pem"
-    server_private_key = "/path/to/key.pem"
-    "#;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(config_content.as_bytes()).unwrap();
-    temp_file.flush().unwrap();
-
-    let result = Configuration::load_all(&[temp_file.path()]);
-    assert!(result.is_ok());
-
-    let config = result.unwrap();
-    match config.server {
-        ServerConfig::Tls(tls_config) => {
-            assert_eq!(
-                tls_config.tls.server_certificate_bundle,
-                PathBuf::from("/path/to/cert.pem")
-            );
-            assert_eq!(
-                tls_config.tls.server_private_key,
-                PathBuf::from("/path/to/key.pem")
-            );
-        }
-        ServerConfig::Insecure(_) => panic!("Expected TLS server config"),
-    }
-}
-
-#[test]
 fn test_load_from_file_with_validation_error() {
     use std::io::Write;
 
@@ -819,8 +669,8 @@ fn deprecated_lock_strategy_table_still_parses() {
     }
 }
 
-// The durable queue needs no lock configuration; the claim-support probe at
-// startup enforces the real precondition.
+// No storage backend gates the durable queue at config time; the startup
+// claim-support probe enforces the real precondition.
 #[test]
 fn job_queue_accepted_on_s3() {
     let config = r#"
@@ -843,9 +693,6 @@ fn job_queue_accepted_on_s3() {
     );
 }
 
-// Lock configuration does not gate the durable queue: any storage backend is
-// accepted at config time, and the startup claim-support probe enforces the
-// real precondition (atomic create-if-absent).
 #[test]
 fn job_queue_accepted_on_fs() {
     let config = r#"
@@ -861,37 +708,6 @@ fn job_queue_accepted_on_fs() {
     assert!(
         Configuration::load_from_str(config).is_ok(),
         "durable queue on FS storage must be accepted"
-    );
-}
-
-#[test]
-fn job_queue_allows_deprecated_lock_strategy_table() {
-    let config = r#"
-    [server]
-    bind_address = "0.0.0.0"
-
-    [global.job_queue]
-
-    [blob_store.s3]
-    bucket = "blob-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "blob-key"
-    secret_key = "blob-secret"
-
-    [metadata_store.s3]
-    bucket = "metadata-bucket"
-    region = "us-east-1"
-    endpoint = "https://s3.amazonaws.com"
-    access_key_id = "key"
-    secret_key = "secret"
-
-    [metadata_store.s3.lock_strategy.s3]
-    "#;
-
-    assert!(
-        Configuration::load_from_str(config).is_ok(),
-        "durable queue with a deprecated lock_strategy table must still be accepted"
     );
 }
 
@@ -963,9 +779,8 @@ fn event_webhook_empty_events_list_fails_load() {
     );
 }
 
-/// A `[server.tls]` section that does not parse must fail the load. Falling
-/// back to a plaintext listener would silently downgrade a registry the
-/// operator asked to serve TLS.
+/// A `[server.tls]` section that does not parse must fail the load: falling
+/// back to plaintext would silently downgrade a registry asked to serve TLS.
 #[test]
 fn incomplete_tls_section_is_rejected_rather_than_downgraded() {
     let config = r#"

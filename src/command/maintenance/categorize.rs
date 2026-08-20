@@ -1,13 +1,9 @@
 //! Pure key categorization for the maintenance walks (scrub, prune's sweeps).
 //!
-//! [`categorize`] maps a raw object-store key onto the union of both stores'
-//! layouts (the blob and metadata stores can share one physical root, so a
-//! walk of either may see the other's keys). It performs no I/O; validation
-//! of an object's content and references happens in `validate`.
-//!
-//! A key that matches no known shape is [`KeyCategory::Unknown`] and gets
-//! quarantined under the lost-and-found prefix, so a shape a newer angos
-//! version writes is recoverable rather than destroyed.
+//! [`categorize`] maps a raw key onto the union of both stores' layouts, since
+//! they may share one physical root, and performs no I/O. A key matching no
+//! known shape is [`KeyCategory::Unknown`] and gets quarantined, so a shape a
+//! newer angos version writes is recoverable rather than destroyed.
 
 use std::str::FromStr;
 
@@ -33,7 +29,7 @@ pub enum KeyCategory {
     /// `v2/blobs/{alg}/{prefix}/{hash}/refs/{encoded-ns}.json` (metadata store).
     BlobIndexShard { digest: Digest, namespace: String },
     /// `v2/ref/{alg}/{prefix}/{hash}/{ns}!own` or `.../{ns}!r/{entry}`
-    /// (metadata store). The namespace is raw: its validity is a validation
+    /// (metadata store); the namespace is raw, its validity being a validation
     /// concern.
     BlobRef {
         digest: Digest,
@@ -41,8 +37,7 @@ pub enum KeyCategory {
         link: LinkKind,
     },
     /// `v2/ns/{ns}!tag/{tag}!/{ord}.{kind}.{alg}.{hash}` (metadata store): one
-    /// write-once tag event. Grammars are checked at categorization, so both
-    /// names are known valid.
+    /// write-once tag event, both names already checked against their grammars.
     TagEntry { namespace: String, tag: String },
     /// `v2/ns/{ns}!hist/{tag}!/{ord}.{kind}.{alg}.{hash}` (metadata store):
     /// one demoted tag-history entry, write-once and never validated.
@@ -52,7 +47,7 @@ pub enum KeyCategory {
     /// an access entry exists.
     TagAccessTime,
     /// `v2/ns/{ns}!atime/tag/{tag}!/{ord}.{suffix}` (metadata store): one
-    /// append-only tag access entry. Grammars are checked at categorization.
+    /// append-only tag access entry.
     TagAtimeEntry { namespace: String, tag: String },
     /// `v2/ns/{ns}!atime/rev/{alg}/{hash}!/{ord}.{suffix}` (metadata store):
     /// one append-only revision access entry.
@@ -69,8 +64,8 @@ pub enum KeyCategory {
     },
     /// `v2/cat/{ns}!` (metadata store): a namespace's catalog index key.
     CatalogIndex { namespace: String },
-    /// A link file under `v2/repositories/{ns}/...` (metadata store). The
-    /// namespace is raw: its validity is a validation concern.
+    /// A link file under `v2/repositories/{ns}/...` (metadata store); the
+    /// namespace is raw, its validity being a validation concern.
     Link { namespace: String, link: ParsedLink },
     /// An upload-session artifact under `v2/repositories/{ns}/_uploads/{uuid}/`
     /// (blob store).
@@ -84,13 +79,12 @@ pub enum KeyCategory {
     JobIndex { queue: Queue },
     /// A worker's leased claim key under `_jobs/claims/` (metadata store).
     JobClaim,
-    /// A collector run marker under `v2/gc/` (metadata store). The one key a
-    /// writer and the collector must both observe; the walk recognizes it and
-    /// never touches it (a crashed run's marker expires by its own TTL).
+    /// A collector run marker under `v2/gc/` (metadata store), the one key a
+    /// writer and the collector must both observe. The walk never touches it;
+    /// a crashed run's marker expires by its own TTL.
     GcMarker,
-    /// A leftover of the removed transaction engine (`.tx-log/`,
-    /// `.tx-bodies/`, `.tx-locks/`). Garbage a previous binary left behind;
-    /// scrub reclaims it once it is older than the grace period.
+    /// A `.tx-log/`, `.tx-bodies/`, or `.tx-locks/` key that no writer
+    /// produces; scrub reclaims it once past the grace period.
     TxLeftover,
     /// Already quarantined; never re-processed.
     LostAndFound,
@@ -104,9 +98,8 @@ pub enum KeyCategory {
 /// validation concern).
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParsedLink {
-    /// `_manifests/tags/{name}/current/link`. The name is raw: an invalid tag
-    /// directory is a categorized defect (deleted by validation), not an
-    /// unknown key.
+    /// `_manifests/tags/{name}/current/link`; the name is raw, an invalid tag
+    /// directory being a categorized defect rather than an unknown key.
     Tag { name: String },
     /// `_manifests/revisions/{alg}/{hash}/link`.
     Revision(Digest),
@@ -137,17 +130,16 @@ pub enum UploadArtifact {
     Staged,
 }
 
-/// Leftover prefixes of the removed transaction engine; nothing writes them,
-/// and scrub reclaims them age-gated.
+/// Transaction-engine prefixes no writer produces; scrub reclaims them
+/// age-gated.
 pub const TX_LEFTOVER_PREFIXES: [&str; 3] = [".tx-log", ".tx-bodies", ".tx-locks"];
 
-/// Prefix of the startup CAS-probe objects previous angos versions wrote at
-/// the store root.
+/// Prefix of the startup CAS-probe objects at the store root.
 const PROBE_KEY_PREFIX: &str = "_angos_probe_";
 
-/// Namespace markers: the reserved first path segment after the namespace in
-/// a repository key. Valid namespace components never start with `_`, so the
-/// first marker segment unambiguously ends the namespace.
+/// The reserved first path segment after the namespace in a repository key.
+/// Valid namespace components never start with `_`, so the first marker
+/// segment unambiguously ends the namespace.
 const NAMESPACE_MARKERS: [&str; 5] = ["_uploads", "_manifests", "_blobs", "_layers", "_config"];
 
 /// Categorize a raw store key against the union of both stores' layouts.
@@ -208,9 +200,8 @@ pub fn categorize(key: &str) -> KeyCategory {
     KeyCategory::Unknown
 }
 
-/// The remainder of `key` below the directory `prefix`. `None` when `key` is
-/// not under it; a bare string prefix never matches (`v2/blobsx` is not under
-/// `v2/blobs`).
+/// The remainder of `key` below the directory `prefix`, matching on segment
+/// boundaries only (`v2/blobsx` is not under `v2/blobs`).
 fn strip_prefix_dir<'a>(key: &'a str, prefix: &str) -> Option<&'a str> {
     let rest = key.strip_prefix(prefix)?;
     rest.strip_prefix('/')
@@ -270,8 +261,8 @@ fn categorize_ref(rest: &str) -> KeyCategory {
 }
 
 /// `{ns}!tag/{tag}!/{ord}.{kind}.{alg}.{hash}` or `{ns}!atime/tag/{tag}`.
-/// Grammars are checked here: a shape no angos writer can produce is unknown
-/// and gets quarantined rather than trusted.
+/// Grammars are checked here, so a shape no angos writer can produce is
+/// quarantined rather than trusted.
 fn categorize_ns(rest: &str) -> KeyCategory {
     let Some((namespace, marker)) = rest.split_once('!') else {
         return KeyCategory::Unknown;
@@ -391,8 +382,8 @@ fn categorize_atime(namespace: &str, rest: &str) -> KeyCategory {
 /// `pending/{queue}/{stem}.json`, `failed/{queue}/{stem}.json`,
 /// `index/{queue}/{encoded}.json`, or `claims/{encoded}.json`.
 fn categorize_job(rest: &str) -> KeyCategory {
-    // Claim keys are leases the workers own; the walk recognizes and never
-    // touches them (a lapsed one is taken over by the next claimant).
+    // Claim keys are worker leases the walk never touches; a lapsed one is
+    // taken over by the next claimant.
     if let Some(file) = rest.strip_prefix("claims/")
         && !file.contains('/')
     {
@@ -467,8 +458,8 @@ fn categorize_upload(namespace: String, tail: &[&str]) -> KeyCategory {
         }
         _ => return KeyCategory::Unknown,
     };
-    // A directory angos never opened: leave it to the unknown-key quarantine
-    // rather than reporting it as a session the upload passes can address.
+    // A directory angos never opened belongs in the unknown-key quarantine,
+    // not in a session the upload passes can address.
     if UploadSessionId::from_str(session_id).is_err() {
         return KeyCategory::Unknown;
     }
@@ -538,8 +529,8 @@ fn single_digest_link(
     }
 }
 
-/// A digest from separate path segments; `None` (an unknown algorithm or a
-/// malformed hash) means the key cannot belong to this angos version.
+/// A digest from separate path segments; `None` means the key cannot belong
+/// to this angos version.
 fn parse_digest(algorithm: &str, hash: &str) -> Option<Digest> {
     let algorithm = Algorithm::from_str(algorithm).ok()?;
     Digest::with_algorithm(algorithm, hash).ok()

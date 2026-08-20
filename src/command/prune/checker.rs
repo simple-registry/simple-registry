@@ -22,8 +22,7 @@ use crate::{
 
 /// Fan-out for the per-tag link-metadata reads feeding the retention rankings.
 /// Fixed rather than derived from `--concurrency`, which already bounds the
-/// namespace walk driving this checker: deriving both from one knob multiplies
-/// them into that many in-flight reads squared.
+/// namespace walk: one knob for both would square the in-flight reads.
 const TAG_METADATA_CONCURRENCY: usize = 16;
 
 struct TagWithMetadata {
@@ -96,19 +95,14 @@ fn check_repo_policy(
 
 #[derive(Debug, PartialEq, Eq)]
 enum Fate {
-    /// Manifest is protected by another reference, has tags, or its link
-    /// metadata is missing: leave it alone.
+    /// Protected by another reference, tagged, or missing its link metadata.
     Skip,
-    /// Retention policy says to keep this manifest.
     Retain,
-    /// Retention policy says to delete this manifest.
     Delete,
 }
 
-/// Pure decision over pre-loaded inputs: should this orphan manifest be skipped,
-/// retained, or deleted? The caller is responsible for fetching `is_protected`,
-/// `has_tags`, and `metadata` and for resolving the relevant `Repository` /
-/// global policy from the checker's state.
+/// Pure decision over pre-loaded inputs: should this orphan manifest be
+/// skipped, retained, or deleted?
 fn decide_orphan_fate(
     is_protected: bool,
     has_tags: bool,
@@ -137,11 +131,9 @@ fn decide_orphan_fate(
     })
 }
 
-/// Revoke per-namespace blob-ownership grants with no manifest reference,
-/// letting the retention policies decide their fate like any other untagged
-/// content: the subject carries no tag and `pushed_at` is the bytes' mtime,
-/// so time-based keep rules apply uniformly. With no policies configured the
-/// grant is retained, matching the orphan-manifest default.
+/// Revoke per-namespace blob-ownership grants with no manifest reference. The
+/// retention policies decide, with the bytes' mtime as `pushed_at` and no tag,
+/// so an unconfigured registry retains the grant like an orphan manifest.
 ///
 /// `in_flight_window` guards the push race, not the decision: a push grants
 /// ownership before it links the manifest, so bytes younger than the window
@@ -178,7 +170,6 @@ pub async fn sweep_orphan_grants(
         .await
 }
 
-/// The state a single grant-only blob check shares across the whole sweep.
 struct GrantSweep<'a> {
     blob_store: &'a Arc<BlobStore>,
     metadata_store: &'a Arc<MetadataStore>,
@@ -190,8 +181,8 @@ struct GrantSweep<'a> {
 }
 
 async fn sweep_grants_for_blob(ctx: &GrantSweep<'_>, blob: &Digest) -> Result<(), Error> {
-    // In-flight guard on the bytes' mtime; without one (or with the bytes
-    // absent) leave the blob to scrub's orphan GC.
+    // In-flight guard on the bytes' mtime; with no mtime or no bytes, leave
+    // the blob to scrub's orphan GC.
     let last_modified = match ctx.blob_store.last_modified(blob).await {
         Ok(Some(ts)) => ts,
         Ok(None) | Err(RegistryError::BlobUnknown | RegistryError::NotFound) => return Ok(()),
@@ -209,10 +200,9 @@ async fn sweep_grants_for_blob(ctx: &GrantSweep<'_>, blob: &Digest) -> Result<()
     let subject = ManifestImage::new(None, Some(last_modified), None, Utc::now());
     let grant = LinkKind::Blob(blob.clone());
     for (namespace, links) in index.namespace {
-        // A namespace that no longer resolves to any configured repository is
-        // being cleared by the orphan-namespace sweep; revoke its grants
-        // outright (the executor's under-lock re-check still spares a blob a
-        // not-yet-cascaded manifest references).
+        // An unresolved namespace is being cleared by the orphan-namespace
+        // sweep, so revoke its grants outright; the executor's re-check still
+        // spares a blob a not-yet-cascaded manifest references.
         let repository = ctx.resolver.resolve(&namespace);
         if repository.is_none() && ctx.resolver.len() > 0 {
             ctx.sink
@@ -223,9 +213,8 @@ async fn sweep_grants_for_blob(ctx: &GrantSweep<'_>, blob: &Digest) -> Result<()
                 .await?;
             continue;
         }
-        // A tracked link (Layer/Config/Manifest) means a manifest references
-        // the blob, so the grant is live; only a grant-only namespace is a
-        // retention subject.
+        // A tracked link means a manifest references the blob, so the grant is
+        // live; only a grant-only namespace is a retention subject.
         if !links.contains(&grant) || links.iter().any(LinkKind::is_tracked) {
             continue;
         }
@@ -277,8 +266,8 @@ impl NamespaceChecker for RetentionChecker {
 }
 
 impl RetentionChecker {
-    /// Reads every tag's link metadata, the tag listing streaming into up to
-    /// `TAG_METADATA_CONCURRENCY` concurrent link reads.
+    /// Reads every tag's link metadata, up to `TAG_METADATA_CONCURRENCY` at a
+    /// time.
     async fn fetch_tag_metadata(
         &self,
         namespace: &Namespace,
@@ -291,8 +280,8 @@ impl RetentionChecker {
                     .metadata_store
                     .read_link(namespace, &LinkKind::Tag(tag.clone()))
                     .await?;
-                // A new-shape tag's last pull lives in its sibling atime key;
-                // a legacy link carries it inline. Take the freshest.
+                // A tag's last pull lives in its sibling atime key, a legacy
+                // link carries it inline; take the freshest.
                 let atime = self
                     .metadata_store
                     .read_tag_access_time(namespace, &tag)
@@ -314,10 +303,9 @@ impl RetentionChecker {
         (last_pushed, last_pulled)
     }
 
-    /// Ranks tags most recent first, leaving out those carrying no such time: a
-    /// tag never pulled is not one of the "n most recently pulled", and ranking
-    /// it would make `top_pulled(n)` retain untouched tags forever in every
-    /// namespace holding n tags or fewer.
+    /// Ranks tags most recent first, leaving out those carrying no such time.
+    /// A never-pulled tag is not one of the "n most recently pulled", and
+    /// ranking it would make `top_pulled(n)` retain untouched tags forever.
     fn rank_by(
         tags: &[TagWithMetadata],
         key: impl Fn(&LinkMetadata) -> Option<DateTime<Utc>>,
@@ -354,8 +342,8 @@ impl RetentionChecker {
             .collect()
     }
 
-    /// Per-item tolerance: a failed deletion (or its required event delivery)
-    /// is logged and skipped; the item is retried on the next run.
+    /// A failed deletion (or its required event delivery) is logged and
+    /// skipped, leaving the tag for the next run.
     async fn emit_delete_tags(
         &self,
         namespace: &Namespace,
@@ -422,8 +410,8 @@ impl RetentionChecker {
     }
 
     /// Collects orphan revisions, requeueing what each delete unpins so one
-    /// skipped while still pinned is revisited in the same run. Requeues cannot
-    /// loop: a digest names its children and subject by content hash.
+    /// skipped while still pinned is revisited in the same run. Requeues
+    /// cannot loop, since a digest names its children by content hash.
     async fn emit_delete_orphan_manifests(
         &self,
         namespace: &Namespace,
@@ -505,8 +493,8 @@ impl RetentionChecker {
                 .await
             {
                 Ok(mut metadata) => {
-                    // A record-shape revision keeps its last pull in the
-                    // sibling atime key; a legacy link carries it inline.
+                    // A revision's last pull lives in its sibling atime key, a
+                    // legacy link carries it inline; take the freshest.
                     let atime = self
                         .metadata_store
                         .read_revision_access_time(namespace, digest)
@@ -574,9 +562,9 @@ impl RetentionChecker {
         Ok(self.metadata_store.has_referrers(namespace, digest).await?)
     }
 
-    /// Any index entry matching `predicate` whose backing link still
-    /// resolves. Writers never remove reference entries, so a bare membership
-    /// test would let stale entries steer retention; only backed ones count.
+    /// Any index entry matching `predicate` whose backing link still resolves.
+    /// Writers never remove reference entries, so a bare membership test would
+    /// let stale ones steer retention.
     async fn has_backed_link(
         &self,
         namespace: &Namespace,
@@ -731,8 +719,6 @@ mod tests {
             .unwrap();
     }
 
-    // rank_by
-
     #[test]
     fn rank_by_sorts_descending_by_key() {
         let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -756,8 +742,8 @@ mod tests {
         assert!(ranked.is_empty());
     }
 
-    /// A tag carrying no such timestamp is unranked, so `top_pushed(n)` and
-    /// `top_pulled(n)` cannot retain it on a slot it never earned.
+    /// An unranked tag cannot be retained by `top_pushed(n)` / `top_pulled(n)`
+    /// on a slot it never earned.
     #[test]
     fn rank_by_drops_tags_without_the_timestamp() {
         let pushed = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -770,8 +756,6 @@ mod tests {
 
         assert_eq!(ranked, vec!["beta".to_string()]);
     }
-
-    // build_sorted_rankings
 
     #[test]
     fn build_sorted_rankings_pushed_order() {
@@ -790,9 +774,8 @@ mod tests {
         assert!(last_pulled.is_empty());
     }
 
-    /// A never-pulled tag is absent from the pull ranking, so `top_pulled(n)`
-    /// cannot retain it: without this, a namespace with n tags or fewer keeps
-    /// every tag forever, whatever their pull times.
+    /// Without this, `top_pulled(n)` keeps every tag forever in a namespace
+    /// holding n tags or fewer, whatever their pull times.
     #[test]
     fn build_sorted_rankings_skips_never_pulled() {
         let pushed = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -807,13 +790,6 @@ mod tests {
 
         assert_eq!(last_pushed.len(), 2);
         assert_eq!(last_pulled, vec!["pulled".to_string()]);
-    }
-
-    #[test]
-    fn build_sorted_rankings_empty_input() {
-        let (last_pushed, last_pulled) = RetentionChecker::build_sorted_rankings(&[]);
-        assert!(last_pushed.is_empty());
-        assert!(last_pulled.is_empty());
     }
 
     #[test]
@@ -1145,7 +1121,7 @@ mod tests {
     }
 
     /// The child sorts before the index in the revision listing, the ordering
-    /// that used to leave the child for a second run.
+    /// that risks leaving the child for a second run.
     #[tokio::test]
     async fn index_child_collected_in_the_same_pass() {
         for_each_backend(async |test_case| {
@@ -1154,8 +1130,8 @@ mod tests {
         .await;
     }
 
-    /// The same with the stores on separate roots, which `for_each_backend`
-    /// shares and so cannot catch a read of the wrong one.
+    /// The same on separate roots, which `for_each_backend` shares and so
+    /// cannot catch a read of the wrong store.
     #[tokio::test]
     async fn index_child_collected_in_the_same_pass_across_split_backends() {
         assert_index_and_child_collected_in_one_pass(&FSRegistryTestCase::with_split_backends())
@@ -1338,7 +1314,7 @@ mod tests {
             let blob_store = test_case.blob_store();
             let metadata_store = test_case.metadata_store();
 
-            // First revision: write blob, then delete it so the executor encounters a missing blob.
+            // First revision: deleted blob, so the executor hits a missing one.
             let digest_missing =
                 put_blob_direct(metadata_store.object_store(), TEST_MANIFEST).await;
             metadata_store
@@ -1353,7 +1329,6 @@ mod tests {
                 .unwrap();
             blob_store.delete_blob(&digest_missing).await.unwrap();
 
-            // Second revision: healthy manifest blob with a digest link.
             let digest_healthy = put_blob_direct(metadata_store.object_store(), TEST_INDEX).await;
             metadata_store
                 .update_links(
@@ -1388,7 +1363,6 @@ mod tests {
             .await
             .unwrap();
 
-            // The healthy revision must be cleaned up: the broken one did not block the loop.
             assert!(
                 metadata_store
                     .read_link(&namespace, &LinkKind::Digest(digest_healthy))
@@ -1401,7 +1375,6 @@ mod tests {
     }
 
     fn make_manifest(tag: &Tag) -> ManifestImage {
-        // `now` at the epoch reproduces the 0/0 this helper has always used.
         ManifestImage::new(Some(tag.to_string()), None, None, DateTime::UNIX_EPOCH)
     }
 
@@ -1527,8 +1500,8 @@ mod tests {
 
     #[test]
     fn decide_orphan_fate_retains_unknown_push_time_under_age_policy() {
-        // A migrated legacy link carries no `created_at`; an age rule must not
-        // treat it as pushed at the Unix epoch and delete recent content.
+        // An age rule must not read a missing `created_at` as the Unix epoch
+        // and delete recent content.
         let metadata = dummy_metadata();
         assert!(metadata.created_at.is_none());
         let policy = RetentionPolicy::new(
@@ -1710,8 +1683,8 @@ mod tests {
             let executor = Executor::new_for_test(test_case.blob_store(), metadata_store.clone());
             let policy = keep_recent_policy();
 
-            // The bytes were just written, so `pushed_at > now() - days(1)`
-            // retains them even though the in-flight window is zero.
+            // Just-written bytes: `pushed_at > now() - days(1)` retains them
+            // even though the in-flight window is zero.
             sweep_orphan_grants(
                 &test_case.blob_store(),
                 &metadata_store,
@@ -1759,8 +1732,8 @@ mod tests {
         }
     }
 
-    /// The namespace walk is already parallel, so a per-namespace fan-out
-    /// derived from the same `--concurrency` would square the in-flight reads.
+    /// The namespace walk is already parallel, so deriving this fan-out from
+    /// the same `--concurrency` would square the in-flight reads.
     #[tokio::test]
     async fn tag_metadata_reads_stay_within_the_fixed_fan_out() {
         let case = FSRegistryTestCase::new();

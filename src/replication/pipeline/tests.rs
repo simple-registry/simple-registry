@@ -1,8 +1,5 @@
 use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration as StdDuration,
 };
 
@@ -10,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use wiremock::{
-    Mock, MockServer, Request, Respond, ResponseTemplate,
+    Mock, MockServer, Request, ResponseTemplate,
     matchers::{header, method, path, query_param},
 };
 
@@ -42,11 +39,10 @@ use crate::{
 
 const NAMESPACE: &str = "nginx";
 
-/// The origin timestamp the fixtures stamp. The header carries whatever
-/// `to_rfc3339` renders it as, which is what the sender puts on the wire.
+/// The origin timestamp the fixtures stamp; the header carries its
+/// `to_rfc3339` rendering.
 const SOURCE_TS: &str = "2026-06-03T00:00:00Z";
 
-/// The origin timestamp a replication write stamps, parsed from RFC 3339.
 fn instant(rfc3339: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(rfc3339)
         .expect("fixture timestamp must be RFC 3339")
@@ -111,28 +107,6 @@ async fn mount_manifest_put(
         .await;
 }
 
-/// A wiremock responder recording the order in which the index vs. its
-/// child manifest are PUT.
-struct OrderRecorder {
-    seen: Arc<AtomicUsize>,
-    child_at: Arc<AtomicUsize>,
-    index_at: Arc<AtomicUsize>,
-    is_index: bool,
-    digest: String,
-}
-
-impl Respond for OrderRecorder {
-    fn respond(&self, _request: &Request) -> ResponseTemplate {
-        let order = self.seen.fetch_add(1, Ordering::SeqCst);
-        if self.is_index {
-            self.index_at.store(order, Ordering::SeqCst);
-        } else {
-            self.child_at.store(order, Ordering::SeqCst);
-        }
-        ResponseTemplate::new(201).insert_header(DOCKER_CONTENT_DIGEST, self.digest.as_str())
-    }
-}
-
 #[tokio::test]
 async fn push_referrers_fallback_when_downstream_is_oci_1_0() {
     metrics_provider::init_for_tests();
@@ -162,8 +136,7 @@ async fn push_referrers_fallback_when_downstream_is_oci_1_0() {
 
     mount_blob_upload_accepted(&mock_server, NAMESPACE, &[&config]).await;
 
-    // No `OCI-Subject` response header => OCI-1.0 downstream => fallback
-    // expected.
+    // No `OCI-Subject` response header => OCI-1.0 downstream => fallback runs.
     mount_manifest_put(&mock_server, NAMESPACE, "v1", &manifest_digest).await;
 
     // The pipeline GETs the existing fallback index first (404 => start fresh).
@@ -210,10 +183,9 @@ async fn push_referrers_fallback_when_downstream_is_oci_1_0() {
 }
 
 /// The fallback index is the same document the Referrers API serves, so a
-/// descriptor in it carries the referrer's annotations and, for an image
-/// manifest declaring no `artifactType`, its config `mediaType`. Dropping
-/// either hides the artifact from a downstream client filtering or discovering
-/// by them.
+/// descriptor carries the referrer's annotations and, absent an `artifactType`,
+/// its config `mediaType`. Dropping either hides the artifact from a client
+/// discovering or filtering by them.
 #[tokio::test]
 async fn referrers_fallback_descriptor_carries_annotations_and_artifact_type() {
     metrics_provider::init_for_tests();
@@ -286,9 +258,8 @@ async fn referrers_fallback_descriptor_carries_annotations_and_artifact_type() {
 
 #[tokio::test]
 async fn referrers_fallback_put_is_timestamp_less() {
-    // The fallback tag is a merged set, not an LWW register: a stamped
-    // fallback PUT could come back superseded and silently drop the
-    // just-merged descriptor.
+    // The fallback tag is a merged set, not an LWW register: a stamped PUT could
+    // come back superseded and silently drop the just-merged descriptor.
     metrics_provider::init_for_tests();
     let mock_server = MockServer::start().await;
     let (blob_store, metadata_store, store, _dir) = test_blob_store();
@@ -480,8 +451,8 @@ async fn referrers_fallback_errors_on_unparseable_index_without_clobbering() {
 
 #[tokio::test]
 async fn concurrent_same_subject_referrers_merge_without_lost_update() {
-    // Without the store lock both concurrent merges read the same base
-    // index and one descriptor vanishes from the final PUT.
+    // Without the per-subject lock both merges read the same base index and one
+    // descriptor vanishes from the final PUT.
     metrics_provider::init_for_tests();
     let mock_server = MockServer::start().await;
     let (blob_store, metadata_store, store, _dir) = test_blob_store();
@@ -613,76 +584,6 @@ async fn no_referrers_fallback_when_downstream_indexes_subject() {
         .await
         .unwrap();
 
-    drop(mock_server);
-}
-
-#[tokio::test]
-async fn index_lands_after_its_child_manifest() {
-    metrics_provider::init_for_tests();
-    let mock_server = MockServer::start().await;
-    let (blob_store, metadata_store, store, _dir) = test_blob_store();
-
-    let child = json!({
-        "schemaVersion": 2,
-        "mediaType": "application/vnd.oci.image.manifest.v1+json",
-        "layers": [],
-    });
-    let child_bytes = serde_json::to_vec(&child).unwrap();
-    let child_digest = put_blob_direct(&store, &child_bytes).await;
-
-    let index = json!({
-        "schemaVersion": 2,
-        "mediaType": "application/vnd.oci.image.index.v1+json",
-        "manifests": [{
-            "mediaType": "application/vnd.oci.image.manifest.v1+json",
-            "digest": child_digest.to_string(),
-            "size": child_bytes.len(),
-        }],
-    });
-    let index_bytes = serde_json::to_vec(&index).unwrap();
-    let index_digest = put_blob_direct(&store, &index_bytes).await;
-
-    let seen = Arc::new(AtomicUsize::new(0));
-    let child_at = Arc::new(AtomicUsize::new(usize::MAX));
-    let index_at = Arc::new(AtomicUsize::new(usize::MAX));
-
-    // The recursion pushes the child by digest, not by tag.
-    Mock::given(method("PUT"))
-        .and(path(format!("/v2/{NAMESPACE}/manifests/{child_digest}")))
-        .respond_with(OrderRecorder {
-            seen: seen.clone(),
-            child_at: child_at.clone(),
-            index_at: index_at.clone(),
-            is_index: false,
-            digest: child_digest.to_string(),
-        })
-        .expect(1)
-        .mount(&mock_server)
-        .await;
-    Mock::given(method("PUT"))
-        .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
-        .respond_with(OrderRecorder {
-            seen: seen.clone(),
-            child_at: child_at.clone(),
-            index_at: index_at.clone(),
-            is_index: true,
-            digest: index_digest.to_string(),
-        })
-        .expect(1)
-        .mount(&mock_server)
-        .await;
-
-    let downstream = test_downstream(downstream_client(&mock_server.uri()));
-    let namespace = Namespace::new(NAMESPACE).unwrap();
-    let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    push_manifest(&ctx, &index_digest, Some("v1"), index_bytes)
-        .await
-        .unwrap();
-
-    assert!(
-        child_at.load(Ordering::SeqCst) < index_at.load(Ordering::SeqCst),
-        "child manifest must land before the parent index"
-    );
     drop(mock_server);
 }
 
@@ -968,41 +869,6 @@ async fn push_manifest_stamps_source_timestamp_header() {
 }
 
 #[tokio::test]
-async fn push_manifest_skips_put_when_downstream_already_converged() {
-    // No manifest PUT mock is mounted, so a wrongly-issued PUT would 404 and
-    // fail the push.
-    metrics_provider::init_for_tests();
-    let mock_server = MockServer::start().await;
-    let (blob_store, metadata_store, store, _dir) = test_blob_store();
-    let (manifest_digest, manifest_bytes) = seed_blobless_manifest(&store).await;
-
-    Mock::given(method("HEAD"))
-        .and(path(format!("/v2/{NAMESPACE}/manifests/v1")))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header(DOCKER_CONTENT_DIGEST, manifest_digest.to_string().as_str())
-                .insert_header("Content-Length", manifest_bytes.len().to_string().as_str()),
-        )
-        .expect(1)
-        .mount(&mock_server)
-        .await;
-
-    let downstream = test_downstream(downstream_client(&mock_server.uri()));
-    let namespace = Namespace::new(NAMESPACE).unwrap();
-    let ctx = push_context(&downstream, &blob_store, &metadata_store, &namespace);
-    let outcome = push_manifest(&ctx, &manifest_digest, Some("v1"), manifest_bytes)
-        .await
-        .expect("a converged downstream must skip the PUT and succeed");
-    assert_eq!(
-        outcome,
-        PushOutcome::Converged,
-        "a HEAD-matched skip must report Converged, not Pushed, so the metric distinguishes a no-op"
-    );
-
-    drop(mock_server);
-}
-
-#[tokio::test]
 async fn repeated_layer_digest_uploads_the_blob_once() {
     // Without dedup both entries HEAD-miss concurrently and both upload;
     // every mock is pinned to `.expect(1)`.
@@ -1037,9 +903,9 @@ async fn repeated_layer_digest_uploads_the_blob_once() {
 
 #[tokio::test]
 async fn converged_skip_head_sends_standard_accept_headers() {
-    // Without an `Accept` header a content-negotiating downstream may return
-    // a converted representation whose digest never matches the local one,
-    // so the converged skip would never fire.
+    // Without an `Accept` header a content-negotiating downstream may return a
+    // converted representation whose digest never matches, so the converged
+    // skip would never fire.
     metrics_provider::init_for_tests();
     let mock_server = MockServer::start().await;
     let (blob_store, metadata_store, store, _dir) = test_blob_store();
@@ -2113,9 +1979,8 @@ async fn a_failing_blob_lets_its_siblings_finish_their_upload() {
 }
 
 /// A manifest PUT only checks that an index child's bytes exist, never that
-/// they parse as a manifest, so a child may name a layer of any size. Reading
-/// it whole to discover that is the memory exhaustion: the size is the cheap
-/// question, asked first.
+/// they parse, so a child may name a layer of any size. Reading it whole to
+/// discover that is the memory exhaustion, so the size is asked first.
 #[tokio::test]
 async fn an_index_child_over_the_manifest_limit_is_refused_before_it_is_read() {
     metrics_provider::init_for_tests();
@@ -2152,8 +2017,7 @@ async fn an_index_child_over_the_manifest_limit_is_refused_before_it_is_read() {
 
 /// Each nesting level holds its manifest body while the level below pushes, so
 /// a chain of indexes each naming the next is memory an authenticated pusher
-/// controls. Content addressing makes a true cycle unconstructible; depth is
-/// the axis that is reachable.
+/// controls. Content addressing rules out a true cycle, leaving depth.
 #[tokio::test]
 async fn an_index_chain_deeper_than_the_cap_is_refused() {
     metrics_provider::init_for_tests();

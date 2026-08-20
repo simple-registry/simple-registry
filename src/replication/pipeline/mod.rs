@@ -2,9 +2,9 @@
 //! and the scrub-reconcile push of a `(namespace, digest, tag?)` job to a
 //! downstream [`RegistryClient`].
 //!
-//! Idempotency is mandatory (the queue is at-least-once): blobs are HEAD-probed
-//! before transfer and child manifests land before the parent index, so a
-//! re-run of an already-converged manifest costs a single no-op HEAD.
+//! The queue is at-least-once, so idempotency is mandatory: blobs are
+//! HEAD-probed before transfer, child manifests land before the parent index,
+//! and a re-run of a converged manifest costs one no-op HEAD.
 
 use std::{collections::HashSet, sync::Arc};
 
@@ -33,10 +33,9 @@ use crate::{
     replication::ReplicationDownstream,
 };
 
-/// Deepest index nesting a replication push follows. The image spec nests an
-/// index inside an index but never deeply, and each level holds its manifest
-/// body while the children below it push, so a chain of indexes each naming the
-/// next is memory an authenticated pusher controls.
+/// Deepest index nesting a replication push follows. Each level holds its
+/// manifest body while the children below it push, so an unbounded chain of
+/// indexes each naming the next is memory an authenticated pusher controls.
 const MAX_INDEX_DEPTH: usize = 8;
 
 mod referrers_fallback;
@@ -57,30 +56,27 @@ pub enum PushOutcome {
     Converged,
     /// The downstream already holds a strictly-newer copy (last-writer-wins loss).
     Superseded,
-    /// The downstream rejects this delete method (`405`, e.g. tag deletion): the
-    /// delete cannot propagate, but retrying cannot help, so the job completes
-    /// without converging rather than dead-lettering per deletion event.
+    /// The downstream rejects this delete method (`405`, e.g. tag deletion):
+    /// retrying cannot help, so the job completes without converging instead of
+    /// dead-lettering once per deletion event.
     Unsupported,
 }
 
-/// Per-push invariants shared across the recursion and the blob fan-out: the
-/// borrowed downstream and stores, the namespace, and the last-writer-wins
-/// source timestamp. The per-manifest varying inputs (digest, media type, tag,
-/// body) stay direct arguments to [`push_manifest`].
-///
-/// Built once at the handler call site; the recursion passes the same context
-/// to every child since children push into the same namespace.
+/// What stays fixed across the recursion and the blob fan-out: the borrowed
+/// downstream and stores, the namespace, and the last-writer-wins timestamp.
+/// Built once at the handler call site and passed unchanged to every child,
+/// which pushes into the same namespace.
 pub struct PushContext<'a> {
     pub downstream: &'a ReplicationDownstream,
     pub blob_store: &'a Arc<BlobStore>,
     pub metadata_store: &'a Arc<MetadataStore>,
     pub namespace: &'a Namespace,
-    /// The remote namespace this push targets on the downstream, derived by the
-    /// handler via [`ReplicationDownstream::remote`].
+    /// The remote namespace this push targets, derived by the handler via
+    /// [`ReplicationDownstream::remote`].
     pub downstream_namespace: &'a Namespace,
     pub source_ts: Option<DateTime<Utc>>,
-    /// How many indexes this push already descended through, bounding the
-    /// recursion below. A caller starts at zero.
+    /// Indexes already descended through, bounding the recursion; a caller
+    /// starts at zero.
     pub index_depth: usize,
 }
 
@@ -88,17 +84,15 @@ pub struct PushContext<'a> {
 /// `ctx.downstream`'s registry, then binds `tag` to it when set.
 ///
 /// Child manifests land before the parent index, referenced blobs are
-/// HEAD-probed and only transferred when absent, and `ctx.source_ts` (the
-/// last-writer-wins timestamp header) is stamped on the primary manifest PUT
-/// only: the referrers fallback tag is a merged set, not an LWW register (see
-/// [`push_referrers_fallback`]).
+/// HEAD-probed and only transferred when absent, and `ctx.source_ts` is stamped
+/// on the primary manifest PUT only, because the referrers fallback tag is a
+/// merged set rather than an LWW register (see [`push_referrers_fallback`]).
 ///
 /// # Errors
 ///
 /// Returns [`Error::InvalidManifest`] when `body` does not parse, and
-/// [`Error::Client`] when a local read or downstream operation fails with
-/// anything other than an LWW-superseded 409, which converges as
-/// [`PushOutcome::Superseded`].
+/// [`Error::Client`] when a local read or downstream call fails with anything
+/// other than an LWW-superseded 409.
 #[instrument(skip(ctx, body))]
 pub async fn push_manifest(
     ctx: &PushContext<'_>,
@@ -116,14 +110,11 @@ pub async fn push_manifest(
         ),
         None => Reference::Digest(digest.clone()),
     };
-    // The converged skip runs before child recursion and the blob sweep: a
+    // The converged skip runs before the child recursion and the blob sweep: a
     // digest-matching HEAD means the downstream validated this manifest's
-    // references at PUT time, so its children and blobs are already present
-    // (each recursed child still gets its own skip). A subject-bearing
-    // manifest must always PUT: only the PUT's `OCI-Subject` response reveals
-    // whether the downstream needs the referrers fallback, and a converged
-    // primary does not imply the fallback landed. A downstream that omits
-    // `Docker-Content-Digest` never converges and is pushed to instead.
+    // references at PUT time, so its children and blobs are already present. A
+    // subject-bearing manifest must always PUT, since only the PUT's
+    // `OCI-Subject` response reveals whether the referrers fallback is needed.
     if manifest.subject.is_none()
         && ctx
             .downstream
@@ -149,13 +140,12 @@ pub async fn push_manifest(
 
     push_blobs(ctx, &manifest).await?;
 
-    // Retain a body copy only for the subject-bearing fallback path; the common
-    // path moves the body into the PUT.
+    // Only the fallback path needs a second copy; the PUT below moves the body.
     let fallback_body = manifest.subject.is_some().then(|| body.clone());
 
     // A body may legitimately omit `mediaType` while the original push carried
     // it in `Content-Type` (recorded on the revision link), and the receiver
-    // rejects a PUT without a `Content-Type`, so fall back to the link's type.
+    // rejects a PUT without one.
     let effective_media_type = match &manifest.media_type {
         Some(media_type) => Some(media_type.clone()),
         None => ctx
@@ -195,8 +185,8 @@ pub async fn push_manifest(
         );
         return Ok(PushOutcome::Superseded);
     };
-    // A downstream echoing a digest other than the locally computed one has
-    // transformed the manifest body: silent content divergence worth a warn.
+    // A different echoed digest means the downstream transformed the body,
+    // which is silent content divergence worth a warn.
     if let Some(echoed) = &echoed
         && echoed != digest
     {
@@ -228,9 +218,8 @@ pub async fn push_manifest(
 }
 
 /// Push every child manifest of an index, overlapping independent children up
-/// to `max_concurrent_pushes` so a wide multi-arch index is not serialized one
-/// child at a time. The caller awaits this before it pushes the parent, so the
-/// parent index never lands before its children.
+/// to `max_concurrent_pushes`. The caller awaits this before the parent PUT, so
+/// the parent index never lands before its children.
 async fn push_child_manifests(
     ctx: &PushContext<'_>,
     manifest: &Manifest,
@@ -255,9 +244,8 @@ async fn push_child_manifests(
     let results = stream::iter(children)
         .map(|child| async move {
             // A manifest PUT only checks that a child's bytes exist, never that
-            // they parse as a manifest, so a child may name a layer of any
-            // size. The stream carries the total, so the oversized case is
-            // refused on the same round trip that would have fetched it.
+            // they parse, so a child may name a layer of any size; the size
+            // comes with the stream and is the cheap question, asked first.
             let (mut reader, size) = ctx.blob_store.reader(&child, None).await.map_err(|e| {
                 Error::Internal(format!("failed to open local manifest blob '{child}': {e}"))
             })?;
@@ -288,8 +276,8 @@ async fn push_blobs(ctx: &PushContext<'_>, manifest: &Manifest) -> Result<(), Er
     let Content::Image { config, layers } = &manifest.content else {
         return Ok(());
     };
-    // Dedup: a manifest may legally repeat a digest, and two concurrent pushes
-    // of the same absent blob would both HEAD-miss and upload.
+    // A manifest may legally repeat a digest, and two concurrent pushes of the
+    // same absent blob would both HEAD-miss and upload.
     let mut seen = HashSet::new();
     let blobs: Vec<Digest> = config
         .iter()
@@ -320,9 +308,8 @@ fn first_error(results: Vec<Result<(), Error>>) -> Result<(), Error> {
 
 /// Picks a cross-repo blob-mount `from` hint: the smallest sibling namespace
 /// referencing the blob, mapped through the same strip/prepend so `from` is the
-/// sibling's location on the downstream. A sibling outside this repository (strip
-/// fails) or any read error yields `None`, so the mount is skipped and the push
-/// falls back to a full upload.
+/// sibling's location on the downstream. A sibling outside this repository, or
+/// any read error, yields `None` and the push falls back to a full upload.
 async fn mount_candidate(
     metadata_store: &Arc<MetadataStore>,
     namespace: &Namespace,
@@ -340,11 +327,10 @@ async fn mount_candidate(
 /// Transfers a single blob to the downstream if it is not already present,
 /// attempting a cross-repo mount before a full upload.
 async fn push_one_blob(ctx: &PushContext<'_>, digest: &Digest) -> Result<(), Error> {
-    // Existence-only probe: any 2xx means present (the optional
-    // Docker-Content-Digest header is not required, so a converged blob never
-    // dead-letters on a minimal downstream); a 404 means absent; a transient
-    // failure fails the push so the job retries instead of doing a pointless
-    // full upload.
+    // Existence-only probe: any 2xx means present, so a converged blob never
+    // dead-letters on a downstream that omits `Docker-Content-Digest`. A
+    // transient failure fails the push so the job retries rather than starting
+    // a pointless full upload.
     if ctx
         .downstream
         .registry_client
@@ -411,8 +397,8 @@ async fn upload_into_session(
     let (reader, content_length) = match ctx.blob_store.reader(digest, None).await {
         Ok(reader) => reader,
         Err(e) => {
-            // The session is already open; cancel it, like the patch/complete
-            // failure paths, so a dying push does not strand it on the downstream.
+            // The session is already open; cancel it so a dying push does not
+            // strand it on the downstream.
             cancel_upload_session(&ctx.downstream.registry_client, &session.url).await;
             return Err(Error::Internal(format!(
                 "failed to open local blob '{digest}': {e}"
@@ -460,17 +446,13 @@ async fn cancel_upload_session(downstream: &RegistryClient, session_url: &str) {
 
 /// Deletes the manifest bound to `reference` on the downstream, stamping
 /// `source_ts` for receiver-side last-writer-wins. A digest delete of a referrer
-/// also drops its descriptor from the subject's OCI-1.0 referrers fallback index
-/// (a no-op on a 1.1 downstream); a tag delete leaves the manifest in place, so
-/// the fallback is untouched.
-///
-/// Returns the [`PushOutcome`]; all but [`PushOutcome::Unsupported`] are
-/// convergence.
+/// also drops its descriptor from the subject's OCI-1.0 referrers fallback
+/// index, while a tag delete leaves the manifest (and the fallback) in place.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Client`] when the delete fails with anything other than
-/// a 404, an LWW-superseded 409, or a 405.
+/// Returns [`Error::Client`] when the delete fails with anything other than a
+/// 404, an LWW-superseded 409, or a 405.
 #[instrument(skip(downstream))]
 pub async fn delete_manifest(
     downstream: &RegistryClient,
@@ -529,9 +511,8 @@ pub async fn delete_manifest(
         }
     };
 
-    // Drop the gone manifest's descriptor from the subject's fallback index.
-    // Best-effort: the delete itself already landed, so a failure warns rather
-    // than replaying the whole job.
+    // Best-effort: the delete itself already landed, so a failed fallback prune
+    // warns rather than replaying the whole job.
     if matches!(push_outcome, PushOutcome::Pushed | PushOutcome::Converged)
         && let (Reference::Digest(digest), Some(subject)) = (reference, &fallback_subject)
         && let Err(e) =

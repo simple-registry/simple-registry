@@ -4,14 +4,6 @@
 //! contract clause, so every backend runs the identical suite under its own
 //! module path and a failure names the backend. Each backend's own test module
 //! instantiates the suite and keeps only backend-specific tests next to them.
-//!
-//! This module instantiates the suite against the in-memory backend as a trait
-//! object (`Arc<dyn ObjectStore>`), which also pins that the trait stays
-//! object-safe.
-
-use std::sync::Arc;
-
-use crate::MemoryObjectStore;
 
 /// Stamp out the [`ObjectStore`](crate::ObjectStore) contract tests against
 /// one backend, in a child module named `object_store_suite`.
@@ -30,9 +22,7 @@ macro_rules! object_store_conformance {
 
             use super::*;
             use crate::Error;
-            // Resolves trait methods on concrete backends; redundant when the
-            // fixture is already a trait object.
-            #[allow(unused_imports)]
+            // Resolves trait methods on the concrete backends under test.
             use crate::ObjectStore;
             use crate::test_util::frame;
 
@@ -547,8 +537,3 @@ macro_rules! object_store_conformance {
 }
 
 pub(crate) use object_store_conformance;
-
-object_store_conformance!({
-    let store: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
-    (store, ())
-});

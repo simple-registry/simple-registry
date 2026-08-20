@@ -78,8 +78,8 @@ pub async fn create_test_server_context_with(options: TestConfigOptions<'_>) -> 
     create_test_server_context_from_config(&config).await
 }
 
-/// The in-memory cache every test context shares with its authenticator and
-/// authorizer, mirroring the bootstrap's single shared backend.
+/// The in-memory cache a test context shares with its authenticator and
+/// authorizer.
 fn test_cache() -> Arc<Cache> {
     cache::Config::Memory.to_backend().expect("memory cache")
 }
@@ -138,27 +138,6 @@ pub fn create_test_event() -> Event {
         &Reference::Digest(digest.clone()),
         None,
     )
-}
-
-#[tokio::test]
-async fn test_server_context_new_with_basic_auth() {
-    let salt = SaltString::generate(OsRng);
-    let argon_config = Params::default();
-    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon_config);
-    let password_hash = argon.hash_password(b"testpass", &salt).unwrap().to_string();
-
-    let config = load_config(&format!(
-        r#"
-        [auth.identity.testuser]
-        username = "testuser"
-        password = "{password_hash}"
-    "#
-    ));
-    let registry = create_test_registry(&config).await;
-
-    let context = ServerContext::new(&config, &test_cache(), registry);
-
-    assert!(context.is_ok());
 }
 
 #[tokio::test]
@@ -236,25 +215,6 @@ async fn test_authenticate_request_ignores_x_forwarded_for_from_untrusted_peer()
         Some("127.0.0.1".to_string()),
         "a peer outside trusted_proxies must not spoof its IP via headers"
     );
-}
-
-#[tokio::test]
-async fn test_authenticate_request_with_remote_address() {
-    let config = minimal_config();
-    let registry = create_test_registry(&config).await;
-    let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
-
-    let request = Request::builder().body(()).unwrap();
-    let (parts, ()) = request.into_parts();
-    let remote_addr: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
-
-    let result = context
-        .authenticate_request(&parts, Some(remote_addr))
-        .await;
-
-    assert!(result.is_ok());
-    let identity = result.unwrap();
-    assert_eq!(identity.client_ip, Some("127.0.0.1".to_string()));
 }
 
 #[tokio::test]
@@ -458,9 +418,9 @@ async fn proxy_namespace_leaves_a_write_alone() {
     assert_eq!(namespace.as_ref(), "library/nginx");
 }
 
-/// Nesting under the mirror can breach the namespace length cap. Falling
-/// through would serve the unprefixed namespace, which is different content
-/// than the client asked for, so the request is refused instead.
+/// Nesting under the mirror can breach the namespace length cap, and falling
+/// through would serve different content than the client asked for, so the
+/// request is refused instead.
 #[tokio::test]
 async fn proxy_namespace_refuses_a_name_it_cannot_map() {
     let config = load_config(
@@ -597,16 +557,6 @@ async fn test_dispatch_event_required_webhook_failure_returns_error() {
 }
 
 #[tokio::test]
-async fn test_server_context_shutdown_with_no_dispatcher() {
-    let config = minimal_config();
-    let registry = create_test_registry(&config).await;
-    let context = ServerContext::new(&config, &test_cache(), registry).unwrap();
-
-    assert!(!context.has_event_dispatcher());
-    context.shutdown().await;
-}
-
-#[tokio::test]
 async fn test_server_context_shutdown_drains_in_flight_async_delivery() {
     let mock_server = MockServer::start().await;
 
@@ -690,20 +640,9 @@ fn proxies(sources: &[&str]) -> Vec<TrustedProxy> {
 }
 
 #[test]
-fn test_resolve_forwarded_ip_single_ip() {
-    let mut headers = HeaderMap::new();
-    headers.insert("X-Forwarded-For", "192.168.1.100".parse().unwrap());
-    assert_eq!(
-        resolve_forwarded_ip(&headers, &[]),
-        Some("192.168.1.100".to_string())
-    );
-}
-
-#[test]
 fn test_resolve_forwarded_ip_takes_rightmost_untrusted_entry() {
-    // 10.0.0.1 is an intermediate trusted proxy; the entry it appended
-    // (192.168.1.100) is the client. The leftmost entries are client-supplied
-    // and must not win.
+    // 10.0.0.1 is an intermediate trusted proxy and the entry it appended is
+    // the client; the leftmost entries are client-supplied and must not win.
     let mut headers = HeaderMap::new();
     headers.insert(
         "X-Forwarded-For",

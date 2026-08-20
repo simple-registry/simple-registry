@@ -1,7 +1,6 @@
-//! Structural job-record validation: a record whose envelope cannot be
-//! parsed can never be drained and is deleted. Config-relative orphan
-//! classification (a job whose downstream or repository left the config) is
-//! prune's job.
+//! Structural job-record validation: a record whose envelope cannot be parsed
+//! can never be drained and is deleted. Config-relative orphan classification
+//! is prune's job.
 
 use tracing::warn;
 
@@ -41,9 +40,8 @@ impl Validator {
         Ok(())
     }
 
-    /// Validate one `lock_key` dedup index entry. A dangling entry (its
-    /// `storage_key` no longer pending) is left alone: the store self-heals
-    /// it at the next enqueue.
+    /// Validate one `lock_key` dedup index entry. A dangling entry is left
+    /// alone: the store self-heals it at the next enqueue.
     pub async fn validate_job_index(&self, key: &str) -> Result<(), Error> {
         let Some(raw) = self.read_metadata_object(key).await? else {
             return Ok(());

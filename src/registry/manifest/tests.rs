@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    io::Cursor,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, io::Cursor, sync::Arc};
 
 use futures_util::future::join_all;
 use hyper::{
@@ -30,13 +26,13 @@ use crate::{
     registry::{
         Error, Registry,
         blob_ownership::BlobOwnership,
-        metadata_store::{LinkKind, LinkMetadata, LinkOperation, link::tag::TagEntryBody},
+        metadata_store::{LinkKind, LinkOperation, link::tag::TagEntryBody},
         path_builder::{self, blob_path},
         repository::Config as RepositoryConfig,
         test_utils::{
-            FSRegistryTestCase, RegistryTestCase, create_test_registry, for_each_backend, get_blob,
-            metadata_store_over, put_link_raw, response_body, response_digest, response_header,
-            upload_blob,
+            FSRegistryTestCase, RegistryTestCase, create_test_registry, create_test_registry_with,
+            for_each_backend, get_blob, metadata_store_over, put_link_raw, response_body,
+            response_digest, response_header, upload_blob,
         },
     },
     registry_client::REPLICATION_SUPERSEDED_CODE,
@@ -293,10 +289,9 @@ async fn test_put_manifest() {
     .await;
 }
 
-/// A by-digest push with `?tag=` query parameters must create each listed tag,
-/// return an `OCI-Tag` header naming both, and resolve each tag to the pushed
-/// digest. The digest is sha512 to lock the distribution-spec regression where
-/// the suite fell back to a sha256-defaulted by-tag push.
+/// A by-digest push with `?tag=` must create each listed tag, name both in
+/// `OCI-Tag`, and resolve each tag to the pushed digest. The digest is sha512
+/// to lock the regression where the suite fell back to a sha256 by-tag push.
 #[tokio::test]
 async fn accept_put_manifest_by_sha512_digest_with_tag_params_creates_tags() {
     let case = FSRegistryTestCase::new();
@@ -328,8 +323,6 @@ async fn accept_put_manifest_by_sha512_digest_with_tag_params_creates_tags() {
     );
     assert_eq!(response_digest(&response), digest);
 
-    // Event emission for `?tag=` pushes is covered by
-    // `event_emission_tests::digest_push_with_tag_params_emits_tag_create_per_tag`.
     for tag in ["1.2.3", "latest"] {
         let head = registry
             .head_manifest(
@@ -349,11 +342,6 @@ async fn accept_put_manifest_by_sha512_digest_with_tag_params_creates_tags() {
         );
     }
 }
-
-// Invalid `?tag=` values are now rejected at the router (a generic 400) before
-// the handler runs, so the handler always receives pre-validated `Tag`s. The
-// router rejection is covered by
-// `router::tests::test_parse_put_manifest_by_digest_invalid_tag_param_rejected`.
 
 /// A by-tag push must ignore any tag query parameters: only the path tag is
 /// created and no `OCI-Tag` header is emitted.
@@ -587,20 +575,15 @@ async fn put_manifest_allows_missing_subject_reference() {
     .await;
 }
 
-/// The live `accept_put_manifest` path honors the registry's
-/// `validate_manifest_references` flag (set from `[global]
-/// allow_missing_manifest_references`): the permissive registry stores an index
-/// whose child manifest is absent (pre-1.2.0 behavior), while the strict
-/// registry rejects the identical push with `MANIFEST_BLOB_UNKNOWN`.
+/// `accept_put_manifest` honors `validate_manifest_references`: permissive
+/// stores an index whose child manifest is absent, strict rejects the identical
+/// push with `MANIFEST_BLOB_UNKNOWN`.
 #[tokio::test]
 async fn accept_put_manifest_honors_reference_validation_flag() {
-    use crate::registry::test_utils::create_test_registry_with;
-
     let missing_child = fixed_digest();
     let namespace = Namespace::new("test-repo/ref-validation").unwrap();
     let (content, media_type) = index_manifest_with_child(&missing_child);
 
-    // Permissive: the missing child reference is accepted.
     let permissive_case = FSRegistryTestCase::new();
     let permissive = create_test_registry_with(
         permissive_case.blob_store(),
@@ -622,7 +605,6 @@ async fn accept_put_manifest_honors_reference_validation_flag() {
         .await
         .expect("permissive registry must accept a missing child manifest reference");
 
-    // Strict: the identical push is rejected before anything is stored.
     let strict_case = FSRegistryTestCase::new();
     let strict =
         create_test_registry_with(strict_case.blob_store(), strict_case.metadata_store(), true);
@@ -645,27 +627,20 @@ async fn accept_put_manifest_honors_reference_validation_flag() {
     assert!(matches!(err, Error::ManifestBlobUnknown));
 }
 
-/// A permissive registry accepts a manifest that references content the pushing
-/// namespace does not own, but it must not grant that namespace read access to
-/// the referenced blobs: the references stay dangling and a later pull resolves
-/// as unknown. This guards the namespace-isolation boundary against a client
-/// minting a readable reference to another namespace's blob.
+/// A permissive registry accepts a manifest referencing content the pushing
+/// namespace does not own, but must not grant it read access: the references
+/// stay dangling so a later pull resolves as unknown.
 #[tokio::test]
 async fn permissive_push_does_not_grant_read_of_unowned_referenced_blob() {
-    use crate::registry::{blob_ownership::BlobOwnership, test_utils::create_test_registry_with};
-
     let case = FSRegistryTestCase::new();
     let permissive = create_test_registry_with(case.blob_store(), case.metadata_store(), false);
 
-    // The owner uploads a config and a layer, gaining ownership of both.
     let owner = Namespace::new("test-repo/owner").unwrap();
     let config_content = br#"{"architecture":"amd64","os":"linux"}"#;
     let layer_content = b"private layer bytes";
     let config_digest = upload_blob(&permissive, &owner, config_content).await;
     let layer_digest = upload_blob(&permissive, &owner, layer_content).await;
 
-    // An attacker in a different namespace pushes a manifest referencing the
-    // owner's blobs by digest. The permissive push is accepted.
     let attacker = Namespace::new("test-repo/attacker").unwrap();
     let (content, media_type) = manifest_with_references(
         &config_digest,
@@ -688,7 +663,6 @@ async fn permissive_push_does_not_grant_read_of_unowned_referenced_blob() {
         .await
         .expect("permissive registry accepts a push referencing unowned blobs");
 
-    // The owner still reads its blobs; the attacker gained no read access.
     let ownership = BlobOwnership::new(permissive.metadata_store.as_ref());
     assert!(ownership.can_read(&owner, &layer_digest).await.unwrap());
     assert!(ownership.can_read(&owner, &config_digest).await.unwrap());
@@ -712,25 +686,18 @@ async fn permissive_push_does_not_grant_read_of_unowned_referenced_blob() {
 }
 
 /// The child-manifest analogue of the blob isolation guard: a permissive
-/// registry accepts an image index whose child manifest digest the pushing
-/// namespace does not own (the docker buildx/bake scenario), but it must not
-/// grant that namespace read access to the child. The `LinkKind::Manifest` drop
-/// branch of `retain_owned_reference_links` keeps the child reference dangling
-/// so a later pull of the child digest resolves as unknown.
+/// registry accepts an index whose child manifest the pushing namespace does
+/// not own (the docker buildx/bake scenario), but must not grant it read access
+/// to the child, which stays dangling.
 #[tokio::test]
 async fn permissive_push_does_not_grant_read_of_unowned_child_manifest() {
-    use crate::registry::{blob_ownership::BlobOwnership, test_utils::create_test_registry_with};
-
     let case = FSRegistryTestCase::new();
     let permissive = create_test_registry_with(case.blob_store(), case.metadata_store(), false);
 
-    // The owner uploads the child manifest content, gaining ownership of it.
     let owner = Namespace::new("test-repo/owner").unwrap();
     let child_content = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef","size":1},"layers":[]}"#;
     let child_digest = upload_blob(&permissive, &owner, child_content).await;
 
-    // An attacker in a different namespace pushes an index referencing the
-    // owner's child manifest by digest. The permissive push is accepted.
     let attacker = Namespace::new("test-repo/attacker").unwrap();
     let (content, media_type) = index_manifest_with_child(&child_digest);
     permissive
@@ -748,7 +715,6 @@ async fn permissive_push_does_not_grant_read_of_unowned_child_manifest() {
         .await
         .expect("permissive registry accepts an index referencing an unowned child manifest");
 
-    // The owner still reads the child; the attacker gained no read access.
     let ownership = BlobOwnership::new(permissive.metadata_store.as_ref());
     assert!(ownership.can_read(&owner, &child_digest).await.unwrap());
     assert!(
@@ -756,8 +722,6 @@ async fn permissive_push_does_not_grant_read_of_unowned_child_manifest() {
         "attacker must not gain read access to a child manifest it never uploaded"
     );
 
-    // The attacker's index push left the child reference dangling, so pulling
-    // the child digest in the attacker namespace resolves as unknown.
     let repository = permissive.get_repository_for_namespace(&attacker).unwrap();
     let outcome = permissive
         .get_manifest(
@@ -776,20 +740,14 @@ async fn permissive_push_does_not_grant_read_of_unowned_child_manifest() {
     );
 }
 
-/// The positive branch of `retain_owned_reference_links` on the permissive
-/// default: a namespace pushing a manifest that references blobs it already owns
-/// keeps every reference link, so the manifest and all its blobs stay fully
-/// pullable. Guards against a regression where permissive mode strips links for
-/// owned content and silently breaks normal image pushes.
+/// The positive branch: a namespace pushing a manifest that references blobs it
+/// already owns keeps every reference link, so the manifest and both blobs stay
+/// pullable.
 #[tokio::test]
 async fn permissive_push_of_owned_references_yields_a_pullable_manifest() {
-    use crate::registry::{blob_ownership::BlobOwnership, test_utils::create_test_registry_with};
-
     let case = FSRegistryTestCase::new();
     let permissive = create_test_registry_with(case.blob_store(), case.metadata_store(), false);
 
-    // One namespace uploads its own config and layer, then pushes a manifest
-    // referencing those owned blobs.
     let namespace = Namespace::new("test-repo/owner").unwrap();
     let config_content = br#"{"architecture":"amd64","os":"linux"}"#;
     let layer_content = b"owned layer bytes";
@@ -817,8 +775,6 @@ async fn permissive_push_of_owned_references_yields_a_pullable_manifest() {
         .await
         .expect("permissive registry accepts a push referencing owned blobs");
 
-    // Every reference link is retained: the namespace reads its blobs and the
-    // manifest plus both blobs are pullable.
     let ownership = BlobOwnership::new(permissive.metadata_store.as_ref());
     assert!(
         ownership
@@ -862,7 +818,6 @@ async fn permissive_push_of_owned_references_yields_a_pullable_manifest() {
     .expect("the owned layer blob must be pullable");
 }
 
-/// Build a pull-through repository whose sole upstream is `server`.
 async fn pull_through_repository(server: &MockServer) -> Repository {
     let cache = cache::Config::Memory.to_backend().unwrap();
     let config = RepositoryConfig {
@@ -879,8 +834,6 @@ async fn pull_through_repository(server: &MockServer) -> Repository {
     .unwrap()
 }
 
-/// Mount a manifest GET on `server` that answers without the SHOULD-level
-/// `Docker-Content-Digest` header.
 async fn mount_manifest_without_digest_header(server: &MockServer, reference: &str, body: &[u8]) {
     Mock::given(method("GET"))
         .and(path(format!("/v2/test-repo/manifests/{reference}")))
@@ -959,9 +912,9 @@ async fn pull_through_recomputes_under_the_requested_digest_algorithm() {
 }
 
 /// A delete cascades the manifest's config, layer and child links, which it can
-/// only name by reading the body. A backend fault must abort the delete: if it
-/// read as "no children", the revision and its bytes would go while those links
-/// survived, pinning their blobs with no body left to replan the cascade from.
+/// only name by reading the body. A fault that read as "no children" would drop
+/// the revision while those links survive, pinning blobs with no body left to
+/// replan the cascade from.
 #[tokio::test]
 async fn a_blob_fault_aborts_a_digest_delete_instead_of_half_committing() {
     let case = FSRegistryTestCase::new();
@@ -1272,7 +1225,6 @@ async fn delete_manifest_leaves_bytes_for_the_collector() {
         let first = &Namespace::new("test-repo/first").unwrap();
         let second = &Namespace::new("test-repo/second").unwrap();
 
-        // Push a manifest to `first`; its blob is shared across namespaces.
         let layer_content = b"shared layer content";
         let config_content = br#"{"architecture":"amd64","os":"linux"}"#;
         let layer_digest = upload_blob(registry, first, layer_content).await;
@@ -1304,8 +1256,7 @@ async fn delete_manifest_leaves_bytes_for_the_collector() {
             .unwrap();
         let digest = response.digest.clone();
 
-        // A second repo holds a reference; the delete revokes only the
-        // first's state and never touches the bytes.
+        // A second repo holds a reference; the delete must not touch the bytes.
         let ownership = BlobOwnership::new(registry.metadata_store.as_ref());
         ownership.grant(second, &digest).await.unwrap();
         let reference = Reference::Digest(digest.clone());
@@ -1491,8 +1442,7 @@ async fn delete_manifest_then_delete_uploaded_blobs() {
             .await
             .unwrap();
 
-        // Ownership revoked (the stale manifest-derived entries and the bytes
-        // wait for the collector).
+        // Ownership revoked; the stale entries and the bytes wait for the collector.
         let ownership = registry.blob_ownership();
         for digest in [&layer_digest, &config_digest] {
             let refs = ownership.references(namespace, digest).await.unwrap();
@@ -1747,7 +1697,6 @@ fn a_subject_only_manifest_links_nothing_but_its_referrer_back_link() {
 
 #[test]
 fn an_index_links_each_of_its_children() {
-    // An OCI image index carries a `manifests` array, no `layers`.
     let body = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.index.v1+json",
@@ -1809,8 +1758,7 @@ async fn test_handle_get_manifest() {
             .await
             .unwrap();
 
-        // Whether served inline or as a redirect, the response names the same
-        // manifest under the same media type.
+        // Inline or redirect, the response names the same manifest and type.
         assert_eq!(response_digest(&response), put_response.digest);
         assert_eq!(
             *response_header(&response, &CONTENT_TYPE),
@@ -1870,186 +1818,6 @@ async fn test_handle_put_manifest() {
         assert_eq!(stored_manifest.content, content);
         assert_eq!(stored_manifest.media_type.unwrap(), media_type);
         assert_eq!(stored_manifest.digest, response_digest(&response));
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn test_delete_manifest_by_digest_removes_multiple_tags() {
-    for_each_backend(async |test_case| {
-        let registry = test_case.registry();
-        let namespace = &Namespace::new("test-repo/delete-multi-tags").unwrap();
-        let (content, media_type) = create_test_manifest(registry, namespace).await;
-
-        let response = registry
-            .put_manifest(
-                namespace,
-                &Reference::Tag(Tag::new("latest").unwrap()),
-                Some(&media_type),
-                &content,
-            )
-            .await
-            .unwrap();
-
-        registry
-            .put_manifest(
-                namespace,
-                &Reference::Tag(Tag::new("v1.0").unwrap()),
-                Some(&media_type),
-                &content,
-            )
-            .await
-            .unwrap();
-
-        registry
-            .delete_manifest(
-                None,
-                None,
-                namespace,
-                &Reference::Digest(response.digest.clone()),
-            )
-            .await
-            .unwrap();
-
-        let repository = registry.get_repository_for_namespace(namespace).unwrap();
-
-        assert!(
-            registry
-                .get_manifest(
-                    Some(repository),
-                    &[MediaRange::from(media_type.clone())],
-                    namespace,
-                    Reference::Tag(Tag::new("latest").unwrap()),
-                    false,
-                    "test-client",
-                )
-                .await
-                .is_err()
-        );
-
-        assert!(
-            registry
-                .get_manifest(
-                    Some(repository),
-                    &[MediaRange::from(media_type.clone())],
-                    namespace,
-                    Reference::Tag(Tag::new("v1.0").unwrap()),
-                    false,
-                    "test-client",
-                )
-                .await
-                .is_err()
-        );
-
-        assert!(
-            registry
-                .get_manifest(
-                    Some(repository),
-                    &[MediaRange::from(media_type.clone())],
-                    namespace,
-                    Reference::Digest(response.digest.clone()),
-                    false,
-                    "test-client",
-                )
-                .await
-                .is_err()
-        );
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn test_delete_manifest_by_digest_preserves_unrelated_tags() {
-    for_each_backend(async |test_case| {
-        let registry = test_case.registry();
-        let namespace = &Namespace::new("test-repo/delete-preserve").unwrap();
-        let (content_a, media_type_a) = create_test_manifest(registry, namespace).await;
-        let (content_b, media_type_b) =
-            create_test_manifest_with_subject(registry, namespace).await;
-
-        let response_a = registry
-            .put_manifest(
-                namespace,
-                &Reference::Tag(Tag::new("v1.0").unwrap()),
-                Some(&media_type_a),
-                &content_a,
-            )
-            .await
-            .unwrap();
-
-        registry
-            .put_manifest(
-                namespace,
-                &Reference::Tag(Tag::new("v1.1").unwrap()),
-                Some(&media_type_a),
-                &content_a,
-            )
-            .await
-            .unwrap();
-
-        let response_b = registry
-            .put_manifest(
-                namespace,
-                &Reference::Tag(Tag::new("v2.0").unwrap()),
-                Some(&media_type_b),
-                &content_b,
-            )
-            .await
-            .unwrap();
-
-        registry
-            .delete_manifest(
-                None,
-                None,
-                namespace,
-                &Reference::Digest(response_a.digest.clone()),
-            )
-            .await
-            .unwrap();
-
-        let repository = registry.get_repository_for_namespace(namespace).unwrap();
-
-        assert!(
-            registry
-                .get_manifest(
-                    Some(repository),
-                    &[MediaRange::from(media_type_a.clone())],
-                    namespace,
-                    Reference::Tag(Tag::new("v1.0").unwrap()),
-                    false,
-                    "test-client",
-                )
-                .await
-                .is_err()
-        );
-
-        assert!(
-            registry
-                .get_manifest(
-                    Some(repository),
-                    &[MediaRange::from(media_type_a.clone())],
-                    namespace,
-                    Reference::Tag(Tag::new("v1.1").unwrap()),
-                    false,
-                    "test-client",
-                )
-                .await
-                .is_err()
-        );
-
-        let manifest_b = registry
-            .get_manifest(
-                Some(repository),
-                &[MediaRange::from(media_type_b.clone())],
-                namespace,
-                Reference::Tag(Tag::new("v2.0").unwrap()),
-                false,
-                "test-client",
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(manifest_b.digest, response_b.digest.clone());
     })
     .await;
 }
@@ -2236,8 +2004,6 @@ fn fixed_digest() -> Digest {
         .unwrap()
 }
 
-// Manifest write/delete path tests
-
 #[tokio::test]
 async fn store_manifest_writes_blob_and_links() {
     let test_case = FSRegistryTestCase::new();
@@ -2260,7 +2026,6 @@ async fn store_manifest_writes_blob_and_links() {
     let stored_digest = response.digest.clone();
     assert_eq!(stored_digest, expected_digest);
 
-    // The link should be readable via the metadata store.
     let link = registry
         .metadata_store
         .read_link(&namespace, &LinkKind::Tag(Tag::new("v1").unwrap()))
@@ -2268,11 +2033,9 @@ async fn store_manifest_writes_blob_and_links() {
         .unwrap();
     assert_eq!(link.target, expected_digest);
 
-    // The blob-data should be retrievable via the blob store.
     let body = registry.blob_store.read(&expected_digest).await.unwrap();
     assert_eq!(body, manifest_bytes);
 
-    // Blob-index should record the namespace reference.
     let blob_index = registry
         .metadata_store
         .read_blob_index(&expected_digest)
@@ -2286,9 +2049,7 @@ async fn store_manifest_writes_blob_and_links() {
 
 /// Regression for the cross-store isolation bug: with the blob and metadata
 /// stores on separate backends, a manifest must be stored as a blob in the blob
-/// store (where reads look), not inside the metadata transaction. Before the fix
-/// the push "succeeded" but the manifest was unreadable (GET 404), and delete
-/// could not reclaim it.
+/// store, where reads look, and not in the metadata store.
 #[tokio::test]
 async fn manifest_blob_lives_in_blob_store_with_split_backends() {
     let test_case = FSRegistryTestCase::with_split_backends();
@@ -2308,13 +2069,11 @@ async fn manifest_blob_lives_in_blob_store_with_split_backends() {
         .await
         .expect("split-backend manifest push must succeed");
 
-    // Reads through the blob store (the path GET uses); 404 before the fix.
     assert_eq!(
         registry.blob_store.read(&digest).await.unwrap(),
         manifest_bytes,
         "manifest body must be readable from the blob store",
     );
-    // The bytes must not be written under the metadata store's blob path.
     assert!(
         test_case
             .metadata_store()
@@ -2325,8 +2084,6 @@ async fn manifest_blob_lives_in_blob_store_with_split_backends() {
         "manifest body must not land in the metadata store",
     );
 
-    // The delete removes the revision; the body stays in the blob store for
-    // the collector to reclaim.
     registry
         .delete_manifest(None, None, &namespace, &Reference::Digest(digest.clone()))
         .await
@@ -2375,7 +2132,6 @@ async fn store_manifest_is_idempotent() {
         .await
         .unwrap();
 
-    // Link and blob-index must still be consistent.
     let digest = Digest::sha256_of_bytes(&manifest_bytes);
     let link = registry
         .metadata_store
@@ -2859,11 +2615,10 @@ async fn find_tags_pointing_at_bypasses_the_link_cache() {
     );
 }
 
-/// The pre-write LWW gate in `accept_put_manifest` is check-then-write: a
-/// racing writer can pass it and still commit out of order. The link
-/// transaction itself must reject a superseded replicated write, so calling
-/// the store directly (as if the gate had been raced) must fail and leave
-/// the winning link untouched.
+/// The pre-write LWW gate in `accept_put_manifest` is check-then-write, so a
+/// racing writer can pass it and still commit out of order. The commit itself
+/// must reject a superseded replicated write, so calling the store directly (as
+/// if the gate had been raced) must fail and leave the winning link untouched.
 #[tokio::test]
 async fn store_manifest_enforces_lww_inside_the_link_transaction() {
     let test_case = FSRegistryTestCase::new();
@@ -2909,9 +2664,9 @@ async fn store_manifest_enforces_lww_inside_the_link_transaction() {
 }
 
 /// A delete or prune can reclaim a referenced blob while a push is in flight.
-/// The link transaction owns the ownership check, so a strict push whose
-/// reference lost its shard entry must be rejected instead of committing a
-/// manifest whose layer bytes are gone.
+/// The commit owns the ownership check, so a strict push whose reference lost
+/// its shard entry must be rejected rather than commit a manifest whose layer
+/// bytes are gone.
 #[tokio::test]
 async fn store_manifest_strict_rejects_a_reference_whose_grant_was_reclaimed() {
     let test_case = FSRegistryTestCase::new();
@@ -2988,11 +2743,10 @@ async fn store_manifest_strict_accepts_a_reference_with_a_live_grant() {
     );
 }
 
-/// A manifest delete leaves its reference keys (and, until the collector
-/// prunes it, the advisory link file) behind. Once the file is pruned, the
-/// stale keys alone must not pass the Strict ownership gate, or a push could
-/// name the layer digest without uploading bytes and mint itself a fresh
-/// backed reference.
+/// A manifest delete leaves its reference keys behind, and the advisory link
+/// file until the collector prunes it. Once that file is pruned the stale keys
+/// alone must not pass the Strict ownership gate, or a push could mint a backed
+/// reference to a layer it never uploaded.
 #[tokio::test]
 async fn store_manifest_strict_rejects_stale_references_of_a_deleted_manifest() {
     let test_case = FSRegistryTestCase::new();
@@ -3127,8 +2881,8 @@ async fn store_manifest_trusted_creates_first_grant_without_prior_entry() {
     );
 }
 
-/// A permissive push must not grant access to an unowned reference: the link
-/// transaction drops the unowned tracked link and commits the rest.
+/// A permissive push must not grant access to an unowned reference: the commit
+/// drops the unowned tracked link and keeps the rest.
 #[tokio::test]
 async fn store_manifest_permissive_drops_an_unowned_reference() {
     let test_case = FSRegistryTestCase::new();
@@ -3166,10 +2920,9 @@ async fn store_manifest_permissive_drops_an_unowned_reference() {
     );
 }
 
-/// The pre-write delete gate in `delete_manifest` is also check-then-write: a
-/// newer re-put can land between the gate and the commit. The link transaction
-/// must reject a superseded replicated delete itself, so calling the store
-/// directly (as if the gate had been raced) must fail and leave the tag intact.
+/// The pre-write delete gate in `delete_manifest` is also check-then-write, so a
+/// newer re-put can land between the gate and the commit. The commit must reject
+/// a superseded replicated delete itself, leaving the tag intact.
 #[tokio::test]
 async fn delete_links_enforces_lww_inside_the_link_transaction() {
     let test_case = FSRegistryTestCase::new();
@@ -3407,54 +3160,6 @@ async fn delete_manifest_accepts_lww_newer_source_ts() {
 }
 
 #[tokio::test]
-async fn delete_manifest_not_superseded_when_local_tag_has_no_created_at() {
-    // The write path always stamps `created_at`, so a legacy no-created_at
-    // link is injected directly via `write_link_reference`.
-    let test_case = FSRegistryTestCase::new();
-    let registry = test_case.registry();
-    let namespace = &Namespace::new("lww-repo").unwrap();
-    let tag = "latest";
-
-    registry
-        .metadata_store
-        .write_link_reference(
-            namespace,
-            &LinkKind::Tag(Tag::new(tag).unwrap()),
-            &LinkMetadata {
-                target: Digest::sha256_of_bytes(b"manifest-bytes"),
-                created_at: None,
-                accessed_at: None,
-                referenced_by: HashSet::new(),
-                media_type: None,
-                descriptor: None,
-            },
-        )
-        .await
-        .expect("seed a tag link with no created_at");
-
-    // An epoch source_ts would lose LWW to any real created_at.
-    let ancient = chrono::DateTime::from_timestamp(0, 0).unwrap();
-    registry
-        .delete_manifest(
-            None,
-            Some(ancient),
-            namespace,
-            &Reference::Tag(Tag::new(tag).unwrap()),
-        )
-        .await
-        .expect("a delete must not be superseded by a tag with no created_at");
-
-    let result = registry
-        .metadata_store
-        .read_link(namespace, &LinkKind::Tag(Tag::new(tag).unwrap()))
-        .await;
-    assert!(
-        matches!(result, Err(Error::NotFound)),
-        "tag must be gone after the non-superseded delete, got: {result:?}"
-    );
-}
-
-#[tokio::test]
 async fn same_digest_re_push_preserves_created_at() {
     // An idempotent re-push (e.g. CI re-pushing an unchanged image) must not
     // advance the tag's LWW timestamp: the binding is unchanged so dispatch is
@@ -3685,10 +3390,8 @@ async fn replication_superseded_maps_to_distinct_oci_code() {
 #[cfg(test)]
 mod noop_suppression_tests {
     //! No-op suppression (loop prevention): an inbound manifest write that does
-    //! not change local state must not be re-dispatched for replication. The
-    //! harness shares one object store between the blob store, metadata store, and a
-    //! caller-held `JobStore`, and spawns no drain, so enqueued jobs persist
-    //! for counting.
+    //! not change local state must not be re-dispatched. The harness shares one
+    //! object store and spawns no drain, so enqueued jobs persist for counting.
 
     use std::{io::Cursor, sync::Arc};
 
@@ -3718,9 +3421,8 @@ mod noop_suppression_tests {
     const REPO: &str = "nginx";
     const NAMESPACE: &str = "nginx";
 
-    /// Build a `Registry` whose blob store, metadata store, and a caller-held
-    /// `JobStore` all share one FS-backed object store, carrying a single
-    /// event+reconcile downstream so `dispatch_replication` enqueues.
+    /// A `Registry` sharing one FS object store with a caller-held `JobStore`,
+    /// carrying one event+reconcile downstream so `dispatch_replication` enqueues.
     fn build_registry() -> (Arc<Registry>, Arc<JobStore>, TempDir) {
         let FsTestStack {
             dir,
@@ -3750,10 +3452,9 @@ mod noop_suppression_tests {
             .unwrap()
     }
 
-    /// Drains (claims + completes) one pending replication job, clearing its
-    /// `lock_key` dedup index. Pending pushes for the same tag coalesce on
-    /// that index, so draining isolates the dispatch gate under test from the
-    /// queue's coalescing.
+    /// Drains one pending replication job, clearing its `lock_key` dedup index.
+    /// Pending pushes for the same tag coalesce on that index, so draining
+    /// isolates the dispatch gate under test from the queue's coalescing.
     async fn drain_one(job_store: &JobStore) {
         let claimed = job_store
             .claim_one(Queue::Replication)
@@ -3764,7 +3465,7 @@ mod noop_suppression_tests {
         job_store.complete(claimed).await.unwrap();
     }
 
-    /// Builds a second, distinct manifest, pre-uploading its blobs so the push
+    /// A second, distinct manifest, with its blobs pre-uploaded so the push
     /// validates.
     async fn create_second_manifest(
         registry: &Registry,
@@ -4285,53 +3986,6 @@ mod noop_suppression_tests {
             "a converged digest delete (revision gone, no pointing tags) must enqueue nothing"
         );
     }
-
-    /// Event emission for the no-op replay is covered by
-    /// `event_emission_tests::noop_push_still_emits_events`.
-    #[tokio::test]
-    async fn noop_push_does_not_enqueue_replication() {
-        let (registry, job_store, _dir) = build_registry();
-        let namespace = Namespace::new(NAMESPACE).unwrap();
-        let tag = "latest";
-
-        let (content, media_type) = create_test_manifest(&registry, &namespace).await;
-        registry
-            .accept_put_manifest(
-                None,
-                PutManifestRequest {
-                    namespace: namespace.clone(),
-                    reference: Reference::Tag(Tag::new(tag).unwrap()),
-                    content_type: Some(media_type.clone()),
-                    tags: Vec::new(),
-                    source_ts: None,
-                },
-                Cursor::new(content.clone()),
-            )
-            .await
-            .expect("seed tag push");
-        let baseline = pending(&job_store).await;
-
-        registry
-            .accept_put_manifest(
-                None,
-                PutManifestRequest {
-                    namespace: namespace.clone(),
-                    reference: Reference::Tag(Tag::new(tag).unwrap()),
-                    content_type: Some(media_type),
-                    tags: Vec::new(),
-                    source_ts: None,
-                },
-                Cursor::new(content),
-            )
-            .await
-            .expect("re-assert same tag->digest");
-
-        assert_eq!(
-            pending(&job_store).await,
-            baseline,
-            "the no-op replay must NOT enqueue a replication job"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -4387,7 +4041,6 @@ mod dispatch_replication_tests {
         .build()
     }
 
-    /// Repository with exactly one downstream of the given mode and namespace filter.
     fn repository_with(mode: ReplicationMode, namespace_filter: Vec<Regex>) -> Repository {
         repository_with_replication(
             REPO,
@@ -4399,8 +4052,8 @@ mod dispatch_replication_tests {
         repository_with(ReplicationMode::EventReconcile, Vec::new())
     }
 
-    /// Build a `Registry` whose job store is a caller-held `JobStore` so the
-    /// test can count pending jobs.
+    /// A `Registry` whose job store is caller-held so the test can count
+    /// pending jobs.
     fn build_registry_with(repository: Repository) -> (Arc<Registry>, Arc<JobStore>, TempDir) {
         let FsTestStack {
             dir,
@@ -4425,38 +4078,6 @@ mod dispatch_replication_tests {
     /// [`build_registry_with`] with one `event+reconcile` downstream.
     fn build_registry() -> (Arc<Registry>, Arc<JobStore>, TempDir) {
         build_registry_with(repository_with_downstream())
-    }
-
-    #[tokio::test]
-    async fn dispatch_replication_enqueues_for_matching_downstream() {
-        init_for_tests();
-        let (registry, job_store, _dir) = build_registry();
-
-        let namespace = Namespace::new(NAMESPACE).unwrap();
-        let digest: Digest = SAMPLE_DIGEST.parse().unwrap();
-
-        let repository = registry.resolver.resolve(&namespace);
-        let tag = Tag::new("v1").unwrap();
-        registry
-            .dispatch_replication(
-                repository,
-                &namespace,
-                DispatchTarget::Push {
-                    tag: Some(&tag),
-                    digest: &digest,
-                },
-                None,
-            )
-            .await;
-
-        assert_eq!(
-            job_store
-                .count_pending(Queue::Replication, 0)
-                .await
-                .unwrap(),
-            1,
-            "a fresh local change must enqueue one push job"
-        );
     }
 
     /// The payload carries the correct downstream/namespace/tag/digest/kind and

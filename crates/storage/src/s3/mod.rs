@@ -668,8 +668,8 @@ fn plan_known_length_parts(uniform: bool, part_size: u64, available: u64) -> (u6
     (count, emit_size, available - count * emit_size)
 }
 
-/// Children strictly after `start_after` by bare name, matching the FS and
-/// memory backends.
+/// Children strictly after `start_after` by bare name, matching the FS
+/// backend.
 fn children_after(names: Vec<String>, start_after: Option<&str>) -> Vec<String> {
     match start_after {
         Some(after) => names

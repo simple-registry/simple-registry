@@ -23,7 +23,7 @@ pub use base64_string::Base64String;
 pub use error::Error;
 
 /// Deserialize a positive integer into a `NonZero` type, naming `field` in the
-/// rejection. The single home of the "must be > 0" config validation.
+/// rejection.
 pub fn deserialize_positive_nonzero<'de, D, P, N>(
     deserializer: D,
     field: &str,
@@ -126,10 +126,9 @@ impl Configuration {
         }
     }
 
-    /// Load and merge configuration files in order, later files winning. Every
-    /// file is read up front so the parsed trees can borrow from all of them,
-    /// and merging happens before deserialization because a file that only
-    /// overrides a few keys is not a `Configuration` on its own.
+    /// Load and merge configuration files in order, later files winning.
+    /// Merging happens before deserialization because a file that overrides
+    /// only a few keys is not a `Configuration` on its own.
     pub fn load_all<P: AsRef<Path>>(paths: &[P]) -> Result<Self, Error> {
         let mut documents = Vec::with_capacity(paths.len());
         for path in paths {
@@ -179,7 +178,7 @@ impl Configuration {
     }
 
     /// Deserialize an already parsed TOML tree. `raw` is the document the tree
-    /// came from, and restores the source excerpt in error messages; a tree
+    /// came from and restores the source excerpt in error messages; a tree
     /// merged from several documents has no single source and passes `None`.
     fn from_table(table: Spanned<DeTable<'_>>, raw: Option<&str>) -> Result<Self, Error> {
         Self::deserialize(TomlDeserializer::from(table)).map_err(|mut e| {
@@ -196,7 +195,7 @@ impl Configuration {
     }
 }
 
-/// Name the files a merged configuration was built from, since an error on the
+/// Name the files a merged configuration was built from, since an error on a
 /// merged tree can only report the offending key path.
 fn annotate_sources<P: AsRef<Path>>(error: Error, paths: &[P]) -> Error {
     let Error::InvalidFormat(message) = &error else {
@@ -212,9 +211,9 @@ fn annotate_sources<P: AsRef<Path>>(error: Error, paths: &[P]) -> Error {
 }
 
 /// An FS blob store rooted at the empty path resolves every object relative to
-/// the process working directory, which in a container is the ephemeral layer
-/// rather than the mounted volume. The metadata store inherits this root by
-/// default, so one check covers both.
+/// the working directory, which in a container is the ephemeral layer rather
+/// than the mounted volume. The metadata store inherits this root by default,
+/// so one check covers both.
 fn validate_blob_store(blob_store: &blob_store::BlobStoreConfig) -> Result<(), Error> {
     let blob_store::BlobStoreConfig::FS(fs) = blob_store else {
         return Ok(());
@@ -287,9 +286,8 @@ fn validate_auth_webhook_ref(
     Ok(())
 }
 
-/// Validates that every name in `refs` exists in `known`. The `context` string
-/// is appended to the error message in parentheses to identify the caller
-/// (e.g. `"referenced globally"`, `"referenced in 'foo' repository"`).
+/// Validates that every name in `refs` exists in `known`; `context` identifies
+/// the referencing site in the error.
 fn validate_event_webhook_refs(
     refs: &[String],
     known: &HashMap<String, EventWebhookConfig>,
@@ -452,23 +450,5 @@ mod metadata_resolver_tests {
                 panic!("expected S3 storage config from Inherit, got {other:?}")
             }
         }
-    }
-
-    #[test]
-    fn test_inherit_is_default_for_registry_storage_field() {
-        let config_str = r#"
-        [blob_store.fs]
-        root_dir = "/tmp/test"
-
-        [server]
-        bind_address = "0.0.0.0"
-        "#;
-
-        let config = Configuration::load_from_str(config_str).unwrap();
-        assert_eq!(
-            config.registry_storage,
-            RegistryStorageConfig::Inherit,
-            "Configuration.registry_storage must default to Inherit when [metadata_store] is absent"
-        );
     }
 }

@@ -26,7 +26,6 @@ use crate::{
     replication::ReplicationJobHandler,
 };
 
-/// Process durable background jobs.
 #[derive(FromArgs, PartialEq, Debug)]
 #[argh(
     subcommand,
@@ -43,9 +42,9 @@ pub struct Options {
     pub poll_interval: HumanDuration,
 }
 
-/// Hot-reloadable worker subcommand draining one or more queues, each on its
-/// own worker pool. Components are swapped atomically on configuration reload;
-/// in-flight jobs finish on the components they started with.
+/// Hot-reloadable worker subcommand draining one or more queues, each on its own
+/// pool. Components swap atomically on reload, so in-flight jobs finish on the
+/// ones they started with.
 pub struct Command {
     queues: Vec<QueueRunner>,
     poll_interval: Duration,
@@ -72,9 +71,8 @@ fn queue_concurrency(config: &Configuration, queue: Queue) -> NonZeroUsize {
     }
 }
 
-/// Parses and de-duplicates `--queue` values preserving command-line order;
-/// defaults to both `cache` and `replication` when none are given. An unknown
-/// queue name is rejected here (the bad name is reported in the error).
+/// Parses and de-duplicates `--queue` values preserving command-line order,
+/// defaulting to both queues and rejecting an unknown name.
 fn resolve_queues(requested: &[String]) -> Result<Vec<Queue>, Error> {
     if requested.is_empty() {
         return Ok(vec![Queue::Cache, Queue::Replication]);
@@ -124,17 +122,15 @@ impl Command {
         if timeout(grace, self.workers.wait()).await.is_err() {
             warn!("Worker pool did not drain within shutdown grace period");
         }
-        // Drain in-flight async webhook deliveries to completion. Every queue
-        // shares one registry per configuration generation, and a repeated
-        // drain on the same registry is a no-op.
+        // Drain in-flight async webhook deliveries; the queues share one
+        // registry per configuration generation, so the repeat is a no-op.
         for runner in &self.queues {
             runner.inner.load().registry.shutdown().await;
         }
     }
 
-    /// Spawn `concurrency` claim-loop tasks per drained queue and wait for them
-    /// to finish. Returns when every worker observes the shutdown signal and
-    /// exits.
+    /// Spawn `concurrency` claim-loop tasks per drained queue and return once
+    /// every one of them has observed the shutdown signal.
     pub async fn run(&self) {
         for runner in &self.queues {
             for _ in 0..runner.concurrency.get() {
@@ -260,8 +256,8 @@ impl WorkerContext {
         })
     }
 
-    /// Builds the [`Components`] for one queue: a fresh `JobStore` consumer
-    /// over the shared storage plus the handler bound to that queue.
+    /// A fresh `JobStore` consumer over the shared storage, plus the handler
+    /// bound to `queue`.
     fn components_for(&self, queue: Queue) -> Components {
         let consumer = Arc::new(JobStore::alongside_with_retry_policy(
             &self.metadata_store,
@@ -347,7 +343,7 @@ mod tests {
         );
     }
 
-    /// Constructs a `WorkerContext` literal directly, bypassing `build` and its
+    /// Builds a `WorkerContext` literal, bypassing `build` and its
     /// `[global.job_queue]` requirement; the `TempDir` keeps the store alive.
     fn worker_context() -> (WorkerContext, TempDir) {
         metrics_provider::init_for_tests();

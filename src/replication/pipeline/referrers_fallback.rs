@@ -28,9 +28,9 @@ use crate::{
 /// mutex indefinitely and starve concurrent jobs of the same subject.
 const REFERRERS_MERGE_HTTP_TIMEOUT: Duration = Duration::from_mins(1);
 
-/// Per-subject merge mutexes, keyed by `namespace:subject`. In-process only:
-/// the queue drains each store from one worker process pool, which is the
-/// same coverage the removed engine's memory lock gave this path.
+/// Per-subject merge mutexes, keyed by `namespace:subject`. In-process only,
+/// which covers this path because the queue drains each store from a single
+/// worker process pool.
 static SUBJECT_LOCKS: LazyLock<StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
@@ -122,13 +122,10 @@ pub async fn deleted_referrer_subject(
 
 /// Runs `critical` (the GET/modify/PUT of one fallback index) under the
 /// subject's merge mutex: two referrers of the same subject are distinct jobs
-/// the queue runs concurrently, and unserialized merges read the same base
-/// index and drop the loser's descriptor. In-process only, like the memory
-/// lock it replaces; it cannot cover an unrelated sender registry pushing to
-/// the same downstream.
-///
-/// The key is deliberately downstream-agnostic: the critical section is two
-/// short HTTP calls, so cross-downstream contention never matters in practice.
+/// the queue runs concurrently, and unserialized merges read the same base index
+/// and drop the loser's descriptor. The key is downstream-agnostic because the
+/// critical section is two short HTTP calls, and being in-process the mutex
+/// cannot cover an unrelated sender registry pushing to the same downstream.
 async fn with_subject_lock(
     namespace: &Namespace,
     subject: &Digest,
@@ -166,8 +163,7 @@ async fn merge_referrers_fallback(
 ) -> Result<(), Error> {
     let mut manifests = fetch_fallback_manifests(downstream, namespace, reference).await?;
 
-    // Dedup by digest so a re-run is idempotent. The blob store is
-    // content-addressed, so `digest` is already the body's digest.
+    // Dedup by digest so a re-run is idempotent.
     if !manifests.iter().any(|entry| entry.digest == *digest) {
         manifests.push(manifest.take_descriptor(digest.clone(), body.len() as u64));
     }
@@ -187,15 +183,14 @@ async fn prune_fallback_descriptor(
 
     let before = manifests.len();
     manifests.retain(|entry| entry.digest != *referrer);
-    // Descriptor absent (already pruned, or a 1.1 downstream has no fallback tag
-    // and the GET returned an empty base): nothing to do.
+    // Absent already: pruned by an earlier attempt, or a 1.1 downstream has no
+    // fallback tag at all.
     if manifests.len() == before {
         return Ok(());
     }
 
     if manifests.is_empty() {
-        // No referrers remain: drop the fallback tag rather than leave an empty
-        // index. Timestamp-less, mirroring the merge PUT.
+        // No referrers remain: drop the tag rather than leave an empty index.
         timeout(
             REFERRERS_MERGE_HTTP_TIMEOUT,
             downstream.delete_manifest(DeleteManifestRequest {
@@ -217,12 +212,11 @@ async fn prune_fallback_descriptor(
     put_fallback_manifests(downstream, namespace, reference, manifests).await
 }
 
-/// GETs the existing referrers fallback index at `location`, bounded by the
-/// merge-lock HTTP timeout, and returns its `manifests[]` descriptors.
-///
-/// Only a `404` yields an empty base; any other error, including a `200` body
-/// that is not a parseable image index, propagates so the caller never rebuilds
-/// the index from an empty base and drops the subject's sibling referrers.
+/// GETs the existing referrers fallback index at `reference` and returns its
+/// `manifests[]` descriptors. Only a `404` yields an empty base; any other
+/// error, including a `200` body that is not a parseable image index,
+/// propagates so the caller never rebuilds the index from empty and drops the
+/// subject's sibling referrers.
 async fn fetch_fallback_manifests(
     downstream: &RegistryClient,
     namespace: &Namespace,
@@ -254,11 +248,9 @@ async fn fetch_fallback_manifests(
     }
 }
 
-/// Serializes `manifests` into an image index and PUTs it to `location`.
-///
-/// Timestamp-less: the receiver then skips LWW, so the merged index can never
-/// come back superseded and silently drop a descriptor. Bounded by the
-/// merge-lock HTTP timeout.
+/// Serializes `manifests` into an image index and PUTs it at `reference`.
+/// Timestamp-less, so the receiver skips LWW and the merged index can never
+/// come back superseded with a descriptor silently dropped.
 async fn put_fallback_manifests(
     downstream: &RegistryClient,
     namespace: &Namespace,

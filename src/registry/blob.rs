@@ -39,11 +39,10 @@ fn whole_blob_response(
 /// Cache a pull-through blob: stage and finalize its bytes through the blob
 /// store, then grant `namespace` a reference through the metadata store.
 ///
-/// Each write commits on its own store's executor, so the blob bytes and the
-/// blob-index grant can live on separate backends without one being routed
-/// through the other's executor. Byte presence is the dedup gate and the grant
-/// is idempotent, so a retry after a partial fill re-grants without re-fetching;
-/// a crash before the grant leaves the bytes for scrub to reclaim.
+/// The two stores may be separate backends, so each write stands alone. Byte
+/// presence is the dedup gate and the grant is idempotent, so a retry after a
+/// partial fill re-grants without re-fetching; a crash before the grant leaves
+/// the bytes for scrub to reclaim.
 pub async fn cache_blob(
     blob_store: &BlobStore,
     metadata_store: &MetadataStore,
@@ -70,11 +69,9 @@ pub async fn cache_blob(
     )
     .await;
 
-    // Reclaim the session whatever the outcome. A fill that fails partway
+    // Reclaim the session whatever the outcome: a fill that fails partway
     // otherwise strands a layer-sized staging directory until scrub runs, and
-    // repeated failures (a flaky upstream, a poisoning attempt) would fill the
-    // disk. On success the bytes have been promoted and the session is spent;
-    // so has a racer's session whose bytes this one found already promoted.
+    // repeated failures would fill the disk.
     if let Err(error) = blob_store.delete_upload(namespace, &session_id).await {
         warn!("Failed to delete cache-fill upload state: {error}");
     }
@@ -105,10 +102,8 @@ async fn fill_cache_session(
             digest.algorithm(),
         )
         .await?;
-    // Reject a pull-through blob whose bytes do not hash to the requested
-    // digest: a compromised or man-in-the-middle upstream must not poison the
-    // cache under a trusted digest. They are never promoted or granted, so no
-    // client can read them.
+    // A compromised or man-in-the-middle upstream must not poison the cache
+    // under a trusted digest, so mismatched bytes are never promoted.
     if &computed_digest != digest {
         warn!("Pull-through blob digest mismatch: expected {digest}, got {computed_digest}");
         return Err(Error::DigestInvalid);
@@ -156,9 +151,8 @@ impl Registry {
                         ResponseBody::empty(),
                     )?);
                 }
-                // Mirror GET: a genuine miss on a pull-through repo re-heads
-                // upstream; every other error (a transient or internal fault)
-                // propagates instead of masquerading as a 404.
+                // As on GET, a genuine miss re-heads upstream while every
+                // other error propagates instead of masquerading as a 404.
                 Err(Error::BlobUnknown) if upstream.is_some() => {}
                 Err(error) => return Err(error),
             }
@@ -179,9 +173,8 @@ impl Registry {
     }
 
     /// Serve the blob locally when `has_access`, else fall back to the
-    /// pull-through upstream. `has_access` is the namespace's ownership
-    /// verdict, resolved once by the caller so the hot GET path does not pay
-    /// for the blob-index read twice.
+    /// pull-through upstream. The caller resolves the ownership verdict once,
+    /// so the hot GET path does not pay for the blob-index read twice.
     pub async fn get_blob_with_access(
         &self,
         repository: Option<&Repository>,
@@ -227,8 +220,8 @@ impl Registry {
     }
 
     /// Fire-and-forget enqueue of a pull-through cache-fill job. A failure is
-    /// logged and counted on `angos_job_queue_enqueue_failures_total` but never
-    /// bubbles up, so a scheduling glitch cannot degrade the client response.
+    /// logged and counted but never bubbles up, so a scheduling glitch cannot
+    /// degrade the client response.
     async fn dispatch_cache_fill(&self, namespace: &Namespace, digest: &Digest) {
         let envelope = match build_envelope(namespace, digest) {
             Ok(envelope) => envelope,
@@ -290,9 +283,8 @@ impl Registry {
         }
 
         // Writers never remove reference entries, so only an entry whose
-        // backing link still resolves counts; a stale one (its manifest
-        // deleted) must not block the client's delete-manifest-then-blobs
-        // flow.
+        // backing link still resolves counts: a stale one must not block the
+        // client's delete-manifest-then-blobs flow.
         for link in &links {
             if matches!(link, LinkKind::Blob(link_digest) if link_digest == &request.digest) {
                 continue;
@@ -319,12 +311,10 @@ impl Registry {
         )?)
     }
 
-    /// Resolves a blob GET request to either a presigned redirect URL or a
-    /// stream, then emits a `blob.pull` event for the served digest.
-    ///
-    /// The redirect fast-path is only taken when the caller allows it (a client
-    /// opts out with `X-Angos-No-Redirect`), `enable_blob_redirect` is set, the
-    /// range is absent, and the blob is locally available (for pull-through repos).
+    /// Resolves a blob GET to either a presigned redirect URL or a stream,
+    /// then emits a `blob.pull` event. The redirect fast-path needs
+    /// `allow_redirect`, `enable_blob_redirect`, no range, and locally
+    /// available bytes.
     #[instrument(skip(self, request))]
     pub async fn resolve_get_blob(
         &self,
@@ -397,7 +387,7 @@ mod tests {
     use angos_oci::http_range::ByteWindow;
     use angos_oci::{Namespace, Tag};
     use angos_storage::{
-        Error as StorageError, MemoryObjectStore, ObjectStore,
+        Error as StorageError, ObjectStore,
         fs::Backend as StorageFsBackend,
         test_util::{HookedStore, StoreHook, StoreOp},
     };
@@ -419,40 +409,6 @@ mod tests {
         },
         test_fixtures::client::test_client_config,
     };
-
-    /// `delete_blob` only revokes the caller's ownership key; the bytes stay
-    /// for the collector, so a concurrent reference in another namespace can
-    /// never be stranded by the delete.
-    #[tokio::test]
-    async fn delete_blob_only_revokes_ownership_and_leaves_the_bytes() {
-        for_each_backend(async |test_case| {
-            let registry = test_case.registry();
-            let first = &Namespace::new("test-repo/first").unwrap();
-            let second = &Namespace::new("test-repo/second").unwrap();
-            let content = b"shared blob content";
-            let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
-            let ownership = registry.blob_ownership();
-
-            ownership.grant(first, &digest).await.unwrap();
-            ownership.grant(second, &digest).await.unwrap();
-
-            // A delete only revokes the caller's ownership key; the bytes are
-            // the collector's to reclaim, so a concurrent reference can never
-            // be stranded.
-            registry
-                .delete_blob(DeleteBlobRequest {
-                    namespace: first.clone(),
-                    digest: digest.clone(),
-                })
-                .await
-                .unwrap();
-
-            assert_eq!(registry.blob_store.read(&digest).await.unwrap(), content);
-            assert!(!ownership.can_read(first, &digest).await.unwrap());
-            assert!(ownership.can_read(second, &digest).await.unwrap());
-        })
-        .await;
-    }
 
     #[tokio::test]
     async fn test_head_blob() {
@@ -480,8 +436,7 @@ mod tests {
         .await;
     }
 
-    /// Fails the `head` of one key, modelling a transient backend fault on the
-    /// blob-size probe while leaving every other operation intact.
+    /// Fails the `head` of one key, leaving every other operation intact.
     struct FailHeadOf {
         key: String,
     }
@@ -503,9 +458,10 @@ mod tests {
         let namespace = &Namespace::new("test-repo").unwrap();
         let digest = Digest::sha256_of_bytes(b"transient-head-blob");
 
-        // The blob-size `head` fails transiently; the grant and repository reads
-        // still succeed, so the request reaches the size probe with access.
-        let inner: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+        // Only the blob-size `head` fails, so the request still reaches the
+        // size probe with access.
+        let dir = TempDir::new().unwrap();
+        let inner: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(dir.path()).build());
         let object: Arc<dyn ObjectStore> = Arc::new(HookedStore::new(
             inner,
             FailHeadOf {
@@ -521,8 +477,6 @@ mod tests {
             .await
             .unwrap();
 
-        // A transient fault must surface (500), not masquerade as a missing blob
-        // (404) the way GET already avoids.
         let result = registry
             .head_blob(HeadBlobRequest {
                 namespace: namespace.clone(),
@@ -642,8 +596,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // The delete revokes ownership; the bytes and the stale entry
-            // wait for the collector.
+            // The bytes and the stale entry wait for the collector.
             assert!(registry.blob_store.read(&digest).await.is_ok());
             assert!(
                 !registry
@@ -665,7 +618,7 @@ mod tests {
             let digest = put_blob_direct(registry.metadata_store.object_store(), content).await;
             let link = LinkKind::Config(digest.clone());
 
-            // A live referring revision: its per-referrer entry is what pins
+            // A live referring revision, whose per-referrer entry is what pins
             // the blob against the delete.
             let manifest =
                 put_blob_direct(registry.metadata_store.object_store(), b"manifest").await;
@@ -707,9 +660,9 @@ mod tests {
         .await;
     }
 
-    /// The conformance delete flow: a manifest is deleted, then its layer
-    /// blob. Reference entries are never removed by writers, so the stale
-    /// manifest entry must grant neither the delete gate nor read access.
+    /// The conformance delete flow: a manifest, then its layer blob. The stale
+    /// manifest entry writers leave behind must grant neither the delete gate
+    /// nor read access.
     #[tokio::test]
     async fn deleted_blob_is_unreadable_despite_stale_manifest_reference() {
         for_each_backend(async |test_case| {
@@ -767,8 +720,8 @@ mod tests {
             let namespace = &Namespace::new("test-repo").unwrap();
             let parent =
                 put_blob_direct(registry.metadata_store.object_store(), b"index manifest").await;
-            // Tracked kinds and the index-child pin are backed only while a
-            // referring manifest's revision resolves, so each names `parent`.
+            // Every kind is backed only while a referring manifest's revision
+            // resolves, so each case names `parent`.
             registry
                 .metadata_store
                 .update_links(
@@ -856,8 +809,7 @@ mod tests {
                 subject: subject.clone(),
                 referrer: digest.clone(),
             },
-            // A per-referrer entry names only the referring manifest, so
-            // there is nothing to retarget.
+            // Nothing to retarget: these name no separate blob.
             LinkKind::Blob(_) | LinkKind::Tag(_) | LinkKind::ReferencedBy(_) => link.clone(),
         }
     }
@@ -962,9 +914,9 @@ mod tests {
         .await;
     }
 
-    /// Regression: a range over a blob the cache does not hold yet is forwarded
-    /// to the upstream and answered `206`. It used to be refused with `416`, so
-    /// one URL answered differently depending on cache state.
+    /// A range over a blob the cache does not hold yet must be forwarded to
+    /// the upstream and answered `206`, not refused with `416`, so one URL
+    /// answers the same whatever the cache state.
     #[tokio::test]
     async fn ranged_get_of_an_uncached_pull_through_blob_serves_partial_content() {
         let content = b"pull-through ranged blob content";
@@ -997,7 +949,8 @@ mod tests {
         .await
         .unwrap();
 
-        let object: Arc<dyn ObjectStore> = Arc::new(MemoryObjectStore::new());
+        let dir = TempDir::new().unwrap();
+        let object: Arc<dyn ObjectStore> = Arc::new(StorageFsBackend::builder(dir.path()).build());
         let registry = create_test_registry(
             Arc::new(BlobStore::new(object.clone(), None)),
             metadata_store_over(object),
@@ -1034,7 +987,7 @@ mod tests {
     }
 
     /// A reader that fails on its first poll, standing in for an upstream
-    /// connection dropping mid-fill.
+    /// dropping mid-fill.
     struct FailingReader;
 
     impl tokio::io::AsyncRead for FailingReader {
@@ -1047,9 +1000,9 @@ mod tests {
         }
     }
 
-    /// Regression: a fill that fails partway must not strand its staged session.
-    /// The bytes are layer-sized, so leaving them for scrub turns an ordinary
-    /// upstream fault into disk pressure.
+    /// A fill that fails partway must not strand its staged session: the bytes
+    /// are layer-sized, so leaving them for scrub turns an ordinary upstream
+    /// fault into disk pressure.
     #[tokio::test]
     async fn cache_blob_reclaims_its_session_when_the_fill_fails() {
         for_each_backend(async |test_case| {
@@ -1077,9 +1030,8 @@ mod tests {
         .await;
     }
 
-    /// Pull-through cache poisoning guard: an upstream serving bytes that do not
-    /// hash to the requested digest must be rejected, and the poisoned bytes
-    /// must never be cached under the trusted digest.
+    /// Cache-poisoning guard: bytes that do not hash to the requested digest
+    /// must be rejected and never cached under it.
     #[tokio::test]
     async fn cache_blob_rejects_content_not_matching_requested_digest() {
         for_each_backend(async |test_case| {
@@ -1115,12 +1067,8 @@ mod tests {
         .await;
     }
 
-    /// Regression guard for the split-backend pull-through cache-fill failure:
-    /// with the blob store and metadata store on separate backends, `cache_blob`
-    /// must store the bytes in the blob store and grant the reference in the
-    /// metadata store as independent idempotent work. The previous design folded
-    /// both into one transaction and conflicted on every layer because the
-    /// blob-index read was verified against the wrong backend.
+    /// With the two stores on separate backends, `cache_blob` must write the
+    /// bytes and grant the reference as independent idempotent work.
     #[tokio::test]
     async fn cache_blob_grants_reference_with_split_blob_and_metadata_backends() {
         init_for_tests();
@@ -1139,8 +1087,7 @@ mod tests {
         let content = b"layer bytes";
         let digest = Digest::sha256_of_bytes(content);
 
-        // A prior manifest pull recorded the layer's ownership link in the
-        // metadata store, which is what made the old design conflict.
+        // A prior manifest pull already recorded the layer's ownership link.
         metadata_store
             .update_blob_index(
                 &namespace,
@@ -1390,8 +1337,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // An empty blob has no satisfiable window, so the range is ignored
-            // and the whole (empty) body is served.
+            // An empty blob has no satisfiable window, so the range is ignored.
             assert_eq!(response.status(), StatusCode::OK);
             assert!(response_body(response).await.is_empty());
         })
