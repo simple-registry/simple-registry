@@ -506,7 +506,7 @@ None. A client sending parameters on a manifest `Content-Type` still has them ig
 
 ---
 
-## 1.5.x → 1.5.2
+## 1.5.x → 1.6.0
 
 ### Transaction Engine Removed
 
