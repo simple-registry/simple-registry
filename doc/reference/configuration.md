@@ -266,13 +266,11 @@ multipart_uniform_parts = true
 
 Optional. Defaults to same backend as blob store.
 
-### Deprecated Coordination Keys
+### Unknown Keys
 
-`lock_strategy` (string or table form, including the
-`[metadata_store.*.lock_strategy.redis]` and
-`[metadata_store.*.lock_strategy.s3]` sub-tables), a bare
-`[metadata_store.*.redis]` table, and `conditional_operations` are accepted
-and ignored. Remove them at your convenience.
+Unknown keys under any section are ignored, so configs carrying knobs of
+removed subsystems (`lock_strategy`, `conditional_operations`,
+`access_time_debounce_secs`) keep loading. Remove them at your convenience.
 
 ### Filesystem (`metadata_store.fs`)
 
@@ -280,7 +278,6 @@ and ignored. Remove them at your convenience.
 |----------------|--------------|------------|-----------------------------------------------|
 | `root_dir`     | string       | -          | Directory for metadata (defaults to blob store) |
 | `sync_to_disk` | bool         | `false`    | Force fsync after writes                        |
-| `lock_strategy` | string/table | -          | Deprecated and ignored (see [Deprecated Coordination Keys](#deprecated-coordination-keys)) |
 
 ### S3 (`metadata_store.s3`)
 
@@ -289,9 +286,6 @@ Same connection options as `blob_store.s3`, plus:
 | Option                      | Type         | Default    | Description                                                                 |
 |-----------------------------|--------------|------------|-----------------------------------------------------------------------------|
 | `link_cache_ttl`            | u64          | `30`       | Read-through cache TTL for link metadata, in seconds (0 to disable)         |
-| `access_time_debounce_secs` | u64          | -          | Deprecated and ignored: access times are written inline as append-only entries |
-| `lock_strategy`             | string/table | -          | Deprecated and ignored (see [Deprecated Coordination Keys](#deprecated-coordination-keys)) |
-| `conditional_operations`    | bool         | -          | Deprecated and ignored (see [Deprecated Coordination Keys](#deprecated-coordination-keys)) |
 
 The link cache reduces S3 round-trips for repeated tag/layer reads.
 
@@ -302,8 +296,7 @@ The link cache reduces S3 round-trips for repeated tag/layer reads.
 There is no lock backend: reads and writes are lock-free, blob reclamation is
 fenced by the `v2/gc/` marker protocol, and the durable job queue serialises
 workers with atomically created claim keys. `lock_strategy` tables are
-accepted and ignored (see
-[Deprecated Coordination Keys](#deprecated-coordination-keys)).
+ignored like any unknown key (see [Unknown Keys](#unknown-keys)).
 
 ---
 

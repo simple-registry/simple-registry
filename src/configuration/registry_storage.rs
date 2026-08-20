@@ -1,20 +1,18 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Deserializer, de::IgnoredAny};
+use serde::Deserialize;
 
 use crate::registry::{blob_store, s3_connection::S3ConnectionConfig};
 
-// The deprecated coordination keys a `[metadata_store]` sub-table may still
-// carry (`lock_strategy` with its `redis`/`s3` sub-tables, a bare `redis`
-// table, `conditional_operations`) configured the removed transaction engine.
-// They parse as ignored raw values so existing configs keep loading, and are
-// silently ignored.
+// Unknown keys in any sub-table are ignored (serde's default), so configs
+// carrying knobs of removed subsystems keep loading.
 
 // FS backend config
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct MetadataFsConfig {
     pub root_dir: PathBuf,
+    #[serde(default)]
     pub sync_to_disk: bool,
 }
 
@@ -27,36 +25,13 @@ impl Default for MetadataFsConfig {
     }
 }
 
-impl<'de> Deserialize<'de> for MetadataFsConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Raw {
-            root_dir: PathBuf,
-            #[serde(default)]
-            redis: Option<IgnoredAny>,
-            #[serde(default)]
-            lock_strategy: Option<IgnoredAny>,
-            #[serde(default)]
-            sync_to_disk: bool,
-        }
-
-        let raw = Raw::deserialize(deserializer)?;
-        let _ = (raw.redis, raw.lock_strategy);
-        Ok(MetadataFsConfig {
-            root_dir: raw.root_dir,
-            sync_to_disk: raw.sync_to_disk,
-        })
-    }
-}
-
 // S3 backend config
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct MetadataS3Config {
+    #[serde(flatten)]
     pub connection: S3ConnectionConfig,
+    #[serde(default = "default_link_cache_ttl")]
     pub link_cache_ttl: u64,
 }
 
@@ -66,46 +41,6 @@ impl Default for MetadataS3Config {
             connection: S3ConnectionConfig::default(),
             link_cache_ttl: default_link_cache_ttl(),
         }
-    }
-}
-
-impl<'de> Deserialize<'de> for MetadataS3Config {
-    // Custom impl because the deprecated coordination keys must parse as
-    // ignored raw values (sub-tables included) without erroring.
-    // The connection fields come in flat alongside the metadata-specific
-    // keys; flattening `S3ConnectionConfig` preserves its required/optional
-    // contract (all required except `key_prefix`).
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Raw {
-            #[serde(flatten)]
-            connection: S3ConnectionConfig,
-            #[serde(default)]
-            redis: Option<IgnoredAny>,
-            #[serde(default)]
-            lock_strategy: Option<IgnoredAny>,
-            #[serde(default = "default_link_cache_ttl")]
-            link_cache_ttl: u64,
-            #[serde(default)]
-            access_time_debounce_secs: Option<IgnoredAny>,
-            #[serde(default)]
-            conditional_operations: Option<IgnoredAny>,
-        }
-
-        let raw = Raw::deserialize(deserializer)?;
-        let _ = (
-            raw.redis,
-            raw.lock_strategy,
-            raw.access_time_debounce_secs,
-            raw.conditional_operations,
-        );
-        Ok(MetadataS3Config {
-            connection: raw.connection,
-            link_cache_ttl: raw.link_cache_ttl,
-        })
     }
 }
 
