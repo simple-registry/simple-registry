@@ -74,9 +74,9 @@ Scrub streams every object key in both stores (blob and metadata), categorizes i
 - Repairs every link a manifest implies (config, layer, sub-manifest, digest revision), the `referenced_by` back-links, and missing blob-index grants.
 - Removes tags whose target manifest blob is missing, revisions whose manifest blob is missing, orphan referrer entries, stale blob-index entries, and tag or namespace directories whose names violate the OCI grammar.
 - Deletes objects whose content is unreadable (a link, job record, or index shard that does not parse).
-- Reclaims blobs with no references (re-checked under the blob-data lock, so it is safe alongside a live server).
+- Reclaims blobs with no references, past the reclamation grace period and fenced by a `v2/gc/` run marker at apply time, so it is safe alongside a live server.
 - Moves any key that matches no known angos layout to `_lost_and_found/` in the same store, preserving its bytes for inspection. Emptying that prefix is the operator's job. With `--delete-unknown` such keys are deleted outright instead.
-- Reclaims leftover `.tx-log/`, `.tx-bodies/`, and `.tx-locks/` keys the removed transaction engine left behind, once past the reclamation grace period.
+- Reclaims legacy `.tx-log/`, `.tx-bodies/`, and `.tx-locks/` transaction-engine keys, once past the reclamation grace period.
 
 Scrub is purely structural: it takes no age thresholds and no configuration-relative decisions. Time-based reclamation and orphan-namespace clearing belong to [`angos prune`](#prune).
 
@@ -153,8 +153,8 @@ Grant-only blob ownership (a blob uploaded whose manifest never landed) is decid
 
 It also performs the configuration-relative cleanup, always on:
 
-- **Orphan namespaces**: every namespace not owned by any configured `[repository]` loses its revisions, tags, in-flight uploads, and blob-ownership grants. The blast radius is every namespace whose owning repository is no longer in your config, so run `--dry-run` after config changes. Refused when no repositories are configured, so an emptied config can never wipe the registry.
-- **Orphan jobs**: queued replication and cache jobs whose downstream or repository is no longer configured.
+- **Orphan namespaces**: every namespace not owned by any configured `[repository]` loses its revisions, tags, in-flight uploads, and blob-ownership grants. The blast radius is every namespace whose owning repository is not in your config, so run `--dry-run` after config changes. Refused when no repositories are configured, so an emptied config can never wipe the registry.
+- **Orphan jobs**: queued replication and cache jobs whose downstream or repository is not configured.
 
 Prune is the config-and-time command: run it against the same configuration file the servers use. It refuses to start when a retention rule uses `image.last_pulled_at` or `top_pulled` while `update_pull_time` is disabled: pull times would never be recorded, so those rules would match nothing and actively pulled images would be deleted.
 

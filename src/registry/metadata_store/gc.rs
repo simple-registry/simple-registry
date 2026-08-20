@@ -35,10 +35,12 @@ const WRITER_BACKOFF: Backoff =
     Backoff::exponential(StdDuration::from_millis(50), StdDuration::from_millis(800)).with_jitter();
 
 /// One collector run's published claim over an inclusive digest range.
+/// `Digest` ordering matches the lexical order of its `algo:hash` string, so
+/// the range semantics are those of the stored keys.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GcRun {
-    pub start: String,
-    pub end: String,
+    pub start: Digest,
+    pub end: Digest,
     pub expires_at: DateTime<Utc>,
     pub instance: String,
 }
@@ -48,8 +50,8 @@ pub struct GcRun {
 pub struct GcClaim {
     key: String,
     instance: String,
-    start: String,
-    end: String,
+    start: Digest,
+    end: Digest,
 }
 
 impl MetadataStore {
@@ -92,10 +94,10 @@ impl MetadataStore {
                 if run.expires_at < Utc::now() {
                     continue;
                 }
-                if digests.iter().any(|digest| {
-                    let digest = digest.to_string();
-                    run.start <= digest && digest <= run.end
-                }) {
+                if digests
+                    .iter()
+                    .any(|digest| run.start <= **digest && **digest <= run.end)
+                {
                     return Ok(true);
                 }
             }
@@ -113,8 +115,8 @@ impl MetadataStore {
         let claim = GcClaim {
             key: path_builder::gc_run_path(&Uuid::new_v4().to_string()),
             instance: Uuid::new_v4().to_string(),
-            start: start.to_string(),
-            end: end.to_string(),
+            start: start.clone(),
+            end: end.clone(),
         };
         self.put_gc_run(&claim).await?;
         Ok(claim)

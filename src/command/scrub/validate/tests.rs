@@ -1072,7 +1072,7 @@ async fn legacy_tag_link_is_converted_to_an_entry() {
 
         let tag = Tag::new("legacy").unwrap();
         let link = LinkKind::Tag(tag.clone());
-        let created_at = chrono::DateTime::from_timestamp_millis(1_600_000_000_000).unwrap();
+        let created_at = DateTime::from_timestamp_millis(1_600_000_000_000).unwrap();
         let metadata = LinkMetadata::from_digest_at(manifest_digest.clone(), created_at);
         let legacy_path = path_builder::link_path(&link, namespace);
         metadata_store
@@ -1120,7 +1120,7 @@ async fn legacy_revision_link_is_converted_to_a_record() {
 
         // Rewind to the legacy shape: link present, record absent.
         let link = LinkKind::Digest(manifest_digest.clone());
-        let created_at = chrono::DateTime::from_timestamp_millis(1_600_000_000_000).unwrap();
+        let created_at = DateTime::from_timestamp_millis(1_600_000_000_000).unwrap();
         let metadata = LinkMetadata::from_digest_at(manifest_digest.clone(), created_at);
         let legacy_path = path_builder::link_path(&link, namespace);
         store
@@ -1383,7 +1383,7 @@ async fn dangling_referrer_backlink_is_pruned() {
         let metadata_store = test_case.metadata_store();
 
         // A legacy link file naming a referrer revision that is absent.
-        // Pushes no longer write these files, so the legacy shape is seeded
+        // Pushes do not write these files, so the legacy shape is seeded
         // raw.
         let dead_revision = Digest::sha256_of_bytes(b"dead-revision");
         let config_link = LinkKind::Config(config_digest.clone());
@@ -1397,16 +1397,15 @@ async fn dangling_referrer_backlink_is_pruned() {
         )
         .await;
 
-        scrub_apply(test_case).await;
-
-        // The dead pin is pruned; the file itself may be retired outright
-        // once no live pins remain, which is also a valid outcome.
-        if let Ok(repaired) = metadata_store.read_link(namespace, &config_link).await {
-            assert!(
-                !repaired.referenced_by.contains(&dead_revision),
-                "a back-link to an absent revision must be pruned"
-            );
-        }
+        let actions = scrub_capture(test_case).await;
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                Action::RemoveReferrer { namespace: ns, link, referrer }
+                    if ns == namespace && *link == config_link && *referrer == dead_revision
+            )),
+            "a back-link to an absent revision must be pruned"
+        );
     })
     .await;
 }
@@ -1678,9 +1677,8 @@ async fn demoted_entries_leave_the_listing_and_keep_their_bodies() {
     .await;
 }
 
-/// Pushes no longer write the legacy layer/config link files; serving,
-/// `can_read`, and the blob delete gate run on records and reference keys
-/// alone.
+/// Pushes write no legacy layer/config link files; serving, `can_read`, and
+/// the blob delete gate run on records and reference keys alone.
 #[tokio::test]
 async fn push_writes_no_tracked_link_files() {
     for_each_backend(async |test_case| {

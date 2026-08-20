@@ -13,7 +13,7 @@ Deploy Angos on Kubernetes as a stateless service. Angos requires only configura
 - Kubernetes cluster
 - `kubectl` configured
 - S3-compatible storage (AWS S3, Exoscale SOS, etc.) for production deployments
-- Optional: Redis for distributed locking and caching in multi-replica deployments
+- Optional: Redis for a shared cache in multi-replica deployments
 - Optional: Ingress controller for external access
 
 ---
@@ -268,9 +268,9 @@ kubectl apply -f ingress.yaml
 
 ---
 
-## With Redis for Locking and Caching
+## With Redis for Caching
 
-For improved performance in multi-replica deployments, add Redis for distributed locking and token caching.
+Replicas need no coordination backend. In multi-replica deployments, an optional Redis shares the link and token caches across replicas, so a write on one replica is visible to the others immediately instead of after the cache TTL.
 
 ### Deploy Redis
 

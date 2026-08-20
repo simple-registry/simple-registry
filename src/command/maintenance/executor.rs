@@ -158,24 +158,36 @@ impl Executor {
     }
 }
 
+/// Whether the object at `key` is younger than `grace_secs`, by the
+/// backend's own timestamp; `None` when the key is gone. A missing timestamp
+/// reads as young, so an unreadable age never justifies a deletion.
+pub async fn object_younger_than_grace(
+    store: &dyn ObjectStore,
+    key: &str,
+    grace_secs: u64,
+) -> Result<Option<bool>, StorageError> {
+    let meta = match store.head(key).await {
+        Ok(meta) => meta,
+        Err(StorageError::NotFound) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let grace = i64::try_from(grace_secs).unwrap_or(i64::MAX);
+    Ok(Some(meta.last_modified.is_none_or(|modified| {
+        Utc::now().signed_duration_since(modified).num_seconds() < grace
+    })))
+}
+
 impl Executor {
-    /// Whether the object at `key` is younger than the reclamation grace
-    /// period; `None` when the key is gone. A missing timestamp reads as
-    /// young, so an unreadable age never justifies a deletion.
+    /// [`object_younger_than_grace`] bound to this executor's grace period
+    /// and error domain.
     async fn key_younger_than_grace(
         &self,
         store: &dyn ObjectStore,
         key: &str,
     ) -> Result<Option<bool>, Error> {
-        let meta = match store.head(key).await {
-            Ok(meta) => meta,
-            Err(StorageError::NotFound) => return Ok(None),
-            Err(e) => return Err(Error::from(RegistryError::from(e))),
-        };
-        let grace = i64::try_from(self.metadata_store.gc_grace_secs()).unwrap_or(i64::MAX);
-        Ok(Some(meta.last_modified.is_none_or(|modified| {
-            Utc::now().signed_duration_since(modified).num_seconds() < grace
-        })))
+        object_younger_than_grace(store, key, self.metadata_store.gc_grace_secs())
+            .await
+            .map_err(|e| Error::from(RegistryError::from(e)))
     }
 
     /// The collector's only irreversible action, fenced by the marker
@@ -1429,7 +1441,7 @@ mod tests {
             let namespace = Namespace::new("test-repo/remove-referrer-cascade").unwrap();
 
             // A legacy layer link file with exactly one phantom referrer,
-            // seeded raw: pushes no longer write these files.
+            // seeded raw: pushes do not write these files.
             let layer_content = b"layer content for cascade test";
             let layer_digest = put_blob_direct(metadata_store.object_store(), layer_content).await;
             let phantom_digest = Digest::from_str(

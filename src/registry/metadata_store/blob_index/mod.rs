@@ -110,7 +110,7 @@ pub async fn namespace_entries_merged(
 ) -> Result<HashSet<LinkKind>, Error> {
     let mut links = namespace_ref_entries(store, namespace, digest).await?;
     let shard_path = path_builder::blob_index_shard_path(digest, namespace);
-    if let Some((_, legacy)) = read_shard(store, &shard_path).await.map_err(Error::from)? {
+    if let Some(legacy) = read_shard(store, &shard_path).await.map_err(Error::from)? {
         links.extend(legacy);
     }
     Ok(links)
@@ -186,8 +186,7 @@ impl MetadataStore {
         loop {
             let page = self.object_store().list(&dir, REF_LIST_PAGE, token).await?;
             for key in &page.items {
-                // Foreign key shapes and invalid namespaces are skipped, the
-                // way undecodable shard names always were.
+                // Foreign key shapes and invalid namespaces are skipped.
                 let Some((raw, link)) = path_builder::parse_blob_ref(digest, key) else {
                     continue;
                 };

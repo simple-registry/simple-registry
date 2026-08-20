@@ -6,7 +6,7 @@ title: "Enable Durable Cache Jobs"
 
 # Enable Durable Cache Jobs
 
-Pull-through cache-fill tasks always go through the engine-backed job queue, and
+Pull-through cache-fill tasks always go through the durable job queue, and
 that queue is **persistent in both modes**: jobs are written to the **same
 backend you configured for `[metadata_store]`** (filesystem or S3), under a
 hardcoded `_jobs/` prefix, and survive a restart. The code path is identical in
@@ -48,8 +48,9 @@ The queue has no storage backend of its own. Durable jobs are written to the
 S3) under a hardcoded top-level `_jobs/` prefix, and workers serialise on
 per-`lock_key` claim keys created atomically on that backend. There is no
 `[global.job_queue.fs]` or `[global.job_queue.s3]` sub-table: enabling the
-queue is just a matter of adding `[global.job_queue]`, which accepts only the
-two tunables below.
+queue is just a matter of adding `[global.job_queue]`, which accepts only a
+few tunables (the two shown below, plus the retry and claim-lease settings in
+the [configuration reference](../reference/configuration.md#durable-job-queue-globaljob_queue)).
 
 ```toml
 [global]
@@ -172,14 +173,11 @@ far. With the default 5-attempt budget a job retries 4 times with delays of
 200 ms, 400 ms, 800 ms and 1.6 s (3 seconds total) before being moved to the
 dead-letter queue.
 
-**Transactional engine path:** All writes (enqueue, complete, retry, and
-dead-letter) are routed through the transactional engine regardless of the
-metadata-store backend. On `complete`, the handler's work-product mutations (for
-`cache.fetch_blob`: `Move` of staged bytes to the canonical blob path,
-`Delete` of the upload-session record, and the per-namespace blob-index
-grant) are merged with the pending and dedup-index deletes into one engine
-transaction. The worker releases the per-`lock_key` execution lock right
-after that transaction settles, so the work commit and the queue cleanup
-land atomically and the next worker can claim the same `lock_key` without
-waiting on TTL. The on-disk layout under `_jobs/pending/`, `_jobs/failed/`, and
+**Write path:** Enqueue, complete, retry, and dead-letter are ordered
+idempotent writes with no transaction, on any metadata-store backend. Workers
+serialise on leased claim keys under `_jobs/claims/`, one per `lock_key`,
+created atomically and refreshed while the job runs; the worker releases the
+claim right after the job's writes settle, so the next worker can claim the
+same `lock_key` without waiting on the lease TTL (`claim_ttl_secs`, default
+60). The on-disk layout under `_jobs/pending/`, `_jobs/failed/`, and
 `_jobs/index/` is identical for both the filesystem and S3 backends.

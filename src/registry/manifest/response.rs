@@ -41,9 +41,8 @@ impl GetManifestResponse {
 /// replication off the rest, so both outlive the write.
 pub struct PutManifestResponse {
     pub digest: Digest,
-    /// Whether the write changed local state, as validated by the committed
-    /// link transaction itself (no racy pre-read); gates the replication
-    /// re-dispatch.
+    /// Whether the write changed local state, per the commit's recorded
+    /// prior targets; gates the replication re-dispatch.
     pub changed: bool,
     pub headers: HeaderMap,
 }

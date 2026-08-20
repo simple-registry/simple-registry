@@ -113,7 +113,9 @@ pub trait ObjectStore: Send + Sync {
         prefix: &str,
         n: u16,
         token: Option<String>,
-    ) -> Result<Page<String>, Error>;
+    ) -> Result<Page<String>, Error> {
+        self.list_after(prefix, n, token, None).await
+    }
 
     /// Create the object only when the key is absent. `false` means it
     /// already exists (any content). The check and the write are one atomic

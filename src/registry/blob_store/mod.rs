@@ -1,13 +1,11 @@
 //! Blob storage subsystem.
 //!
-//! Exposes a single [`BlobStore`] over a plain [`ObjectStore`] plus an optional
-//! [`PresignedStore`]. The blob store is pure storage: it performs no
-//! coordination and holds no transaction executor. Blob-lifecycle serialisation
-//! lives entirely on the metadata store's `blob-data:{digest}` lock, which every
-//! caller (push, upload, delete, scrub) acquires before mutating blob bytes. FS
-//! and S3 share one code path (the [`BlobStoreConfig`] enum only picks the
-//! storage handles); all public methods are inherent on `BlobStore`, with no
-//! caller-facing trait. The one deliberate exception is
+//! Exposes a single [`BlobStore`] over a plain [`ObjectStore`] plus an
+//! optional [`PresignedStore`]. The blob store is pure storage with no
+//! coordination: writers rely on the collector's grace period and the `v2/gc`
+//! marker protocol in the metadata store. FS and S3 share one code path (the
+//! [`BlobStoreConfig`] enum only picks the storage handles); all public
+//! methods are inherent on `BlobStore`, except
 //! [`multipart_cleanup::MultipartCleanup`], kept as a trait so prune can
 //! inject a test double.
 

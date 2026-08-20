@@ -1632,7 +1632,6 @@ pub async fn test_datastore_shared_blob_pin_survives_other_manifest_delete(m: Ar
 
     m.delete_manifest(
         namespace,
-        &first_manifest,
         &[
             LinkOperation::delete(LinkKind::Digest(first_manifest.clone())),
             LinkOperation::delete_with_referrer(

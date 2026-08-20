@@ -32,12 +32,12 @@ pub struct TagEntryBody {
     pub media_type: Option<MediaType>,
 }
 
-/// The resolved winner of a tag's newest entry group.
+/// The resolved winner of a tag's newest entry group. Its fields rebuild the
+/// entry key via [`path_builder::tag_entry_path`].
 struct TagWinner {
     ord: u64,
     deletion: bool,
     digest: Digest,
-    entry: String,
 }
 
 /// The mutation appending one `set` entry. The entry key carries the authored
@@ -101,10 +101,12 @@ impl MetadataStore {
         match self.resolve_tag_winner(namespace, tag).await? {
             Some(winner) if winner.deletion => Err(Error::NotFound),
             Some(winner) => {
-                let entry_path = format!(
-                    "{}/{}",
-                    path_builder::tag_entry_dir(namespace, tag),
-                    winner.entry
+                let entry_path = path_builder::tag_entry_path(
+                    namespace,
+                    tag,
+                    winner.ord,
+                    winner.deletion,
+                    &winner.digest,
                 );
                 let media_type = match self.object_store().get(&entry_path).await {
                     Ok(body) => serde_json::from_slice::<TagEntryBody>(&body)
@@ -149,7 +151,6 @@ impl MetadataStore {
                         ord,
                         deletion,
                         digest,
-                        entry: name.clone(),
                     }),
                 }
             }
@@ -245,10 +246,9 @@ impl MetadataStore {
     /// Convert one legacy `current/link` into a `set` entry stamped with the
     /// link's recorded `created_at`, then delete the link once it is older
     /// than the grace period (an old-binary writer may still rewrite a young
-    /// one in place; a skipped delete waits for the next run). Entry first,
-    /// so an interruption loses nothing; both halves are idempotent. An
-    /// absent link is a no-op (a racer or an earlier run already converted
-    /// it).
+    /// one in place; a skipped delete waits for the next run). Entry first
+    /// and both halves idempotent, so an interruption or an absent link
+    /// loses nothing.
     pub async fn convert_legacy_tag_link(
         &self,
         namespace: &Namespace,

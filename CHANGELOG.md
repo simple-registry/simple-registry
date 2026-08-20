@@ -8,15 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- The internal transaction engine (crate, intent log, recovery loop, janitors, and lock backends) is removed: `lock_strategy` and `conditional_operations` are accepted and silently ignored, and a previous binary's mid-crash transaction is no longer replayed; `angos scrub` reclaims leftover `.tx-*` keys as garbage and repairs any torn legacy write from content.
-- Registry metadata is stored as write-once keys (references under `v2/ref/`, tag entries, revision and referrer records under `v2/ns/`, a catalog index under `v2/cat/`), replacing the metadata transaction, its locks, and every read-modify-write; legacy shapes keep answering reads until `angos scrub` converts them, so no migration step is required.
-- Blob reclamation moves entirely to `angos scrub`, fenced by a `v2/gc/` run-marker protocol and the new `[global] gc_grace_secs` knob (default 300): deletes answer `202 Accepted` while bytes wait for the sweep, and a write racing an active reclamation answers 503 `RECLAMATION_IN_PROGRESS` with `Retry-After`.
-- The durable job queue serialises workers with leased claim keys (atomic create-if-absent, probed at startup) instead of distributed locks; `[global.job_queue] claim_ttl_secs` (default 60) sets how quickly a crashed worker's jobs are taken over.
+- The internal transaction engine is removed: `lock_strategy` and `conditional_operations` are accepted and ignored, and `angos scrub` reclaims leftover `.tx-*` keys and repairs any torn legacy write from content.
+- Registry metadata is stored as write-once keys under `v2/ref/`, `v2/ns/`, and `v2/cat/`; legacy shapes keep answering reads until `angos scrub` converts them, so no migration step is required.
+- Blob reclamation moves entirely to `angos scrub`, fenced by `v2/gc/` run markers and the new `[global] gc_grace_secs` knob (default 300): deletes answer `202 Accepted` while bytes wait for the sweep, and a write racing an active reclamation answers 503 `RECLAMATION_IN_PROGRESS` with `Retry-After`.
+- The durable job queue serialises workers with leased claim keys (atomic create-if-absent, probed at startup) instead of distributed locks; `[global.job_queue] claim_ttl_secs` (default 60) bounds how quickly a crashed worker's jobs are taken over.
 - Tag history is retained: timestamps carry millisecond precision and scrub demotes superseded entries to a per-namespace `!hist/` prefix, keeping the hot tag listing at one entry per tag.
-- The catalog and tag listings serve ordered pages straight off key listings, with the catalog served from the `v2/cat/` index alone; a namespace whose index key is missing, whether its write was lost to a crash or its content predates the index, lists again after the next scrub backfill.
-- Pushes no longer write the legacy layer/config/index-child link files, and `angos scrub` retires the existing ones once their references are re-homed to per-referrer reference keys, leaving `v2/repositories/` to upload sessions only.
-- Upload-session metadata collapses into one `session.json` per session (one atomic put per chunk), replacing the `startedat` marker and per-offset `hashstates/` checkpoints; sessions begun by an earlier version still resume, complete, and age out.
-- Access times are append-only entries written inline on each stamped pull, carrying the pulling client's identity and forming a rolling one-hour audit window; `angos scrub` collects superseded entries past it while always keeping the newest, retires the legacy overwritten atime keys, and the `access_time_debounce_secs` knob is accepted and silently ignored.
+- The catalog and tag listings serve ordered pages straight off key listings, the catalog from the `v2/cat/` index alone; a namespace whose index key is missing lists again after the next scrub backfill.
+- Pushes write none of the legacy layer/config/index-child link files, and `angos scrub` retires the existing ones, leaving `v2/repositories/` to upload sessions only.
+- Upload-session metadata collapses into one `session.json` per session; sessions begun by an earlier version still resume, complete, and age out.
+- Access times are append-only entries carrying the pulling client's identity in a rolling one-hour audit window; `angos scrub` keeps each target's newest entry and collects the rest, and `access_time_debounce_secs` is accepted and ignored.
 
 ## 1.5.1
 

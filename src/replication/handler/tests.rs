@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use tempfile::TempDir;
 use wiremock::{
@@ -539,9 +539,7 @@ async fn execute_push_resolves_tag_past_the_link_cache() {
         .await
         .unwrap();
     sibling.target = current_digest.clone();
-    sibling.created_at = sibling
-        .created_at
-        .map(|ts| ts + chrono::Duration::milliseconds(1));
+    sibling.created_at = sibling.created_at.map(|ts| ts + Duration::milliseconds(1));
     metadata_store
         .write_link_reference(&namespace, &link, &sibling)
         .await

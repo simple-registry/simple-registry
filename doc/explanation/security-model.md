@@ -78,7 +78,7 @@ Between clients and registry:
 
 Between registry and storage:
 - Separate credentials for S3
-- Redis authentication for locks/cache
+- Redis authentication for the cache
 - Network isolation recommended
 
 ### Upstream Boundary

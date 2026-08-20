@@ -187,14 +187,13 @@ impl From<StorageError> for Error {
 /// hold one claim.
 pub async fn ensure_claim_support(store: &Arc<dyn ObjectStore>) -> Result<(), Error> {
     let key = format!("{JOBS_ROOT}/claims/.probe-{}", Uuid::new_v4());
-    let objects = store;
-    let first = objects
+    let first = store
         .create_if_absent(&key, Bytes::from_static(b"probe"))
         .await;
-    let second = objects
+    let second = store
         .create_if_absent(&key, Bytes::from_static(b"probe"))
         .await;
-    let _ = objects.delete(&key).await;
+    let _ = store.delete(&key).await;
     match (first, second) {
         (Ok(true), Ok(false)) => Ok(()),
         (Ok(_), Ok(_)) => Err(Error::Storage(
@@ -576,12 +575,6 @@ impl JobClaim {
     fn lost(&self) -> bool {
         self.lost.is_cancelled()
     }
-
-    /// Cancelled the moment the claim is lost, so the runner can abort a
-    /// handler mid-execution.
-    pub fn cancellation(&self) -> CancellationToken {
-        self.lost.clone()
-    }
 }
 
 impl Drop for JobClaim {
@@ -604,9 +597,10 @@ pub struct ClaimedJob {
 }
 
 impl ClaimedJob {
-    /// Cancelled the moment the claim's lease is lost.
+    /// Cancelled the moment the claim's lease is lost, so the runner can
+    /// abort a handler mid-execution.
     pub fn lock_lost(&self) -> CancellationToken {
-        self.claim.cancellation()
+        self.claim.lost.clone()
     }
 
     /// Test-only: a claimed job over a hand-built claim, so runner tests can
@@ -1009,14 +1003,12 @@ impl JobStore {
     // Claims: create-if-absent keys plus leases
     // -----------------------------------------------------------------------
 
-    /// Try to claim `lock_key`: one atomic create of the claim key. A held
-    /// unexpired claim yields `None`; a lapsed one is deleted and re-created.
-    /// The takeover is deliberately unfenced (no conditional store): two
-    /// claimants can both see the lapse, and the later delete can remove the
-    /// earlier winner's fresh claim, so both may execute for a while. Each
-    /// loser's refresher notices the foreign record within one refresh
-    /// period, so the cost is bounded duplicate execution of an idempotent
-    /// handler, never a lost job.
+    /// Try to claim `lock_key`: one atomic create of the claim key; a held
+    /// unexpired claim yields `None`, a lapsed one is deleted and re-created.
+    /// The takeover is deliberately unfenced: racing claimants may both
+    /// execute briefly (each loser's refresher notices within one refresh
+    /// period), costing a duplicate run of an idempotent handler, never a
+    /// lost job.
     async fn try_claim(&self, lock_key: &LockKey) -> Result<Option<JobClaim>, Error> {
         let key = job_claim_path(lock_key);
         let instance = Uuid::new_v4().to_string();
@@ -1312,10 +1304,9 @@ impl JobStore {
     }
 
     /// Mark a claimed job as complete: delete its pending file, retire the
-    /// dedup index when it still points at it, and release the claim. The
-    /// handler's effects already landed as their own idempotent writes. A
-    /// lost claim skips the cleanup entirely: the key's new holder owns that
-    /// state now, and a redundant re-run is what the handler contract covers.
+    /// dedup index when it still points at it, and release the claim. A lost
+    /// claim skips the cleanup entirely: the key's new holder owns that state
+    /// now, and a redundant re-run is what the handler contract covers.
     pub async fn complete(&self, claimed: ClaimedJob) -> Result<CompleteOutcome, Error> {
         let ClaimedJob {
             envelope,
@@ -1616,11 +1607,9 @@ fn should_cancel_claim(
 /// The claim holder's lease refresher: re-stamp the record at a third of the
 /// lease, stop and raise `lost` when the key positively no longer carries
 /// this instance, or when read errors persist past the last verified expiry.
-/// The re-stamp is an unconditional put, so it can overwrite a takeover's
-/// record written between the read and the put; like the takeover race on
-/// `try_claim`, that costs at most bounded duplicate execution of an
-/// idempotent handler, detected within one refresh period, and never a lost
-/// job.
+/// The re-stamp is an unconditional put that can overwrite a takeover's
+/// record; like the `try_claim` race, that costs at most a bounded duplicate
+/// run of an idempotent handler, never a lost job.
 async fn refresh_claim_loop(
     store: Arc<dyn ObjectStore>,
     key: String,

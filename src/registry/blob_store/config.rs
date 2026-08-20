@@ -4,8 +4,7 @@
 //! `[blob_store.fs]` or `[blob_store.s3]`. It selects which storage backend to
 //! instantiate, but the resulting [`BlobStore`] is the same unified type
 //! regardless: each arm wires the object store plus, on S3, the presign
-//! backend. The blob store holds no transaction executor: blob-lifecycle
-//! serialisation lives on the metadata store's `blob-data:{digest}` lock.
+//! backend.
 
 use std::path::PathBuf;
 use std::{sync::Arc, time::Duration};

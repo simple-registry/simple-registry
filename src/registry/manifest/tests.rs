@@ -3034,7 +3034,6 @@ async fn store_manifest_strict_rejects_stale_references_of_a_deleted_manifest() 
         store
             .delete_manifest(
                 &namespace,
-                manifest,
                 &[
                     LinkOperation::delete(LinkKind::Digest((*manifest).clone())),
                     LinkOperation::delete_with_referrer(

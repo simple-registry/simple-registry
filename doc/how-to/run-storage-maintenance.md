@@ -13,9 +13,9 @@ Repair storage inconsistencies with the `scrub` command and reclaim aged or poli
 - Angos installed
 - Access to the same configuration and storage as the running registry
 
-## Automatic vs Scheduled Maintenance
+## Deletes and Scheduled Maintenance
 
-Angos performs garbage collection **automatically** during normal operation: unreferenced blobs are cleaned up as part of request handling, without downtime.
+A delete removes records immediately and answers `202 Accepted`; the freed blob bytes wait for the next `angos scrub` sweep to be reclaimed. Schedule scrub periodically or storage only grows.
 
 The `scrub` and `prune` commands run as **separate periodic processes** that operate alongside the live server (no shutdown required). The split is:
 
@@ -26,7 +26,7 @@ The `scrub` and `prune` commands run as **separate periodic processes** that ope
 
 Scrub streams every key in both stores (blob and metadata), categorizes it by shape, and validates it concurrently, in three ordered passes: links and job records, then blob-index references (legacy shards are converted into reference keys, then every key is probed), then blob data. Every check always runs; there are no per-check flags.
 
-Before applying a cross-key repair, scrub confirms the inconsistency is settled damage rather than a transaction caught mid-apply: while a live transaction intent covers the involved keys, the candidate waits briefly and re-checks, and one that never settles is left for the next run. This is what makes scrub safe to run against a live server.
+Before applying a cross-key repair, scrub confirms the inconsistency is settled damage rather than a push caught between its write waves: the repair proceeds only when a fresh re-read still observes it, and every reclaim is age-gated by `gc_grace_secs`, so a key younger than the grace period reads as live. This is what makes scrub safe to run against a live server.
 
 | Concern | Behavior |
 |---|---|
@@ -38,7 +38,7 @@ Before applying a cross-key repair, scrub confirms the inconsistency is settled 
 | Corrupt content | Deletes links, job records, and index shards whose content does not parse |
 | Orphan blobs | Reclaims blobs with no live references, past a grace period and fenced by a `v2/gc/` run marker at apply time |
 | Unrecognized keys | Moves them to `_lost_and_found/` in the same store, preserving their bytes |
-| Engine leftovers | Deletes `.tx-log/`, `.tx-bodies/`, and `.tx-locks/` keys the removed transaction engine left behind, once past the reclamation grace period |
+| Engine leftovers | Deletes legacy `.tx-log/`, `.tx-bodies/`, and `.tx-locks/` transaction-engine keys, once past the reclamation grace period |
 
 | Option | Short | Description |
 |---|---|---|
@@ -69,7 +69,7 @@ Prune first enforces retention policies (see [Configure Retention Policies](conf
 | Grant-only blob ownership | Retention policies decide, like any untagged content (no tag, `pushed_at` = upload time); the `-u` window only shields in-flight pushes, and with no policies configured the grant is retained |
 | Byteless index entries | Removes blob-index entries whose blob bytes never landed |
 | Orphan namespaces | Clears revisions, tags, in-flight uploads, and blob grants of every namespace not owned by any configured repository (always on; see below) |
-| Orphan jobs | Deletes queued replication/cache jobs whose downstream or repository is no longer configured (always on) |
+| Orphan jobs | Deletes queued replication/cache jobs whose downstream or repository is not configured (always on) |
 
 These need an age threshold because a structural check cannot distinguish an in-flight push (blob uploaded, manifest seconds away) from an abandoned one; the `-u` window is exactly that upload-lifecycle age. The `-u` window must exceed the longest push you expect, since a deleting retention policy revokes grant-only blobs older than it. Run prune against the same configuration file the servers use.
 
@@ -245,20 +245,20 @@ See [Configure Retention Policies](configure-retention-policies.md) for detailed
 | Blob | `scrub`: not referenced by any manifest |
 | Upload | `prune`: broken session or older than the `-u` window |
 | Grant-only blob | `prune`: no manifest reference, past the `-u` window, and no retention rule keeps it |
-| Queued job | `prune`: downstream or repository no longer configured |
+| Queued job | `prune`: downstream or repository not configured |
 | Corrupt object | `scrub`: content does not parse (link, shard, job record) |
 | Unrecognized key | `scrub`: quarantined to `_lost_and_found/` |
 | Whole namespace | `prune`: not owned by any configured `[repository]` (revisions, tags, in-flight uploads, plus the namespace's blob-ownership grants) |
 
 ### Clearing Orphan Namespaces
 
-Orphan-namespace clearing runs on **every prune**. When a `[repository]` is removed from configuration (or data predates it), the namespaces it held no longer resolve to any repository, yet their manifests, tags, and blobs would linger forever. Prune removes the revisions, tags, and in-flight uploads of every such namespace and reclaims their blob bytes by revoking those blobs' ownership grants when no still-configured namespace shares them, so the blast radius is **every namespace whose owning repository is no longer in your config**, not just empty ones.
+Orphan-namespace clearing runs on **every prune**. When a `[repository]` is removed from configuration (or data predates it), the namespaces it held resolve to no repository, yet their manifests, tags, and blobs would linger forever. Prune removes the revisions, tags, and in-flight uploads of every such namespace and reclaims their blob bytes by revoking those blobs' ownership grants when no still-configured namespace shares them, so the blast radius is **every namespace whose owning repository is not in your config**, not just empty ones.
 
 Safeguards apply:
 
 - **Dry-run after config changes.** Run `angos prune --dry-run` after removing or renaming a `[repository]` and confirm the listed deletions only cover namespaces you intend to drop.
 - **Byte reclaim may take a follow-up scrub.** Prune clears the namespace's links and grants; a scrub reclaims blob bytes the cascade freed.
-- **Run with no writers on orphan namespaces.** A client can still push to a namespace that no longer maps to any repository; a later prune mops up anything pushed during the clear.
+- **Run with no writers on orphan namespaces.** A client can still push to a namespace that maps to no repository; a later prune mops up anything pushed during the clear.
 - **Empty-config guard.** If no `[repository]` is configured, every namespace would be an orphan, so the clearing is skipped with a warning and nothing is deleted; an emptied config can never wipe the registry.
 
 Cleared namespaces drop out of `_catalog` automatically, since the catalog is derived from stored content.

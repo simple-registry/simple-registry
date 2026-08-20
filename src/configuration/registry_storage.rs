@@ -118,7 +118,7 @@ fn default_link_cache_ttl() -> u64 {
 /// Unified storage configuration for both the metadata store and the job store.
 ///
 /// Both subsystems share the same `ObjectStore` built once at startup by the
-/// CLI bootstrap (`crate::command::bootstrap::build_store`); this module
+/// CLI bootstrap (`crate::command::bootstrap::build_object_store`); this module
 /// carries only the parsed configuration.
 ///
 /// The operator-facing TOML key remains `[metadata_store]` (with `.fs` or
@@ -130,8 +130,8 @@ pub enum RegistryStorageConfig {
     /// Inherit blob-store credentials and root path.
     ///
     /// Resolved via [`crate::configuration::Configuration::resolve_registry_storage`]
-    /// before any backend is built. Reaching the bootstrap's `build_store`
-    /// with this variant is a programming error.
+    /// before any backend is built. Reaching the bootstrap's
+    /// `build_object_store` with this variant is a programming error.
     #[default]
     Inherit,
     #[serde(rename = "fs")]

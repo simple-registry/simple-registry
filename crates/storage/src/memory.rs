@@ -204,15 +204,6 @@ impl ObjectStore for MemoryObjectStore {
             .ok_or(Error::NotFound)
     }
 
-    async fn list(
-        &self,
-        prefix: &str,
-        n: u16,
-        token: Option<String>,
-    ) -> Result<Page<String>, Error> {
-        self.list_after(prefix, n, token, None).await
-    }
-
     async fn list_after(
         &self,
         prefix: &str,

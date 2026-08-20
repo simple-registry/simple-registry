@@ -201,17 +201,12 @@ pub fn tag_entry_path(
     )
 }
 
-/// Directory holding every demoted tag-history directory of `namespace`.
-/// Nothing reads `!hist/` yet: it retains superseded entries for the future
-/// tag-history endpoint while `!tag/` keeps only each tag's current group.
-pub fn tag_hist_root(namespace: &Namespace) -> String {
-    format!("{NS_ROOT}/{namespace}!hist")
-}
-
-/// Directory holding one tag's demoted entries, `!`-terminated like
-/// [`tag_entry_dir`].
+/// Directory holding one tag's demoted entries under `<namespace>!hist`,
+/// `!`-terminated like [`tag_entry_dir`]. Nothing reads `!hist/` yet: it
+/// retains superseded entries for the future tag-history endpoint while
+/// `!tag/` keeps only each tag's current group.
 pub fn tag_hist_dir(namespace: &Namespace, tag: &Tag) -> String {
-    format!("{}/{tag}!", tag_hist_root(namespace))
+    format!("{NS_ROOT}/{namespace}!hist/{tag}!")
 }
 
 /// A demoted entry keeps its [`tag_entry_path`] file name, so history stays
@@ -220,8 +215,8 @@ pub fn tag_hist_path(namespace: &Namespace, tag: &Tag, entry_name: &str) -> Stri
     format!("{}/{entry_name}", tag_hist_dir(namespace, tag))
 }
 
-/// Legacy advisory last-pull timestamp for a tag, overwritten in place.
-/// Read as a fallback and retired by scrub; no longer written.
+/// Legacy advisory last-pull timestamp for a tag: read as a fallback,
+/// retired by scrub.
 pub fn tag_atime_path(namespace: &Namespace, tag: &Tag) -> String {
     format!("{NS_ROOT}/{namespace}!atime/tag/{tag}")
 }
@@ -308,8 +303,8 @@ pub fn referrer_record_path(namespace: &Namespace, subject: &Digest, referrer: &
     )
 }
 
-/// Legacy advisory last-pull timestamp for a manifest revision, overwritten
-/// in place. Read as a fallback and retired by scrub; no longer written.
+/// Legacy advisory last-pull timestamp for a manifest revision: read as a
+/// fallback, retired by scrub.
 pub fn revision_atime_path(namespace: &Namespace, digest: &Digest) -> String {
     format!(
         "{NS_ROOT}/{namespace}!atime/rev/{}/{}",
@@ -319,9 +314,8 @@ pub fn revision_atime_path(namespace: &Namespace, digest: &Digest) -> String {
 }
 
 /// The inverted-timestamp ordinal of `ts`: entries sort newest first.
-/// `u64::MAX` is reserved for a missing timestamp: it sorts last and never
-/// wins resolution, mirroring how a link without `created_at` never won
-/// last-writer-wins, and stays distinct from a real epoch timestamp.
+/// `u64::MAX` is reserved for a missing timestamp: it sorts last, never wins
+/// resolution, and stays distinct from a real epoch timestamp.
 pub fn tag_ord(ts: Option<DateTime<Utc>>) -> u64 {
     match ts {
         None => u64::MAX,
@@ -591,20 +585,21 @@ mod tests {
         );
     }
 
-    /// The whole listing story rests on `!` sorting below every byte a
-    /// namespace or tag can contain, so a name that is a prefix of another
-    /// sorts first and flat listings yield true lexical order. A grammar
-    /// relaxation admitting a lower byte would break tag ordering silently.
+    /// Flat listings stay in lexical order only while `!` sorts below every
+    /// byte the namespace and tag grammars admit; probed against the real
+    /// validators so a grammar relaxation fails here.
     #[test]
     fn the_separator_sorts_below_both_grammars() {
-        let namespace_alphabet = "abcdefghijklmnopqrstuvwxyz0123456789._-/";
-        let tag_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-";
-        for byte in namespace_alphabet.bytes().chain(tag_alphabet.bytes()) {
-            assert!(
-                b'!' < byte,
-                "'!' must sort below {:?} or listings lose lexical order",
-                byte as char
-            );
+        for byte in 0u8..=127 {
+            let c = byte as char;
+            let admitted =
+                Namespace::new(&format!("a{c}a")).is_ok() || Tag::new(&format!("a{c}a")).is_ok();
+            if admitted {
+                assert!(
+                    b'!' < byte,
+                    "'!' must sort below {c:?} or listings lose lexical order"
+                );
+            }
         }
     }
 
@@ -675,7 +670,7 @@ mod tests {
         let hist_key = tag_hist_path(&ns, &tag, file);
         assert_eq!(hist_key, format!("v2/ns/org/app!hist/v1!/{file}"));
         assert_eq!(hist_key, format!("{}/{file}", tag_hist_dir(&ns, &tag)));
-        assert!(hist_key.starts_with(&format!("{}/", tag_hist_root(&ns))));
+        assert!(hist_key.starts_with("v2/ns/org/app!hist/"));
         assert_eq!(parse_tag_entry(file), Some((7, true, digest)));
     }
 

@@ -372,10 +372,9 @@ impl Registry {
             .read_manifest_link(namespace, &blob_link, client)
             .await?;
 
-        // A tag is history and can outlive the manifest, whose bytes wait
-        // for the collector; the revision record is existence, so a tag
-        // resolving to a deleted revision reads as gone (a request, checked
-        // alongside the body read).
+        // A tag entry can outlive its manifest, whose bytes wait for the
+        // collector, so a tag resolving to a deleted revision must read as
+        // gone; the probe runs alongside the body read.
         let (revision, content) = tokio::join!(
             self.probe_revision_for_tag(namespace, reference, &link.target),
             self.blob_store.read(&link.target),
@@ -482,7 +481,7 @@ impl Registry {
         );
 
         // Ownership of the referenced digests is checked by the link
-        // transaction itself, per `reference_policy`; a strict push only
+        // planner itself, per `reference_policy`; a strict push only
         // pre-verifies that the referenced bytes exist.
         if reference_policy == ReferencePolicy::Strict {
             self.validate_manifest_references(&manifest).await?;
@@ -501,10 +500,10 @@ impl Registry {
             .store_manifest(namespace, &ops, created_at, reference_policy)
             .await?;
 
-        // Changed-state check from the prior target the committed transaction
-        // itself validated; a missing entry fails open so a genuine write is
-        // never suppressed. A by-digest push with `?tag=` also counts its created
-        // tag links so newly added tags replicate even when the digest is present.
+        // Changed-state check from the prior target the commit reported; a
+        // missing entry fails open so a genuine write is never suppressed. A
+        // by-digest push with `?tag=` also counts its created tag links so
+        // newly added tags replicate even when the digest is present.
         let changed = commit.changed(&LinkKind::from_reference(reference), &computed_digest)
             || created_tags
                 .iter()
@@ -526,7 +525,7 @@ impl Registry {
     }
 
     /// Verifies each referenced blob's bytes exist; ownership is checked by
-    /// the link transaction, where the read is commit-validated.
+    /// the link planner's own pre-read.
     async fn validate_manifest_references(&self, manifest: &Manifest) -> Result<(), Error> {
         match &manifest.content {
             Content::Image { config, layers } => {
@@ -704,12 +703,11 @@ impl Registry {
     /// Commits the delete transaction, reporting whether the reference counted
     /// as present beforehand (the replication-dispatch gate).
     ///
-    /// A digest delete resolves its pointing tags and tombstones each one; a
-    /// tag pushed concurrently appends its own newer entry and wins
-    /// resolution by timestamp regardless of interleaving. A tag delete
-    /// writes one tombstone. `source_ts` stamps a replicated delete with the
-    /// author's clock, so the LWW gate resolves it against local writes the
-    /// same way an entry would.
+    /// A digest delete resolves its pointing tags and tombstones each one (a
+    /// tag delete writes one tombstone); a tag pushed concurrently appends
+    /// its own newer entry and wins resolution by timestamp regardless of
+    /// interleaving. `source_ts` stamps a replicated delete with the author's
+    /// clock, so the LWW gate resolves it like any entry.
     async fn commit_manifest_delete(
         &self,
         resolved_repository: Option<&Repository>,
@@ -746,7 +744,7 @@ impl Registry {
         // The bytes are the collector's to reclaim once every reference is
         // stale; both delete endpoints answer `202 Accepted` regardless.
         self.metadata_store
-            .delete_manifest(namespace, digest, &ops, source_ts)
+            .delete_manifest(namespace, &ops, source_ts)
             .await?;
         Ok(existed_before)
     }
@@ -884,8 +882,8 @@ impl Registry {
 
     /// Advisory last-writer-wins fast-fail for a replication-originated tag
     /// write, saving the manifest blob write when the local tag already
-    /// supersedes the incoming `source_ts`; the authoritative read-set-validated
-    /// gate lives in the link transaction planner and applies the same
+    /// supersedes the incoming `source_ts`; the authoritative gate lives in
+    /// the link planner and applies the same
     /// [`LinkMetadata::supersedes`] rule. Skipped without a `source_ts` (genuine
     /// client write) and for digest references (content-addressed); ordering
     /// uses the author's write time, persisted as `created_at` and propagated
@@ -1043,9 +1041,8 @@ impl Registry {
             .await?;
 
         // No-op suppression: re-dispatching a converged replay would keep a
-        // mesh cycle alive, so only a write that changed local state (per the
-        // committed transaction) is replicated. Webhook events fire
-        // unconditionally.
+        // mesh cycle alive, so only a write that changed local state (per
+        // the commit) is replicated. Webhook events fire unconditionally.
         if response.changed {
             self.replicate_manifest_push(
                 resolved_repository,

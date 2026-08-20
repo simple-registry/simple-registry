@@ -398,16 +398,6 @@ impl ObjectStore for Backend {
         })
     }
 
-    async fn list(
-        &self,
-        prefix: &str,
-        n: u16,
-        token: Option<String>,
-    ) -> Result<Page<String>, Error> {
-        let (items, next_token) = self.client.list_objects(prefix, n, token, None).await?;
-        Ok(Page { items, next_token })
-    }
-
     async fn list_after(
         &self,
         prefix: &str,

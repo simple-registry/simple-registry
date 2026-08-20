@@ -75,7 +75,7 @@ impl LinkMetadata {
         }
     }
 
-    /// Test convenience: writers no longer grow a stored `referenced_by` set.
+    /// Test convenience for seeding legacy link files with a referrer set.
     #[cfg(test)]
     pub fn add_referrer(&mut self, digest: Digest) {
         self.referenced_by.insert(digest);

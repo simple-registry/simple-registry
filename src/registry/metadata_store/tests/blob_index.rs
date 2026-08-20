@@ -348,56 +348,9 @@ async fn legacy_shards_merge_into_every_read() {
     );
 }
 
-/// A shard holding an empty link set must not keep blob data alive. Removing
-/// the last link deletes the shard object outright, so the empty set is written
-/// directly here: it is the only way to reach the tolerance branch.
-#[tokio::test]
-async fn test_has_blob_references_ignores_empty_cas_shards() {
-    let config = test_config();
-    let backend = config.to_backend(None).unwrap();
-
-    let digest =
-        Digest::from_str("sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
-            .unwrap();
-    let namespace = Namespace::new("empty-cas-shard").unwrap();
-    let shard_path = path_builder::blob_index_shard_path(&digest, &namespace);
-
-    backend
-        .object_store()
-        .put(&shard_path, Bytes::from_static(b"[]"))
-        .await
-        .unwrap();
-    assert!(
-        !backend.blob_references_live(&digest).await.unwrap(),
-        "empty CAS shards must not keep blob data alive"
-    );
-
-    // The negative case above only means something if a populated shard of the
-    // same digest reports the opposite.
-    backend
-        .update_blob_index(
-            &namespace,
-            &digest,
-            BlobIndexOperation::Insert(LinkKind::Blob(digest.clone())),
-        )
-        .await
-        .unwrap();
-    assert!(
-        backend.blob_references_live(&digest).await.unwrap(),
-        "a shard holding a link must keep blob data alive"
-    );
-
-    backend
-        .object_store()
-        .delete_prefix(&config.connection.key_prefix)
-        .await
-        .unwrap();
-}
-
-/// The collector's liveness test reads legacy shards the way the old
-/// reclaim check did: an emptied shard was deleted by the old write path, so
-/// a persisted empty one is an artifact and must not pin the blob forever,
-/// while any populated one pins it until scrub converts it.
+/// Legacy shards gate collector liveness: an empty shard is a legacy
+/// artifact and must not pin the blob forever, while any populated one pins
+/// it until scrub converts it.
 #[tokio::test]
 async fn legacy_shards_gate_collector_liveness() {
     let config = test_config();
@@ -429,7 +382,7 @@ async fn legacy_shards_gate_collector_liveness() {
         "a populated legacy shard must pin the blob"
     );
 
-    // A shard whose filename no longer decodes to a valid namespace still
+    // A shard whose filename does not decode to a valid namespace still
     // pins: skipping it would reclaim bytes another namespace holds.
     let bad_digest =
         Digest::from_str("sha256:ff00000000000000000000000000000000000000000000000000000000000003")

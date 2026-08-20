@@ -8,7 +8,7 @@ title: "Deploy with Docker Compose"
 
 Deploy Angos using Docker Compose with persistent storage and TLS.
 
-**Note:** This guide uses filesystem storage for simplicity. For production multi-host deployments, use S3 storage instead (see the "With S3 Locking for Multi-Replica" section below).
+**Note:** This guide uses filesystem storage for simplicity. For production multi-host deployments, use S3 storage instead (see the "With S3 for Multi-Replica" section below).
 
 ## Prerequisites
 
@@ -185,7 +185,11 @@ enabled = true
 
 ---
 
-## With Redis for Multi-Replica
+## With a Shared Redis Cache for Multi-Replica
+
+Replicas need no coordination backend. Redis is optional: it shares the link,
+token, and key caches across replicas, so a write on one replica is visible to
+the others immediately instead of after the cache TTL.
 
 ### docker-compose.yml
 
@@ -237,9 +241,9 @@ key_prefix = "angos"
 
 ---
 
-## With S3 Locking for Multi-Replica
+## With S3 for Multi-Replica
 
-If your S3 provider supports conditional writes, you can run multiple replicas without Redis by using S3-based locking.
+S3 storage lets replicas run on any number of hosts with no Redis and no other coordination infrastructure.
 
 ### docker-compose.yml
 

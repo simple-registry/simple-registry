@@ -263,9 +263,8 @@ sudo chown -R $(id -u):$(id -g) /data/registry
 
 ### Leftover `.tx-` keys after an upgrade
 
-**Cause**: A previous angos version's transaction engine kept its journal,
-staged bodies, and lock objects under `.tx-log/`, `.tx-bodies/`, and
-`.tx-locks/`. Nothing writes them any more.
+**Cause**: Legacy transaction-engine keys under `.tx-log/`, `.tx-bodies/`,
+and `.tx-locks/`. Nothing reads or writes them.
 
 **Solution**: Run `angos scrub`; it reclaims the leftovers once they are
 older than the reclamation grace period (`[global] gc_grace_secs`).

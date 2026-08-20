@@ -15,22 +15,19 @@ mod tests;
 
 use std::{
     collections::HashSet,
-    future::Future,
     sync::{Arc, Mutex, atomic::Ordering},
 };
 
-use chrono::Utc;
 use tracing::warn;
 
 use angos_oci::Digest;
-use angos_storage::Error as StorageError;
 
 use crate::{
     command::maintenance::{
         Error,
         action::{Action, WalkedStore},
         categorize::{KeyCategory, categorize},
-        executor::ActionSink,
+        executor::{ActionSink, object_younger_than_grace},
         walk::WalkStats,
     },
     registry::{Error as RegistryError, blob_store::BlobStore, metadata_store::MetadataStore},
@@ -186,34 +183,18 @@ impl Validator {
     }
 
     /// Whether the metadata key at `key` is younger than the reclamation
-    /// grace period, by the backend's own timestamp. A young key may belong
-    /// to a push between two of its waves, so no repair may be derived from
-    /// (or applied to) it; a missing timestamp never reads in favour of one.
-    /// A missing key is not young: its absence is the caller's evidence.
+    /// grace period. A young key may belong to a push between two of its
+    /// waves, so no repair may be derived from (or applied to) it; a missing
+    /// key is not young, its absence being the caller's evidence.
     pub async fn younger_than_grace(&self, key: &str) -> Result<bool, Error> {
-        let meta = match self.metadata_store.object_store().head(key).await {
-            Ok(meta) => meta,
-            Err(StorageError::NotFound) => return Ok(false),
-            Err(e) => return Err(RegistryError::from(e).into()),
-        };
-        let Some(modified) = meta.last_modified else {
-            return Ok(true);
-        };
-        let grace = i64::try_from(self.metadata_store.gc_grace_secs()).unwrap_or(i64::MAX);
-        Ok(Utc::now().signed_duration_since(modified).num_seconds() < grace)
-    }
-
-    /// Confirm a cross-key inconsistency before repairing it: the repair
-    /// proceeds only when `reverify` still observes the inconsistency against
-    /// fresh reads, so a first read raced by a write between its waves is
-    /// never mistaken for settled damage. Mid-write windows beyond that are
-    /// covered by the age gates on every reclaim.
-    pub async fn confirm_repair<F, Fut>(&self, reverify: F) -> Result<bool, Error>
-    where
-        F: Fn() -> Fut,
-        Fut: Future<Output = Result<bool, Error>>,
-    {
-        reverify().await
+        let young = object_younger_than_grace(
+            self.metadata_store.object_store().as_ref(),
+            key,
+            self.metadata_store.gc_grace_secs(),
+        )
+        .await
+        .map_err(RegistryError::from)?;
+        Ok(young == Some(true))
     }
 
     /// Reclaim one leftover key of the removed transaction engine. Age-gated

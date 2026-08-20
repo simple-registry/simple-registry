@@ -19,8 +19,6 @@ sequenceDiagram
     participant MetaStore as Metadata Store
     participant FS as Filesystem
     participant S3 as S3
-    participant Lock as Lock Store
-    participant Redis
 
     Client->>Registry: Request
 
@@ -39,17 +37,6 @@ sequenceDiagram
             MetaStore->>FS: Access local disk
         else S3 backend
             MetaStore->>S3: Access object storage
-        end
-    end
-
-    alt Write operation (needs locking)
-        Registry->>Lock: Acquire lock
-        alt Single instance
-            Lock->>Lock: In-memory lock
-        else Multi-replica (Redis)
-            Lock->>Redis: Distributed lock
-        else Multi-replica (S3)
-            Lock->>S3: Conditional write lock
         end
     end
 
@@ -180,7 +167,7 @@ operation_attempt_timeout_secs = 300
 - Higher latency than local disk
 - Network dependency
 - Potential egress costs
-- Requires distributed locking configuration for multi-replica
+- Requires a provider with honest conditional writes (`If-None-Match: *`), which the job queue probes at startup
 
 ### Compatible Services
 
@@ -205,14 +192,10 @@ queue serialises workers with leased claim keys created atomically
 
 ### Deprecated Lock Configuration
 
-Earlier versions coordinated writes through a transaction engine with a
-configurable lock backend. That engine is gone, and with it the lock
-configuration surface: `lock_strategy` (including the
-`[metadata_store.*.lock_strategy.redis]` and
+`lock_strategy` (including the `[metadata_store.*.lock_strategy.redis]` and
 `[metadata_store.*.lock_strategy.s3]` sub-tables), a bare
-`[metadata_store.*.redis]` table, and `conditional_operations` are still
-accepted by the TOML parser so existing configs keep loading, but they are
-ignored. Remove them at your convenience.
+`[metadata_store.*.redis]` table, and `conditional_operations` are accepted
+and ignored. Remove them at your convenience.
 
 ### Shared Filesystem (Not Recommended)
 
@@ -223,9 +206,6 @@ Shared filesystems (NFS, EFS) defeat Angos's stateless design and are not recomm
 - **Scaling issues**: metadata round-trips worsen as replicas increase
 
 For multi-replica deployments, use S3 instead: conditional writes give the queue its atomic claim keys with no additional infrastructure.
-
-See the [configuration reference](../reference/configuration.md#prometheus-metrics) for the full metrics list.
-
 
 ---
 
@@ -372,7 +352,7 @@ When using S3 for metadata, Angos includes several optimizations to reduce round
 
 In single-instance deployments, in-memory cache is sufficient. In multi-instance deployments, each instance maintains its own in-memory cache, so a write on instance A is not visible to instance B until the TTL expires. For consistency, use a shared Redis cache: when instance A writes a tag, all instances see the updated entry immediately.
 
-**Access time updates**: A recording pull appends one write-once entry under the target's `!atime/` directory, named newest-first (inverted-millisecond ordinal plus a short hash of the client identity) with a JSON body carrying the authenticated client and the RFC3339 pull time, so access times double as a rolling audit log. Readers stay O(1): retention and the admin API list only the newest entry, falling back to the legacy overwritten single key, which is no longer written and which scrub retires once an entry exists. Scrub always keeps each target's newest entry (retention needs the last access durably) and collects superseded entries older than a one-hour audit window (hardcoded today, a config knob later).
+**Access time updates**: A recording pull appends one write-once entry under the target's `!atime/` directory, named newest-first (inverted-millisecond ordinal plus a short hash of the client identity) with a JSON body carrying the authenticated client and the RFC3339 pull time, so access times double as a rolling audit log. Readers stay O(1): retention and the admin API list only the newest entry, falling back to the legacy overwritten single key, which nothing writes and which scrub retires once an entry exists. Scrub always keeps each target's newest entry (retention needs the last access durably) and collects superseded entries older than a one-hour audit window (hardcoded).
 
 The stamp is written inline: every stamped pull is one extra storage write, and same-millisecond stamps never contend (distinct clients land as distinct entries; a same-client repeat dedupes by key). Entries accumulate between scrub sweeps proportional to distinct-client pull volume, bounded by the collection window; readers stay O(1) regardless. Disable `update_pull_time` if retention does not need last-pull times.
 
@@ -427,9 +407,9 @@ This makes the catalog **deterministic and strongly consistent** for content wri
 
 #### Legacy Layouts
 
-Blob references written by earlier versions as per-namespace `v2/blobs/.../refs/{namespace}.json` shards are still merged into every read as a fallback; `angos scrub` converts each shard into reference keys and deletes it, so the fallback cost disappears with the last shard. The advisory layer/config/index-child link files earlier versions kept under `v2/repositories/` are no longer written by pushes; scrub retires each one once its live references are re-homed to per-referrer reference keys. The pre-1.2.0 single-file `index.json` is no longer read (see the [upgrade guide](../how-to/upgrade.md) for the required pre-upgrade migration).
+Legacy per-namespace `v2/blobs/.../refs/{namespace}.json` shards are merged into every read as a fallback; `angos scrub` converts each shard into reference keys and deletes it, so the fallback cost disappears with the last shard. Pushes do not write the advisory layer/config/index-child link files under `v2/repositories/`; scrub retires each existing one once its live references are re-homed to per-referrer reference keys. The pre-1.2.0 single-file `index.json` is not read (see the [upgrade guide](../how-to/upgrade.md) for the required pre-upgrade migration).
 
-Pre-existing namespace-registry index objects (`_registry/namespaces.json` and `_registry/ns/*.json`) written by earlier versions are no longer read or written; the catalog is now served from the content-checked `v2/cat/` index. These objects become unused after upgrade and can be left in place or deleted manually; no migration step is required.
+Namespace-registry index objects (`_registry/namespaces.json` and `_registry/ns/*.json`) are not read or written; the catalog is served from the content-checked `v2/cat/` index. Any present in a store are inert and can be left in place or deleted manually.
 
 #### Blob Index Convergence
 
@@ -439,7 +419,7 @@ blob. It is stored per-blob as one reference key per (namespace, link) under
 
 The write path adds entries on push and removes them on successful delete.
 Mid-flight failures or out-of-band edits can leave stale entries pointing to
-namespaces that no longer exist.
+namespaces that do not exist.
 
 Periodic `angos scrub` probes every reference key against its raw link key
 in the metadata store, bypassing the link cache so a stale cache entry cannot
@@ -501,7 +481,6 @@ Without Redis, cache is in-memory per-instance.
 | Multiple instances | ❌              | ✅               |
 | High availability  | ❌             | ✅               |
 | Low latency        | ✅             | ❌               |
-| Native locking     | ✅ (in-memory) | ✅ (S3 or Redis) |
 | Simple setup       | ✅             | ❌               |
 | Cost (small scale) | ✅             | ❌               |
 | Cost (large scale) | ❌             | ✅               |
@@ -541,8 +520,7 @@ startup probe verifies the backend's create-if-absent is honest before
 hasher checkpoint) under `v2/repositories/<namespace>/_uploads/<uuid>/`;
 `complete` moves the staged blob to its content-addressed key as an idempotent
 effect, and a crash mid-promotion leaves a re-drivable state that the caller's
-retry or scrub reconciles. Sessions begun by an earlier version keep their
-`startedat` marker and `hashstates/` checkpoints readable until they complete
-or age out.
+retry or scrub reconciles. Legacy sessions carrying a `startedat` marker and
+`hashstates/` checkpoints stay readable until they complete or age out.
 
-Earlier versions kept three reserved prefixes in the metadata store's backend for their transaction engine: `.tx-log/` (the transaction journal), `.tx-bodies/` (staged object bodies), and `.tx-locks/` (lock objects). Nothing writes them any more, and their crash-recovery loop is gone with the engine: a store carrying a previous binary's mid-crash transaction is not replayed. `angos scrub` reclaims the leftover keys as garbage once they are older than the reclamation grace period, and any torn legacy write surfaces as a scrub-repairable inconsistency that the validators repair from content.
+A store may carry legacy transaction-engine keys under three reserved prefixes: `.tx-log/` (journal), `.tx-bodies/` (staged bodies), and `.tx-locks/` (lock objects). Nothing reads or writes them, and a legacy mid-crash transaction is never replayed: `angos scrub` reclaims the keys as garbage once past the reclamation grace period, and any torn legacy write surfaces as a scrub-repairable inconsistency repaired from content.

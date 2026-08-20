@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use angos_oci::{Digest, Namespace, UploadSessionId};
+use angos_oci::{Digest, MediaType, Namespace, Reference, Tag, UploadSessionId};
 
 use crate::command::maintenance::action::Action;
 use crate::command::maintenance::executor::{ActionSink, Executor};
@@ -9,7 +9,7 @@ use crate::registry::{
     blob_ownership::{GrantOutcome, promote_and_grant},
     metadata_store::{BlobIndexOperation, LinkKind},
     path_builder,
-    test_utils::{FSRegistryTestCase, RegistryTestCase},
+    test_utils::{FSRegistryTestCase, RegistryTestCase, upload_blob},
 };
 
 async fn seed_blob(case: &FSRegistryTestCase, content: &[u8]) -> Digest {
@@ -140,7 +140,6 @@ async fn a_guarded_grant_fails_closed_while_a_run_covers_present_bytes() {
 async fn a_guarded_grant_never_returns_a_reclaimed_blob() {
     let case = FSRegistryTestCase::new();
     let registry = case.registry();
-    let store = case.metadata_store();
     let namespace = Namespace::new("gc-mount").unwrap();
     let digest = seed_blob(&case, b"gc-mount-bytes").await;
 
@@ -157,26 +156,6 @@ async fn a_guarded_grant_never_returns_a_reclaimed_blob() {
         GrantOutcome::BytesAbsent,
         "a reclaimed blob must never be granted"
     );
-
-    // A crash between waves leaves partial state; every prefix of the wave
-    // order reads consistently. Wave A only: reference keys with no revision.
-    let torn = Namespace::new("gc-torn").unwrap();
-    let orphan = seed_blob(&case, b"gc-torn-bytes").await;
-    store
-        .update_blob_index(
-            &torn,
-            &orphan,
-            BlobIndexOperation::Insert(LinkKind::Blob(orphan.clone())),
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .read_link_reference(&torn, &LinkKind::Digest(orphan.clone()))
-            .await
-            .is_err(),
-        "reference keys alone must not make a manifest resolvable"
-    );
 }
 
 /// A crash between waves leaves only legal states: after wave C a revision
@@ -189,10 +168,8 @@ async fn a_push_interrupted_between_waves_reads_consistently() {
     let store = case.metadata_store();
     let namespace = Namespace::new("test-repo/torn-push").unwrap();
 
-    let config_digest =
-        crate::registry::test_utils::upload_blob(registry, &namespace, br#"{"torn":true}"#).await;
-    let media_type =
-        angos_oci::MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap();
+    let config_digest = upload_blob(registry, &namespace, br#"{"torn":true}"#).await;
+    let media_type = MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap();
     let content = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
         "mediaType": media_type,
@@ -207,7 +184,7 @@ async fn a_push_interrupted_between_waves_reads_consistently() {
     let digest = registry
         .put_manifest(
             &namespace,
-            &angos_oci::Reference::Tag(angos_oci::Tag::new("latest").unwrap()),
+            &Reference::Tag(Tag::new("latest").unwrap()),
             Some(&media_type),
             &content,
         )
@@ -220,16 +197,13 @@ async fn a_push_interrupted_between_waves_reads_consistently() {
         .object_store()
         .delete_prefix(&path_builder::tag_entry_dir(
             &namespace,
-            &angos_oci::Tag::new("latest").unwrap(),
+            &Tag::new("latest").unwrap(),
         ))
         .await
         .unwrap();
     assert!(
         store
-            .read_link_reference(
-                &namespace,
-                &LinkKind::Tag(angos_oci::Tag::new("latest").unwrap())
-            )
+            .read_link_reference(&namespace, &LinkKind::Tag(Tag::new("latest").unwrap()))
             .await
             .is_err(),
         "without its wave-D entry the tag must read as absent"
@@ -269,10 +243,8 @@ async fn a_manifest_push_fails_closed_while_a_run_covers_its_blob() {
     let store = case.metadata_store();
     let namespace = Namespace::new("gc-writer-push").unwrap();
 
-    let config_digest =
-        crate::registry::test_utils::upload_blob(registry, &namespace, br#"{"gc":true}"#).await;
-    let media_type =
-        angos_oci::MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap();
+    let config_digest = upload_blob(registry, &namespace, br#"{"gc":true}"#).await;
+    let media_type = MediaType::new("application/vnd.oci.image.manifest.v1+json").unwrap();
     let content = serde_json::to_vec(&serde_json::json!({
         "schemaVersion": 2,
         "mediaType": media_type,
@@ -284,7 +256,7 @@ async fn a_manifest_push_fails_closed_while_a_run_covers_its_blob() {
         "layers": []
     }))
     .unwrap();
-    let reference = angos_oci::Reference::Tag(angos_oci::Tag::new("latest").unwrap());
+    let reference = Reference::Tag(Tag::new("latest").unwrap());
 
     let claim = store
         .gc_claim(&config_digest, &config_digest)

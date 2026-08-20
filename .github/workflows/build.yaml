@@ -326,11 +326,12 @@ jobs:
           zb_pid=$!
           sleep 2
 
-          # Scrub races the live benchmark traffic: the classify-then-recheck
-          # lock discipline must never reclaim or repair in-flight state, so
-          # even under load the walk must report all zeros. Run as the store's
-          # owning uid on fs (see the backend step) so this run's tx-engine
-          # writes stay readable by the later host-side gate binary.
+          # Scrub races the live benchmark traffic: the grace-gated
+          # classify-then-recheck discipline must never reclaim or repair
+          # in-flight state, so even under load the walk must report all
+          # zeros. Run as the store's owning uid on fs (see the backend step)
+          # so this run's writes stay readable by the later host-side gate
+          # binary.
           docker_user=""
           if [[ "${{ matrix.s3 }}" != "true" ]]; then docker_user="--user $(id -u):$(id -g)"; fi
           docker run --rm $docker_user \

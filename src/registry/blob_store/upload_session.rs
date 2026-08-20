@@ -23,7 +23,7 @@
 //! progress (size, hash) is the blob store's concern, reconstructed from the
 //! session record.
 //!
-//! `complete` promotes the upload under the caller's `blob-data:{digest}` lock:
+//! `complete` promotes the upload:
 //! 1. The session record is deleted, consuming the session so a re-run fails
 //!    (`UploadNotFound`) instead of re-finalizing.
 //! 2. The object store's `complete_upload` runs (S3 multipart-complete; no-op
@@ -102,16 +102,17 @@ pub struct SessionFile {
     pub hash_state: String,
 }
 
-/// Decode `session.json` bytes into the record and its hasher checkpoint.
-/// Any shape this version does not write reads as [`Error::Corrupt`], which
-/// prune's upload sweep treats as a session that can never complete.
-pub fn decode_session_file(raw: &[u8]) -> Result<(SessionFile, Vec<u8>), Error> {
+/// Decode `session.json` bytes into `(last_activity, committed_offset,
+/// hasher checkpoint)`. Any shape this version does not write reads as
+/// [`Error::Corrupt`], which prune's upload sweep treats as a session that
+/// can never complete.
+pub fn decode_session_file(raw: &[u8]) -> Result<(DateTime<Utc>, u64, Vec<u8>), Error> {
     let file: SessionFile = serde_json::from_slice(raw)
         .map_err(|e| Error::Corrupt(format!("upload session record: {e}")))?;
     let hash_context = BASE64_STANDARD
         .decode(&file.hash_state)
         .map_err(|e| Error::Corrupt(format!("upload session hash state: {e}")))?;
-    Ok((file, hash_context))
+    Ok((file.last_activity, file.committed_offset, hash_context))
 }
 
 impl BlobStore {
@@ -130,19 +131,19 @@ impl BlobStore {
             }
             Err(e) => return Err(e.into()),
         };
-        let (file, hash_context) = decode_session_file(&raw)?;
+        let (last_activity, committed_offset, hash_context) = decode_session_file(&raw)?;
         Ok(UploadSessionRecord {
             session_id: session_id.clone(),
             namespace: namespace.clone(),
-            started_at: file.last_activity,
+            started_at: last_activity,
             hash_context,
-            uploaded_size: file.committed_offset,
+            uploaded_size: committed_offset,
         })
     }
 
     /// Persist `record` as one atomic `session.json` put. On a legacy session
-    /// this supersedes the old artifacts, which stay behind untouched until
-    /// completion or abort deletes the container.
+    /// this supersedes the legacy artifacts, which stay behind untouched
+    /// until completion or abort deletes the container.
     async fn write_session(&self, record: &UploadSessionRecord) -> Result<(), Error> {
         let key = path_builder::upload_session_path(&record.namespace, &record.session_id);
         let file = SessionFile {
@@ -469,11 +470,10 @@ impl BlobStore {
     /// The session record is deleted up front, consuming the session so a
     /// re-run returns [`Error::BlobUploadUnknown`] rather than re-finalizing
     /// an already-completed upload (on S3 a naive re-finalize overwrites the
-    /// blob with an empty object). The caller holds the `blob-data:{digest}`
-    /// lock and skips this when the blob already exists, so a crash after
-    /// promotion is short-circuited; a crash after the record is consumed but
-    /// before promotion makes the client re-push, and scrub reclaims the
-    /// leftover session dir.
+    /// blob with an empty object). The caller skips this when the blob
+    /// already exists, so a crash after promotion is short-circuited; a
+    /// crash after the record is consumed but before promotion makes the
+    /// client re-push, and scrub reclaims the leftover session dir.
     ///
     /// `hashed_size` is the byte count the session hashed. The assembled object
     /// must be exactly that long, or its bytes do not hash to `digest` and it is

@@ -27,7 +27,6 @@ use crate::{
 };
 
 /// How long superseded access entries are retained as a rolling audit log.
-/// A config knob later.
 const ATIME_AUDIT_WINDOW_SECS: u64 = 3600;
 
 impl Validator {
@@ -534,11 +533,10 @@ impl Validator {
             Err(RegistryError::NotFound) => {}
             Err(e) => return Err(e.into()),
         }
-        let backed = self
+        Ok(self
             .metadata_store
             .reference_backed(namespace, link, target)
-            .await?;
-        Ok(backed)
+            .await?)
     }
 
     /// A referrer link is live only while its referrer manifest is a current
@@ -604,8 +602,10 @@ impl Validator {
         subject: &Digest,
         referrer: &Digest,
     ) -> Result<(), Error> {
-        let reverify = move || async move { Ok(!self.revision_exists(namespace, referrer).await?) };
-        if !self.confirm_repair(reverify).await? {
+        let reverify = move || async move {
+            Ok::<_, Error>(!self.revision_exists(namespace, referrer).await?)
+        };
+        if !reverify().await? {
             return Ok(());
         }
         self.emit(Action::DeleteOrphanReferrer {
@@ -661,10 +661,12 @@ impl Validator {
                 let Some(current) = self.read_link_body(key).await? else {
                     return Ok(false);
                 };
-                Ok(current.referenced_by.contains(referrer)
-                    && !self.revision_exists(namespace, referrer).await?)
+                Ok::<_, Error>(
+                    current.referenced_by.contains(referrer)
+                        && !self.revision_exists(namespace, referrer).await?,
+                )
             };
-            if !self.confirm_repair(reverify).await? {
+            if !reverify().await? {
                 retire = false;
                 continue;
             }
@@ -726,12 +728,13 @@ impl Validator {
         }
         let link_key = &link_key;
         let reverify = move || async move {
-            Ok(self
-                .read_link_body(link_key)
-                .await?
-                .is_none_or(|current| &current.target != expected))
+            Ok::<_, Error>(
+                self.read_link_body(link_key)
+                    .await?
+                    .is_none_or(|current| &current.target != expected),
+            )
         };
-        if !self.confirm_repair(reverify).await? {
+        if !reverify().await? {
             return Ok(());
         }
         self.emit(Action::RecreateLink {
@@ -778,10 +781,10 @@ impl Validator {
             {
                 Ok(links) => Ok(!links.contains(link)),
                 Err(RegistryError::NotFound) => Ok(true),
-                Err(e) => Err(e.into()),
+                Err(e) => Err(Error::from(e)),
             }
         };
-        if !self.confirm_repair(reverify).await? {
+        if !reverify().await? {
             return Ok(false);
         }
         self.emit(Action::GrantBlobIndexLink {

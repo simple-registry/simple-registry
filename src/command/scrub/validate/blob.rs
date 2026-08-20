@@ -2,7 +2,7 @@
 //! `BlobChecker` orphan GC and the orphan-namespace sweeps). Runs last: the
 //! index has been healed, so an empty index really means no references.
 
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use tracing::warn;
 
 use angos_oci::{Digest, Namespace};
@@ -14,6 +14,7 @@ use crate::{
             Error,
             action::{Action, WalkedStore},
             categorize::UploadArtifact,
+            executor::object_younger_than_grace,
         },
         scrub::validate::Validator,
     },
@@ -67,21 +68,14 @@ impl Validator {
         // too keeps fresh bytes (an upload or push still in flight, or a
         // just-deleted blob inside its grace period) from being emitted and
         // counted as repairs on every walk.
-        let meta = match self
-            .blob_store
-            .object_store()
-            .head(&path_builder::blob_path(digest))
-            .await
-        {
-            Ok(meta) => meta,
-            Err(StorageError::NotFound) => return Ok(()),
-            Err(e) => return Err(RegistryError::from(e).into()),
-        };
-        let grace = i64::try_from(self.metadata_store.gc_grace_secs()).unwrap_or(i64::MAX);
-        let fresh = meta.last_modified.is_none_or(|modified| {
-            Utc::now().signed_duration_since(modified).num_seconds() < grace
-        });
-        if fresh {
+        let young = object_younger_than_grace(
+            self.blob_store.object_store().as_ref(),
+            &path_builder::blob_path(digest),
+            self.metadata_store.gc_grace_secs(),
+        )
+        .await
+        .map_err(RegistryError::from)?;
+        if young.is_none_or(|fresh| fresh) {
             return Ok(());
         }
         self.emit(Action::DeleteOrphanBlob(digest.clone())).await

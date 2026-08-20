@@ -65,7 +65,6 @@ Most configuration changes take effect immediately without restart. The followin
 - `observability.tracing.sampling_rate`
 - Enabling or disabling TLS
 - Changing storage backend type (filesystem ↔ S3)
-- Changing lock strategy
 - Adding or removing `[global.job_queue]`
 - `max_concurrent_cache_jobs` / `max_concurrent_replication_jobs` on a standalone `angos worker`: the worker's pool size is fixed at startup, so a running worker must be restarted to change it (the server's in-process drain applies the change on reload).
 
@@ -143,10 +142,9 @@ more `angos worker` processes drain it. Either way, jobs persist under the
 
 The queue does not have its own storage backend. Durable jobs are written to
 the **same backend configured for `[metadata_store]`** (filesystem or S3,
-whichever metadata uses), under a hardcoded top-level `_jobs/` prefix; the lock
-strategy is likewise inherited from `[metadata_store]`. There is therefore no
-job-queue-level backend, credential, prefix, or lock-strategy setting: the
-section accepts only the tunables below.
+whichever metadata uses), under a hardcoded top-level `_jobs/` prefix. There is
+no job-queue-level backend, credential, or prefix setting: the section accepts
+only the tunables below.
 
 > **An honest atomic create is required.** The durable queue is drained by
 > separate processes that serialise on leased claim keys created atomically
@@ -270,13 +268,11 @@ Optional. Defaults to same backend as blob store.
 
 ### Deprecated Coordination Keys
 
-Earlier versions coordinated writes through a transaction engine with a
-configurable lock backend. The engine is gone; `lock_strategy` (string or
-table form, including the `[metadata_store.*.lock_strategy.redis]` and
+`lock_strategy` (string or table form, including the
+`[metadata_store.*.lock_strategy.redis]` and
 `[metadata_store.*.lock_strategy.s3]` sub-tables), a bare
-`[metadata_store.*.redis]` table, and `conditional_operations` are still
-accepted by the parser so existing configs keep loading, but they are
-ignored. Remove them at your convenience.
+`[metadata_store.*.redis]` table, and `conditional_operations` are accepted
+and ignored. Remove them at your convenience.
 
 ### Filesystem (`metadata_store.fs`)
 
@@ -303,10 +299,10 @@ The link cache reduces S3 round-trips for repeated tag/layer reads.
 
 ### Distributed Locking
 
-No lock backend exists any more: reads and writes are lock-free, blob
-reclamation is fenced by the `v2/gc/` marker protocol, and the durable job
-queue serialises workers with atomically created claim keys. The former
-`lock_strategy` tables are accepted and ignored (see
+There is no lock backend: reads and writes are lock-free, blob reclamation is
+fenced by the `v2/gc/` marker protocol, and the durable job queue serialises
+workers with atomically created claim keys. `lock_strategy` tables are
+accepted and ignored (see
 [Deprecated Coordination Keys](#deprecated-coordination-keys)).
 
 ---
@@ -545,7 +541,7 @@ Webhooks are enabled by referencing their names:
 
 ### Prometheus Metrics
 
-Angos emits Prometheus metrics on the `/metrics` endpoint, including a family of lock metrics for the distributed lock backends. See [Lock Metrics](metrics.md#lock-metrics) for the metric names and label values.
+Angos emits Prometheus metrics on the `/metrics` endpoint. See the [Metrics Reference](metrics.md) for the metric names and label values.
 
 ---
 
@@ -619,7 +615,7 @@ name = "My Registry"
 
 ### S3-Only Multi-Instance Deployment
 
-This example uses S3 for both blob and metadata storage with S3-based distributed locking, eliminating the need for Redis:
+This example uses S3 for both blob and metadata storage; multiple instances need no coordination infrastructure:
 
 ```toml
 [server]

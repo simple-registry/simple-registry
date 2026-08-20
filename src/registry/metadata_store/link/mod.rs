@@ -1,8 +1,8 @@
 //! The link domain: the link value types ([`LinkKind`], [`LinkMetadata`],
 //! [`LinkOperation`]), the single-link [`storage`] primitives with their
-//! cache, and the consolidated transaction planner ([`ops`]) that batches
-//! link mutations with their blob-data/blob-index side effects and carries
-//! the `store_manifest` / `delete_manifest` wrappers.
+//! cache, and the consolidated write planner ([`ops`]) that batches link
+//! mutations with their blob-index side effects and carries the
+//! `store_manifest` / `delete_manifest` wrappers.
 
 mod kind;
 mod metadata;

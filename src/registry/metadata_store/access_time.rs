@@ -32,6 +32,11 @@ pub struct AccessEntry {
     pub at: DateTime<Utc>,
 }
 
+/// Longest client identity an access entry records. Identities come from
+/// token claims, which have no length bound of their own; the cap keeps a
+/// pathological subject from bloating every stamped pull.
+const MAX_CLIENT_CHARS: usize = 256;
+
 /// Append one access entry to `dir`: a fresh ordinal plus the client's
 /// suffix, the body recording the client and the stamp time.
 pub async fn put_access_entry(
@@ -39,6 +44,10 @@ pub async fn put_access_entry(
     dir: &str,
     client: &str,
 ) -> Result<(), Error> {
+    let client = match client.char_indices().nth(MAX_CLIENT_CHARS) {
+        Some((cut, _)) => &client[..cut],
+        None => client,
+    };
     let at = Utc::now();
     let name = path_builder::atime_entry_name(
         path_builder::tag_ord(Some(at)),

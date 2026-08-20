@@ -5,9 +5,8 @@ use angos_oci::{Descriptor, Digest, MediaType};
 use crate::registry::metadata_store::LinkKind;
 
 /// How a manifest push treats newly-referenced digests the target namespace
-/// does not already own. Enforced inside the link transaction, where the
-/// ownership read is commit-validated, so the check cannot race a concurrent
-/// reclaim.
+/// does not already own. Enforced by the link planner's ownership pre-read;
+/// the `v2/gc` marker check keeps it from racing a concurrent reclaim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReferencePolicy {
     /// Reject the push with `MANIFEST_BLOB_UNKNOWN`.

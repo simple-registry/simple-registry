@@ -11,11 +11,10 @@ use crate::registry::{
 };
 
 /// Promote the upload session's staged bytes to the canonical blob path and
-/// grant `namespace` its reference. No lock: freshly landed bytes and a fresh
-/// `_own` key both sit inside the collector's grace period, so a sweep cannot
-/// reclaim them. Promotion is skipped when the bytes already landed (a racer
-/// won), per [`BlobStore::complete_upload`]'s contract; the grant is
-/// idempotent. Bytes that pre-existed (and may be old) get the guarded grant.
+/// grant `namespace` its reference, lock-free: fresh bytes and a fresh `_own`
+/// key sit inside the collector's grace period, and both steps are
+/// idempotent. Bytes that pre-existed (and may be old) get the guarded
+/// [`BlobOwnership::grant_existing`] instead.
 pub async fn promote_and_grant(
     blob_store: &BlobStore,
     metadata_store: &MetadataStore,
@@ -73,11 +72,9 @@ impl<'a> BlobOwnership<'a> {
         Self { metadata_store }
     }
 
-    /// Insert `namespace`'s blob ownership reference into the blob index:
-    /// one idempotent put, so a retry re-grants harmlessly. Correct on its
-    /// own only for freshly written bytes (the collector's grace period
-    /// covers them); a grant against pre-existing bytes goes through
-    /// [`Self::grant_existing`].
+    /// Insert `namespace`'s blob ownership reference: one idempotent put,
+    /// correct on its own only for freshly written bytes (the grace period
+    /// covers them); pre-existing bytes go through [`Self::grant_existing`].
     pub async fn grant(&self, namespace: &Namespace, digest: &Digest) -> Result<(), Error> {
         self.metadata_store
             .update_blob_index(
@@ -118,10 +115,9 @@ impl<'a> BlobOwnership<'a> {
             Err(StorageError::NotFound) => {}
             Err(error) => return Err(error.into()),
         }
-        // Writers never remove reference entries, so a raw entry is not
-        // access: the `_own` key grants directly, anything else only while
-        // its backing link still resolves. A stale manifest reference must
-        // not resurrect a blob the namespace deleted.
+        // Writers never remove reference entries, so a non-own entry counts
+        // only while its backing link still resolves: a stale manifest
+        // reference must not resurrect a blob the namespace deleted.
         let links = self.references(namespace, digest).await?;
         for link in &links {
             if matches!(link, LinkKind::Blob(link_digest) if link_digest == digest) {

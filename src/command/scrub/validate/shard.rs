@@ -53,8 +53,7 @@ impl Validator {
             return Ok(());
         };
         if links.is_empty() {
-            // The old write path deleted a shard when its set emptied; a
-            // persisted empty set is degenerate leftover.
+            // No writer persists an empty set; it is degenerate leftover.
             return self.delete_corrupt(WalkedStore::Metadata, key).await;
         }
         // Witness for blob GC, which otherwise decides from a per-blob listing:
@@ -83,8 +82,7 @@ impl Validator {
     }
 
     /// Validate one reference key of `digest`'s blob index: the link that
-    /// backs it must still exist, or the key is removed. The per-entry probing
-    /// the legacy shard pass used to do, one key at a time.
+    /// backs it must still exist, or the key is removed.
     pub async fn validate_ref(
         &self,
         key: &str,
@@ -136,7 +134,7 @@ impl Validator {
         let namespace_ref = &namespace;
         let link_ref = &link;
         let reverify = move || self.ref_still_dangling(key, namespace_ref, link_ref, digest);
-        if !self.confirm_repair(reverify).await? {
+        if !reverify().await? {
             return Ok(());
         }
         self.emit(Action::RemoveBlobIndexLink {

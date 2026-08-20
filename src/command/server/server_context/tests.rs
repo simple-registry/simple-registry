@@ -15,6 +15,7 @@ use angos_oci::{Digest, Namespace, Reference, Tag};
 
 use crate::{
     cache::{self, Cache},
+    command::bootstrap,
     command::server::server_context::{ServerContext, resolve_forwarded_ip},
     configuration::{Configuration, TrustedProxy},
     event_webhook::{config::EventWebhookConfig, dispatcher::EventDispatcher, event::Event},
@@ -92,7 +93,7 @@ pub async fn create_test_registry(config: &Configuration) -> Arc<Registry> {
     let blob_backend = std::sync::Arc::new(config.blob_store.build_backend().unwrap());
     let auth_cache = config.cache.to_backend().unwrap();
     let storage_config = config.resolve_registry_storage();
-    let store = crate::command::bootstrap::build_object_store(&storage_config).unwrap();
+    let store = bootstrap::build_object_store(&storage_config).unwrap();
     let metadata_store = Arc::new(MetadataStore::builder(store).build());
 
     let mut repositories_map = HashMap::new();

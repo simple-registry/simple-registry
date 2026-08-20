@@ -33,12 +33,12 @@ use crate::registry::{
     path_builder,
 };
 
-// Consolidated transaction planner
+// Consolidated write planner
 
-/// The kind of link transaction the planner runs: one variant per public entry
-/// point, each carrying exactly the blob-data / blob-index side effects and
-/// timestamps that operation needs. Modelling it as an enum (not a struct of
-/// optional fields) makes invalid combinations unrepresentable.
+/// The kind of link write the planner runs: one variant per public entry
+/// point, each carrying exactly the blob-index side effects and timestamps
+/// that operation needs. Modelling it as an enum (not a struct of optional
+/// fields) makes invalid combinations unrepresentable.
 pub enum LinksTx<'a> {
     /// Plain link create/delete batch (`update_links`): no blob-data or
     /// blob-index side effects and no replication timestamps.
@@ -47,15 +47,12 @@ pub enum LinksTx<'a> {
     /// last-writer-wins gate (`delete_links`); `None` is a plain local delete.
     /// Unlike [`Self::DeleteManifest`] it does no blob-data reclamation.
     DeleteLinks { source_ts: Option<DateTime<Utc>> },
-    /// `store_manifest`: the link writes for a manifest push, ordered waves of
-    /// idempotent write-once puts with no lock; the `v2/gc` marker check
-    /// between waves A and C backs off while a collector run covers a
-    /// referenced digest. The manifest blob-data is written separately to the
-    /// blob store by the registry before this runs. `created_at` stamps new
-    /// link metadata; a replicated write passes the author's `source_ts` for
-    /// LWW. `reference_policy` governs newly-referenced digests the namespace
-    /// does not own: Strict rejects the push, Permissive drops the unowned
-    /// link, Trusted grants blindly.
+    /// `store_manifest`: ordered waves of idempotent write-once puts, the
+    /// `v2/gc` marker check between waves A and C backing off while a
+    /// collector run covers a referenced digest. `created_at` stamps new link
+    /// metadata (a replicated write passes the author's `source_ts` for LWW);
+    /// `reference_policy` governs newly-referenced unowned digests: Strict
+    /// rejects the push, Permissive drops the link, Trusted grants blindly.
     StoreManifest {
         created_at: Option<DateTime<Utc>>,
         reference_policy: ReferencePolicy,
@@ -113,15 +110,15 @@ impl<'a> LinksTx<'a> {
         }
     }
 
-    /// Whether this transaction touches blob-data or the blob-index beyond its
+    /// Whether this write touches blob-data or the blob-index beyond its
     /// link operations, so the empty-no-op short-circuit must not fire.
     fn has_blob_side_effects(&self) -> bool {
         !matches!(self, LinksTx::UpdateLinks | LinksTx::DeleteLinks { .. })
     }
 }
 
-/// Data captured from a successful link-transaction attempt, used for
-/// post-apply cache/cleanup steps outside the engine lock.
+/// Data captured from a planned link write, used for post-apply cache and
+/// cleanup steps.
 #[derive(Default)]
 struct LinksTxCaptured {
     /// Link writes that were committed (both tracked and non-tracked creates,
@@ -132,9 +129,9 @@ struct LinksTxCaptured {
     /// Prior target per `Create` op's link (`None` = absent), as read by the
     /// committed attempt.
     prior_targets: Vec<(LinkKind, Option<Digest>)>,
-    /// `Some(message)` when the attempt's last-writer-wins guard rejected the
-    /// write; the attempt committed an empty transaction and the caller maps
-    /// this to [`Error::ReplicationSuperseded`].
+    /// `Some(message)` when the last-writer-wins guard rejected the write;
+    /// the plan is empty and the caller maps this to
+    /// [`Error::ReplicationSuperseded`].
     superseded: Option<String>,
     /// `Some(digest)` when a strict push referenced a digest the namespace
     /// held no entry for at plan time; the plan is empty and the caller maps
@@ -153,8 +150,8 @@ pub struct LinksCommit {
 
 impl LinksCommit {
     /// Whether the commit changed `link`: it was absent or pointed at a
-    /// different digest before. Fails open (`true`) when the transaction had
-    /// no `Create` op for `link`, so a genuine write is never suppressed.
+    /// different digest before. Fails open (`true`) when the write had no
+    /// `Create` op for `link`, so a genuine write is never suppressed.
     #[must_use]
     pub fn changed(&self, link: &LinkKind, target: &Digest) -> bool {
         self.prior_targets
@@ -261,7 +258,7 @@ impl LinkMutations {
     /// and referrer removals that reference it. The blob-index entry is left
     /// for the collector: a writer that removed it could unpin a blob a
     /// concurrent push is committing.
-    fn delete_link(&mut self, namespace: &Namespace, link: &LinkKind, _target: &Digest) {
+    fn delete_link(&mut self, namespace: &Namespace, link: &LinkKind) {
         let record_key = match link {
             LinkKind::Digest(digest) => Some(path_builder::revision_record_path(namespace, digest)),
             LinkKind::Referrer { subject, referrer } => Some(path_builder::referrer_record_path(
@@ -285,9 +282,8 @@ impl LinkMutations {
 }
 
 impl MetadataStore {
-    /// Engine-backed implementation of `update_links`.
-    ///
-    /// Thin wrapper over [`Self::execute_links_tx`].
+    /// Apply a plain link create/delete batch: a thin wrapper over
+    /// [`Self::execute_links_tx`].
     pub async fn update_links(
         &self,
         namespace: &Namespace,
@@ -319,11 +315,10 @@ impl MetadataStore {
             .map(|_| ())
     }
 
-    /// Plan the write once, then apply it as ordered waves of unconditional
-    /// single-object writes, and perform post-apply cleanup. Every public
-    /// entry point shares this body, differing only in the `tx` kind. No
-    /// retry loop: every write is idempotent, so a failed wave surfaces to
-    /// the client and a replay is harmless.
+    /// Plan the write once, then apply it as ordered waves of idempotent
+    /// single-object writes plus post-apply cleanup; a failed wave surfaces
+    /// to the client and a replay is harmless. Every public entry point
+    /// shares this body, differing only in the `tx` kind.
     pub async fn execute_links_tx(
         &self,
         namespace: &Namespace,
@@ -493,10 +488,9 @@ impl MetadataStore {
     /// planning. A non-`NotFound` read error fails the attempt rather than
     /// being planned around as an absent link.
     ///
-    /// Repeated operations are collapsed first: a manifest may legally list the
-    /// same digest twice, and planning that link twice would erase the referrers
-    /// the first mutation merged in and leave a second write to the same key
-    /// whose read precondition the first one already invalidated.
+    /// Repeated operations are collapsed first: a manifest may legally list
+    /// the same digest twice, and planning that link twice would double-plan
+    /// writes to the same keys.
     async fn snapshot_links<'a>(
         &self,
         namespace: &Namespace,
@@ -582,9 +576,7 @@ impl MetadataStore {
         Ok(snapshot)
     }
 
-    /// Read a link's exact stored bytes and parsed metadata, or `None` when
-    /// absent. The snapshot pass needs the raw bytes for the read-set
-    /// fingerprint alongside the parsed metadata.
+    /// Read a link file's parsed metadata, or `None` when absent.
     async fn read_link_raw(&self, link_path: &str) -> Result<Option<LinkMetadata>, Error> {
         match self.object_store().get(link_path).await {
             Ok(data) => {
@@ -599,7 +591,7 @@ impl MetadataStore {
 
 /// The last-writer-wins gate for replicated writes and deletes: returns
 /// `Some(message)` when a local tag is newer than the replicated source, so
-/// the attempt commits an empty transaction and the caller maps it to
+/// the plan stays empty and the caller maps it to
 /// [`Error::ReplicationSuperseded`]. A racing local tag write appends a
 /// fresher entry that wins resolution by timestamp either way.
 fn lww_superseded(snapshot: &LinksSnapshot<'_>, tx: &LinksTx<'_>) -> Option<String> {
@@ -659,11 +651,9 @@ fn is_empty_noop(ops: &[OpSnapshot<'_>], tx: &LinksTx<'_>) -> bool {
     !had_creates && !tx.has_blob_side_effects() && all_deletes_absent
 }
 
-/// The planning step: turn the snapshot's creates and deletes into transaction
-/// mutations, accumulating the blob-index ops and the written / deleted link
-/// sets. Seeds the builder with the snapshot reads and direct blob-index ops,
-/// then threads a [`LinkMutations`] accumulator through the create/delete
-/// processors.
+/// The planning step: turn the snapshot's creates and deletes into wave
+/// mutations, threading a [`LinkMutations`] accumulator through the
+/// create/delete processors.
 fn build_link_mutations(
     namespace: &Namespace,
     ops: &[OpSnapshot<'_>],
@@ -864,10 +854,10 @@ fn build_delete_mutations(
             if pruned.has_references() {
                 acc.put_link(namespace, link, pruned)?;
             } else {
-                acc.delete_link(namespace, link, &metadata.target);
+                acc.delete_link(namespace, link);
             }
         } else {
-            acc.delete_link(namespace, link, &metadata.target);
+            acc.delete_link(namespace, link);
         }
     }
     Ok(acc)
@@ -988,16 +978,13 @@ fn capture_prior_targets(ops: &[OpSnapshot<'_>]) -> Vec<(LinkKind, Option<Digest
 
 impl MetadataStore {
     /// Persist a manifest's link metadata and blob-index reference keys as
-    /// ordered waves of idempotent write-once puts: reference keys first, the
-    /// revision record after the `v2/gc` marker check, the tag entry and
-    /// referrer record last, with no lock. The manifest blob-data itself is
-    /// content and is written separately to the blob store by the caller.
-    /// Returns the [`LinksCommit`] carrying each created link's prior target.
-    ///
-    /// `reference_policy` governs newly-referenced digests the namespace does
-    /// not own: Strict fails the push with [`Error::ManifestBlobUnknown`],
-    /// Permissive drops the unowned link, Trusted grants blindly. The marker
-    /// check keeps the decision from racing a concurrent reclaim.
+    /// ordered lock-free waves (reference keys, then the revision record
+    /// after the `v2/gc` marker check, then the tag entry and referrer
+    /// record), returning each created link's prior target; the manifest
+    /// blob-data is written separately by the caller. `reference_policy`
+    /// governs newly-referenced unowned digests: Strict fails with
+    /// [`Error::ManifestBlobUnknown`], Permissive drops the link, Trusted
+    /// grants blindly.
     pub async fn store_manifest(
         &self,
         namespace: &Namespace,
@@ -1019,7 +1006,6 @@ impl MetadataStore {
     pub async fn delete_manifest(
         &self,
         namespace: &Namespace,
-        _digest: &Digest,
         operations: &[LinkOperation],
         source_ts: Option<DateTime<Utc>>,
     ) -> Result<(), Error> {

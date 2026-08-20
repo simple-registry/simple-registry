@@ -843,9 +843,9 @@ fn job_queue_accepted_on_s3() {
     );
 }
 
-// The removed engine's lock keys no longer gate the durable queue: any
-// storage backend is accepted at config time, and the claim-support probe
-// at startup enforces the real precondition (atomic create-if-absent).
+// Lock configuration does not gate the durable queue: any storage backend is
+// accepted at config time, and the startup claim-support probe enforces the
+// real precondition (atomic create-if-absent).
 #[test]
 fn job_queue_accepted_on_fs() {
     let config = r#"

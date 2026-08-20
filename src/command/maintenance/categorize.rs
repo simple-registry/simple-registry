@@ -48,8 +48,8 @@ pub enum KeyCategory {
     /// one demoted tag-history entry, write-once and never validated.
     TagHistory,
     /// `v2/ns/{ns}!atime/tag/{tag}` or `v2/ns/{ns}!atime/rev/{alg}/{hash}`
-    /// (metadata store): a legacy advisory last-pull timestamp, overwritten
-    /// in place. No longer written; retired once an access entry exists.
+    /// (metadata store): a legacy advisory last-pull timestamp, retired once
+    /// an access entry exists.
     TagAccessTime,
     /// `v2/ns/{ns}!atime/tag/{tag}!/{ord}.{suffix}` (metadata store): one
     /// append-only tag access entry. Grammars are checked at categorization.
@@ -137,9 +137,8 @@ pub enum UploadArtifact {
     Staged,
 }
 
-/// Prefixes the removed transaction engine wrote its intent log, staged
-/// bodies, and lock objects under. No writer produces these keys any more;
-/// scrub reclaims the leftovers, age-gated like every other reclaim.
+/// Leftover prefixes of the removed transaction engine; nothing writes them,
+/// and scrub reclaims them age-gated.
 pub const TX_LEFTOVER_PREFIXES: [&str; 3] = [".tx-log", ".tx-bodies", ".tx-locks"];
 
 /// Prefix of the startup CAS-probe objects previous angos versions wrote at
