@@ -156,3 +156,55 @@ impl MetadataStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_names_round_trip_and_sort_newest_first() {
+        let older = DateTime::from_timestamp_millis(1_000_000).unwrap();
+        let newer = DateTime::from_timestamp_millis(2_000_000).unwrap();
+        let suffix = atime_client_suffix("alice");
+
+        let older_name = atime_entry_name(tag_ord(Some(older)), &suffix);
+        let newer_name = atime_entry_name(tag_ord(Some(newer)), &suffix);
+        assert!(
+            newer_name < older_name,
+            "a newer entry must sort before an older one"
+        );
+        assert_eq!(parse_atime_entry(&newer_name), Some(tag_ord(Some(newer))));
+        assert_eq!(
+            tag_ord_ts(parse_atime_entry(&newer_name).unwrap()),
+            Some(newer)
+        );
+    }
+
+    /// Two clients stamping in the same millisecond must land on distinct
+    /// entries, or one pull silently overwrites the other's audit record.
+    #[test]
+    fn same_millisecond_stamps_from_distinct_clients_do_not_collide() {
+        let at = DateTime::from_timestamp_millis(1_000_000).unwrap();
+        let alice = atime_client_suffix("alice");
+        let bob = atime_client_suffix("bob");
+        assert_eq!(alice.len(), 8);
+        assert_ne!(alice, bob);
+        assert_ne!(
+            atime_entry_name(tag_ord(Some(at)), &alice),
+            atime_entry_name(tag_ord(Some(at)), &bob)
+        );
+    }
+
+    #[test]
+    fn foreign_entry_names_do_not_parse() {
+        for name in [
+            "",
+            "0123.abcd1234",
+            &format!("{:016x}.short", 1_u64),
+            &format!("{:016x}.zzzzzzzz", 1_u64),
+            &format!("{:016x}", 1_u64),
+        ] {
+            assert_eq!(parse_atime_entry(name), None, "name {name:?}");
+        }
+    }
+}

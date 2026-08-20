@@ -10,14 +10,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The internal transaction engine is removed: `lock_strategy` and `conditional_operations` are accepted and ignored, and `angos scrub` reclaims leftover `.tx-*` keys and repairs any torn legacy write from content.
 - Registry metadata is stored as write-once keys under `v2/ref/`, `v2/ns/`, and `v2/cat/`; legacy shapes keep answering reads until `angos scrub` converts them, so no migration step is required.
-- Blob reclamation moves entirely to `angos scrub`, fenced by `v2/gc/` run markers and the new `[global] gc_grace_secs` knob (default 300): deletes answer `202 Accepted` while bytes wait for the sweep, and a write racing an active reclamation answers 503 `RECLAMATION_IN_PROGRESS` with `Retry-After`.
-- The durable job queue serialises workers with leased claim keys instead of distributed locks: atomic create-if-absent where the backend supports it (probed at startup), advisory claims with a logged warning where it does not, and `[global.job_queue] claim_ttl_secs` (default 60) bounds how quickly a crashed worker's jobs are taken over.
+- Blob reclamation moves entirely to `angos scrub`, fenced by `v2/gc/` run markers and the `[global] gc_grace_secs` knob (default 300).
+- Deletes answer `202 Accepted` while the bytes wait for the next sweep, and a write racing an active reclamation answers 503 `RECLAMATION_IN_PROGRESS` with `Retry-After`.
+- The durable job queue serialises workers with leased claim keys instead of distributed locks, using atomic create-if-absent where the backend supports it and advisory claims with a logged warning where it does not.
+- `[global.job_queue] claim_ttl_secs` (default 60) bounds how quickly a crashed worker's jobs are taken over.
 - Tag history is retained: timestamps carry millisecond precision and scrub demotes superseded entries to a per-namespace `!hist/` prefix, keeping the hot tag listing at one entry per tag.
 - Tag entries record the manifest's size and annotations (reserved `org.opencontainers.distribution` keys excluded), so history can serve full descriptors once the tag-history API lands.
 - The catalog and tag listings serve ordered pages straight off key listings, the catalog from the `v2/cat/` index alone; a namespace whose index key is missing lists again after the next scrub backfill.
 - Pushes write none of the legacy layer/config/index-child link files, and `angos scrub` retires the existing ones, leaving `v2/repositories/` to upload sessions only.
 - Upload-session metadata collapses into one `session.json` per session; sessions begun by an earlier version still resume, complete, and age out.
-- Access times are append-only entries carrying the pulling client's identity in a rolling one-hour audit window; `angos scrub` keeps each target's newest entry and collects the rest, and `access_time_debounce_secs` is accepted and ignored.
+- Access times are append-only entries carrying the pulling client's identity, kept as a rolling one-hour audit log whose superseded entries `angos scrub` collects.
+- `access_time_debounce_secs` is accepted and ignored: every stamped pull writes its entry inline.
 
 ## 1.5.1
 

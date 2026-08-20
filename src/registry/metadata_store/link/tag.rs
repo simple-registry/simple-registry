@@ -343,3 +343,67 @@ impl MetadataStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn the_ordinal_round_trips_and_reserves_the_never_wins_value() {
+        let at = DateTime::from_timestamp_millis(1_700_000_000_123).unwrap();
+        assert_eq!(tag_ord_ts(tag_ord(Some(at))), Some(at));
+        assert_eq!(tag_ord_ts(tag_ord(None)), None, "the never-wins ordinal");
+        assert_eq!(tag_ord(None), u64::MAX);
+        assert!(
+            tag_ord(None) > tag_ord(Some(DateTime::from_timestamp_millis(0).unwrap())),
+            "a missing timestamp must sort after a real epoch one"
+        );
+        // Sub-millisecond precision is not encoded, so two stamps in the same
+        // millisecond share an ordinal and only the digest separates them.
+        let same_ms = DateTime::from_timestamp_micros(1_700_000_000_123_400).unwrap();
+        assert_eq!(tag_ord(Some(same_ms)), tag_ord(Some(at)));
+    }
+
+    #[test]
+    fn entry_names_round_trip_through_the_parser() {
+        let namespace = Namespace::new("org/app").unwrap();
+        let tag = Tag::new("v1.0").unwrap();
+        let digest = Digest::sha256(HASH_A).unwrap();
+        let at = DateTime::from_timestamp_millis(1_700_000_000_123).unwrap();
+
+        for deletion in [false, true] {
+            let key = namespace.tag_entry_path(&tag, tag_ord(Some(at)), deletion, &digest);
+            let (_, name) = key.rsplit_once('/').unwrap();
+            assert_eq!(
+                parse_tag_entry(name),
+                Some((tag_ord(Some(at)), deletion, digest.clone())),
+                "entry {name:?} must round-trip"
+            );
+        }
+
+        // Same millisecond, different digests: distinct keys, both parseable.
+        let other = Digest::sha256(HASH_B).unwrap();
+        assert_ne!(
+            namespace.tag_entry_path(&tag, tag_ord(Some(at)), false, &digest),
+            namespace.tag_entry_path(&tag, tag_ord(Some(at)), false, &other)
+        );
+    }
+
+    #[test]
+    fn foreign_entry_names_do_not_parse() {
+        for name in [
+            "",
+            &format!("{:016x}.set.sha256", 1_u64),
+            &format!("{:08x}.set.sha256.{HASH_A}", 1_u64),
+            &format!("{:016x}.mov.sha256.{HASH_A}", 1_u64),
+            &format!("{:016x}.set.sha3.{HASH_A}", 1_u64),
+            &format!("{:016x}.set.sha256.{}", 1_u64, "z".repeat(64)),
+            &format!("{:016x}.set.sha256.{HASH_A}.extra", 1_u64),
+        ] {
+            assert_eq!(parse_tag_entry(name), None, "name {name:?}");
+        }
+    }
+}

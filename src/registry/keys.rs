@@ -148,14 +148,9 @@ pub trait NamespaceKeys {
     /// held, which tag history requires).
     fn tag_entry_path(&self, tag: &Tag, ord: u64, deletion: bool, digest: &Digest) -> String;
 
-    /// Directory holding one tag's demoted entries, `!`-terminated like
-    /// [`NamespaceKeys::tag_entry_dir`]. Nothing reads `!hist/` yet: it retains
-    /// superseded entries for the tag-history endpoint while `!tag/` keeps only
-    /// the current group.
-    fn tag_hist_dir(&self, tag: &Tag) -> String;
-
-    /// A demoted entry keeps its [`NamespaceKeys::tag_entry_path`] file name,
-    /// so history stays in newest-first order.
+    /// One tag's demoted entry, under a `!`-terminated history directory. It
+    /// keeps its [`NamespaceKeys::tag_entry_path`] file name, so history stays
+    /// in newest-first order.
     fn tag_hist_path(&self, tag: &Tag, entry_name: &str) -> String;
 
     /// Directory holding one tag's append-only access entries, `!`-terminated
@@ -221,12 +216,8 @@ impl NamespaceKeys for Namespace {
         )
     }
 
-    fn tag_hist_dir(&self, tag: &Tag) -> String {
-        format!("{NS_ROOT}/{self}!hist/{tag}!")
-    }
-
     fn tag_hist_path(&self, tag: &Tag, entry_name: &str) -> String {
-        format!("{}/{entry_name}", self.tag_hist_dir(tag))
+        format!("{NS_ROOT}/{self}!hist/{tag}!/{entry_name}")
     }
 
     fn tag_atime_entry_dir(&self, tag: &Tag) -> String {
@@ -399,7 +390,6 @@ mod tests {
         let file = entry_key.rsplit_once('/').unwrap().1;
         let hist_key = ns.tag_hist_path(&tag, file);
         assert_eq!(hist_key, format!("v2/ns/org/app!hist/v1!/{file}"));
-        assert_eq!(hist_key, format!("{}/{file}", ns.tag_hist_dir(&tag)));
     }
 
     #[test]
@@ -475,6 +465,29 @@ mod tests {
         assert_eq!(
             layer_key,
             format!("{}/layer", digest.blob_ref_namespace_dir(&ns))
+        );
+    }
+
+    /// `org`'s leaf keys must not be mistaken for `org/app`'s, the whole point
+    /// of terminating the namespace with a byte its grammar cannot hold.
+    #[test]
+    fn a_namespace_that_prefixes_another_keeps_its_own_keys() {
+        let digest = Digest::sha256(HASH_A).unwrap();
+        let parent = Namespace::new("org").unwrap();
+        let child = Namespace::new("org/app").unwrap();
+        let dir = format!("{}/", digest.blob_ref_dir());
+
+        for (namespace, expected) in [(&parent, "org"), (&child, "org/app")] {
+            let key = digest.blob_ref_own_path(namespace);
+            let relative = key.strip_prefix(&dir).unwrap();
+            assert_eq!(
+                digest.parse_blob_ref(relative),
+                Some((expected.to_string(), LinkKind::Blob(digest.clone())))
+            );
+        }
+        assert_ne!(
+            digest.blob_ref_own_path(&parent),
+            digest.blob_ref_own_path(&child)
         );
     }
 
